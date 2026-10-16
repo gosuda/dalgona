@@ -3,6 +3,7 @@
 //! Strict decoding of the product's battery sections.
 
 use std::error::Error;
+use std::io::Write;
 
 use dal_tools::{Calibration, GuardConfig, GuardParts};
 use dalgona_batteries::history::{self, HistoryConfig};
@@ -60,13 +61,39 @@ fn section_error(section: &str, source: impl Error + Send + Sync + 'static) -> d
     }
 }
 
+/// Decodes `[plugin.history]`, the one battery section that does not abort startup.
+///
+/// The history battery documents that an invalid section prints one startup
+/// warning and then refuses every compaction with that same text. The typed
+/// `HistoryConfigError` text becomes `HistoryConfig::Invalid`, so the battery
+/// still registers its failing compactor and no consolidation task runs.
+fn history_section(section: Option<&toml::Value>) -> HistoryConfig {
+    match history::parse_config(section) {
+        Ok(decoded) => decoded,
+        Err(error) => HistoryConfig::Invalid {
+            message: error.to_string().into_boxed_str(),
+        },
+    }
+}
+
 impl Sections {
     /// Decodes every section, rejecting unknown keys and invalid values.
+    ///
+    /// An invalid `[plugin.history]` section is the authored exception: it
+    /// decodes to `HistoryConfig::Invalid` and prints one startup warning on
+    /// stderr, but only after every other section has decoded, so a build that
+    /// goes on to fail prints no warning.
     pub(crate) fn decode(config: &dalgon::Config) -> Result<Self, dalgon::BuildError> {
+        Self::decode_with(config, &mut std::io::stderr().lock())
+    }
+
+    fn decode_with(
+        config: &dalgon::Config,
+        warnings: &mut dyn Write,
+    ) -> Result<Self, dalgon::BuildError> {
         validate_plugin_sections(config)?;
-        Ok(Self {
-            history: history::parse_config(config.section("plugin.history"))
-                .map_err(|source| section_error("plugin.history", source))?,
+        let sections = Self {
+            history: history_section(config.section("plugin.history")),
             judged: JudgedConfig::from_config(config.section("plugin.judged"))
                 .map_err(|source| section_error("plugin.judged", source))?,
             mcp: McpSettings::parse(config.section("plugin.mcp"))
@@ -82,7 +109,13 @@ impl Sections {
             web: web::parse_config(config.section("plugin.web"))
                 .map_err(|source| section_error("plugin.web", source))?,
             rule_sets: rule_sets(config.section("rule_sets"))?,
-        })
+        };
+        if let HistoryConfig::Invalid { message } = &sections.history {
+            // A closed stderr must not abort startup; the same text still
+            // reaches every compaction refusal.
+            let _ = writeln!(warnings, "{message}");
+        }
+        Ok(sections)
     }
 }
 
@@ -190,4 +223,81 @@ fn rule_sets(section: Option<&toml::Value>) -> Result<Vec<String>, dalgon::Build
         .ok_or_else(|| invalid_list(enabled))?;
     ttsr_rules::validate_enabled(&names).map_err(|source| section_error("rule_sets", source))?;
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use dal_core::{Config, ConfigProduct};
+    use dalgona_batteries::history::{HistoryConfig, HistoryConfigError};
+
+    use super::Sections;
+
+    fn config(user_toml: &str) -> Config {
+        Config::load(
+            ConfigProduct::Dalgona,
+            &std::env::temp_dir(),
+            crate::DEFAULTS,
+            Some(user_toml),
+        )
+        .expect("fixture configuration loads")
+    }
+
+    /// Decodes `user_toml` and returns the sections with every warning line written.
+    fn decode(user_toml: &str) -> (Sections, String) {
+        let mut warnings = Vec::new();
+        let sections =
+            Sections::decode_with(&config(user_toml), &mut warnings).expect("startup continues");
+        (
+            sections,
+            String::from_utf8(warnings).expect("warnings are text"),
+        )
+    }
+
+    #[test]
+    fn invalid_history_section_warns_once_and_keeps_startup_going() {
+        for (body, error) in [
+            ("enabled = \"yes\"", HistoryConfigError::Enabled),
+            ("share = 0.9", HistoryConfigError::Share),
+            ("share = \"lots\"", HistoryConfigError::Share),
+            (
+                "unknown = true",
+                HistoryConfigError::UnknownKey("unknown".to_owned()),
+            ),
+        ] {
+            let (sections, warnings) = decode(&format!("[plugin.history]\n{body}\n"));
+            let text = error.to_string();
+            assert_eq!(
+                sections.history,
+                HistoryConfig::Invalid {
+                    message: text.as_str().into(),
+                },
+                "{body}"
+            );
+            assert_eq!(warnings, format!("{text}\n"), "{body}");
+        }
+    }
+
+    #[test]
+    fn valid_history_sections_decode_without_a_warning() {
+        let (defaulted, warnings) = decode("");
+        assert!(matches!(defaulted.history, HistoryConfig::Enabled { .. }));
+        assert_eq!(warnings, "");
+        let (sized, warnings) = decode("[plugin.history]\nshare = 0.5\n");
+        assert_eq!(sized.history, HistoryConfig::Enabled { share: 0.5 });
+        assert_eq!(warnings, "");
+        let (off, warnings) = decode("[plugin.history]\nenabled = false\n");
+        assert_eq!(off.history, HistoryConfig::Disabled);
+        assert_eq!(warnings, "");
+    }
+
+    #[test]
+    fn a_failing_neighbour_section_still_aborts_startup_without_a_history_warning() {
+        let mut warnings = Vec::new();
+        let user_toml = "[plugin.history]\nshare = 0.9\n[plugin.web]\nbogus = 1\n";
+        let Err(error) = Sections::decode_with(&config(user_toml), &mut warnings) else {
+            panic!("an unknown web key must abort startup");
+        };
+        assert!(error.to_string().contains("bogus"), "{error}");
+        assert!(warnings.is_empty(), "no warning precedes a failed build");
+    }
 }

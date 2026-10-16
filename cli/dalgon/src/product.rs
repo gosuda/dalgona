@@ -23,6 +23,8 @@ pub struct Parts {
     pub batteries: Vec<dal_agent::ext::Extension>,
     /// Embedded Starlark sources (dal: empty).
     pub bundled: Vec<dal_core::PluginSource>,
+    /// Whether the product composes the built-in TTSR repetitive-turns lane.
+    pub ttsr_lane: bool,
 }
 
 impl std::fmt::Debug for Parts {
@@ -38,6 +40,7 @@ impl std::fmt::Debug for Parts {
             .field("guard", &self.guard.name())
             .field("batteries", &batteries)
             .field("bundled", &self.bundled.len())
+            .field("ttsr_lane", &self.ttsr_lane)
             .finish()
     }
 }
@@ -70,6 +73,7 @@ pub fn parts(cx: &BuildCx<'_>) -> Result<Parts, BuildError> {
         guard: guard.extension,
         batteries: Vec::new(),
         bundled: Vec::new(),
+        ttsr_lane: false,
     })
 }
 
@@ -222,7 +226,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         kept: std::sync::Mutex::new(Vec::new()),
     });
     let reload_dyn: Arc<dyn dal_ext::commands::PluginReload> = reload.clone();
-    let rules = rule_dependencies(&parts.tools.edit_style)?;
+    let rules = rule_dependencies(&parts.tools.edit_style, parts.ttsr_lane)?;
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
@@ -289,6 +293,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
 
 fn rule_dependencies(
     input: &dal_core::EditStyleInput,
+    lane: bool,
 ) -> Result<dal_ext::ttsr::TtsrDeps, BuildError> {
     let edit_style =
         dal_tools::patch::parse_edit_style(input).map_err(|source| BuildError::Section {
@@ -308,7 +313,10 @@ fn rule_dependencies(
             }
         }
     });
-    Ok(dal_ext::ttsr::TtsrDeps { pick_edit_style })
+    Ok(dal_ext::ttsr::TtsrDeps {
+        pick_edit_style,
+        lane,
+    })
 }
 
 /// Fails assembly when two extensions claim one registration name.
@@ -500,6 +508,7 @@ mod tests {
         let mut partial = parts(&cx).unwrap();
         assert!(partial.batteries.is_empty());
         assert_eq!(partial.bundled, [] as [dal_core::PluginSource; 0]);
+        assert!(!partial.ttsr_lane);
         let battery =
             dal_agent::ext::ExtensionBuilder::new("battery", "0.1.0", dal_core::ServiceSet::EMPTY)
                 .unwrap()

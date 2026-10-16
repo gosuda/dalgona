@@ -91,12 +91,19 @@ fn bundled_rust_batteries_pass_the_public_builder() -> support::TestResult<()> {
             initializer.contains("initializer-and-sprints"),
             "served skill page names the live skill"
         );
-        let missing = host.doc("skill://nope");
-        assert_eq!(
-            missing.err().map(|error| error.to_string()).as_deref(),
-            Some("unknown skill: nope"),
-            "an unknown skill URI is the typed unknown-skill error"
-        );
+        // An unknown skill URI is a typed missing-skill refusal naming the
+        // requested skill. The alternatives listing is checked once, with
+        // live product records, in the skills-defaults gate.
+        let failure = host
+            .doc("skill://nope")
+            .err()
+            .ok_or_else(|| io::Error::other("an unknown skill URI must fail"))?;
+        assert!(matches!(
+            &failure,
+            dal_agent::error::SchemeError::Failed { .. }
+        ));
+        let text = failure.to_string();
+        assert!(text.contains("nope"), "{text}");
         let report = host.shutdown(Duration::from_secs(2)).await;
         assert_eq!(report.sessions_closed, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
