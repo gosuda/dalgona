@@ -131,15 +131,18 @@ fn markdown_export_includes_assistant_reply() -> Result<(), Box<dyn std::error::
                     },
                     Block::Text {
                         text: "Answer".into(),
+                        replay: None,
                     },
                     Block::ToolCall {
                         id: CallId::new("call-1"),
                         name: "read".into(),
                         input: RawJson::parse(r#"{"path":"src"}"#)?,
+                        replay: None,
                     },
                 ],
                 usage: usage(),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         },
         EntryView {

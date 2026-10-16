@@ -58,19 +58,32 @@ fn record_session_closed() -> ServiceError {
 }
 
 /// Encodes the durable start policy of one child session: its tool
-/// allowlist and the approval mode it inherits from its parent.
+/// allowlist, the approval mode it inherits from its parent, and the
+/// prompt customization its start carried. Missing optional fields keep
+/// older records readable.
 fn child_policy_body(
     tools: Option<&[Name]>,
     approval: ApprovalMode,
+    role: Option<&str>,
+    system: Option<&str>,
 ) -> Result<RawJson, ServiceError> {
     #[derive(serde::Serialize)]
     struct Policy<'a> {
         tools: Option<Vec<&'a str>>,
         approval: ApprovalMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        system: Option<&'a str>,
     }
     let tools = tools.map(|names| names.iter().map(Name::as_str).collect());
-    let body = sonic_rs::to_string(&Policy { tools, approval })
-        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    let body = sonic_rs::to_string(&Policy {
+        tools,
+        approval,
+        role,
+        system,
+    })
+    .map_err(|error| ServiceError::failed(None, error.to_string()))?;
     RawJson::parse(&body).map_err(|error| ServiceError::failed(None, error.to_string()))
 }
 
@@ -90,6 +103,23 @@ async fn copy_child_approval(
         })
         .await
         .map(|_| ())
+}
+
+/// Keeps the live child snapshot in step with the durable start policy
+/// before the first prompt enters the child.
+fn apply_child_snapshot(child: &crate::agent::Agent, start: &dal_core::AgentStart) {
+    if let Some(names) = &start.tools {
+        child.inner.shared.restrict_tools(names);
+    }
+    if let Some(system) = &start.system {
+        child.inner.shared.set_child_prompt_policy(
+            crate::session::shared::ChildPromptPolicy::System(system.clone()),
+        );
+    } else if let Some(role) = &start.role {
+        child.inner.shared.set_child_prompt_policy(
+            crate::session::shared::ChildPromptPolicy::Role(role.clone()),
+        );
+    }
 }
 
 /// Runs the prompted turn's interrupt inside the child's task group: after
@@ -815,11 +845,6 @@ impl SessionBackend for Backend {
         })
     }
 
-    fn request_resolved(&self, resolved: crate::broker::Resolved) {
-        self.handle
-            .work_detached(crate::session::actor::TurnWork::Answered { resolved });
-    }
-
     fn ext_records(&self) -> Arc<[ExtRecord]> {
         self.shared.ext_records()
     }
@@ -1157,6 +1182,9 @@ impl Backend {
     }
 
     async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
+        if let Err(error) = start.validate() {
+            return Err(child_start_error(error));
+        }
         if let Some(max_depth) = self.depth_refusal() {
             return Ok(refused(AgentRefusal::MaxDepth { max_depth }));
         }
@@ -1198,7 +1226,12 @@ impl Backend {
         // The restriction and the inherited approval mode are journaled
         // through the child's actor first: a start whose policy cannot be
         // recorded leaves no half-restricted child behind.
-        let Ok(body) = child_policy_body(start.tools.as_deref(), self.shared.approval()) else {
+        let Ok(body) = child_policy_body(
+            start.tools.as_deref(),
+            self.shared.approval(),
+            start.role.as_deref(),
+            start.system.as_deref(),
+        ) else {
             let _ = self.host().close(child_id).await;
             return Err(child_start_error("could not encode the child start policy"));
         };
@@ -1225,11 +1258,7 @@ impl Backend {
                 "could not journal the child start policy",
             ));
         }
-        // Keep the live snapshot in step with the durable policy before the
-        // first prompt enters the child.
-        if let Some(names) = &start.tools {
-            child.inner.shared.restrict_tools(names);
-        }
+        apply_child_snapshot(&child, &start);
         // The child starts under the approval mode its parent runs under now,
         // not the configured default. When the mode cannot be set the child
         // does not start.
@@ -1237,10 +1266,6 @@ impl Backend {
         if let Err(error) = copy_child_approval(&child, approval).await {
             let _ = self.host().close(child_id).await;
             return Err(child_start_error(error));
-        }
-        let mut prompt = start.prompt.to_string();
-        if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
-            prompt = format!("System: {system}\n\n{prompt}");
         }
         if let Some(model) = model
             && let Err(error) = child
@@ -1256,9 +1281,7 @@ impl Backend {
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
-                content: vec![Part::Text {
-                    text: prompt.into(),
-                }],
+                content: vec![Part::Text { text: start.prompt }],
             })
             .await
         {
@@ -1520,7 +1543,9 @@ impl Backend {
             };
             if latest_assistant {
                 for block in content.iter().rev() {
-                    if let dal_core::Block::Text { text: chunk } = block {
+                    // The report reads visible text only; the opaque
+                    // provider replay payload rides along untouched.
+                    if let dal_core::Block::Text { text: chunk, .. } = block {
                         text.insert_str(0, chunk);
                     }
                 }
@@ -1714,7 +1739,11 @@ mod tests {
     async fn prompt_interrupt_targets_ended_turn_without_cancelling_successor() {
         let prompted = dal_core::TurnId::new(NonZeroU64::MIN);
         let successor = dal_core::TurnId::new(NonZeroU64::new(2).expect("nonzero turn"));
-        let control = Arc::new(std::sync::Mutex::new(ControlCell::new()));
+        // The constructor under test shares one broker between the inbox
+        // and the cell, as `spawn` wires them: claims route through the
+        // inbox under its lock.
+        let inbox = Arc::new(ResolutionInbox::new(Arc::new(Broker::new())));
+        let control = Arc::new(std::sync::Mutex::new(ControlCell::new(Arc::clone(&inbox))));
         let successor_token = {
             let mut control = control
                 .lock()
@@ -1730,7 +1759,7 @@ mod tests {
             tx,
             opening_tx,
             Arc::clone(&control),
-            Arc::new(ResolutionInbox::new()),
+            inbox,
         );
         let tasks = SessionTasks::new();
         spawn_prompt_interrupt(&tasks, handle, prompted, std::time::Duration::ZERO);

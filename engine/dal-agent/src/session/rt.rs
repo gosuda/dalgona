@@ -547,7 +547,9 @@ fn history_span_role_text(
         }
         EntryKind::Assistant { content, .. } => {
             let (role, text) = match content.get(part_index) {
-                Some(dal_core::Block::Text { text }) => ("assistant".to_owned(), text.to_string()),
+                Some(dal_core::Block::Text { text, .. }) => {
+                    ("assistant".to_owned(), text.to_string())
+                }
                 Some(dal_core::Block::Reasoning { text, .. }) => {
                     ("reasoning".to_owned(), text.to_string())
                 }

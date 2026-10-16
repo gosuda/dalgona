@@ -344,7 +344,8 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     // The data-plane refuses nested calls until the session services are
     // published; build the same wiring the registry uses at session start.
     let grants = Arc::new(
-        crate::ext::grants::GrantStore::with_runtime(
+        crate::ext::grants::GrantStore::with_runtime_scoped(
+            data_root.clone(),
             data_root.clone(),
             Duration::from_secs(30),
             Arc::clone(&broker),

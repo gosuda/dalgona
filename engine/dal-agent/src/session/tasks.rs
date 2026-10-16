@@ -173,6 +173,11 @@ struct ScopeEntry {
     admitted: u64,
     /// Normalized usage from completed model requests.
     usage: ScopeUsage,
+    /// Whether a successful model request reported no measurement.
+    ///
+    /// Such a request has no spend to add, so a token or USD budget cannot
+    /// be charged for it and is treated as exhausted rather than as zero.
+    unmetered: bool,
     /// The first budget or cancellation refusal.
     refusal: Option<ScopeSpecError>,
     /// The tasks issued and not yet finished.
@@ -214,6 +219,15 @@ impl ScopeEntry {
                 ScopeState::Open => Err(ScopeError::NotOpen(self.id)),
                 ScopeState::Closed => Ok(()),
             },
+        }
+    }
+
+    /// Books what one settled model request spent.
+    fn book(&mut self, charge: &Charge) {
+        match charge {
+            Charge::Measured(charge) => self.usage.add(charge),
+            Charge::Unmetered => self.unmetered = true,
+            Charge::Skip => {}
         }
     }
 
@@ -311,6 +325,7 @@ impl ScopeTable {
                 deadline,
                 admitted: 0,
                 usage: ScopeUsage::default(),
+                unmetered: false,
                 refusal: None,
                 active: 0,
                 tasks: Vec::new(),
@@ -435,6 +450,17 @@ impl ScopeTable {
     /// blob mechanism and re-reports the reference-sized result. Unknown or
     /// already-settled tasks absorb the late arrival, so a cancelled task's
     /// terminal record is never replaced.
+    ///
+    /// A successful model request charges its measured usage once. One that
+    /// reported no usage, or only an all-zero unreported one, has no
+    /// measurement to charge: it exhausts the scope's token and USD limits
+    /// instead of passing as free. Failed and cancelled requests and scopes
+    /// limited only by `requests` or `wall` are unaffected.
+    ///
+    /// A result refused by the byte budget has still been paid for: its
+    /// usage is charged to the scope before the refusal returns, while the
+    /// task stays unsettled. The caller then settles it with a failure that
+    /// carries no usage, so the spend is booked once.
     pub(crate) fn complete(
         &mut self,
         t: TaskId,
@@ -450,15 +476,18 @@ impl ScopeTable {
         let over_invocation = self.bytes.saturating_add(bytes) > MAX_RESULT_BYTES;
         let over_host =
             self.host_bytes.load(Ordering::SeqCst).saturating_add(bytes) > MAX_HOST_RESULT_BYTES;
-        if over_invocation || over_host {
-            return Err(HostTerminal::LimitExceeded {
-                what: "result_bytes",
-            });
-        }
         let scope = record.scope;
         let op = record.op.clone();
         let was_issued = record.state == TaskState::Issued;
         let charge = scope_charge(&op, &o, record.price.as_ref());
+        if over_invocation || over_host {
+            if let Some(entry) = self.scopes.get_mut(&scope) {
+                entry.book(&charge);
+            }
+            return Err(HostTerminal::LimitExceeded {
+                what: "result_bytes",
+            });
+        }
         let failed = !matches!(&o, OpOutcome::Ok { .. });
         if let Some(record) = self.tasks.get_mut(&t) {
             record.state = TaskState::Done;
@@ -469,14 +498,12 @@ impl ScopeTable {
             if was_issued {
                 entry.active -= 1;
             }
-            if let Some(charge) = charge {
-                entry.usage.add(&charge);
-            }
+            entry.book(&charge);
         }
         self.bytes += bytes;
         self.host_bytes.fetch_add(bytes, Ordering::SeqCst);
         let reason = self.scopes.get(&scope).and_then(|entry| {
-            if usage_exhausted(&entry.spec, &entry.usage) {
+            if usage_exhausted(entry) {
                 Some(ScopeSpecError::Exhausted)
             } else if failed && entry.spec.on_error == OnError::Cancel {
                 Some(ScopeSpecError::Cancelled)
@@ -719,45 +746,62 @@ fn model_request(req: &OpRequest) -> Option<ModelRequest> {
         .flatten()
 }
 
-fn scope_charge(op: &OpId, outcome: &OpOutcome, price: Option<&ModelPrice>) -> Option<ScopeUsage> {
-    if !is_model_op(op) {
-        return None;
-    }
-    let OpOutcome::Ok {
-        value: OpValue::Json(value),
-        ..
-    } = outcome
-    else {
-        return None;
-    };
-    let Ok(inference) = value.decode_as::<dal_core::Inference>() else {
-        return None;
-    };
-    inference
-        .events
-        .iter()
-        .find_map(|event| match event {
-            StreamEvent::Usage(usage) => Some(*usage),
-            _ => None,
-        })
-        .map(|mut usage| {
-            usage.cost_usd = usage.cost_usd(price, None);
-            ScopeUsage {
-                requests: 1,
-                input_tokens: usage.input_tokens,
-                output_tokens: usage
-                    .output_tokens
-                    .saturating_add(usage.reasoning_tokens.unwrap_or(0)),
-                cost_usd: usage.cost_usd,
-            }
-        })
+/// What one settled operation contributes to its scope's accounting.
+enum Charge {
+    /// Not a successful model request: nothing to measure.
+    Skip,
+    /// A successful model request whose usage was measured.
+    Measured(ScopeUsage),
+    /// A successful model request that reported no measurement: no `Usage`
+    /// event, or one with every counter zero and no cost. Local pricing
+    /// would turn it into a zero cost, so it is never priced.
+    Unmetered,
 }
 
-fn usage_exhausted(spec: &ScopeSpec, usage: &ScopeUsage) -> bool {
-    let budget = &spec.budget;
-    budget
-        .input_tokens
-        .is_some_and(|limit| usage.input_tokens >= limit)
+fn scope_charge(op: &OpId, outcome: &OpOutcome, price: Option<&ModelPrice>) -> Charge {
+    if !is_model_op(op) {
+        return Charge::Skip;
+    }
+    let OpOutcome::Ok { value, .. } = outcome else {
+        return Charge::Skip;
+    };
+    let OpValue::Json(value) = value else {
+        return Charge::Unmetered;
+    };
+    let Ok(inference) = value.decode_as::<dal_core::Inference>() else {
+        return Charge::Unmetered;
+    };
+    let first = inference.events.iter().find_map(|event| match event {
+        StreamEvent::Usage(usage) => Some(*usage),
+        _ => None,
+    });
+    let Some(mut usage) = first.filter(|usage| !usage.is_unreported()) else {
+        return Charge::Unmetered;
+    };
+    usage.cost_usd = usage.cost_usd(price, None);
+    Charge::Measured(ScopeUsage {
+        requests: 1,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage
+            .output_tokens
+            .saturating_add(usage.reasoning_tokens.unwrap_or(0)),
+        cost_usd: usage.cost_usd,
+    })
+}
+
+/// Reports whether one scope's measured or unmeasured spend exhausts a budget.
+///
+/// An unmetered request exhausts every token or USD limit; a scope with only
+/// `requests` or `wall` limits is unaffected.
+fn usage_exhausted(entry: &ScopeEntry) -> bool {
+    let budget = &entry.spec.budget;
+    let usage = &entry.usage;
+    let spend_limited =
+        budget.input_tokens.is_some() || budget.output_tokens.is_some() || budget.usd.is_some();
+    (entry.unmetered && spend_limited)
+        || budget
+            .input_tokens
+            .is_some_and(|limit| usage.input_tokens >= limit)
         || budget
             .output_tokens
             .is_some_and(|limit| usage.output_tokens >= limit)

@@ -30,7 +30,7 @@ use crate::ext::hooks::{
     hook_fanout,
 };
 use crate::ext::overlay::{Overlay, TurnTools};
-use crate::ext::prompt::{PromptSection, SectionCx};
+use crate::ext::prompt::{PromptOrder, PromptSection, SectionCx};
 use crate::ext::services::SessionBackend;
 use crate::ext::{Caller, CallerKind, Services, ToolDescription};
 use crate::host::HostState;
@@ -43,9 +43,11 @@ use crate::session::context::{
     system_prompt, tool_list,
 };
 use crate::session::control::ControlCell;
-use crate::session::dispatch::{DispatchCtx, GrantLedger, ReadyCall, plan_units, run_unit};
+use crate::session::dispatch::{
+    DispatchCtx, GrantLedger, ReadyCall, echo_resolved, plan_units, run_unit,
+};
 use crate::session::projection::SnapshotArgs;
-use crate::session::shared::Shared;
+use crate::session::shared::{ChildPromptPolicy, Shared};
 use crate::session::tasks::SessionTasks;
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 use crate::session::{SessionHandle, commands};
@@ -308,18 +310,13 @@ impl Driver {
                     answer,
                     by,
                     resolution,
+                    cause,
                 } = waiter.await;
-                let _ = handle
-                    .work(TurnWork::Answered {
-                        resolved: crate::broker::Resolved {
-                            request,
-                            answer,
-                            by,
-                            resolution,
-                            was_default: resolution == crate::broker::Resolution::Unavailable,
-                        },
-                    })
-                    .await;
+                let Some(resolved) = echo_resolved(&request, &answer, &by, resolution, cause)
+                else {
+                    return;
+                };
+                let _ = handle.work(TurnWork::Answered { resolved }).await;
             });
         }
     }
@@ -883,6 +880,13 @@ impl Driver {
     }
 
     /// Renders the system prompt for one provider request.
+    ///
+    /// A child prompt policy reshapes the product-owned base sections: an
+    /// explicit system takes the place of the identity and D2 sections, and
+    /// a role appends one section after the assembled base so siblings on
+    /// one model share the cached prefix. Extension-contributed sections
+    /// keep rendering either way, so a child start cannot silently drop
+    /// required extension guidance.
     fn system(
         &mut self,
         turn: TurnId,
@@ -891,9 +895,10 @@ impl Driver {
         mode: dal_core::Mode,
         info: &ModelInfo,
     ) -> String {
+        let policy = self.deps.shared.child_prompt_policy();
         let tools = descriptions(generation, turn_tools, info);
         let deps = &self.deps;
-        system_prompt(generation, mode, &|owner, section| {
+        let rendered = |owner: usize, section: &PromptSection| {
             render_section(
                 deps,
                 generation.extensions.get(owner)?,
@@ -901,7 +906,26 @@ impl Driver {
                 turn,
                 &tools,
             )
-        })
+        };
+        match policy {
+            Some(ChildPromptPolicy::System(system)) => {
+                let base = base_without_product_sections(generation, mode, rendered);
+                if base.is_empty() {
+                    system.to_string()
+                } else {
+                    format!("{system}\n\n{base}")
+                }
+            }
+            Some(ChildPromptPolicy::Role(role)) => {
+                let base = system_prompt(generation, mode, &rendered);
+                if base.is_empty() {
+                    role.to_string()
+                } else {
+                    format!("{base}\n\n{role}")
+                }
+            }
+            None => system_prompt(generation, mode, &rendered),
+        }
     }
 
     /// Publishes one hook notice without journaling.
@@ -1121,7 +1145,7 @@ impl Driver {
             backend: Arc::clone(&self.deps.backend),
             broker: Arc::clone(&self.deps.broker),
             policy: batch.policy.clone(),
-            cancel: state.cancel.clone(),
+            cancel: state.cancel.child_token(),
             turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
             parallel_reads: PARALLEL_READS,
             cutoff: None,
@@ -1361,9 +1385,13 @@ impl Driver {
             page: full_page(),
         });
         let total = view.usage.context_tokens;
+        // An all-zero input count is an unmeasured report, not a zero-token
+        // context: it falls back to the leaf estimate like the fold does, or
+        // a shrinking replacement can never read as shrinking.
         let measured = turn
             .and_then(|turn| self.turns.get(&turn))
             .and_then(|state| state.usage)
+            .filter(|usage| usage.input_tokens > 0)
             .map(|usage| {
                 usage.input_tokens + usage.output_tokens + usage.reasoning_tokens.unwrap_or(0)
             });
@@ -1418,6 +1446,30 @@ impl Driver {
             .await;
     }
 
+    /// Clones the live cancellation token for a turn-scoped compaction.
+    ///
+    /// A turn-scoped pass without driver state is not manual: when the
+    /// control cell still holds that turn's live token (a threshold
+    /// compaction arriving before any infer materialized the state) the
+    /// chain stays bound to it, so a user cancel still stops the chain. A
+    /// turn-scoped pass with no live token at all is stale or replaying; it
+    /// fails closed instead of running an uncancellable chain no stop can
+    /// reach.
+    fn compaction_cancel(&self, turn: TurnId) -> Result<CancellationToken, Box<str>> {
+        if let Some(state) = self.turns.get(&turn) {
+            return Ok(state.cancel.clone());
+        }
+        if let Some(token) = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token_for(turn)
+        {
+            return Ok(token);
+        }
+        Err("compaction cancelled.".into())
+    }
+
     /// Runs compactors in canonical order until one commits a replacement.
     async fn compact_span(
         &self,
@@ -1456,69 +1508,79 @@ impl Driver {
         ))
     }
 
-    /// Runs compactors in canonical order until one commits a replacement.
+    /// Runs compactors in canonical order until one commits a shrinking
+    /// replacement.
+    ///
+    /// A committed replacement counts only when it strictly shrinks the
+    /// context under the same token accounting the journal entry reports
+    /// (`tokens_after < tokens_before`). Non-shrinking output earns a
+    /// neutral `compaction_not_shrunk` notice and the chain moves on to the
+    /// next registered compactor. When no compactor shrinks, the last
+    /// non-shrinking summary is still returned: the core fold owns the
+    /// final verdict (`compaction_not_shrunk` on the journal side), so the
+    /// existing outcome for an all-failed run is preserved rather than
+    /// turned into a turn failure.
     async fn run_compactors(
         &self,
         compacted: CompactedSpan<'_>,
     ) -> Result<dal_core::CompactionSummary, Box<str>> {
-        let CompactedSpan {
-            turn,
-            covered,
-            span,
-            first_kept,
-            total,
-            measured,
-            retained,
-            carried,
-            route,
-            image_profile,
-            window,
-        } = compacted;
         let generation = self.deps.host.shared.generation.borrow().clone();
+        // Bind this turn's live token once for the whole chain, through
+        // `compaction_cancel`: a token re-read after the fold ends the turn
+        // cannot see the fired token, and a stale turn with no live token
+        // fails closed instead of running an uncancellable chain.
+        let cancel: CancellationToken = match compacted.turn {
+            None => CancellationToken::new(),
+            Some(turn) => self.compaction_cancel(turn)?,
+        };
         let params = RequestParams {
             thinking: self.deps.host.shared.config.thinking(),
             ..RequestParams::default()
         };
         let mut refused: Option<Box<str>> = None;
+        let mut nonshrunk: Option<dal_core::CompactionSummary> = None;
         for entry in generation.compactors.entries() {
+            // A cancelled turn never starts the next link: the check covers
+            // the link already parked, and a result landing after the
+            // cancellation is dropped, not classified.
+            if cancel.is_cancelled() {
+                return Err("compaction cancelled.".into());
+            }
             let Some(compactor) = generation.compactor(entry.name.as_ref()) else {
                 continue;
             };
-            let Some(owner) = generation.extensions.get(entry.ext) else {
+            let Some(caller) = compactor_caller(&generation, entry, compacted.turn) else {
                 continue;
             };
-            let Ok(ext) = owner.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                ext,
-                owner.origin(),
-                owner.inject(),
-                owner.state_version(),
-                CallerKind::Handler,
-                turn,
-            )
-            .with_extension(owner);
             let input = crate::ext::compact::CompactInput {
                 caller: &caller,
-                model: route.clone(),
+                model: compacted.route.clone(),
                 session: self.deps.session,
                 instructions: "",
-                covered,
-                span,
-                first_kept,
-                context_window: window,
-                image_profile,
-                images_elsewhere: retained.count,
-                image_bytes_elsewhere: retained.bytes,
-                carried: carried.clone(),
-                total_tokens: total,
+                covered: compacted.covered,
+                span: compacted.span,
+                first_kept: compacted.first_kept,
+                context_window: compacted.window,
+                image_profile: compacted.image_profile,
+                images_elsewhere: compacted.retained.count,
+                image_bytes_elsewhere: compacted.retained.bytes,
+                carried: compacted.carried.clone(),
+                total_tokens: compacted.total,
                 params: params.clone(),
             };
-            match compactor
-                .compact(input, Arc::clone(&self.deps.services))
-                .await
-            {
+            // Race the compaction against cancellation: the losing future
+            // is dropped at the await point (the mechanism of the other
+            // session service calls); `biased` makes cancellation win a
+            // poll tie.
+            let outcome = tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(crate::ext::CompactError::Service(
+                    crate::error::ServiceError::Cancelled,
+                )),
+                outcome = compactor
+                    .compact(input, Arc::clone(&self.deps.services)) => outcome,
+            };
+            match outcome {
                 Ok(Some(compaction)) => {
                     if compaction_has_reserved_policy_record(&compaction) {
                         refused = Some(
@@ -1527,13 +1589,26 @@ impl Driver {
                         );
                         continue;
                     }
-                    return Ok(summarize(
+                    let summary = summarize(
                         &entry.name,
-                        measured.unwrap_or(total),
-                        covered,
-                        first_kept,
+                        compacted.measured.unwrap_or(compacted.total),
+                        compacted.covered,
+                        compacted.first_kept,
                         &compaction,
-                    ));
+                    );
+                    if summary.tokens_after >= summary.tokens_before {
+                        let text = not_shrunk_text(
+                            &entry.name,
+                            summary.tokens_before,
+                            summary.tokens_after,
+                        );
+                        if let Some(turn) = compacted.turn {
+                            self.notice(turn, "compaction_not_shrunk", &text);
+                        }
+                        nonshrunk = Some(summary);
+                        continue;
+                    }
+                    return Ok(summary);
                 }
                 Ok(None) => {}
                 Err(error) if error.is_cancelled() => {
@@ -1544,8 +1619,44 @@ impl Driver {
                 }
             }
         }
+        if let Some(summary) = nonshrunk {
+            return Ok(summary);
+        }
         Err(refused.unwrap_or_else(|| "no compactor registered.".into()))
     }
+}
+
+/// Mints the host caller for one compactor link from the live generation.
+///
+/// The admitted extension's immutable code identity is captured here, so an
+/// in-flight call cannot borrow a later generation's grant. A missing owner
+/// or an unparsable extension name skips the link, matching the chain's
+/// prior per-link `continue` behavior.
+fn compactor_caller(
+    generation: &Generation,
+    entry: &crate::ext::generation::NamedEntry,
+    turn: Option<TurnId>,
+) -> Option<Caller> {
+    let owner = generation.extensions.get(entry.ext)?;
+    let ext = owner.name().parse::<Name>().ok()?;
+    Some(
+        Caller::new(
+            ext,
+            owner.origin(),
+            owner.inject(),
+            owner.state_version(),
+            CallerKind::Handler,
+            turn,
+        )
+        .with_extension(owner),
+    )
+}
+
+/// The notice text for one compactor's non-shrinking output.
+fn not_shrunk_text(name: &str, tokens_before: u64, tokens_after: u64) -> String {
+    format!(
+        "Compactor {name} did not shrink the context ({tokens_before} to {tokens_after} tokens)."
+    )
 }
 
 fn compaction_has_reserved_policy_record(compaction: &crate::ext::compact::Compaction) -> bool {
@@ -1565,13 +1676,13 @@ fn settled_reply_text(entries: &[EntryView]) -> Box<str> {
         let capacity = content
             .iter()
             .map(|block| match block {
-                dal_core::Block::Text { text } => text.len(),
+                dal_core::Block::Text { text, .. } => text.len(),
                 _ => 0,
             })
             .sum();
         let mut text = String::with_capacity(capacity);
         for block in content {
-            if let dal_core::Block::Text { text: chunk } = block {
+            if let dal_core::Block::Text { text: chunk, .. } = block {
                 text.push_str(chunk);
             }
         }
@@ -1716,6 +1827,52 @@ fn descriptions(
         .map(|(tool, _)| tool.identity(info))
         .chain(overlay.map(|entry| entry.tool.identity(info)))
         .collect()
+}
+
+/// Joins the visible prompt sections minus the product-owned base orders,
+/// byte-stable with the default assembly: same visibility gate, same
+/// order, same separator. An explicit child system prompt takes the place
+/// of exactly these sections; every extension section still renders.
+fn base_without_product_sections(
+    generation: &Generation,
+    mode: dal_core::Mode,
+    render: impl Fn(usize, &PromptSection) -> Option<String>,
+) -> String {
+    let mut sections: Vec<(u8, String)> = Vec::new();
+    for (owner, section) in generation.prompt_sections.iter() {
+        if !section_reaches_model(section.visibility(), mode) {
+            continue;
+        }
+        if matches!(section.order(), PromptOrder::Identity | PromptOrder::D2) {
+            continue;
+        }
+        let text = match section {
+            PromptSection::Static { text, .. } => Some(text.to_string()),
+            PromptSection::Session { .. } => render(*owner, section),
+        };
+        if let Some(text) = text {
+            sections.push((section.order().position(), text));
+        }
+    }
+    sections.sort_by_key(|(order, _)| *order);
+    sections
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Whether a section visibility reaches the model in this mode; mirrors
+/// the default request assembler's gate.
+fn section_reaches_model(visibility: Visibility, mode: dal_core::Mode) -> bool {
+    matches!(
+        (visibility, mode),
+        (Visibility::Model, _)
+            | (
+                Visibility::EvalOnly,
+                dal_core::Mode::EvalFirst | dal_core::Mode::EvalOnly
+            )
+    )
 }
 
 /// Renders one prompt section through its registered body.

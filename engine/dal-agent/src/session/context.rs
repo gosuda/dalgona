@@ -583,6 +583,7 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
             api,
             model,
             content,
+            replay,
             ..
         } => Some(ContextItem::Assistant {
             source: ReplaySource {
@@ -590,6 +591,7 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
                 model: model.clone(),
             },
             parts: content.iter().map(assistant_part).collect(),
+            replay: replay.clone(),
         }),
         EntryKind::ToolResult {
             call,
@@ -629,15 +631,24 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
 /// Maps one assistant block to its provider part.
 fn assistant_part(block: &Block) -> AssistantPart {
     match block {
-        Block::Text { text } => AssistantPart::Text { text: text.clone() },
+        Block::Text { text, replay } => AssistantPart::Text {
+            text: text.clone(),
+            replay: replay.clone(),
+        },
         Block::Reasoning { text, replay } => AssistantPart::Thinking {
             text: text.clone(),
             replay: Some(replay.clone()),
         },
-        Block::ToolCall { id, name, input } => AssistantPart::ToolCall {
+        Block::ToolCall {
+            id,
+            name,
+            input,
+            replay,
+        } => AssistantPart::ToolCall {
             call: id.clone(),
             name: name.clone(),
             args: input.clone(),
+            replay: replay.clone(),
         },
     }
 }
@@ -768,6 +779,7 @@ mod tests {
                         id: CallId::new(*call),
                         name: "read".into(),
                         input: RawJson::parse("{}").expect("valid JSON"),
+                        replay: None,
                     })
                     .collect(),
                 usage: dal_core::Usage {
@@ -779,6 +791,7 @@ mod tests {
                     cost_usd: None,
                 },
                 stop: dal_core::AssistantStop::ToolUse,
+                replay: None,
             },
         )
     }
@@ -872,6 +885,85 @@ mod tests {
                 Some("question"),
                 Some("first\nsecond"),
                 Some("Stay within the workspace.")
+            ]
+        );
+    }
+
+    #[test]
+    fn journal_replay_forwards_into_the_request_projection() {
+        let text_replay = RawJson::parse(r#"{"t":1}"#).expect("valid JSON");
+        let call_replay = RawJson::parse(r#"{"c":2}"#).expect("valid JSON");
+        let message_replay = RawJson::parse(r#"{"m":3}"#).expect("valid JSON");
+        let response = entry(
+            1,
+            None,
+            EntryKind::Assistant {
+                api: Family::Chat,
+                model: "model".into(),
+                route: Some(dal_core::AssistantRoute::Api(Family::Chat)),
+                content: vec![
+                    Block::Text {
+                        text: "answer".into(),
+                        replay: Some(text_replay.clone()),
+                    },
+                    Block::ToolCall {
+                        id: CallId::new("call-a"),
+                        name: "read".into(),
+                        input: RawJson::parse("{}").expect("valid JSON"),
+                        replay: Some(call_replay.clone()),
+                    },
+                ],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::Done,
+                replay: Some(message_replay.clone()),
+            },
+        );
+        let plain = assistant_calling(2, Some(response.id), &["call-b"]);
+
+        let context = context_items(&[response, plain]);
+
+        assert_eq!(
+            context,
+            vec![
+                ContextItem::Assistant {
+                    source: ReplaySource {
+                        family: Family::Chat,
+                        model: "model".into(),
+                    },
+                    parts: vec![
+                        AssistantPart::Text {
+                            text: "answer".into(),
+                            replay: Some(text_replay),
+                        },
+                        AssistantPart::ToolCall {
+                            call: CallId::new("call-a"),
+                            name: "read".into(),
+                            args: RawJson::parse("{}").expect("valid JSON"),
+                            replay: Some(call_replay),
+                        },
+                    ],
+                    replay: Some(message_replay),
+                },
+                ContextItem::Assistant {
+                    source: ReplaySource {
+                        family: Family::Chat,
+                        model: "model".into(),
+                    },
+                    parts: vec![AssistantPart::ToolCall {
+                        call: CallId::new("call-b"),
+                        name: "read".into(),
+                        args: RawJson::parse("{}").expect("valid JSON"),
+                        replay: None,
+                    }],
+                    replay: None,
+                },
             ]
         );
     }
