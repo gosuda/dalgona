@@ -524,8 +524,17 @@ impl SkillResolver {
         if let Some(body) = self.registry.body(path) {
             return Ok(Doc::new(format!("skill://{path}"), body.to_string()));
         }
+        let names = self.registry.names();
+        let message = if names.is_empty() {
+            format!("skill {path} does not exist; no skills are loaded")
+        } else {
+            format!(
+                "skill {path} does not exist; known skills: {}",
+                names.join(", ")
+            )
+        };
         Err(SchemeError::Failed {
-            message: format!("unknown skill: {path}").into(),
+            message: message.into(),
         })
     }
 }
