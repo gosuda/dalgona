@@ -307,6 +307,7 @@ fn replay_request(
     if !first.text.is_empty() {
         parts.push(AssistantPart::Text {
             text: first.text.clone().into(),
+            replay: None,
         });
     }
     for item in &first.items {
@@ -326,7 +327,11 @@ fn replay_request(
                     text: first_prompt.into(),
                 }],
             },
-            ContextItem::Assistant { source, parts },
+            ContextItem::Assistant {
+                source,
+                parts,
+                replay: None,
+            },
             ContextItem::User {
                 parts: vec![Part::Text {
                     text: prompt.into(),
@@ -608,7 +613,9 @@ async fn live_codex_compaction() {
                 source,
                 parts: vec![AssistantPart::Text {
                     text: "Here is a short draft.".into(),
+                    replay: None,
                 }],
+                replay: None,
             },
             ContextItem::User {
                 parts: vec![Part::Text {

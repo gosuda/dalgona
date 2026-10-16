@@ -162,13 +162,16 @@ fn snapshot_request() -> ModelRequest {
                     },
                     AssistantPart::Text {
                         text: "Reading.".into(),
+                        replay: None,
                     },
                     AssistantPart::ToolCall {
                         call: CallId::new("call_1"),
                         name: "read".into(),
                         args: RawJson::parse(r#"{"path":"a.rs"}"#).expect("call args"),
+                        replay: None,
                     },
                 ],
+                replay: None,
             },
             ContextItem::ToolResult {
                 call: CallId::new("call_1"),
@@ -214,8 +217,10 @@ fn cross_model_request(model: &str) -> ModelRequest {
                     },
                     AssistantPart::Text {
                         text: "Done.".into(),
+                        replay: None,
                     },
                 ],
+                replay: None,
             },
         ]),
         params: params(),

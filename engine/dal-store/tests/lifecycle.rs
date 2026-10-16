@@ -60,10 +60,12 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
                     id: CallId::new(*call),
                     name: "read".into(),
                     input: input.clone(),
+                    replay: None,
                 })
                 .collect(),
             usage: usage(),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }
@@ -682,6 +684,80 @@ async fn remote_compaction_replay_roundtrip() {
         "replay payload is preserved"
     );
 }
+#[tokio::test]
+async fn clone_preserves_assistant_replay_verbatim() {
+    let (_temp, store) = setup("life-clone-replay");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "root")])
+        .await
+        .expect("user appends");
+    let assistant = Record::Assistant(Entry {
+        id: entry_id(2),
+        parent: Some(entry_id(1)),
+        at: timestamp(),
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test-model".into(),
+            route: Some(AssistantRoute::Api(Family::Chat)),
+            content: vec![Block::Text {
+                text: "kept".into(),
+                replay: Some(RawJson::parse("{\"text\":\"kept\"}").expect("block replay parses")),
+            }],
+            usage: usage(),
+            stop: AssistantStop::Done,
+            replay: Some(RawJson::parse("{\"assistant\":\"kept\"}").expect("entry replay parses")),
+        },
+    });
+    let assistant_line = encode(&assistant).expect("assistant encodes");
+    journal
+        .append(vec![assistant])
+        .await
+        .expect("assistant appends");
+    let mut cloned = journal.clone_session().await.expect("clone succeeds");
+    let found: Vec<&Record> = cloned
+        .records()
+        .iter()
+        .filter(|record| matches!(record, Record::Assistant(entry) if entry.id == entry_id(2)))
+        .collect();
+    assert_eq!(found.len(), 1, "the clone carries the assistant entry");
+    let Record::Assistant(entry) = found[0] else {
+        panic!("expected an assistant record");
+    };
+    let EntryKind::Assistant {
+        content, replay, ..
+    } = &entry.kind
+    else {
+        panic!("expected an assistant entry");
+    };
+    let [
+        Block::Text {
+            replay: Some(block),
+            ..
+        },
+    ] = content.as_slice()
+    else {
+        panic!("expected one text block with replay");
+    };
+    assert_eq!(
+        replay.as_ref().map(dal_core::RawJson::as_str),
+        Some("{\"assistant\":\"kept\"}"),
+        "entry replay survives the clone"
+    );
+    assert_eq!(
+        block.as_str(),
+        "{\"text\":\"kept\"}",
+        "block replay survives the clone"
+    );
+    let cloned_line = encode(found[0]).expect("cloned assistant encodes");
+    assert_eq!(
+        cloned_line, assistant_line,
+        "assistant replay survives byte-for-byte"
+    );
+    cloned.close().await.expect("clone closes");
+    journal.close().await.expect("source closes");
+}
 
 #[tokio::test]
 async fn label_removal_appends_record() {
@@ -749,9 +825,11 @@ async fn cancelled_message_rejects_tool_call() {
                     id: CallId::new("x"),
                     name: "read".into(),
                     input,
+                    replay: None,
                 }],
                 usage: usage(),
                 stop: AssistantStop::Cancelled,
+                replay: None,
             },
         })])
         .await
@@ -1461,4 +1539,378 @@ async fn sidecar_cannot_overwrite_the_sessions_own_files() {
         .write("notes", b"fine")
         .expect("ordinary names still work");
     journal.close().await.expect("session closes");
+}
+
+/// `Store::read_session_entry` over real temporary stores: closed sessions
+/// read back strictly read-only, bounded by the same complete-prefix rules
+/// the open preflight applies.
+mod closed_read {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+
+    use super::*;
+
+    /// One path under a tree: its bytes (files only) and modification time.
+    type Tree = Vec<(PathBuf, Option<Vec<u8>>, SystemTime)>;
+
+    /// Every path under `root` with its bytes and mtime, in stable order, so
+    /// a created, removed, truncated, or rewritten file all show as a diff.
+    fn tree(root: &Path) -> Tree {
+        let mut found = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            let metadata = fs::symlink_metadata(&path).expect("stat path");
+            let modified = metadata.modified().expect("read mtime");
+            if !metadata.is_dir() {
+                found.push((
+                    path.clone(),
+                    Some(fs::read(&path).expect("read file")),
+                    modified,
+                ));
+                continue;
+            }
+            for child in fs::read_dir(&path).expect("list directory") {
+                stack.push(child.expect("read directory entry").path());
+            }
+            found.push((path, None, modified));
+        }
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found
+    }
+
+    fn user_child(id: u64, parent: u64, text: &str) -> Record {
+        Record::User(Entry {
+            id: entry_id(id),
+            parent: Some(entry_id(parent)),
+            at: timestamp(),
+            kind: EntryKind::User {
+                parts: vec![JournalPart::Text { text: text.into() }],
+            },
+        })
+    }
+
+    fn user_kind(text: &str) -> EntryKind {
+        EntryKind::User {
+            parts: vec![JournalPart::Text { text: text.into() }],
+        }
+    }
+
+    /// Creates one durable session holding `texts` as entries 1.., then
+    /// closes it so no actor or lock remains.
+    async fn closed_session(tag: &str, texts: &[&str]) -> (TempDir, Store, SessionId, PathBuf) {
+        let (temp, store) = setup(tag);
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        for (number, text) in (1_u64..).zip(texts) {
+            journal
+                .append(vec![user(number, text)])
+                .await
+                .expect("append entry");
+        }
+        journal.close().await.expect("session closes");
+        let root = temp.path().join("data");
+        (temp, store, id, root)
+    }
+
+    #[tokio::test]
+    async fn closed_session_entries_read_back_and_leave_every_file_untouched() {
+        let (temp, store, id, root) =
+            closed_session("life-closed-read", &["first prompt", "second prompt"]).await;
+        let elsewhere = Store::new(
+            root.clone(),
+            Workspace::new(temp.path().join("elsewhere")).expect("workspace is absolute"),
+            Product::Dalgona,
+        );
+        let other = SessionId::new_v7();
+        let mut foreign = elsewhere.create_session(other);
+        foreign
+            .append(vec![user(1, "other workspace")])
+            .await
+            .expect("foreign append");
+        foreign.close().await.expect("foreign session closes");
+        let before = tree(&root);
+
+        let first =
+            Store::read_session_entry(&root, id, entry_id(1)).expect("closed entry 1 reads back");
+        assert_eq!(first.id, entry_id(1));
+        assert_eq!(first.parent, None);
+        assert_eq!(first.kind, user_kind("first prompt"));
+        let second =
+            Store::read_session_entry(&root, id, entry_id(2)).expect("closed entry 2 reads back");
+        assert_eq!(
+            second.parent,
+            Some(entry_id(1)),
+            "the stored parent survives"
+        );
+        assert_eq!(second.kind, user_kind("second prompt"));
+        let foreign_entry = Store::read_session_entry(&root, other, entry_id(1))
+            .expect("a session in another workspace resolves under the same data root");
+        assert_eq!(foreign_entry.kind, user_kind("other workspace"));
+
+        assert_eq!(
+            tree(&root),
+            before,
+            "reads create, remove, and rewrite no file and move no mtime"
+        );
+        assert!(
+            store.session_file(id).exists(),
+            "the closed journal stays where the store put it"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_read_reports_missing_session_entry_and_root_with_typed_errors() {
+        let (temp, _store, id, root) = closed_session("life-closed-missing", &["only"]).await;
+        let before = tree(&root);
+
+        let entry = Store::read_session_entry(&root, id, entry_id(99))
+            .expect_err("an entry the journal never held");
+        assert!(
+            matches!(&entry, StoreError::UnknownEntry { id: found, entry: missing }
+                if *found == id && *missing == entry_id(99)),
+            "got {entry:?}"
+        );
+        let session = Store::read_session_entry(&root, SessionId::new_v7(), entry_id(1))
+            .expect_err("a session the store never held");
+        assert!(
+            matches!(session, StoreError::NotFound { .. }),
+            "got {session:?}"
+        );
+        let absent = temp.path().join("absent-root");
+        let nothing = Store::read_session_entry(&absent, id, entry_id(1))
+            .expect_err("a data root that does not exist");
+        assert!(
+            matches!(nothing, StoreError::NotFound { .. }),
+            "got {nothing:?}"
+        );
+        assert!(!absent.exists(), "failed lookups create no directories");
+        assert_eq!(tree(&root), before, "failed lookups touch nothing");
+    }
+
+    #[tokio::test]
+    async fn closed_read_serves_only_the_leaf_path_like_the_live_projection() {
+        let (temp, store) = setup("life-closed-leaf");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal
+            .append(vec![user(1, "root")])
+            .await
+            .expect("root appends");
+        journal
+            .append(vec![user(2, "abandoned branch")])
+            .await
+            .expect("abandoned branch appends");
+        journal
+            .append(vec![Record::Leaf {
+                at: timestamp(),
+                to: Some(entry_id(1)),
+            }])
+            .await
+            .expect("leaf moves back to the root");
+        journal
+            .append(vec![user(3, "kept branch")])
+            .await
+            .expect("kept branch appends");
+        journal.close().await.expect("session closes");
+        let root = temp.path().join("data");
+        let before = tree(&root);
+
+        assert_eq!(
+            Store::read_session_entry(&root, id, entry_id(3))
+                .expect("the leaf reads")
+                .parent,
+            Some(entry_id(1))
+        );
+        assert!(Store::read_session_entry(&root, id, entry_id(1)).is_ok());
+        let off_branch = Store::read_session_entry(&root, id, entry_id(2))
+            .expect_err("an entry off the leaf path stays missing");
+        assert!(
+            matches!(off_branch, StoreError::UnknownEntry { .. }),
+            "got {off_branch:?}"
+        );
+        assert_eq!(tree(&root), before, "branch reads touch nothing");
+    }
+
+    #[tokio::test]
+    async fn closed_read_ignores_a_torn_tail_without_repairing_it() {
+        let (_temp, store, id, root) =
+            closed_session("life-closed-torn", &["kept one", "kept two"]).await;
+        let path = store.session_file(id);
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open journal to tear it");
+        file.write_all(b"{\"v\":1,\"type\":\"user\",\"id\":3")
+            .expect("stage a torn tail");
+        drop(file);
+        let before = tree(&root);
+
+        let kept = Store::read_session_entry(&root, id, entry_id(2))
+            .expect("the complete prefix still reads");
+        assert_eq!(kept.kind, user_kind("kept two"));
+        let torn = Store::read_session_entry(&root, id, entry_id(3))
+            .expect_err("the torn bytes are not an entry");
+        assert!(
+            matches!(torn, StoreError::UnknownEntry { .. }),
+            "got {torn:?}"
+        );
+        assert_eq!(
+            tree(&root),
+            before,
+            "the torn tail is neither truncated nor quarantined and no recovery record lands"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_read_refuses_genuine_corruption_without_changing_evidence() {
+        for (garbage, expect_version) in [
+            (&b"this is not a record\n"[..], None),
+            (&b"{\"v\":99,\"type\":\"boot\"}\n"[..], Some(99_u64)),
+        ] {
+            let (_temp, store, id, root) =
+                closed_session("life-closed-damaged", &["intact one", "intact two"]).await;
+            let path = store.session_file(id);
+            let intact = fs::read(&path).expect("read journal");
+            let mut damaged = intact.clone();
+            damaged.extend_from_slice(garbage);
+            fs::write(&path, &damaged).expect("stage a complete bad record");
+            let before = tree(&root);
+
+            let refused = Store::read_session_entry(&root, id, entry_id(1))
+                .expect_err("a corrupt complete record is a typed failure, not a miss");
+            let intact_len = u64::try_from(intact.len()).expect("offset fits");
+            let typed = match expect_version {
+                Some(version) => matches!(
+                    &refused,
+                    StoreError::UnknownVersion { found, .. } if *found == version
+                ),
+                None => matches!(
+                    &refused,
+                    StoreError::Damaged { offset, .. } if *offset == intact_len
+                ),
+            };
+            assert!(
+                typed,
+                "the failure is typed and names the first bad record: {refused:?}"
+            );
+            assert_eq!(
+                tree(&root),
+                before,
+                "damage is reported, never truncated, quarantined, or repaired"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_read_stops_at_a_rollback_marker_and_leaves_it_in_place() {
+        let (_temp, store, id, root) =
+            closed_session("life-closed-rollback", &["committed one", "committed two"]).await;
+        let path = store.session_file(id);
+        let marker = path.with_file_name("journal.jsonl.rollback");
+        let committed = fs::read(&path).expect("read journal");
+        let mut staged = committed.clone();
+        staged.extend_from_slice(
+            &encode(&user_child(3, 2, "failed batch")).expect("failed batch encodes"),
+        );
+        fs::write(&path, &staged).expect("stage a failed batch");
+        fs::write(&marker, format!("{}\n", committed.len())).expect("write rollback marker");
+        let before = tree(&root);
+
+        let kept =
+            Store::read_session_entry(&root, id, entry_id(2)).expect("the committed prefix reads");
+        assert_eq!(kept.kind, user_kind("committed two"));
+        let replayed = Store::read_session_entry(&root, id, entry_id(3))
+            .expect_err("a failed batch behind the marker never replays");
+        assert!(
+            matches!(replayed, StoreError::UnknownEntry { .. }),
+            "got {replayed:?}"
+        );
+        assert_eq!(
+            tree(&root),
+            before,
+            "the marker and the failed batch stay for the writer to consume"
+        );
+        assert!(marker.exists(), "reads never consume the marker");
+
+        for (label, offset) in [
+            ("inside a record", committed.len() - 1),
+            ("past the end of the journal", staged.len() + 1),
+        ] {
+            fs::write(&marker, format!("{offset}\n")).expect("write bad marker");
+            let before = tree(&root);
+            let refused = Store::read_session_entry(&root, id, entry_id(1))
+                .expect_err("an inconsistent marker refuses instead of guessing");
+            assert!(
+                matches!(refused, StoreError::Damaged { .. }),
+                "{label}: got {refused:?}"
+            );
+            assert_eq!(tree(&root), before, "{label}: evidence is unchanged");
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_read_refuses_a_journal_that_is_not_a_regular_file() {
+        let (_temp, store, id, root) = closed_session("life-closed-unsafe", &["guarded"]).await;
+        let path = store.session_file(id);
+        fs::remove_file(&path).expect("remove journal");
+        fs::create_dir(&path).expect("occupy the journal path with a directory");
+
+        let refused = Store::read_session_entry(&root, id, entry_id(1))
+            .expect_err("a non-file journal is refused, not read and not a silent miss");
+        assert!(
+            matches!(&refused, StoreError::Invalid { reason } if reason.contains("not a regular file")),
+            "got {refused:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_read_never_follows_a_symlinked_journal() {
+        let (temp, store, id, root) = closed_session("life-closed-link", &["guarded"]).await;
+        let path = store.session_file(id);
+        let target = temp.path().join("elsewhere.jsonl");
+        fs::rename(&path, &target).expect("move journal out of the store");
+        std::os::unix::fs::symlink(&target, &path).expect("link journal back in");
+        let victim = fs::read(&target).expect("read link target");
+
+        let refused = Store::read_session_entry(&root, id, entry_id(1))
+            .expect_err("a symlinked journal is refused, not followed");
+        assert!(
+            matches!(&refused, StoreError::Invalid { reason } if reason.contains("not a regular file")),
+            "got {refused:?}"
+        );
+        assert_eq!(fs::read(&target).expect("reread target"), victim);
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("stat link")
+                .file_type()
+                .is_symlink(),
+            "the link itself is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_read_beside_a_live_writer_takes_no_lock_and_sees_durable_batches() {
+        let (temp, store) = setup("life-closed-live");
+        let root = temp.path().join("data");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal
+            .append(vec![user(1, "live one")])
+            .await
+            .expect("first append is durable");
+
+        let seen = Store::read_session_entry(&root, id, entry_id(1))
+            .expect("a read beside the live writer needs no lock");
+        assert_eq!(seen.kind, user_kind("live one"));
+        journal
+            .append(vec![user(2, "live two")])
+            .await
+            .expect("the writer is unaffected by the read");
+        let later = Store::read_session_entry(&root, id, entry_id(2))
+            .expect("the next durable batch is visible");
+        assert_eq!(later.kind, user_kind("live two"));
+        journal.close().await.expect("session closes");
+    }
 }

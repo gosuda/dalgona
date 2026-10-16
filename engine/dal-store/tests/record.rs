@@ -4,13 +4,13 @@
 
 mod support;
 
-use std::num::NonZeroU64;
+use std::{fs, num::NonZeroU64};
 
 use dal_core::{
     Answer, ApprovalMode, AssistantRoute, AssistantStop, Block, CallId, ClientId, Entry, EntryId,
-    EntryKind, Family, Gen, Header, InferredPurpose, JobEvent, JobId, JournalPart, Mail, MailMode,
-    Mode, ModelRoute, Owner, Product, RawJson, Record, RequestId, SessionId, Source, ThinkingLevel,
-    TurnEndStop, TurnId, Usage, Workspace, decode, encode, scan_head,
+    EntryKind, EntryView, Family, Gen, Header, InferredPurpose, JobEvent, JobId, JournalPart, Mail,
+    MailMode, Mode, ModelRoute, Owner, Product, RawJson, Record, RequestId, SessionId, Source,
+    ThinkingLevel, TurnEndStop, TurnId, Usage, Workspace, decode, encode, scan_head,
 };
 use dal_store::Store;
 use proptest::prelude::*;
@@ -79,9 +79,13 @@ fn assistant_entry(id: u64) -> Entry {
             api: Family::Chat,
             model: "test-model".into(),
             route: Some(AssistantRoute::Api(Family::Chat)),
-            content: vec![Block::Text { text: "hi".into() }],
+            content: vec![Block::Text {
+                text: "hi".into(),
+                replay: None,
+            }],
             usage: usage(),
             stop: AssistantStop::Done,
+            replay: None,
         },
     }
 }
@@ -226,6 +230,7 @@ fn corpus() -> Vec<Record> {
             answer: Answer::Approve,
             by: ClientId::new("tester"),
             was_default: false,
+            cause: None,
         },
         Record::AllowAlways {
             at,
@@ -567,4 +572,134 @@ async fn mail_and_synthetic_inferred_records_replay() {
         "inferred retains its synthetic id"
     );
     assert_eq!(kept_inferred.2, &usage(), "inferred retains its usage");
+}
+
+/// Appends one assistant replay line to a real durable store journal.
+///
+/// Returns the store handle plus the session id, the exact encoded line, and
+/// the durable journal bytes. The store stays open for the caller: the live
+/// journal owns the session, so the caller drives both lifecycles.
+async fn durable_replay_journal(temp: &TempDir) -> (Store, SessionId, Vec<u8>, Vec<u8>) {
+    let workspace =
+        Workspace::new(temp.path().join("workspace")).expect("temporary workspace is absolute");
+    let store = Store::new(temp.path().join("data"), workspace, Product::Dalgona);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![Record::User(user_entry(1, "start"))])
+        .await
+        .expect("user appends");
+    let mut entry = assistant_entry(2);
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("assistant_entry holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse(r#"{"reasoning":[1,2,3]}"#).expect("replay payload parses"));
+    let record = Record::Assistant(entry);
+    let line = encode(&record).expect("replay record encodes");
+    journal
+        .append(vec![record])
+        .await
+        .expect("assistant with replay appends");
+    journal.close().await.expect("close the live journal");
+    let on_disk = fs::read(store.session_file(id)).expect("read journal");
+    (store, id, line, on_disk)
+}
+
+/// The expected view of the replayed assistant entry, built from the exact
+/// encoded line so ids and parents come from the same source as the file.
+fn expected_replay_view(line: &[u8]) -> EntryView {
+    let decoded = decode(line).expect("replay line decodes");
+    let Record::Assistant(mut entry) = decoded.record else {
+        unreachable!("the staged line holds an assistant entry");
+    };
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("the staged line holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse(r#"{"reasoning":[1,2,3]}"#).expect("replay parses"));
+    EntryView {
+        id: entry.id,
+        parent: entry.parent,
+        kind: entry.kind,
+    }
+}
+
+#[tokio::test]
+async fn replayed_entry_reads_back_only_from_complete_lines() {
+    let temp = TempDir::new("record-replay-boundary");
+    let (store, id, line, on_disk) = durable_replay_journal(&temp).await;
+    let journal_path = store.session_file(id);
+    let root = temp.path().join("data");
+    let replay = expected_replay_view(&line);
+    let newline = on_disk.len() - line.len();
+    for cut in newline..on_disk.len() {
+        let truncated = &on_disk[..cut];
+        fs::write(&journal_path, truncated).expect("stage a cut inside the replay line");
+        assert!(
+            Store::read_session_entry(&root, id, entry_id(2)).is_err(),
+            "the torn replay line is not an entry at cut {cut}"
+        );
+        assert!(
+            Store::read_session_entry(&root, id, entry_id(1)).is_ok(),
+            "the user entry stays reachable at cut {cut}"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("read staged journal"),
+            truncated,
+            "a cut at {cut} never triggers repair or rewrite"
+        );
+    }
+    fs::write(&journal_path, &on_disk).expect("restore the full journal");
+    let found = Store::read_session_entry(&root, id, entry_id(2))
+        .expect("the complete replay line is an entry");
+    assert_eq!(found, replay, "the replay payload survives the read");
+    for cut in 1..newline {
+        let truncated = &on_disk[..cut];
+        fs::write(&journal_path, truncated).expect("stage a cut inside earlier lines");
+        assert!(
+            Store::read_session_entry(&root, id, entry_id(2)).is_err(),
+            "the replay entry is gone at cut {cut}"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("read staged journal"),
+            truncated,
+            "a cut at {cut} never triggers repair or rewrite"
+        );
+    }
+    fs::write(&journal_path, &on_disk).expect("restore the full journal");
+}
+
+#[tokio::test]
+async fn null_replay_append_is_refused_without_a_partial_write() {
+    let temp = TempDir::new("record-null-replay");
+    let (store, id, _, on_disk) = durable_replay_journal(&temp).await;
+    let journal_path = store.session_file(id);
+    let mut entry = assistant_entry(3);
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("assistant_entry holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse("null").expect("explicit null parses"));
+    let (mut reopened, _) = store
+        .open_session(id)
+        .await
+        .expect("the durable session reopens");
+    let baseline = fs::read(&journal_path).expect("read the reopened journal");
+    assert!(
+        baseline.len() > on_disk.len() && baseline.starts_with(&on_disk),
+        "reopen appends its recovery boot after the durable prefix"
+    );
+    let error = reopened
+        .append(vec![Record::Assistant(entry)])
+        .await
+        .expect_err("a null replay is refused at the append boundary");
+    reopened.close().await.expect("close the reopened session");
+    assert_eq!(
+        error.to_string(),
+        "cannot encode a null assistant replay",
+        "exact NullReplay refusal"
+    );
+    assert_eq!(
+        fs::read(&journal_path).expect("read the journal"),
+        baseline,
+        "the refused batch left the journal byte-identical"
+    );
 }

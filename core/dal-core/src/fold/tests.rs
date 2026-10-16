@@ -3,6 +3,7 @@ use super::types::MAX_STEERS;
 
 use super::*;
 use crate::journal::AssistantRoute;
+use crate::update::ResolutionCause;
 use std::{num::NonZeroU64, path::PathBuf};
 
 fn id(value: u64) -> TurnId {
@@ -332,6 +333,7 @@ fn session_grant_accepts_a_mapped_tool_name() {
             &Answer::ApproveForSession,
             Some(client()),
             false,
+            ResolutionCause::Answered,
             stamp(),
             &mut emit,
         )
@@ -447,6 +449,7 @@ fn turn_cancel_keeps_turnless_questions_waiting() {
             answer: Answer::Approve,
             by: Some(client()),
             was_default: false,
+            cause: ResolutionCause::Answered,
         },
     )
     .unwrap();
@@ -579,7 +582,8 @@ fn adjacent_text_deltas_journal_as_one_block() {
     assert_eq!(
         content,
         vec![Block::Text {
-            text: "Hello streamed world.".into()
+            text: "Hello streamed world.".into(),
+            replay: None,
         }]
     );
 }
@@ -1409,6 +1413,7 @@ fn stream_end_reserves_partial_tool_results() {
             id: CallId::new("partial-capacity"),
             name: "read_file".into(),
             input: RawJson::parse("{}").unwrap(),
+            replay: None,
         }],
         usage: usage(0),
     };
@@ -1777,6 +1782,7 @@ fn context_measurement_tracks_selected_model_and_family() {
                 content: Vec::new(),
                 usage: usage(5500),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         }),
     ];
@@ -1836,9 +1842,11 @@ fn replay_repairs_aborted_turn() {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             }],
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     };
     let records = [
@@ -1911,9 +1919,11 @@ fn replay_declared_keeps_the_open_turn_unrepaired() {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             }],
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     };
     let records = [
@@ -2025,10 +2035,12 @@ fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
                     id: CallId::new(*call),
                     name: "read_file".into(),
                     input: RawJson::parse("{}").unwrap(),
+                    replay: None,
                 })
                 .collect(),
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }
@@ -2715,6 +2727,7 @@ fn projection_matches_replay_after_branch_selection() {
             content: Vec::new(),
             usage: usage(90_000),
             stop: AssistantStop::Done,
+            replay: None,
         },
     }));
     let mut live = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
@@ -2813,6 +2826,7 @@ fn projection_tracks_latest_compaction_on_selected_branch() {
                 content: Vec::new(),
                 usage: usage(90_000),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         }),
         Record::Compaction(Entry {
@@ -3056,11 +3070,13 @@ fn interrupted_stream_records_partial_assistant_and_call_result_once() {
         content: vec![
             Block::Text {
                 text: "partial answer".into(),
+                replay: None,
             },
             Block::ToolCall {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             },
         ],
         usage: usage(7),
@@ -4224,6 +4240,7 @@ fn route_assistant(
             content: Vec::new(),
             usage: usage(tokens),
             stop: AssistantStop::Done,
+            replay: None,
         },
     })
 }
@@ -4444,6 +4461,7 @@ fn partial_assistant_measurement_matches_across_reopen() {
     let partial = PartialResponse {
         content: vec![Block::Text {
             text: "partial answer".into(),
+            replay: None,
         }],
         usage: usage(90_000),
     };
@@ -4470,9 +4488,11 @@ fn partial_assistant_measurement_matches_across_reopen() {
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "partial answer".into(),
+                replay: None,
             }],
             usage: usage(90_000),
             stop: AssistantStop::Cancelled,
+            replay: None,
         },
     );
     let records = decode_journal(&records);
@@ -4681,4 +4701,370 @@ fn declared_fold_mirrors_job_records_into_session_jobs() {
         session.ended_jobs.as_slice(),
         [(id, JobOutcome::Exited { code: 0 })] if *id == job
     ));
+}
+#[cfg(test)]
+mod threshold_estimate_fallback {
+    //! ENG-17 C-05: the automatic-threshold trigger must estimate from the
+    //! projected branch whenever measured usage is absent, stale (pre-dating a
+    //! compaction), or tied to another model, using the shared token-estimation
+    //! owner in `crate::tokens`. A change in the turn outcome (a `Compact`
+    //! effect firing or not) is the observable, so deleting the fallback
+    //! breaks these tests instead of just uninvoking a helper.
+    use super::*;
+
+    /// Drives a real prompt turn to the trigger point. `open_round` runs
+    /// inside the guard event (`begin_turn` -> boundary -> `open_round`), so
+    /// the guard's effects are the observable: `Effect::Compact` means the
+    /// threshold fired.
+    fn open_prompt_turn(session: &mut Session, text: &str) -> (TurnId, Vec<Effect>) {
+        send(
+            session,
+            Event::Command {
+                cmd: Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text { text: text.into() }],
+                },
+                by: client(),
+            },
+        )
+        .unwrap();
+        let turn = match session.phase() {
+            Phase::Opening { turn, .. } => *turn,
+            phase => panic!("prompt did not open a turn: {phase:?}"),
+        };
+        let out = send(session, guard(turn)).unwrap();
+        (turn, out)
+    }
+
+    fn compacted(out: &[Effect]) -> bool {
+        out.iter()
+            .any(|effect| matches!(effect, Effect::Compact { .. }))
+    }
+
+    /// ~455 projected KiB -> estimate = ceil(2 * bytes / 7) ~= 149k tokens,
+    /// above the 85% line of a 100k window with `min_tokens` = 1.
+    fn heavy_text() -> String {
+        "context ".repeat(65_000)
+    }
+
+    /// ~228 projected KiB -> estimate ~= 74k tokens: below the 85k line
+    /// alone, past it when one more entry of the same size joins.
+    fn medium_text() -> String {
+        "context ".repeat(32_500)
+    }
+
+    #[test]
+    fn unmeasured_projected_context_crossing_threshold_compacts() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        assert_eq!(session.last_usage, None, "precondition: no usage yet");
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            compacted(&out),
+            "unmeasured context above the estimate threshold must compact"
+        );
+        assert!(session.pending_compaction.is_some());
+    }
+
+    #[test]
+    fn unmeasured_context_below_threshold_does_not_compact() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (_, out) = open_prompt_turn(&mut session, "tiny question");
+        assert!(
+            !compacted(&out),
+            "a small unmeasured context must not trigger compaction"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn min_tokens_floor_gates_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(200_000)).unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            !compacted(&out),
+            "the estimate must respect limits.compact.min_tokens"
+        );
+    }
+
+    #[test]
+    fn model_changed_context_compacts_on_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "small question");
+        let out = stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 500));
+        assert!(
+            !compacted(&out),
+            "measured same-model usage below the threshold must not compact"
+        );
+        send(&mut session, Event::Boundary { turn }).unwrap();
+        // Switch the requested model: the stored measurement now belongs to
+        // another route, so only the estimate remains valid.
+        select_model(
+            &mut session,
+            &ModelRoute::Api {
+                family: Family::Anthropic,
+                model: "other-model".into(),
+            },
+        );
+        // Grow the projected branch stream-free in sub-threshold steps
+        // (200 000 bytes -> 57 143 estimated tokens each): the first
+        // post-switch turn must not fire, the second crosses the 85k line
+        // on the estimate alone.
+        let mid_text = "context ".repeat(25_000);
+        let (turn, out) = open_prompt_turn(&mut session, &mid_text);
+        assert!(
+            !compacted(&out),
+            "the first sub-threshold estimate must not compact"
+        );
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &mid_text);
+        assert!(
+            compacted(&out),
+            "a stale measurement from another model must fall back to the estimate"
+        );
+    }
+
+    #[test]
+    fn measured_eligible_usage_still_takes_precedence() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "question");
+        let out = one_read_round(&mut session, turn, "precedence", 90_000);
+        // 90_000 measured tokens >= 85_000 with a tiny projection: the
+        // measured value must decide, not the estimate.
+        assert_eq!(session.tokens_since_last_compaction(), 90_000);
+        assert!(
+            compacted(&out),
+            "eligible measured usage must still trigger compaction"
+        );
+    }
+
+    #[test]
+    fn zero_window_still_disables_the_trigger() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 0,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: true,
+                    compactor_available: true,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "window == 0 must disable the trigger");
+    }
+
+    #[test]
+    fn disabled_flag_still_suppresses_the_estimate_trigger() {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 100_000,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: false,
+                    compactor_available: true,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "compact.enabled = false must suppress");
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn missing_compactor_keeps_the_estimate_only_notifying() {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 100_000,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: true,
+                    compactor_available: false,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out));
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+        assert!(
+            out.iter().any(|effect| matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "compaction_none")))),
+            "an eligible trigger with no compactor must notify compaction_none"
+        );
+    }
+
+    #[test]
+    fn open_breaker_suppresses_the_estimate_trigger() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        session.breaker_open = true;
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "an open breaker must suppress");
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn breaker_arms_when_estimate_driven_compactions_fail_three_times() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        // Stream-free: every measured_context_tokens() stays None, so each
+        // round is judged by the estimate alone.
+        for index in 0..3 {
+            let (turn, out) = open_prompt_turn(&mut session, &heavy_text());
+            assert!(
+                compacted(&out),
+                "estimate-driven compaction {index} must fire"
+            );
+            let out = send(
+                &mut session,
+                Event::CompactionSettled {
+                    turn: Some(turn),
+                    outcome: Err("compactor unavailable".into()),
+                },
+            )
+            .unwrap();
+            assert!(
+                out.iter().any(|effect| matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "compaction_ended")))),
+                "failed compaction {index} must emit compaction_ended"
+            );
+            if index < 2 {
+                assert!(session.auto_compaction_on(), "breaker closed after {index}");
+            }
+            send(
+                &mut session,
+                Event::Cancel {
+                    scope: CancelScope::Turn(turn),
+                    partial: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(
+            !session.auto_compaction_on(),
+            "breaker must arm on the third failure"
+        );
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            !compacted(&out),
+            "the open breaker must suppress estimate-driven compaction"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn resolved_compaction_consumes_the_estimate_so_no_loop_fires() {
+        // Stream-free so measured_context_tokens() stays None. The context is
+        // split across two ~260 KiB user entries (~74k estimated tokens
+        // each): one alone stays under the 85k line, both together cross it,
+        // and dropping the older one brings the projection back under.
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, out) = open_prompt_turn(&mut session, &medium_text());
+        assert!(
+            !compacted(&out),
+            "a single sub-threshold entry must not compact"
+        );
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &medium_text());
+        assert!(
+            compacted(&out),
+            "two entries past the line must fire on the estimate"
+        );
+        let turn = match session.phase() {
+            Phase::Running { turn, .. } => *turn,
+            phase => panic!("compaction did not pause the turn: {phase:?}"),
+        };
+        // Keep only the newest user entry (first_kept = entry 2): the
+        // projected bytes collapse back to ~74k estimated tokens, so the next
+        // trigger point must infer, not re-compact.
+        let mut summary = compact_summary(148_000, 74_000);
+        summary.first_kept = Some(entry(2));
+        send(
+            &mut session,
+            Event::CompactionSettled {
+                turn: Some(turn),
+                outcome: Ok(summary),
+            },
+        )
+        .unwrap();
+        assert_eq!(session.compactions(), 1);
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, "next");
+        assert!(
+            !compacted(&out),
+            "a resolved compaction must not re-trigger on its own summary"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn stale_pre_compaction_usage_falls_back_to_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "before compaction");
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 500));
+        send(&mut session, Event::Boundary { turn }).unwrap();
+        send(
+            &mut session,
+            Event::Command {
+                cmd: Command::Compact { focus: None },
+                by: client(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(session.phase(), Phase::Compacting { .. }));
+        settle_manual_compaction(&mut session, 1_000, 100);
+        assert_eq!(session.compactions(), 1);
+        // The stored usage predates compaction 1: measured_context_tokens()
+        // now returns None and the estimate must decide.
+        assert_eq!(session.measured_context_tokens(), None);
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            compacted(&out),
+            "stale pre-compaction usage must fall back to the estimate"
+        );
+    }
 }

@@ -797,6 +797,7 @@ async fn anthropic_native_tool_search_session_replays_the_search_pair() {
                 family: Family::Anthropic,
                 model: MODEL.into(),
             },
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
@@ -806,6 +807,7 @@ async fn anthropic_native_tool_search_session_replays_the_search_pair() {
                     call: CallId::new(call.id.clone()),
                     name: call.name.clone().into(),
                     args,
+                    replay: None,
                 },
             ],
         },

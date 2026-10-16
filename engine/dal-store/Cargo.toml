@@ -79,6 +79,10 @@ path = "tests/kill.rs"
 name = "adversarial"
 path = "tests/adversarial.rs"
 
+[[test]]
+name = "resolution_cause"
+path = "tests/resolution_cause.rs"
+
 [[bin]]
 name = "append-child"
 path = "tests/support/append_child.rs"

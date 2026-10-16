@@ -1,4 +1,5 @@
 use crate::BEFORE_TURN_SOURCE;
+use crate::ext::InputVerdict;
 
 use super::helpers::{
     HookTarget, compact_notice, compaction_started_notice, invalid, part_to_journal, zero_usage,
@@ -231,6 +232,7 @@ impl Session {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
         match outcome.into_verdict() {
+            HookVerdict::Input(verdict) => self.input_guard(turn, verdict),
             HookVerdict::BeforeTurn(add) => self.begin_turn(turn, add, now, emit, effects),
             HookVerdict::BeforeRequest(Some(params)) if matches!(&self.phase, Phase::Running { turn: active, .. } if *active == turn) =>
             {
@@ -240,7 +242,54 @@ impl Session {
             HookVerdict::ToolCall(verdict) => {
                 self.tool_call_guard(turn, target, verdict, now, emit, effects)
             }
-            HookVerdict::BeforeRequest(_) | HookVerdict::Input(_) => Ok(()),
+            HookVerdict::BeforeRequest(_) => Ok(()),
+        }
+    }
+
+    /// Applies the folded `input` verdict to the opening of `turn`.
+    ///
+    /// `Transform` replaces the content the opening carries, so the one
+    /// `Record::User` that [`Self::begin_turn`] journals holds the final
+    /// parts and the provider context derived from that entry matches the
+    /// journal. `Continue` and `Handled` keep the admitted content. The
+    /// verdict emits no record and no effect. A verdict for a turn whose
+    /// opening is gone is stale and ignored, like any late guard.
+    ///
+    /// # Errors
+    /// Rejects, leaving the opening unchanged, a transform that leaves no
+    /// parts and a transform of a wake opening, which runs no input hooks.
+    fn input_guard(&mut self, turn: TurnId, verdict: InputVerdict) -> Result<(), Rejection> {
+        let InputVerdict::Transform(parts) = verdict else {
+            return Ok(());
+        };
+        let Some(source) = self.opening_source_mut(turn) else {
+            return Ok(());
+        };
+        if parts.is_empty() {
+            return Err(invalid("input transform left the turn without content"));
+        }
+        match source {
+            TurnSource::Prompt { content, .. } | TurnSource::FollowUp { content, .. } => {
+                *content = parts;
+                Ok(())
+            }
+            TurnSource::Wake { .. } => Err(invalid("wake openings take no input transform")),
+        }
+    }
+
+    /// Borrows the input of the opening that awaits its `before_turn` verdict.
+    fn opening_source_mut(&mut self, turn: TurnId) -> Option<&mut TurnSource> {
+        match &mut self.phase {
+            Phase::Opening {
+                turn: active,
+                source,
+                ..
+            } if *active == turn => Some(source),
+            Phase::Settling {
+                follow_up: Some((next, source)),
+                ..
+            } if *next == turn => Some(source),
+            _ => None,
         }
     }
 
@@ -571,5 +620,146 @@ impl Session {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Event, Expect, JournalPart};
+    use super::*;
+
+    fn at() -> jiff::Timestamp {
+        jiff::Timestamp::UNIX_EPOCH
+    }
+
+    fn text(value: &str) -> Part {
+        Part::Text { text: value.into() }
+    }
+
+    fn step(session: &mut Session, event: Event) -> Result<Vec<Effect>, Rejection> {
+        let mut out = Vec::new();
+        session.step(event, at(), &mut out)?;
+        Ok(out)
+    }
+
+    fn guard(turn: TurnId, verdict: HookVerdict) -> Event {
+        let outcome = HookOutcome::new(verdict.event(), verdict).unwrap();
+        Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome,
+        }
+    }
+
+    fn transform(turn: TurnId, parts: Vec<Part>) -> Event {
+        guard(turn, HookVerdict::Input(InputVerdict::Transform(parts)))
+    }
+
+    fn open_turn(session: &Session) -> TurnId {
+        match session.phase() {
+            Phase::Opening { turn, .. } => *turn,
+            phase => panic!("expected an opening, got {phase:?}"),
+        }
+    }
+
+    fn prompt(session: &mut Session, content: Vec<Part>) -> TurnId {
+        let command = Command::Prompt {
+            expect: Expect::Idle,
+            content,
+        };
+        let event = Event::Command {
+            cmd: command,
+            by: ClientId::new("test"),
+        };
+        step(session, event).unwrap();
+        open_turn(session)
+    }
+
+    /// The parts of the one `User` record the batch journals.
+    fn user_parts(effects: &[Effect]) -> Vec<JournalPart> {
+        let batch = effects.iter().find_map(|effect| match effect {
+            Effect::Emit(emit) => Some(&emit.records),
+            _ => None,
+        });
+        let mut users = batch.unwrap().iter().filter_map(|record| match record {
+            Record::User(entry) => Some(entry),
+            _ => None,
+        });
+        let entry = users.next().unwrap();
+        assert!(users.next().is_none(), "exactly one User record");
+        match &entry.kind {
+            EntryKind::User { parts } => parts.clone(),
+            other => panic!("the User record holds {other:?}"),
+        }
+    }
+
+    fn journaled(parts: &[Part]) -> Vec<JournalPart> {
+        parts.iter().map(part_to_journal).collect()
+    }
+
+    fn opened(content: Vec<Part>) -> (Session, TurnId) {
+        let (mut session, _) = Session::replay([], at()).unwrap();
+        let turn = prompt(&mut session, content);
+        (session, turn)
+    }
+
+    #[test]
+    fn a_transform_replaces_the_content_the_user_record_journals() {
+        let (mut session, turn) = opened(vec![text("original")]);
+        let out = step(&mut session, transform(turn, vec![text("changed")])).unwrap();
+        assert!(out.is_empty(), "the input guard emits nothing: {out:?}");
+        let out = step(&mut session, guard(turn, HookVerdict::BeforeTurn(None))).unwrap();
+        assert_eq!(user_parts(&out), journaled(&[text("changed")]));
+    }
+
+    #[test]
+    fn continue_and_handled_keep_the_admitted_content() {
+        for verdict in [InputVerdict::Continue, InputVerdict::Handled] {
+            let (mut session, turn) = opened(vec![text("original")]);
+            step(&mut session, guard(turn, HookVerdict::Input(verdict))).unwrap();
+            let out = step(&mut session, guard(turn, HookVerdict::BeforeTurn(None))).unwrap();
+            assert_eq!(user_parts(&out), journaled(&[text("original")]));
+        }
+    }
+
+    #[test]
+    fn a_transform_for_a_closed_opening_is_ignored() {
+        let (mut session, turn) = opened(vec![text("original")]);
+        let cancel = Event::Command {
+            cmd: Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            },
+            by: ClientId::new("test"),
+        };
+        step(&mut session, cancel).unwrap();
+        assert_eq!(session.phase(), &Phase::Idle);
+        step(&mut session, transform(turn, vec![text("late")])).unwrap();
+        assert_eq!(session.phase(), &Phase::Idle);
+    }
+
+    #[test]
+    fn an_empty_transform_is_refused_and_leaves_the_content() {
+        let (mut session, turn) = opened(vec![text("original")]);
+        let refused = step(&mut session, transform(turn, Vec::new()));
+        assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+        let out = step(&mut session, guard(turn, HookVerdict::BeforeTurn(None))).unwrap();
+        assert_eq!(user_parts(&out), journaled(&[text("original")]));
+    }
+
+    #[test]
+    fn a_wake_opening_refuses_a_transform() {
+        let (mut session, _) = Session::replay([], at()).unwrap();
+        let wake = Event::Wake {
+            text: "wake".into(),
+            sources: Box::default(),
+            jobs: Box::default(),
+        };
+        step(&mut session, wake).unwrap();
+        let turn = open_turn(&session);
+        let refused = step(&mut session, transform(turn, vec![text("changed")]));
+        assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+        let out = step(&mut session, guard(turn, HookVerdict::BeforeTurn(None))).unwrap();
+        assert_eq!(user_parts(&out), journaled(&[text("wake")]));
     }
 }

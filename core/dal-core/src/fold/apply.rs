@@ -6,6 +6,7 @@ use super::{
     Limits, ModelRoute, Name, Part, Phase, Question, Record, Rejection, Reply, Request, RequestId,
     Session, TurnId, UpdateKind,
 };
+use crate::update::ResolutionCause;
 
 impl Session {
     pub(super) fn apply(
@@ -47,7 +48,8 @@ impl Session {
                 answer,
                 by,
                 was_default,
-            } => return self.grant_resolved(request, &answer, by, was_default, now, emit),
+                cause,
+            } => return self.grant_resolved(request, &answer, by, was_default, cause, now, emit),
             Event::JobStarted { job, kind } => self.job_started(job, kind, emit),
             Event::JobSettled { job, outcome } => self.job_settled(job, outcome, emit),
             Event::Wake {
@@ -176,12 +178,21 @@ impl Session {
         self.queued_inputs.clear();
     }
 
+    /// Journals the broker's answer to a tracked question, once.
+    ///
+    /// The fold records `cause` as given and never infers it from the
+    /// answer, the attribution, or the default flag. An unknown question
+    /// steps to `Ok` with nothing emitted: its terminal record already
+    /// exists, or it was never opened here. A session-wide allowance follows
+    /// only from a real client answer, never from a default, a timeout, a
+    /// cancellation, or a withdrawal.
     pub(super) fn grant_resolved(
         &mut self,
         request: RequestId,
         answer: &Answer,
         by: Option<ClientId>,
         was_default: bool,
+        cause: ResolutionCause,
         now: jiff::Timestamp,
         emit: &mut Emit,
     ) -> Result<(), Rejection> {
@@ -192,7 +203,8 @@ impl Session {
         else {
             return Ok(());
         };
-        let grant = if *answer == Answer::ApproveForSession && !was_default && by.is_some() {
+        let client_answered = cause == ResolutionCause::Answered && !was_default && by.is_some();
+        let grant = if *answer == Answer::ApproveForSession && client_answered {
             self.open_questions[index]
                 .1
                 .tool
@@ -213,6 +225,7 @@ impl Session {
             answer: answer.clone(),
             by: by.clone(),
             was_default,
+            cause: Some(cause),
         });
         if let Some(name) = grant {
             emit.records.push(Record::AllowAlways {
@@ -226,14 +239,20 @@ impl Session {
             id: request,
             answer: answer.clone(),
             by,
+            cause: Some(cause),
         });
         Ok(())
     }
 
-    /// Resolves the ending turn's still-open questions as core cancellations:
-    /// a cancelled turn ends with its approvals answered, so a withdrawal or
-    /// expiry that lands after the close still finds its terminal record
-    /// already journaled instead of dropping it as unknown.
+    /// Resolves the ending turn's still-open questions as core
+    /// cancellations that name `cause`: a turn that ends leaves no request
+    /// without its terminal record, so a withdrawal or expiry that lands after
+    /// the close still finds that record already journaled instead of
+    /// dropping it as unknown.
+    ///
+    /// The caller picks `Cancelled` when the turn ended cancelled and
+    /// `Withdrawn` for every other end, where nobody answered and nobody
+    /// cancelled the turn.
     ///
     /// Turnless questions keep waiting: the broker resolves only the ending
     /// turn's slots, so a service-grant question asked outside any turn must
@@ -241,6 +260,7 @@ impl Session {
     pub(super) fn cancel_open_questions(
         &mut self,
         turn: TurnId,
+        cause: ResolutionCause,
         now: jiff::Timestamp,
         emit: &mut Emit,
     ) {
@@ -257,11 +277,13 @@ impl Session {
                 answer: Answer::Cancel,
                 by: by.clone(),
                 was_default: false,
+                cause: Some(cause),
             });
             emit.updates.push(UpdateKind::RequestResolved {
                 id: request,
                 answer: Answer::Cancel,
                 by,
+                cause: Some(cause),
             });
         }
     }

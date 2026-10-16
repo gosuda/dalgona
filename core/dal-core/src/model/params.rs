@@ -125,6 +125,13 @@ pub enum ContextItem {
         source: ReplaySource,
         /// Text, reasoning, and tool calls in document order.
         parts: Vec<AssistantPart>,
+        /// Unmodified provider replay payload for this whole message, if the
+        /// provider returned one.
+        ///
+        /// Omitted from the serialized form when absent; an explicit `null`
+        /// decodes as absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay: Option<RawJson>,
     },
     /// The result of a tool call.
     ToolResult {
@@ -147,6 +154,8 @@ pub(super) struct UserFields {
 pub(super) struct AssistantFields {
     pub(super) source: ReplaySource,
     pub(super) parts: Vec<AssistantPart>,
+    #[serde(default)]
+    pub(super) replay: Option<RawJson>,
 }
 #[derive(Deserialize)]
 pub(super) struct ToolResultFields {
@@ -173,6 +182,7 @@ impl<'de> Deserialize<'de> for ContextItem {
                 Ok(Self::Assistant {
                     source: fields.source,
                     parts: fields.parts,
+                    replay: fields.replay,
                 })
             }
             "tool_result" => {

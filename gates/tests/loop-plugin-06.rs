@@ -122,7 +122,7 @@ fn assert_replay_view(view: &View, max_retries: usize) {
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        dal_core::Block::Text { text } => Some(text.as_ref()),
+                        dal_core::Block::Text { text, .. } => Some(text.as_ref()),
                         _ => None,
                     })
                     .collect::<String>(),
@@ -306,7 +306,7 @@ fn journal_texts(view: &View) -> (Reminders, String) {
             }
             EntryKind::Assistant { content, .. } => {
                 for block in content {
-                    if let dal_core::Block::Text { text } = block {
+                    if let dal_core::Block::Text { text, .. } = block {
                         assistant.push_str(text);
                     }
                 }

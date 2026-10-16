@@ -24,7 +24,7 @@ pub use core::{
     check_synthetic_chain,
 };
 pub use params::{Caps, ContextItem, ModelInfo, ModelToolSpec, Purpose, RequestParams};
-pub use parts::{AssistantPart, Stop, StreamEvent};
+pub use parts::{AssistantPart, ReplayCapture, ReplayRefusal, Stop, StreamEvent};
 pub use pricing::{
     CompactOutcome, CompactedHistory, InferFailure, Inference, ModelPrice, ModelRequest, PriceTier,
     StreamChannel, Usage,

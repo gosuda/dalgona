@@ -50,10 +50,10 @@ use crate::proc::{ProcResult, ProcStatus, SpawnOpts, StopReason};
 use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
-    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
-    StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    AgentsOp, AgentsReply, Answer, CallId, DenyReason, EntryId, FetchRequest, FetchResponse,
+    Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview, Question,
+    Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError, StateNs,
+    StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -95,47 +95,27 @@ pub struct SessionServices {
 /// Cap on concurrently open extension asks. Real callers are blocked tool
 /// calls and permitted cells, so the cap only exists to keep the set
 /// bounded against a looping script; over the cap the raise is refused
-/// with the busy error (backpressure, never a silent drop).
-const MAX_OPEN_ASKS: usize = 16;
+/// with the busy error (backpressure, never a silent drop). The count
+/// includes armed slots and armed slots whose withdrawal the actor has not
+/// settled yet, so it bounds the session's withdrawal claims too; the
+/// inbox derives its lane bound from this constant.
+pub(crate) const MAX_OPEN_ASKS: usize = 16;
 
-/// Marks the withdrawal in the broker and renders the resolution to
-/// journal, or `None` when the guard was disarmed or the request was
-/// already resolved. A local deadline instead uses broker expiry, so its
-/// journal record carries `Resolution::Unavailable` and the request default.
-fn withdraw_request(
-    armed: bool,
-    expired: bool,
-    broker: &Broker,
-    request: &Request,
-) -> Option<crate::broker::Resolved> {
-    if !armed {
-        return None;
-    }
-    if expired {
-        return broker.expire_one(request.id, Instant::now());
-    }
-    let by = ClientId::new("core");
-    let answered = broker
-        .answer(request.id, Answer::Cancel, by.clone())
-        .is_ok();
-    answered.then(|| crate::broker::Resolved {
-        request: request.clone(),
-        answer: Answer::Cancel,
-        by,
-        resolution: Resolution::Cancelled,
-        was_default: false,
-    })
-}
-
-/// Releases one extension-ask slot on drop and resolves a withdrawn broker
-/// request as `Cancel`. A stranded request would stay answerable on every
-/// front end while nobody consumes its reply. The withdrawal is the
-/// request's first resolution: the broker mark here wins late answers, and
-/// the actor-owned inbox journals it before the fold broadcasts the
-/// retirement after the record.
+/// Releases one extension-ask slot. The withdrawal is the request's first
+/// resolution: the inbox claims the broker slot under its lock, which wins
+/// late answers, and the actor journals the claim before the fold
+/// broadcasts the retirement after the record.
+///
+/// Admission lifetime: while the guard is armed the slot's id stays in
+/// `ask_open` after the drop, so the next admission cannot reuse the
+/// capacity until the actor settles the claim (see
+/// [`ResolutionInbox::mark_settled`](crate::session::ResolutionInbox::mark_settled)).
+/// A guard that saw its waiter settle frees the entry at once — the waiter
+/// is released only after the terminal record's journal receipt, so the
+/// settlement is already durable.
 struct AskSlot<'a> {
     slot: &'a Mutex<HashSet<RequestId>>,
-    broker: &'a Broker,
+    resolutions: std::sync::Arc<crate::session::ResolutionInbox>,
     backend: Arc<dyn SessionBackend>,
     request: Request,
     armed: bool,
@@ -145,43 +125,70 @@ struct AskSlot<'a> {
 
 impl Drop for AskSlot<'_> {
     fn drop(&mut self) {
-        let resolved = withdraw_request(self.armed, self.expired, self.broker, &self.request);
+        if !self.armed {
+            let mut open = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            open.remove(&self.request.id);
+            return;
+        }
+        // The attachment probe runs before any inbox lock nests under it.
+        let expiry = self.expired.then(|| !self.backend.answerer_attached());
+        self.free_unless_claimed(self.resolutions.withdraw(self.request.id, expiry));
+    }
+}
+
+impl AskSlot<'_> {
+    /// Frees this slot's admission entry unless a claim queued: `Some(id)`
+    /// means the actor will settle that claim and the entry must stay
+    /// occupied until then; `None` means another winner resolved the slot or
+    /// the fence owns it, so no settlement will arrive for this id and
+    /// keeping the entry would wedge the battery at its cap.
+    fn free_unless_claimed(&self, receipt: Option<RequestId>) {
+        if receipt.is_some() {
+            return;
+        }
         let mut open = self
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         open.remove(&self.request.id);
-        drop(open);
-        if let Some(resolved) = resolved {
-            self.backend.request_resolved(resolved);
-        }
     }
 }
 
 /// The one open run-approval slot: same withdrawal discipline as
-/// [`AskSlot`], but exclusive until its terminal record is settled.
+/// [`AskSlot`], but exclusive until its terminal record is settled. A run
+/// has no local timer — its broker deadline settles through the actor's
+/// expiry sweep — so its withdrawal never expires, only withdraws.
 struct RunSlot<'a> {
     slot: &'a Mutex<Option<RequestId>>,
-    broker: &'a Broker,
-    backend: Arc<dyn SessionBackend>,
+    resolutions: std::sync::Arc<crate::session::ResolutionInbox>,
     request: Request,
     armed: bool,
-    expired: bool,
 }
 
 impl Drop for RunSlot<'_> {
     fn drop(&mut self) {
-        let resolved = withdraw_request(self.armed, self.expired, self.broker, &self.request);
+        if !self.armed {
+            let mut slot = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_some_and(|id| id == self.request.id) {
+                *slot = None;
+            }
+            return;
+        }
+        if self.resolutions.withdraw(self.request.id, None).is_some() {
+            return;
+        }
         let mut slot = self
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_some_and(|id| id == self.request.id) {
             *slot = None;
-        }
-        drop(slot);
-        if let Some(resolved) = resolved {
-            self.backend.request_resolved(resolved);
         }
     }
 }
@@ -253,7 +260,10 @@ impl SessionServices {
             // A fired token fails before any gate or wait: the turn is
             // already cancelled, so no new work may start under it.
             Some(token) if token.is_cancelled() => Err(ServiceError::Cancelled),
-            Some(token) => Ok(token),
+            // The caller receives a child of the turn token: it observes the
+            // turn's cancellation, but a holder firing it cannot fire the
+            // turn root, so a later user cancel still classifies honestly.
+            Some(token) => Ok(token.child_token()),
             None => Ok(self.cancel.clone()),
         }
     }
@@ -451,11 +461,9 @@ impl SessionServices {
         };
         let mut guard = RunSlot {
             slot: &self.run_open,
-            broker: &self.broker,
-            backend: Arc::clone(&self.backend),
+            resolutions: Arc::clone(&self.resolutions),
             request: request.clone(),
             armed: true,
-            expired: false,
         };
         self.backend
             .request_opened(request.clone())
@@ -473,6 +481,7 @@ impl SessionServices {
             answer,
             by,
             resolution,
+            ..
         }) = settled
         else {
             return Err(ServiceError::Cancelled);
@@ -688,6 +697,10 @@ impl Services for SessionServices {
                     .ask_open
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // A dropped armed slot keeps its id occupied until the actor
+                // settles its withdrawal claim, so only settled entries free
+                // capacity here.
+                open.retain(|id| !self.resolutions.take_settled(*id));
                 if open.len() >= MAX_OPEN_ASKS {
                     return Err(ServiceError::ask_busy());
                 }
@@ -702,7 +715,7 @@ impl Services for SessionServices {
             };
             let mut guard = AskSlot {
                 slot: &self.ask_open,
-                broker: &self.broker,
+                resolutions: Arc::clone(&self.resolutions),
                 backend: Arc::clone(&self.backend),
                 request: request.clone(),
                 armed: true,

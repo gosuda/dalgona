@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use dal_core::Answer;
+
 /// Every fixed terminal string, keyed by its stable deck id.
 pub mod ids {
     /// Product tagline.
@@ -214,6 +216,14 @@ pub mod ids {
         "note: \"{title}\" timed out. dal used the default: {answer}.";
     /// Turn-cancelled request notice.
     pub const REQUEST_CANCELLED: &str = "note: \"{title}\" was cancelled with the turn.";
+    /// Withdrawn request notice: the owner gave up without a turn cancellation.
+    pub const REQUEST_WITHDRAWN: &str = "note: \"{title}\" was withdrawn.";
+    /// Unanswered request notice: no answerer was attached when the deadline passed.
+    pub const REQUEST_NO_CONTROLLER: &str =
+        "note: no one was attached to answer \"{title}\"; dal used the default: {answer}.";
+    /// Neutral request notice for resolutions that predate causes or carry one
+    /// this build does not know; the cause is never inferred from the answer.
+    pub const REQUEST_RESOLVED: &str = "note: \"{title}\" was resolved: {answer}.";
     /// Lost answer notice.
     pub const REQUEST_LOST: &str = "note: {error}";
     /// One-call answer word.
@@ -493,6 +503,9 @@ pub const DECK: &[(&str, &str)] = &[
     ("request.resolvedBy", ids::REQUEST_RESOLVED_BY),
     ("request.timedOut", ids::REQUEST_TIMED_OUT),
     ("request.cancelled", ids::REQUEST_CANCELLED),
+    ("request.withdrawn", ids::REQUEST_WITHDRAWN),
+    ("request.noController", ids::REQUEST_NO_CONTROLLER),
+    ("request.resolved", ids::REQUEST_RESOLVED),
     ("request.lost", ids::REQUEST_LOST),
     ("answer.word.approve", ids::ANSWER_WORD_APPROVE),
     ("answer.word.session", ids::ANSWER_WORD_SESSION),
@@ -612,6 +625,23 @@ pub fn render(template: &str, values: &[(&str, &str)], plural_count: u64) -> Str
     rendered
 }
 
+/// Selects the spoken word for an answer used as a default in a resolution
+/// notice: the deck's answer words, or a value answer's raw JSON text.
+///
+/// An answer this build does not know is named by its debug form, never
+/// guessed into a known word.
+#[must_use]
+pub fn answer_word(answer: &Answer) -> String {
+    match answer {
+        Answer::Approve => ids::ANSWER_WORD_APPROVE.to_owned(),
+        Answer::ApproveForSession => ids::ANSWER_WORD_SESSION.to_owned(),
+        Answer::Decline => ids::ANSWER_WORD_DECLINE.to_owned(),
+        Answer::Cancel => ids::ANSWER_WORD_CANCEL.to_owned(),
+        Answer::Value(value) => value.as_str().to_owned(),
+        _ => format!("{answer:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DECK, dur, ids, render, tokens};
@@ -652,5 +682,58 @@ mod tests {
         let unique: std::collections::BTreeSet<_> = DECK.iter().map(|(id, _)| *id).collect();
         assert_eq!(unique.len(), DECK.len());
         assert!(!DECK.iter().any(|(id, _)| *id == "jobs.wake"));
+    }
+
+    #[test]
+    fn answer_words_follow_the_deck_and_values_stay_raw() {
+        use dal_core::{Answer, RawJson};
+
+        assert_eq!(
+            super::answer_word(&Answer::Approve),
+            ids::ANSWER_WORD_APPROVE
+        );
+        assert_eq!(
+            super::answer_word(&Answer::ApproveForSession),
+            ids::ANSWER_WORD_SESSION
+        );
+        assert_eq!(
+            super::answer_word(&Answer::Decline),
+            ids::ANSWER_WORD_DECLINE
+        );
+        assert_eq!(super::answer_word(&Answer::Cancel), ids::ANSWER_WORD_CANCEL);
+        assert_eq!(
+            super::answer_word(&Answer::Value(
+                RawJson::parse("\"selected rows\"").expect("valid raw JSON")
+            )),
+            "\"selected rows\""
+        );
+    }
+
+    #[test]
+    fn resolution_notices_render_from_the_deck() {
+        assert_eq!(
+            super::render(
+                ids::REQUEST_WITHDRAWN,
+                &[("title", "Allow this command?")],
+                1,
+            ),
+            "note: \"Allow this command?\" was withdrawn."
+        );
+        assert_eq!(
+            super::render(
+                ids::REQUEST_NO_CONTROLLER,
+                &[("title", "Allow this command?"), ("answer", "deny"),],
+                1,
+            ),
+            "note: no one was attached to answer \"Allow this command?\"; dal used the default: deny."
+        );
+        assert_eq!(
+            super::render(
+                ids::REQUEST_RESOLVED,
+                &[("title", "Pick one"), ("answer", "\"a\"")],
+                1,
+            ),
+            "note: \"Pick one\" was resolved: \"a\"."
+        );
     }
 }

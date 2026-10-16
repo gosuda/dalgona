@@ -61,6 +61,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
                     id: CallId::new(*call),
                     name: "read".into(),
                     input: input.clone(),
+                    replay: None,
                 })
                 .collect(),
             usage: Usage {
@@ -72,6 +73,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
                 cost_usd: None,
             },
             stop: dal_core::AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }

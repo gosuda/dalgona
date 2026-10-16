@@ -89,6 +89,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
             id: CallId::new(*call),
             name: "read_file".into(),
             input: input.clone(),
+            replay: None,
         })
         .collect();
     Record::Assistant(Entry {
@@ -102,6 +103,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
             content,
             usage: usage(),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }

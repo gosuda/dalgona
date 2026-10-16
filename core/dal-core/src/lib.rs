@@ -65,22 +65,24 @@ pub use jiff::Timestamp;
 pub use journal::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, Block, Branch, BranchError, BranchMode,
     DecodeError, Decoded, EncodeError, Entry, EntryKind, Header, InferredPurpose, JobEvent,
-    JobKind, JobOutcome, JournalPart, Mail, Product, Record, ScannedHead, Source, TreeKind,
-    TurnEndStop, TurnSequence, TurnSequenceError, VERSION as JOURNAL_VERSION, branch, decode,
-    encode, scan_head,
+    JobKind, JobOutcome, JournalPart, MAX_RECORD, Mail, Product, Record, ScannedHead, Source,
+    TreeKind, TurnEndStop, TurnSequence, TurnSequenceError, VERSION as JOURNAL_VERSION, branch,
+    decode, encode, scan_head,
 };
 pub use model::{
     AssistantPart, Caps, CompactOutcome, CompactedHistory, ContextItem, Family, InferFailure,
     Inference, MAX_SYNTHETIC_DEPTH, ModelInfo, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec,
-    PriceTier, Purpose, ReplaySource, RequestParams, RouteError, Stop, StreamChannel, StreamEvent,
-    ThinkingLevel, Usage, check_synthetic_chain,
+    PriceTier, Purpose, ReplayCapture, ReplayRefusal, ReplaySource, RequestParams, RouteError,
+    Stop, StreamChannel, StreamEvent, ThinkingLevel, Usage, check_synthetic_chain,
 };
 pub use raw::{RawJson, RawJsonError};
 pub use request::{
     Answer, AnswerValue, CallGrant, Choice, JobEnd, Owner, Preview, Question, Request,
 };
 pub use tokens::{estimate_text_tokens, estimate_tokens};
-pub use update::{ExtState, ExtStatus, Notice, ToolOutcomeView, TurnCause, Update, UpdateKind};
+pub use update::{
+    ExtState, ExtStatus, Notice, ResolutionCause, ToolOutcomeView, TurnCause, Update, UpdateKind,
+};
 pub use view::{
     AutoCompaction, EntryView, FileChange, ListQuery, Page, PageReq, PageReqError, SessionInfo,
     SessionSummary, SettingsView, Stats, TreeBranch, TreeDelta, TreeOutline, TurnState, UsageView,

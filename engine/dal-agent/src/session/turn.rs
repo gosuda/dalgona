@@ -203,6 +203,9 @@ impl StreamConverter {
                 }
                 out
             }
+            In::MessageReplay { capture } => {
+                vec![StreamEvent::MessageReplay { capture }]
+            }
             In::Usage { usage } => vec![StreamEvent::Usage(usage)],
             In::Stop { reason } => vec![StreamEvent::Stop(map_stop(&reason))],
             // `ProviderEvent` is `#[non_exhaustive]`; every known variant has

@@ -42,6 +42,23 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Reports whether the provider measured nothing.
+    ///
+    /// True when every counter is zero and neither a reasoning split nor a
+    /// cost was reported. Such a response is "no measurement", never a free
+    /// one: a zero cost computed from it by local pricing is not spend that
+    /// anything has verified. An explicit reasoning count or cost, even zero,
+    /// is a reported measurement.
+    #[must_use]
+    pub const fn is_unreported(&self) -> bool {
+        self.input_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.output_tokens == 0
+            && self.reasoning_tokens.is_none()
+            && self.cache_write_tokens == 0
+            && self.cost_usd.is_none()
+    }
+
     /// Returns the provider-reported cost first, then configured pricing,
     /// then compiled pricing; absent sources leave the cost unknown.
     ///

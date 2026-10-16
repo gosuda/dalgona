@@ -3,8 +3,14 @@
 //! The first answer wins and resolves the waiter; deadlines and turn
 //! cancellation resolve through the actor with core attribution. Resolved
 //! slots stay for late answers until deadline plus retention grace.
+//!
+//! Every resolution carries the [`ResolutionCause`] that explains it; the
+//! waiter-facing [`Resolution`] only routes the waiter. A turn cancel claims
+//! each unresolved slot of the turn under one lock: reported slots return as a
+//! batch, and slots whose `RequestOpened` the fold has not stepped yet keep the
+//! claim parked until [`Broker::report_opened`] hands it over.
 
-use dal_core::{Answer, ClientId, Owner, Question, Request, RequestId, TurnId};
+use dal_core::{Answer, ClientId, Owner, Question, Request, RequestId, ResolutionCause, TurnId};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
@@ -43,6 +49,41 @@ pub(crate) struct RequestSlot {
     answer: Option<oneshot::Sender<Settled>>,
     resolved_by: Option<ClientId>,
     deadline: Instant,
+    /// Whether the fold has stepped this request's `RequestOpened`.
+    reported: bool,
+    /// A turn-cancel claim made before the request was reported; handed to the
+    /// actor by [`Broker::report_opened`] so its record follows `RequestOpened`.
+    parked: Option<Resolved>,
+}
+
+impl RequestSlot {
+    /// Claims the unresolved slot for `core` with a `Cancel` answer.
+    fn claim_cancel(&mut self, cause: ResolutionCause) -> Resolved {
+        let by = core_client();
+        self.resolved_by = Some(by.clone());
+        Resolved {
+            request: self.request.clone(),
+            answer: Answer::Cancel,
+            by,
+            resolution: Resolution::Cancelled,
+            cause,
+            was_default: false,
+        }
+    }
+
+    /// Claims the unresolved slot for `core` with the request default.
+    fn claim_default(&mut self, cause: ResolutionCause) -> Resolved {
+        let by = core_client();
+        self.resolved_by = Some(by.clone());
+        Resolved {
+            request: self.request.clone(),
+            answer: self.request.default.clone(),
+            by,
+            resolution: Resolution::Unavailable,
+            cause,
+            was_default: true,
+        }
+    }
 }
 
 /// How an open request reached its answer.
@@ -66,6 +107,11 @@ pub(crate) struct Settled {
     pub(crate) by: ClientId,
     /// How the request reached this answer.
     pub(crate) resolution: Resolution,
+    /// The journaled cause when this settlement released a durable record;
+    /// `None` for a fail-closed settlement, which records nothing. The fold
+    /// never infers a cause from the answer or attribution, so echo callers
+    /// must skip a `None` settlement instead of filling one in.
+    pub(crate) cause: Option<ResolutionCause>,
 }
 
 /// The answering end of one open request; resolves to its settled end.
@@ -79,10 +125,13 @@ impl Future for AnswerWait {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(settled)) => Poll::Ready(settled),
+            // The sender is gone, so no record journaled: a `None` cause
+            // tells echo callers to skip this settlement, never infer one.
             Poll::Ready(Err(_)) => Poll::Ready(Settled {
                 answer: Answer::Cancel,
                 by: core_client(),
                 resolution: Resolution::Cancelled,
+                cause: None,
             }),
             Poll::Pending => Poll::Pending,
         }
@@ -100,6 +149,9 @@ pub(crate) struct Resolved {
     pub(crate) by: ClientId,
     /// How the broker reached this resolution.
     pub(crate) resolution: Resolution,
+    /// Why the request resolved; provenance for the journal and clients,
+    /// independent of how the waiter is routed.
+    pub(crate) cause: ResolutionCause,
     /// Whether the broker selected the request default.
     pub(crate) was_default: bool,
 }
@@ -144,13 +196,16 @@ impl Broker {
         (request, waiter)
     }
 
-    /// Tracks a fold-minted request, returning its waiter.
+    /// Tracks a fold-minted request, returning its waiter. The fold stepped
+    /// its `RequestOpened` before the actor tracks it, so the slot starts
+    /// reported.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Borrowing requires changing the actor call site outside this cleanup scope."
     )]
     pub(crate) fn track(&self, request: Request, deadline: Instant) -> AnswerWait {
-        let (waiter, slot) = slot_for(&request, request.turn, deadline);
+        let (waiter, mut slot) = slot_for(&request, request.turn, deadline);
+        slot.reported = true;
         let mut state = self
             .state
             .lock()
@@ -189,33 +244,123 @@ impl Broker {
             answer,
             by,
             resolution: Resolution::Answered,
+            cause: ResolutionCause::Answered,
             was_default: false,
         })
     }
 
-    /// Resolves every open request of one turn; resolved slots stay for late answers.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "Borrowing requires changing the actor call site outside this cleanup scope."
-    )]
-    pub(crate) fn resolve_turn(&self, turn: TurnId, answer: Answer, by: ClientId) -> Vec<Resolved> {
+    /// Records that the fold stepped this request's `RequestOpened` and takes
+    /// the turn-cancel claim parked while the request was unreported.
+    ///
+    /// Marking and taking happen under one lock, so a cancel can neither slip
+    /// between them nor be seen twice: a cancel that won first left its claim
+    /// here, and a cancel that comes after sees the slot reported and queues
+    /// its claim instead. `None` means no claim is waiting, or the request is
+    /// unknown.
+    pub(crate) fn report_opened(&self, id: RequestId) -> Option<Resolved> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut resolved = Vec::new();
-        for slot in state.slots.values_mut() {
+        let slot = state.slots.get_mut(&id)?;
+        slot.reported = true;
+        slot.parked.take()
+    }
+
+    /// Claims every unresolved request of a cancelled turn as `Cancelled`.
+    ///
+    /// One pass under one lock, oldest request first. Reported requests return
+    /// for the caller to queue; unreported ones keep their claim parked for
+    /// [`Self::report_opened`] and are not returned. Either way each slot is
+    /// resolved here once, so later answers, withdrawals, deadlines, and turn
+    /// resolutions find it taken.
+    pub(crate) fn cancel_turn(&self, turn: TurnId) -> Vec<Resolved> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let BrokerState { slots, open_order } = &mut *state;
+        let mut queued = Vec::new();
+        for id in &*open_order {
+            let Some(slot) = slots.get_mut(id) else {
+                continue;
+            };
             if slot.turn != Some(turn) || slot.resolved_by.is_some() {
                 continue;
             }
-            slot.resolved_by = Some(by.clone());
-            resolved.push(Resolved {
-                request: slot.request.clone(),
-                answer: answer.clone(),
-                by: by.clone(),
-                resolution: Resolution::Cancelled,
-                was_default: false,
-            });
+            let claim = slot.claim_cancel(ResolutionCause::Cancelled);
+            if slot.reported {
+                queued.push(claim);
+            } else {
+                slot.parked = Some(claim);
+            }
+        }
+        queued
+    }
+
+    /// Snapshots every claim still parked for an unreported request, oldest
+    /// first. The slots stay resolved; a closing actor publishes or cancels
+    /// these claims.
+    pub(crate) fn parked(&self) -> Vec<Resolved> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .open_order
+            .iter()
+            .filter_map(|id| state.slots.get(id))
+            .filter_map(|slot| slot.parked.clone())
+            .collect()
+    }
+
+    /// Withdraws one unresolved request on its owner's behalf: a `Cancel`
+    /// answered by `core` with cause `Withdrawn`. `None` when the request is
+    /// unknown or already resolved, so a withdrawal never overrides a winner.
+    pub(crate) fn withdraw(&self, id: RequestId) -> Option<Resolved> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slot = state.slots.get_mut(&id)?;
+        if slot.resolved_by.is_some() {
+            return None;
+        }
+        Some(slot.claim_cancel(ResolutionCause::Withdrawn))
+    }
+
+    /// Resolves every still-unresolved request of one turn as a core `Cancel`,
+    /// oldest first, reported or not; resolved slots stay for late answers.
+    ///
+    /// This is the actor's backstop after a turn's terminal record, so `cause`
+    /// is `Cancelled` when the driver confirmed a cancel and `Withdrawn` for
+    /// any other end. Slots a cancel or withdrawal already claimed are skipped.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `cause` is neither `Cancelled` nor `Withdrawn`.
+    pub(crate) fn resolve_turn(&self, turn: TurnId, cause: ResolutionCause) -> Vec<Resolved> {
+        assert!(
+            matches!(
+                cause,
+                ResolutionCause::Cancelled | ResolutionCause::Withdrawn
+            ),
+            "a turn resolution is Cancelled or Withdrawn, not {cause:?}."
+        );
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let BrokerState { slots, open_order } = &mut *state;
+        let mut resolved = Vec::new();
+        for id in &*open_order {
+            let Some(slot) = slots.get_mut(id) else {
+                continue;
+            };
+            if slot.turn != Some(turn) || slot.resolved_by.is_some() {
+                continue;
+            }
+            resolved.push(slot.claim_cancel(cause));
         }
         resolved
     }
@@ -224,7 +369,16 @@ impl Broker {
     ///
     /// Slots resolved longer than the retention grace ago are pruned, so
     /// the map stays bounded in days-long sessions.
-    pub(crate) fn expire(&self, now: Instant) -> Vec<Resolved> {
+    ///
+    /// An expired request resolves as `NoController` when `unattended` says no
+    /// answerer for its question is attached, otherwise as `TimedOut`. The
+    /// probe runs after the broker lock is released, so it may take any lock
+    /// an attachment registry needs.
+    pub(crate) fn expire(
+        &self,
+        now: Instant,
+        unattended: impl Fn(&Question) -> bool,
+    ) -> Vec<Resolved> {
         let mut state = self
             .state
             .lock()
@@ -234,16 +388,7 @@ impl Broker {
             if slot.resolved_by.is_some() || slot.deadline > now {
                 continue;
             }
-            let by = core_client();
-            slot.resolved_by = Some(by.clone());
-            let answer = slot.request.default.clone();
-            resolved.push(Resolved {
-                request: slot.request.clone(),
-                answer,
-                by,
-                resolution: Resolution::Unavailable,
-                was_default: true,
-            });
+            resolved.push(slot.claim_default(ResolutionCause::TimedOut));
         }
         let horizon = now.checked_sub(RETENTION_GRACE).unwrap_or(now);
         let expired_ids: Vec<RequestId> = state
@@ -259,14 +404,26 @@ impl Broker {
         }
         let BrokerState { slots, open_order } = &mut *state;
         open_order.retain(|id| slots.contains_key(id));
+        drop(state);
+        for item in &mut resolved {
+            if unattended(&item.request.question) {
+                item.cause = ResolutionCause::NoController;
+            }
+        }
         resolved
     }
     /// Resolves one request past its deadline with its default answer.
     ///
     /// Unlike [`Self::expire`], this leaves unrelated requests untouched.
     /// Local waiters use it when their timer fires before the actor's
-    /// periodic sweep.
-    pub(crate) fn expire_one(&self, id: RequestId, now: Instant) -> Option<Resolved> {
+    /// periodic sweep. `unattended` says no answerer for the question is
+    /// attached, which makes the cause `NoController` instead of `TimedOut`.
+    pub(crate) fn expire_one(
+        &self,
+        id: RequestId,
+        now: Instant,
+        unattended: bool,
+    ) -> Option<Resolved> {
         let mut state = self
             .state
             .lock()
@@ -275,15 +432,12 @@ impl Broker {
         if slot.resolved_by.is_some() || slot.deadline > now {
             return None;
         }
-        let by = core_client();
-        slot.resolved_by = Some(by.clone());
-        Some(Resolved {
-            request: slot.request.clone(),
-            answer: slot.request.default.clone(),
-            by,
-            resolution: Resolution::Unavailable,
-            was_default: true,
-        })
+        let cause = if unattended {
+            ResolutionCause::NoController
+        } else {
+            ResolutionCause::TimedOut
+        };
+        Some(slot.claim_default(cause))
     }
 
     /// Delivers a broker resolution after the owning actor has journaled it.
@@ -302,6 +456,9 @@ impl Broker {
             answer: resolved.answer.clone(),
             by: resolved.by.clone(),
             resolution: resolved.resolution,
+            // The actor releases only after the terminal record's journal
+            // receipt, so `resolved.cause` is journaled by construction.
+            cause: Some(resolved.cause),
         });
     }
 
@@ -317,10 +474,13 @@ impl Broker {
         let Some(sender) = sender else {
             return;
         };
+        // The answer could not be made durable, so no record journaled.
+        // Echo callers skip a `None` cause instead of inferring one.
         let _ = sender.send(Settled {
             answer: Answer::Cancel,
             by: core_client(),
             resolution: Resolution::Cancelled,
+            cause: None,
         });
     }
 
@@ -379,6 +539,8 @@ fn slot_for(
             answer: Some(tx),
             resolved_by: None,
             deadline,
+            reported: false,
+            parked: None,
         },
     )
 }

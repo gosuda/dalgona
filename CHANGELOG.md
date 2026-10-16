@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Reject inconsistent request-resolution causes before writing a session journal.
+  Refused records leave both stored bytes and the live journal unchanged.
+  Older records without a cause remain readable.
 - Return the catchable `unavailable` code from `state.*` in an ephemeral
   session, so `ctx.try_call` can degrade instead of failing the handler.
 - Start an unnamed child when `agents.start` gets no `name`. One plugin can

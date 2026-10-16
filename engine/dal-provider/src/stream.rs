@@ -4,10 +4,10 @@
 //! and maps onto the recorded core protocol events. Its grammar is: any
 //! number of text, reasoning, call-start, and argument-fragment events
 //! interleaved with [`StreamEvent::Replay`] events, then exactly one
-//! [`StreamEvent::ToolCallsDone`] (possibly empty), exactly one
-//! [`StreamEvent::Usage`], and exactly one [`StreamEvent::Stop`]. A
-//! [`ProviderError`] ends the stream instead of `Stop`. Decoders own that
-//! order by construction.
+//! [`StreamEvent::ToolCallsDone`] (possibly empty), at most one
+//! [`StreamEvent::MessageReplay`], exactly one [`StreamEvent::Usage`],
+//! and exactly one [`StreamEvent::Stop`]. A [`ProviderError`] ends the
+//! stream instead of `Stop`. Decoders own that order by construction.
 //!
 //! [`EventStream`] owns one decoder source and one cancellation action and
 //! guards the terminal: `Stop` or an error is delivered once, nothing is
@@ -15,7 +15,9 @@
 //! [`ProviderError::StreamCut`]. The cancellation action runs at most once:
 //! when the stream ends in an error or a cut, or when the consumer drops the
 //! stream before its terminal. A clean `Stop` drops the action uncalled, so a
-//! transport may keep a healthy connection for reuse.
+//! transport may keep a healthy connection for reuse. A second
+//! [`StreamEvent::MessageReplay`] is dropped the same way, with a debug
+//! assertion, so capture delivery stays at-most-once.
 //!
 //! This module has no clock and no socket. The transport adapter that builds
 //! the source and the action owns the real-time bound on closing the
@@ -73,6 +75,22 @@ pub enum StreamEvent {
     ToolCallsDone {
         /// The calls in response order.
         calls: Vec<ToolCall>,
+    },
+    /// The exact provider replay capture for the response: its payload or a
+    /// typed refusal.
+    ///
+    /// A turn stream carries at most one, after its tool calls and before
+    /// its usage. Delivery is at-most-once: the first is delivered, a second
+    /// is dropped by [`EventStream`] under the same late-event policy as a
+    /// post-`Stop` event, so a consumer treats the delivered capture as the
+    /// response's final replay state and never waits for a retry. A capture
+    /// offered on a response with tool calls is refused by the decoding
+    /// grammar, never silently rewritten. The capture is family-neutral: no
+    /// invented source or family travels beside it, and a refusal observed
+    /// by one adapter never reaches another family's request.
+    MessageReplay {
+        /// The captured payload or the typed refusal.
+        capture: dal_core::ReplayCapture,
     },
     /// The normalized token usage of the response.
     Usage {
@@ -179,6 +197,18 @@ pub type NoticeSink = Arc<dyn Fn(String) + Send + Sync>;
 type Source = Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
 type Cancel = Box<dyn FnOnce() + Send>;
 
+/// One polled source item's disposition under the grammar guards.
+enum Polled {
+    /// Yield the event to the consumer.
+    Deliver(StreamEvent),
+    /// A second `MessageReplay`: dropped, and the source polled again.
+    Duplicate,
+    /// End the stream after aborting the source.
+    Cut(ProviderError),
+    /// The source is not ready.
+    Wait,
+}
+
 /// An owned, boxed provider event source with a terminal guard and a
 /// cancellation action.
 ///
@@ -188,7 +218,10 @@ type Cancel = Box<dyn FnOnce() + Send>;
 /// or a cut drops the source at once, so nothing can follow it. After `Stop`
 /// the source is kept until the next call, which checks it without waiting:
 /// an event already produced after `Stop` violates the grammar, and debug
-/// builds panic while release builds drop the late event.
+/// builds panic while release builds drop the late event. A second
+/// [`StreamEvent::MessageReplay`] in one response is dropped the same way:
+/// the first capture delivered is the response's only capture, so capture
+/// delivery stays at-most-once.
 ///
 /// The cancellation action runs at most once, always after the source is
 /// dropped: when the stream ends in an error or a cut, or when the stream is
@@ -201,6 +234,8 @@ pub struct EventStream {
     cancel: Option<Cancel>,
     /// `Stop` was delivered and the kept source awaits the late-event check.
     stopped: bool,
+    /// One `MessageReplay` was already delivered this response.
+    message_replay: bool,
 }
 
 impl EventStream {
@@ -217,6 +252,7 @@ impl EventStream {
             source: Some(Box::pin(source)),
             cancel: Some(Box::new(cancel)),
             stopped: false,
+            message_replay: false,
         }
     }
 
@@ -257,26 +293,54 @@ impl EventStream {
             self.source = None;
             return Poll::Ready(None);
         }
-        let item = match source.as_mut().poll_next(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(item) => item,
-        };
-        match item {
-            Some(Ok(event)) if event.is_terminal() => {
-                self.stopped = true;
-                self.cancel = None;
-                Poll::Ready(Some(Ok(event)))
-            }
-            Some(Ok(event)) => Poll::Ready(Some(Ok(event))),
-            Some(Err(error)) => {
-                self.abort();
-                Poll::Ready(Some(Err(error)))
-            }
-            None => {
-                self.abort();
-                Poll::Ready(Some(Err(ProviderError::StreamCut)))
+        loop {
+            let polled = source.as_mut().poll_next(cx);
+            match Self::classify(polled, &mut self.message_replay) {
+                Polled::Wait => return Poll::Pending,
+                // The duplicate was consumed by the poll, so it is re-polled
+                // at once instead of parking; the inner waker stays armed.
+                Polled::Duplicate => {}
+                Polled::Deliver(event) => {
+                    if event.is_terminal() {
+                        self.stopped = true;
+                        self.cancel = None;
+                    }
+                    return Poll::Ready(Some(Ok(event)));
+                }
+                Polled::Cut(error) => {
+                    self.abort();
+                    return Poll::Ready(Some(Err(error)));
+                }
             }
         }
+    }
+
+    /// Disposes one polled source item under the grammar guards.
+    fn classify(
+        polled: Poll<Option<Result<StreamEvent, ProviderError>>>,
+        seen_replay: &mut bool,
+    ) -> Polled {
+        let Poll::Ready(item) = polled else {
+            return Polled::Wait;
+        };
+        let Some(result) = item else {
+            return Polled::Cut(ProviderError::StreamCut);
+        };
+        let event = match result {
+            Err(error) => return Polled::Cut(error),
+            Ok(event) => event,
+        };
+        if let StreamEvent::MessageReplay { .. } = &event {
+            if *seen_replay {
+                debug_assert!(
+                    false,
+                    "provider stream yielded a second {event:?}; it is dropped"
+                );
+                return Polled::Duplicate;
+            }
+            *seen_replay = true;
+        }
+        Polled::Deliver(event)
     }
 
     /// Drops the source, then runs the cancellation action if still armed.

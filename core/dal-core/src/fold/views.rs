@@ -60,15 +60,13 @@ impl Session {
         if !limits.compact.enabled || self.breaker_open || limits.window == 0 {
             return false;
         }
-        let current_model = self.active_model.as_ref().or(self.settings.model.as_ref());
-        let Some((model, tokens, compactions)) = &self.last_usage else {
-            return false;
-        };
-        if current_model.is_some_and(|current| current != model) || *compactions != self.compactions
-        {
-            return false;
-        }
-        if *tokens < limits.compact.min_tokens {
+        // Measured usage counts only when it is nonzero, its model matches
+        // the active one, and its compaction count equals the session's;
+        // otherwise tokens_since_last_compaction estimates from the projected
+        // branch bytes, so unmeasured, zero-reported, model-changed, and
+        // stale contexts still evaluate against the threshold.
+        let tokens = self.tokens_since_last_compaction();
+        if tokens < limits.compact.min_tokens {
             return false;
         }
         #[expect(
@@ -80,7 +78,7 @@ impl Session {
             clippy::cast_precision_loss,
             reason = "usage and window are u64 counters; the configured trigger fraction is f64"
         )]
-        let tokens = *tokens as f64;
+        let tokens = tokens as f64;
         tokens >= window * limits.compact.threshold
     }
 
@@ -124,20 +122,26 @@ impl Session {
             .is_some_and(|entry| matches!(&entry.kind, EntryKind::Compaction { .. }))
     }
 
-    /// Returns same-model tokens since compaction, or an estimate from the
-    /// active branch's retained context at the shared 3.5-characters-per-token
-    /// rate. The estimate includes the latest compaction replacement and its
-    /// retained prefix, but excludes the replaced history. Before-turn and
-    /// named rule reminders contribute to the estimate.
+    /// Returns the same-model prompt tokens a provider reported since
+    /// compaction, or an estimate from the active branch's retained context
+    /// at the shared 3.5-characters-per-token rate when none were reported.
+    /// A reported count of zero is "none reported", not a measurement. The
+    /// estimate includes the latest compaction replacement and its retained
+    /// prefix, but excludes the replaced history. Before-turn and named rule
+    /// reminders contribute to the estimate.
     #[must_use]
     pub fn tokens_since_last_compaction(&self) -> u64 {
         self.measured_context_tokens()
             .unwrap_or_else(|| crate::tokens::estimate_tokens(self.projected_bytes))
     }
+    /// A zero count is the usage grammar's "server reported none", so it is
+    /// never a context size: returning it would pin the threshold at zero.
     pub(super) fn measured_context_tokens(&self) -> Option<u64> {
         let current_model = self.active_model.as_ref().or(self.settings.model.as_ref());
         let (model, tokens, compactions) = self.last_usage.as_ref()?;
-        if *compactions != self.compactions || current_model.is_some_and(|current| current != model)
+        if *tokens == 0
+            || *compactions != self.compactions
+            || current_model.is_some_and(|current| current != model)
         {
             return None;
         }

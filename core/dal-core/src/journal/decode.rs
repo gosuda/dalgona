@@ -146,6 +146,12 @@ pub(super) fn opt_text_member(
     }
 }
 
+/// Reads one raw JSON member exactly as written, `null` included.
+pub(super) fn raw_json_member(member: &Member<'_>, name: &str) -> Result<RawJson, DecodeError> {
+    let (offset, raw) = (member.offset, member.value);
+    RawJson::parse(raw).map_err(|error| invalid(offset, format!("member `{name}`: {error}")))
+}
+
 pub(super) fn opt_raw_json_member(
     member: &Member<'_>,
     name: &str,
@@ -153,10 +159,7 @@ pub(super) fn opt_raw_json_member(
     if is_null(member) {
         return Ok(None);
     }
-    let (offset, raw) = (member.offset, member.value);
-    RawJson::parse(raw)
-        .map(Some)
-        .map_err(|error| invalid(offset, format!("member `{name}`: {error}")))
+    raw_json_member(member, name).map(Some)
 }
 
 pub(super) fn parts_member(member: &Member<'_>) -> Result<Vec<JournalPart>, DecodeError> {
@@ -253,6 +256,7 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
     match ty.as_ref() {
         "text" => Ok(Block::Text {
             text: text.ok_or_else(|| invalid(offset, "a text block needs `text`"))?,
+            replay,
         }),
         "reasoning" => Ok(Block::Reasoning {
             text: text.ok_or_else(|| invalid(offset, "a reasoning block needs `text`"))?,
@@ -274,7 +278,12 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
                 })
                 .transpose()?
                 .ok_or_else(|| invalid(offset, "a tool_call block needs `input`"))?;
-            Ok(Block::ToolCall { id, name, input })
+            Ok(Block::ToolCall {
+                id,
+                name,
+                input,
+                replay,
+            })
         }
         kind => Err(invalid(
             offset,

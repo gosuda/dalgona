@@ -6,6 +6,7 @@ use super::{
     ToolClass, TurnId, Unit, UpdateKind, Usage,
 };
 use crate::ext::ToolData;
+use crate::update::ResolutionCause;
 
 /// Assistant content retained by the actor for one interrupted stream.
 #[derive(Clone, Debug, PartialEq)]
@@ -341,6 +342,9 @@ pub enum Event {
         by: Option<ClientId>,
         /// Whether the answer was selected as the request default.
         was_default: bool,
+        /// Why the broker resolved the request. Live inputs always name a
+        /// cause; the fold never infers one from the answer or attribution.
+        cause: ResolutionCause,
     },
     /// A job was started by the actor.
     JobStarted {

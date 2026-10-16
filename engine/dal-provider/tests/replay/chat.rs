@@ -158,13 +158,16 @@ fn snapshot_request() -> ModelRequest {
                 parts: vec![
                     AssistantPart::Text {
                         text: "Checking.".into(),
+                        replay: None,
                     },
                     AssistantPart::ToolCall {
                         call: CallId::new("call_1"),
                         name: "read".into(),
                         args: RawJson::parse(r#"{"path":"a.txt"}"#).expect("call args parse"),
+                        replay: None,
                     },
                 ],
+                replay: None,
             },
             ContextItem::ToolResult {
                 call: CallId::new("call_1"),

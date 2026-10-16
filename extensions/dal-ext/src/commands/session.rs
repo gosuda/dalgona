@@ -133,7 +133,7 @@ pub(super) fn copy(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
             let texts: Vec<&str> = content
                 .iter()
                 .filter_map(|block| match block {
-                    Block::Text { text } => Some(&**text),
+                    Block::Text { text, .. } => Some(&**text),
                     Block::Reasoning { .. } | Block::ToolCall { .. } => None,
                 })
                 .collect();

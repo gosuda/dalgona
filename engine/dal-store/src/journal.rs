@@ -23,8 +23,8 @@ use dal_core::{
 
 use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
 
-/// The largest one record may be, in bytes.
-pub(crate) const MAX_RECORD: u64 = 67_108_864;
+/// The largest one record may be, in bytes: [`dal_core::MAX_RECORD`].
+pub(crate) use dal_core::MAX_RECORD;
 
 const SCAN_BUFFER: usize = 1_048_576;
 
@@ -191,17 +191,8 @@ impl Journal {
             .unwrap_or(usize::MAX)
             .min(SCAN_BUFFER);
         let mut stream_buffer = vec![0_u8; buffer_len];
-        let rollback = read_rollback_marker(path)?;
-        let scan_end = match rollback {
-            Some(offset) if offset <= file_len => offset,
-            Some(offset) => {
-                return Err(OpenFailure::Damaged {
-                    offset,
-                    reason: "the rollback marker points past the end of the journal".into(),
-                });
-            }
-            None => file_len,
-        };
+        let rollback = rollback_offset(path, file_len)?;
+        let scan_end = rollback.unwrap_or(file_len);
         let mut records = Vec::new();
         let (complete_end, validator) = scan_complete_prefix(
             &mut journal.file,
@@ -1190,6 +1181,115 @@ fn scan_and_validate(
     Ok(validator)
 }
 
+/// Reads one entry from a journal's complete prefix without repairing or
+/// writing the file.
+///
+/// The scan is bounded by the rollback marker when one exists, exactly as
+/// [`Journal::open`] bounds its preflight, so the complete lines of a failed
+/// batch never replay; the marker itself is left on disk for the writer.
+/// A marker not at a record boundary is damage, never silently ignored.
+///
+/// The entry is accepted only on the validator's leaf path — the branch the
+/// projection serves live — so an off-branch entry stays missing.
+///
+/// # Errors
+/// Returns [`OpenFailure`] for a damaged prefix, unsupported version,
+/// unreadable rollback marker, or I/O failure. A torn tail under
+/// [`MAX_RECORD`] is ignored according to store rules.
+pub(crate) fn scan_entry(
+    path: &Path,
+    wanted: EntryId,
+) -> Result<Option<dal_core::EntryView>, OpenFailure> {
+    let mut file = crate::private::open_private_file(path)
+        .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
+    let file_len = file
+        .metadata()
+        .map_err(|source| OpenFailure::Journal(jio("read", path, source)))?
+        .len();
+    let buffer_len = usize::try_from(file_len)
+        .unwrap_or(usize::MAX)
+        .min(SCAN_BUFFER);
+    let mut buffer = vec![0_u8; buffer_len];
+    let rollback = rollback_offset(path, file_len)?;
+    let scan_end = rollback.unwrap_or(file_len);
+    let mut scan = EntryScan::new(wanted);
+    let (complete_end, validator) =
+        scan_complete_prefix(&mut file, path, scan_end, &mut buffer, |_, record| {
+            scan.visit(&record);
+        })?;
+    if rollback.is_some() && complete_end != scan_end {
+        return Err(OpenFailure::Damaged {
+            offset: scan_end,
+            reason: "the rollback marker does not point to a record boundary".into(),
+        });
+    }
+    Ok(scan.found(validator.leaf()))
+}
+
+/// The validated rollback marker offset for a journal of `file_len` bytes.
+///
+/// `None` means no marker exists. A marker past the end of the file is
+/// damage: an unreadable or inconsistent marker must never let the failed
+/// batch replay.
+fn rollback_offset(path: &Path, file_len: u64) -> Result<Option<u64>, OpenFailure> {
+    match read_rollback_marker(path)? {
+        Some(offset) if offset > file_len => Err(OpenFailure::Damaged {
+            offset,
+            reason: "the rollback marker points past the end of the journal".into(),
+        }),
+        marker => Ok(marker),
+    }
+}
+
+/// Accepts `wanted` only when the validator's leaf path reaches it.
+struct EntryScan {
+    wanted: EntryId,
+    parents: HashMap<EntryId, Option<EntryId>>,
+    wanted_view: Option<dal_core::EntryView>,
+}
+
+impl EntryScan {
+    fn new(wanted: EntryId) -> Self {
+        Self {
+            wanted,
+            parents: HashMap::new(),
+            wanted_view: None,
+        }
+    }
+
+    fn visit(&mut self, record: &Record) {
+        let Some(entry) = record.entry() else {
+            return;
+        };
+        self.parents.insert(entry.id, entry.parent);
+        if entry.id == self.wanted {
+            self.wanted_view = Some(dal_core::EntryView {
+                id: entry.id,
+                parent: entry.parent,
+                kind: entry.kind.clone(),
+            });
+        }
+    }
+
+    /// Walks the leaf path toward its roots and returns the wanted view when
+    /// the walk reaches it.
+    ///
+    /// A missing parent breaks the walk exactly as the projection's
+    /// leaf-path walk does: the reachable prefix stays accepted. The entry
+    /// kind is genuinely duplicated into the owned view; the journal keeps
+    /// its own bytes.
+    fn found(&self, leaf: Option<EntryId>) -> Option<dal_core::EntryView> {
+        let mut cursor = Some(leaf?);
+        while let Some(id) = cursor {
+            if id == self.wanted {
+                return self.wanted_view.clone();
+            }
+            cursor = self.parents.get(&id).copied().flatten();
+        }
+        None
+    }
+}
+
 /// Metadata from a read-only validation of a journal's complete prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PrefixSummary {
@@ -1708,6 +1808,7 @@ mod tests {
                 id: CallId::new(*call),
                 name: (*name).into(),
                 input: RawJson::parse("{}").expect("valid test tool input"),
+                replay: None,
             })
             .collect();
         Record::Assistant(Entry {
@@ -1721,6 +1822,7 @@ mod tests {
                 content,
                 usage: usage(input_tokens),
                 stop: AssistantStop::ToolUse,
+                replay: None,
             },
         })
     }
