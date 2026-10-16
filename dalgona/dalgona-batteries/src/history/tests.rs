@@ -3,8 +3,10 @@
 //! History battery behavior tests.
 
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
-use dal_core::EntryId;
+use dal_agent::ext::{CompactInput, CoveredEntry, Services, ToolCx};
+use dal_core::{ContextItem, EntryId, Family, ModelRoute, Part, RequestParams, SessionId};
 
 use super::config::{HistoryConfig, HistoryConfigError, parse_config};
 use super::draw::{Grid, draw, paginate};
@@ -20,6 +22,8 @@ use super::selection::{
 use super::spans::{
     CompactPiece, HistoryError, Item, Role, SourceError, Span, items, retained_segments,
 };
+use super::wiring::history;
+use crate::work::support::FakeServices;
 
 fn entry_id(value: u64) -> Option<EntryId> {
     NonZeroU64::new(value).map(EntryId::new)
@@ -75,6 +79,77 @@ fn config_rejects_invalid_enabled_share_and_unknown_key() {
 fn config_disables_on_false() {
     let disabled = table("[plugin.history]\nenabled = false\n");
     assert_eq!(parse_config(disabled.as_ref()), Ok(HistoryConfig::Disabled));
+}
+
+fn covered_user(entry: u64, text: &str) -> CoveredEntry {
+    CoveredEntry {
+        entry: entry_id(entry).expect("nonzero entry"),
+        starts_user_turn: true,
+        estimated_tokens: 1_000,
+        content: ContextItem::User {
+            parts: vec![Part::Text { text: text.into() }],
+        },
+        note: None,
+    }
+}
+
+#[tokio::test]
+async fn invalid_config_installs_only_a_compactor_that_refuses_with_its_exact_message() {
+    let message = HistoryConfigError::UnknownKey("bogus".to_owned()).to_string();
+    let invalid = history(HistoryConfig::Invalid {
+        message: message.as_str().into(),
+    })
+    .expect("an invalid section still builds the history extension");
+    let enabled = history(HistoryConfig::Enabled { share: 0.4 }).expect("enabled history builds");
+
+    let names: Vec<&str> = invalid
+        .compactors()
+        .iter()
+        .map(|(name, _)| &**name)
+        .collect();
+    assert_eq!(names, ["history"]);
+    assert!(
+        invalid.session_setup().is_none(),
+        "an invalid section wires no consolidation task"
+    );
+    assert!(
+        enabled.session_setup().is_some(),
+        "a valid section wires the consolidation task"
+    );
+
+    let services: Arc<dyn Services> = Arc::new(FakeServices::default());
+    let cx = ToolCx::for_test(Arc::clone(&services));
+    let entries = [
+        covered_user(1, &"a".repeat(300)),
+        covered_user(2, &"b".repeat(40)),
+    ];
+    let input = CompactInput {
+        caller: cx.caller(),
+        model: ModelRoute::Api {
+            family: Family::Chat,
+            model: "test".into(),
+        },
+        session: SessionId::new_v7(),
+        instructions: "",
+        covered: &entries,
+        span: (
+            entry_id(1).expect("nonzero entry"),
+            entry_id(2).expect("nonzero entry"),
+        ),
+        first_kept: None,
+        context_window: Some(200_000),
+        image_profile: None,
+        images_elsewhere: 0,
+        image_bytes_elsewhere: 0,
+        carried: None,
+        total_tokens: 2_000,
+        params: RequestParams::default(),
+    };
+    let (_, compactor) = &invalid.compactors()[0];
+    let Err(refusal) = compactor.compact(input, services).await else {
+        panic!("an invalid section must refuse every compaction");
+    };
+    assert_eq!(refusal.to_string(), message);
 }
 
 #[test]
