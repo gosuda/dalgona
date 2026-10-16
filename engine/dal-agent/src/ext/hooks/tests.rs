@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use dal_core::{
     RequestParams, ServiceSet, SessionId, StateError, StateOp, StateRecord, ToolCallEvent,
     ToolCallVerdict,
 };
+use tokio::sync::{Notify, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -518,4 +520,224 @@ async fn observer_queue_drops_oldest_and_lossless_queue_backpressures() {
     assert_eq!(lossless.len(), 64);
     assert_eq!(lossless.pop(), Some(0));
     assert_eq!(lossless.len(), 63);
+}
+
+struct CancelHeldHook {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Arc<Notify>,
+    completed: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+}
+
+struct CancelDropGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CancelDropGuard {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Hook<ToolCallEvent, ToolCallVerdict> for CancelHeldHook {
+    fn call(
+        &self,
+        _input: ToolCallEvent,
+        _cx: crate::ext::HookCx,
+    ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
+        let sender = self.entered.lock().expect("entered").take();
+        let release = Arc::clone(&self.release);
+        let completed = Arc::clone(&self.completed);
+        let dropped = Arc::clone(&self.dropped);
+        Box::pin(async move {
+            let _guard = CancelDropGuard { flag: dropped };
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+            release.notified().await;
+            completed.store(true, Ordering::SeqCst);
+            Ok(ToolCallVerdict::Allow)
+        })
+    }
+}
+
+struct ReadyAllowHook;
+
+impl Hook<ToolCallEvent, ToolCallVerdict> for ReadyAllowHook {
+    fn call(
+        &self,
+        _input: ToolCallEvent,
+        _cx: crate::ext::HookCx,
+    ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
+        Box::pin(async move { Ok(ToolCallVerdict::Allow) })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tool_call_held_hook_cancel_denies_and_drops_future() {
+    let caller = caller();
+    let services: Arc<dyn Services> = Arc::new(NoSvcs);
+    let cancel = CancellationToken::new();
+    let cx = cx(&caller, &services, &cancel);
+    let (entered_tx, mut entered) = oneshot::channel::<()>();
+    let release = Arc::new(Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let hook = Arc::new(CancelHeldHook {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Arc::clone(&release),
+        completed: Arc::clone(&completed),
+        dropped: Arc::clone(&dropped),
+    });
+    let hooks: Vec<Arc<dyn Hook<ToolCallEvent, ToolCallVerdict>>> = vec![hook];
+    let event = tool_event(r#"{"a":1}"#);
+    let start = Instant::now();
+    let mut dispatch = Box::pin(dispatch_tool_call(
+        "test",
+        &cx,
+        &hooks,
+        &event,
+        RawJson::parse(r#"{"a":1}"#).expect("args"),
+    ));
+    tokio::select! {
+        step = &mut dispatch => panic!("dispatch completed before held hook entered: {step:?}"),
+        _ = &mut entered => {},
+    }
+    cancel.cancel();
+    // Make the held future ready too: only biased cancel-first selection can
+    // still deny. A removed cancel arm would return Allow here, and a deadline
+    // win would auto-advance paused virtual time.
+    release.notify_waiters();
+    let step = dispatch.await;
+    assert_eq!(
+        Instant::now(),
+        start,
+        "cancelled guard must deny via the cancel branch without advancing to the hook budget deadline"
+    );
+    assert!(
+        step.block.is_some(),
+        "cancelled guard must fail closed instead of allowing"
+    );
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "cancelled hook must not run past its held point"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "cancelled hook future must be dropped"
+    );
+    release.notify_waiters();
+    tokio::task::yield_now().await;
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "release after cancel must not publish a later side effect"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn approval_held_approver_cancel_denies_and_drops_future() {
+    let cancel = CancellationToken::new();
+    let turn_deadline = Instant::now() + Duration::from_secs(3600);
+    let (entered_tx, mut entered) = oneshot::channel::<()>();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let release = Arc::new(Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let approver = |_event: ToolCallEvent| -> BoxFuture<'static, Approval> {
+        let sender = entered_tx.lock().expect("entered").take();
+        let release = Arc::clone(&release);
+        let completed = Arc::clone(&completed);
+        let dropped = Arc::clone(&dropped);
+        Box::pin(async move {
+            let _guard = CancelDropGuard { flag: dropped };
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+            }
+            release.notified().await;
+            completed.store(true, Ordering::SeqCst);
+            Approval::Allow
+        })
+    };
+    let event = tool_event(r#"{"a":1}"#);
+    let mut approval = Box::pin(approve_tool_call(
+        &event,
+        &approver,
+        &cancel,
+        turn_deadline,
+        5_000,
+    ));
+    tokio::select! {
+        decision = &mut approval => {
+            panic!("approval completed before held approver entered: {decision:?}")
+        },
+        _ = &mut entered => {},
+    }
+    cancel.cancel();
+    // Make the held approver ready too: only biased cancel-first selection can
+    // still deny. A removed cancel arm would return Allow here, and a deadline
+    // win would auto-advance paused virtual time.
+    release.notify_waiters();
+    let start = Instant::now();
+    let decision = approval.await;
+    assert_eq!(
+        Instant::now(),
+        start,
+        "cancelled approval must deny via the cancel branch without advancing to the grant deadline"
+    );
+    assert!(
+        matches!(&decision, ToolDecision::Denied),
+        "cancelled approval must deny, got {decision:?}"
+    );
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "cancelled approver must not run past its held point"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "cancelled approver future must be dropped"
+    );
+    release.notify_waiters();
+    tokio::task::yield_now().await;
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "release after cancel must not publish a later side effect"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn precancelled_ready_allow_still_denies() {
+    let caller = caller();
+    let services: Arc<dyn Services> = Arc::new(NoSvcs);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let cx = cx(&caller, &services, &cancel);
+    let hooks: Vec<Arc<dyn Hook<ToolCallEvent, ToolCallVerdict>>> = vec![Arc::new(ReadyAllowHook)];
+    let step = dispatch_tool_call(
+        "test",
+        &cx,
+        &hooks,
+        &tool_event(r#"{"a":1}"#),
+        RawJson::parse(r#"{"a":1}"#).expect("args"),
+    )
+    .await;
+    assert!(
+        step.block.is_some(),
+        "pre-cancelled guard must fail closed even when the hook is ready to allow"
+    );
+
+    let allow = |_event: ToolCallEvent| -> BoxFuture<'static, Approval> {
+        Box::pin(async { Approval::Allow })
+    };
+    let decision = approve_tool_call(
+        &tool_event(r#"{"a":1}"#),
+        &allow,
+        &cancel,
+        Instant::now() + Duration::from_secs(3600),
+        5_000,
+    )
+    .await;
+    assert!(
+        matches!(&decision, ToolDecision::Denied),
+        "pre-cancelled approval must deny even when the approver is ready to allow, got {decision:?}"
+    );
 }

@@ -34,6 +34,7 @@ use crate::session::actor::{ActorDeps, DriverPorts, spawn};
 use crate::session::backend::{Backend, BackendDeps};
 use crate::session::rt::{SessionRt, SessionRtDeps};
 use crate::session::script::SessionScriptHost;
+use crate::session::shared::ChildPromptPolicy;
 
 /// Publishes one session-scoped notice per failed observer hook.
 ///
@@ -88,11 +89,17 @@ const STATUS_QUIET_POLL: Duration = Duration::from_millis(50);
 struct ChildPolicyBody {
     tools: Option<Vec<Box<str>>>,
     approval: ApprovalMode,
+    #[serde(default)]
+    role: Option<Box<str>>,
+    #[serde(default)]
+    system: Option<Box<str>>,
 }
 
 struct ChildPolicy {
     tools: Option<Vec<Name>>,
     approval: ApprovalMode,
+    role: Option<Box<str>>,
+    system: Option<Box<str>>,
 }
 
 fn parse_child_policy_tool(name: &str) -> Result<Name, HostError> {
@@ -137,6 +144,8 @@ fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostEr
     Ok(Some(ChildPolicy {
         tools,
         approval: body.approval,
+        role: body.role,
+        system: body.system,
     }))
 }
 
@@ -293,6 +302,9 @@ impl OpeningCleanup {
                 &end,
             )
             .await;
+            // Classification first: the opening and running turn resolve
+            // through the inbox before any lifecycle fire wakes holders.
+            wired.handle.begin_shutdown();
             cancel.cancel();
             child_tasks.stop().await;
             wired.handle.shutdown().await;
@@ -429,6 +441,10 @@ impl Host {
             let _ = done_tx.send(());
         });
         let _ = done_rx.await;
+        // Classification first: the opening and running turn resolve
+        // through the inbox before the session token or the abort wakes
+        // holders into withdrawing as the wrong cause.
+        entry.handle.begin_shutdown();
         entry.cancel.cancel();
         entry.driver.abort();
         entry.handle.shutdown().await;
@@ -894,10 +910,15 @@ impl Host {
             mode,
         ));
         shared.restore_fold(&fold);
-        if let Some(policy) = &policy
-            && let Some(tools) = &policy.tools
-        {
-            shared.restrict_tools(tools);
+        if let Some(policy) = &policy {
+            if let Some(tools) = &policy.tools {
+                shared.restrict_tools(tools);
+            }
+            if let Some(system) = &policy.system {
+                shared.set_child_prompt_policy(ChildPromptPolicy::System(system.clone()));
+            } else if let Some(role) = &policy.role {
+                shared.set_child_prompt_policy(ChildPromptPolicy::Role(role.clone()));
+            }
         }
         let initial_entries: Arc<[dal_core::EntryView]> = shared.leaf_entries().into();
         let jobs_table = if resolved.ephemeral {
@@ -1354,6 +1375,9 @@ impl Host {
             self.run_session_setups(&resolved, &wired, &cancel).await
         };
         if let Err(error) = setup.await {
+            // A setup that failed after opening a request still classifies
+            // it before the lifecycle fires, so the drain journals it.
+            wired.handle.begin_shutdown();
             cancel.cancel();
             tasks.stop().await;
             wired.handle.shutdown().await;

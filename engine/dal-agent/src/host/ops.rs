@@ -7,7 +7,7 @@ use dal_provider::{Catalog, CatalogEntry, built_in_entries, resolve};
 use tokio_util::sync::CancellationToken;
 
 use super::{Host, SessionEntry};
-use crate::error::{HostError, SchemeError};
+use crate::error::{HostError, SchemeError, ToolError};
 use crate::ext::scheme::Doc;
 use crate::scheme;
 
@@ -101,9 +101,15 @@ impl Host {
 
     /// Resolves one document URI through the scheme table.
     ///
+    /// A `session://` URI resolves from the live session's memory first. A
+    /// session with no live actor is read from its journal on disk instead:
+    /// a synchronous, bounded, strictly read-only file scan that takes no
+    /// lock and never reopens, repairs, or revives the session.
+    ///
     /// # Errors
     /// Returns a [`SchemeError`] when the URI is invalid, its scheme is
-    /// unknown, no document exists at the URI, or a resolver fails.
+    /// unknown, no document exists at the URI, or a resolver fails. A
+    /// damaged or unsafe journal is [`SchemeError::Failed`], never a miss.
     pub fn doc(&self, uri: &str) -> Result<Doc, SchemeError> {
         let parsed = scheme::parse(uri)?;
         match scheme::builtin_resolver(parsed.scheme) {
@@ -111,12 +117,7 @@ impl Host {
                 return self.session_doc(uri, parsed.path);
             }
             Ok(scheme::BuiltinResolver::Job) => {
-                return Err(SchemeError::Failed {
-                    message: format!(
-                        "job output at {uri} is unavailable until the session turn driver attaches its job table."
-                    )
-                    .into(),
-                });
+                return self.job_doc(uri);
             }
             Err(_) => {}
         }
@@ -166,26 +167,89 @@ impl Host {
             .and_then(std::num::NonZeroU64::new)
             .map(dal_core::EntryId::new)
             .ok_or_else(|| SchemeError::NotFound { uri: uri.into() })?;
-        let sessions = self
+        let live = self
             .state
             .sessions
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let live = sessions
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session)
-            .ok_or_else(|| SchemeError::NotFound { uri: uri.into() })?;
-        let view = live.shared.snapshot(snapshot_for_doc(live));
-        let found = view
-            .entries
-            .items
-            .into_iter()
-            .find(|item| item.id == entry)
-            .ok_or_else(|| SchemeError::NotFound { uri: uri.into() })?;
-        let text = sonic_rs::to_string(&found).map_err(|error| SchemeError::Failed {
-            message: error.to_string().into(),
-        })?;
-        Ok(Doc::new(uri, text))
+            .map(|live| {
+                let view = live.shared.snapshot(snapshot_for_doc(live));
+                view.entries.items.into_iter().find(|item| item.id == entry)
+            });
+        // The session actor is gone or never lived here: the journal on disk
+        // is the one source of truth, read without lock, recovery append, or
+        // marker removal.
+        let Some(found) = live else {
+            return session_doc_from_disk(&self.state.shared.data_root, uri, session, entry);
+        };
+        let found = found.ok_or_else(|| SchemeError::NotFound { uri: uri.into() })?;
+        entry_doc(uri, &found)
     }
+
+    /// Resolves one `job://` URI through the owning live session's job table.
+    ///
+    /// Every live session's table is asked and the single claim wins: a
+    /// second claim is an invariant failure, never a first-match guess, and
+    /// an id no live table owns keeps the dispatch table's
+    /// `job <id> is not running` text. `doc` is synchronous while job tables
+    /// lock asynchronously, so tables lock with `try_lock`: a table
+    /// mutating under a concurrent spawn reports busy instead of blocking
+    /// the caller.
+    ///
+    /// # Errors
+    /// Returns a [`SchemeError`] when the URI is not a `job://` document, no
+    /// live table owns the id, more than one does, or the owning table
+    /// fails the read.
+    fn job_doc(&self, uri: &str) -> Result<Doc, SchemeError> {
+        let (id, _) = scheme::job_parts(uri)?;
+        let tables: Vec<Arc<tokio::sync::Mutex<crate::jobs::JobTable>>> = self
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| Arc::clone(entry.backend.jobs()))
+            .collect();
+        let not_running = crate::error::ValidationError::job_not_running(id).to_string();
+        let mut claims = 0u32;
+        let mut settled: Option<Result<Doc, SchemeError>> = None;
+        let mut busy = false;
+        for table in &tables {
+            let Ok(table) = table.try_lock() else {
+                busy = true;
+                continue;
+            };
+            let Some(outcome) = read_owned_job(&table, uri, &not_running) else {
+                continue;
+            };
+            claims += 1;
+            settled = settled.or(Some(outcome));
+        }
+        if claims > 1 {
+            return Err(SchemeError::Failed {
+                message: format!(
+                    "job {id} is claimed by more than one live session; refusing to guess."
+                )
+                .into(),
+            });
+        }
+        if let Some(outcome) = settled {
+            return outcome;
+        }
+        if busy {
+            return Err(SchemeError::Failed {
+                message: format!(
+                    "job {id} is temporarily unreadable; its session job table is busy."
+                )
+                .into(),
+            });
+        }
+        Err(SchemeError::Failed {
+            message: not_running.into(),
+        })
+    }
+
     /// Returns true when the provider resolves a credential from auth.json or the captured env.
     #[must_use]
     pub fn has_credential(&self, provider: &str) -> bool {
@@ -286,6 +350,58 @@ impl Host {
         dal_provider::resolve(&catalog, &aliases, reference)
             .ok()
             .map(|resolved| resolved.route)
+    }
+}
+
+/// Renders one entry as the public `session://` JSON document.
+fn entry_doc(uri: &str, entry: &dal_core::EntryView) -> Result<Doc, SchemeError> {
+    let text = sonic_rs::to_string(entry).map_err(|error| SchemeError::Failed {
+        message: error.to_string().into(),
+    })?;
+    Ok(Doc::new(uri, text))
+}
+
+/// Reads one closed-session entry from its journal under `data_root`.
+///
+/// A blocking local file read bounded by the store's record limits: `Host::doc`
+/// is synchronous, so the read must not enter an async runtime. A missing
+/// session or entry is the typed `NotFound`; damage, an unsafe file, or an
+/// I/O failure is `Failed` with the store's own text, never a silent miss.
+fn session_doc_from_disk(
+    data_root: &std::path::Path,
+    uri: &str,
+    session: SessionId,
+    entry: dal_core::EntryId,
+) -> Result<Doc, SchemeError> {
+    match dal_store::Store::read_session_entry(data_root, session, entry) {
+        Ok(found) => entry_doc(uri, &found),
+        Err(
+            dal_store::StoreError::NotFound { .. } | dal_store::StoreError::UnknownEntry { .. },
+        ) => Err(SchemeError::NotFound { uri: uri.into() }),
+        Err(error) => Err(SchemeError::Failed {
+            message: error.to_string().into(),
+        }),
+    }
+}
+
+/// Reads one `job://` URI from a single locked job table.
+///
+/// Returns `None` when the table owns no such row so the caller keeps
+/// looking; any other outcome claims the id, including the table's own
+/// typed route errors. This keeps the multi-table scan in `job_doc` flat:
+/// one claim wins, two claims are an invariant failure.
+fn read_owned_job(
+    table: &crate::jobs::JobTable,
+    uri: &str,
+    not_running: &str,
+) -> Option<Result<Doc, SchemeError>> {
+    match table.read_uri(uri) {
+        Ok(doc) => Some(Ok(doc)),
+        Err(ToolError::Scheme(error)) => Some(Err(error)),
+        Err(ToolError::Failed(error)) if error.to_string() == not_running => None,
+        Err(error) => Some(Err(SchemeError::Failed {
+            message: error.to_string().into(),
+        })),
     }
 }
 
