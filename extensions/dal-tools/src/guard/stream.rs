@@ -1,7 +1,7 @@
 use super::{Engine, report};
 use dal_agent::ext::hooks::{StreamWatch, TurnInfo, WatchFactory};
-use dal_core::TurnId;
 use dal_core::ext::{Channel, StreamVerdict};
+use dal_core::{SessionId, TurnId};
 use regex::RegexSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
@@ -155,18 +155,17 @@ impl WatchFactory for Router {
             return None;
         }
         let state = self.engine.state.lock().ok()?;
-        let session_id = state.turns.get(&turn.turn)?;
-        let session = state.sessions.get(session_id)?;
-        if session
+        let session = state.sessions.get(&turn.session)?;
+        let epoch = session
             .turn
             .as_ref()
-            .is_none_or(|active| active.id != turn.turn)
-        {
-            return None;
-        }
+            .filter(|active| active.id == turn.turn)?
+            .epoch;
         drop(state);
         Some(Box::new(Watch {
+            session: turn.session,
             turn: turn.turn,
+            epoch,
             carry: String::new(),
             counts: BTreeMap::new(),
             fired: BTreeSet::new(),
@@ -176,7 +175,9 @@ impl WatchFactory for Router {
 }
 
 pub(super) struct Watch {
+    session: SessionId,
     turn: TurnId,
+    epoch: u64,
     carry: String,
     counts: BTreeMap<G8Rule, u32>,
     fired: BTreeSet<G8Rule>,
@@ -263,15 +264,15 @@ impl Watch {
             self.fired.remove(&rule);
             return false;
         };
-        let Some(session_id) = state.turns.get(&self.turn).copied() else {
+        let Some(session) = state.sessions.get_mut(&self.session) else {
             self.fired.remove(&rule);
             return false;
         };
-        let Some(session) = state.sessions.get_mut(&session_id) else {
-            self.fired.remove(&rule);
-            return false;
-        };
-        let Some(turn) = session.turn.as_mut().filter(|turn| turn.id == self.turn) else {
+        let Some(turn) = session
+            .turn
+            .as_mut()
+            .filter(|turn| turn.id == self.turn && turn.epoch == self.epoch)
+        else {
             self.fired.remove(&rule);
             return false;
         };
@@ -282,13 +283,14 @@ impl Watch {
         let Ok(mut state) = self.engine.state.lock() else {
             return;
         };
-        let Some(session_id) = state.turns.get(&self.turn).copied() else {
+        let Some(session) = state.sessions.get_mut(&self.session) else {
             return;
         };
-        let Some(session) = state.sessions.get_mut(&session_id) else {
-            return;
-        };
-        let Some(turn) = session.turn.as_mut().filter(|turn| turn.id == self.turn) else {
+        let Some(turn) = session
+            .turn
+            .as_mut()
+            .filter(|turn| turn.id == self.turn && turn.epoch == self.epoch)
+        else {
             return;
         };
         for (rule, count) in &self.counts {

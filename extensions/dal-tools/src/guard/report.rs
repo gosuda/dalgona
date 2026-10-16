@@ -5,11 +5,8 @@ pub(super) const PLACEHOLDER_REJECT: &str = "PATCH REJECTED. The replacement con
 pub(super) const GUARD_WRAP_NOTICE: &str = "GUARD-WRAP NOTICE. This edit adds a guard or fallback around unchanged code without removing behavior. Confirm that the guard is required; do not add a wrapper merely to avoid the failure.";
 pub(super) const HELPER_NOTICE: &str = "ABSTRACTION NOTICE. This new helper is small and has one same-file use. Keep it if it names a real boundary; otherwise inline it. No change was made.";
 pub(super) const BASELINES_RESET: &str = "guard: baselines reset (session start)";
-#[cfg(test)]
-pub(super) const FS_READ_DENIED: &str =
-    "guard: fs.read denied; warning router disabled this session";
-#[cfg(test)]
-pub(super) const TURN_DENIED: &str = "guard: turn service denied; strike stop-downgrade active";
+pub(super) const FS_READ_DENIED: &str = "guard: fs.read denied; full exec output is not read, so compiler warnings come from result previews only this session. Grant the guard extension fs.read to scan full output.";
+pub(super) const TURN_DENIED: &str = "guard: turn service denied; repeated mutating calls stay blocked but the turn is not cancelled. Grant the guard extension the turn service to let it cancel the turn.";
 pub(super) const HUMAN_BASELINE: &str = " (human baseline 0.34±0.22)";
 pub(super) const MINIMALISM_RULE: &str = "Minimalism rule: make the smallest change that meets the request. Add no guard, fallback, helper, or comment that the request does not need.";
 pub(super) const CONTRACTS_HEADER: &str = "Tool contracts (terse):";
@@ -33,7 +30,6 @@ pub(super) fn strike_notice(n: u8, effect: &str, cause: &str, evidence: &str) ->
     )
 }
 
-#[cfg(test)]
 pub(super) fn exhaustion(key: &str, cause: &str, paths: &str) -> String {
     format!(
         "Guard stopped this turn after 3 strikes. No pending retry was run. Repeated target: {key}. Last failure: {cause}. Persistent changes in this turn: {paths}."
