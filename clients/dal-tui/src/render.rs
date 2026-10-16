@@ -1,15 +1,15 @@
 //! Pure projection from a session view and live front-end state to terminal rows.
 
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 
-use dal_core::{Block, EntryKind, EntryView, JournalPart, TurnState, View};
-use unicode_segmentation::UnicodeSegmentation;
+use dal_core::{BlobId, Block, EntryId, EntryKind, EntryView, JournalPart, TurnState, View};
 
-use crate::diagram::{ArtRole, DiagramSettings, RenderCache, WiredBlock, wire_block};
+use crate::diagram::{ArtRole, DiagramKind, DiagramSettings, RenderCache, WiredBlock, wire_block};
 use crate::dialog::DialogUi;
 use crate::frame::{RegionBudget, RegionRequest};
-use crate::live::Live;
+use crate::live::{BlobRead, ExpandedCard, ExpandedView, Live};
 use crate::picker::PickerUi;
 use crate::status::StatusData;
 use crate::theme::{ResolvedTheme, Role};
@@ -172,7 +172,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
 
     let assistant = live_assistant_rows(&input, w, mode, h);
     let assistant_len = assistant.len();
-    let mut activity = activity_rows(&input, assistant);
+    let activity = activity_rows(&input, assistant);
     let notices = input.live.notices();
     let overlay = overlay_height(&input, w, mode);
     let laid = composer_layout(&input, w, mode);
@@ -187,40 +187,12 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
             overlay,
         },
     );
-    let popup_len = if overlay.is_some() {
-        0
-    } else {
-        input.popup.len()
-    };
-    let occupied = activity
-        .len()
-        .saturating_add(popup_len)
-        .min(budget.activity);
-    let ext_allowance = budget.activity.saturating_sub(occupied).min(4);
-    let ext_rows: Vec<RenderRow> = input
-        .live
-        .ext_lines(ext_allowance)
-        .into_iter()
-        .map(|row| RenderRow::new(row, Role::Dim))
-        .collect();
-    // The assistant rows sit at the tail of the activity rows; the front
-    // splice shifts them by the ext row count.
-    let assistant_start = activity.len() - assistant_len + ext_rows.len();
-    activity.splice(..0, ext_rows);
-    if overlay.is_none() {
-        activity.extend(
-            input
-                .popup
-                .iter()
-                .map(|row| RenderRow::new(row.clone(), Role::Dim)),
-        );
-    }
-    paint_fullscreen_selection(
+    let activity = stage_activity_rows(
         &input,
-        &mut activity,
-        assistant_start,
+        activity,
         assistant_len,
         budget.activity,
+        overlay.is_some(),
     );
     let mut bottom = Vec::with_capacity(budget.cap);
     let notice_rows = notice_rows(notices, budget.notices, w, mode);
@@ -232,7 +204,17 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     overlay_rows(&input, &budget, &laid, w, mode, &mut bottom);
     bottom.push(status);
     let bottom: Vec<RenderRow> = bottom.into_iter().map(|row| row.clipped(w, mode)).collect();
-    let rows = if input.screen == Screen::Inline {
+    let rows = if input.screen == Screen::Fullscreen && input.live.expanded().is_some() {
+        expand_view_rows(
+            &input,
+            notice_rows,
+            bottom,
+            model.as_deref(),
+            width,
+            height,
+            mode,
+        )
+    } else if input.screen == Screen::Inline {
         bottom
     } else {
         fullscreen_rows(
@@ -248,6 +230,50 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     resolve_colors(rows, input.theme)
 }
 
+/// Splices extension rows ahead of the assistant tail, appends popup rows when
+/// no overlay owns them, and paints fullscreen selection state. Returns the
+/// staged rows.
+fn stage_activity_rows(
+    input: &FrameInput<'_>,
+    mut activity: Vec<RenderRow>,
+    assistant_len: usize,
+    activity_budget: usize,
+    has_overlay: bool,
+) -> Vec<RenderRow> {
+    let popup_len = if has_overlay { 0 } else { input.popup.len() };
+    let occupied = activity
+        .len()
+        .saturating_add(popup_len)
+        .min(activity_budget);
+    let ext_allowance = activity_budget.saturating_sub(occupied).min(4);
+    let ext_rows: Vec<RenderRow> = input
+        .live
+        .ext_lines(ext_allowance)
+        .into_iter()
+        .map(|row| RenderRow::new(row, Role::Dim))
+        .collect();
+    // The assistant rows sit at the tail of the activity rows; the front
+    // splice shifts them by the ext row count.
+    let assistant_start = activity.len() - assistant_len + ext_rows.len();
+    activity.splice(..0, ext_rows);
+    if !has_overlay {
+        activity.extend(
+            input
+                .popup
+                .iter()
+                .map(|row| RenderRow::new(row.clone(), Role::Dim)),
+        );
+    }
+    paint_fullscreen_selection(
+        input,
+        &mut activity,
+        assistant_start,
+        assistant_len,
+        activity_budget,
+    );
+    activity
+}
+
 fn paint_fullscreen_selection(
     input: &FrameInput<'_>,
     activity: &mut [RenderRow],
@@ -255,7 +281,7 @@ fn paint_fullscreen_selection(
     assistant_len: usize,
     activity_budget: usize,
 ) {
-    if input.screen != Screen::Fullscreen {
+    if input.screen != Screen::Fullscreen || input.live.expanded().is_some() {
         return;
     }
     let kept_from = activity.len().saturating_sub(activity_budget);
@@ -285,6 +311,14 @@ fn paint_fullscreen_selection(
 fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<usize> {
     if input.dialog.is_open() {
         Some(6)
+    } else if input.screen == Screen::Inline
+        && let Some(view) = input.live.expanded()
+    {
+        // The expanded card owns the composer and hint rows, like a dialog.
+        // It requests its measured natural height so live activity rows keep
+        // the remainder; the first frame, unmeasured, takes the full
+        // allowance and reports the real count back.
+        Some(view.measured_rows().unwrap_or(usize::MAX))
     } else if let Some(signin) = input.signin {
         Some(signin.rows(w, mode, usize::MAX).len())
     } else if let Some(picker) = input.picker {
@@ -359,6 +393,93 @@ fn fold_hint(segments: Vec<&'static str>, w: usize, mode: WidthMode) -> String {
     segments.join(" · ")
 }
 
+/// The expanded card's overlay window: the whole card when it fits, else the
+/// window with one slot kept for the scroll affordance. The view observes the
+/// painted window so its page size and scroll bounds match what is painted.
+fn expanded_overlay_rows(
+    input: &FrameInput<'_>,
+    view: &ExpandedView,
+    overlay_budget: usize,
+    w: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let cap = prose_cap(w).saturating_sub(2).max(1);
+    let mut rows = expanded_rows(input, view, cap, mode);
+    rows = rows.into_iter().map(|row| row.clipped(w, mode)).collect();
+    if rows.len() <= overlay_budget {
+        // The whole card fits: no truncation cue, plain window.
+        view.observe(overlay_budget, rows.len());
+        rows.into_iter()
+            .skip(view.top())
+            .take(overlay_budget)
+            .collect()
+    } else {
+        // The window keeps one slot for the scroll affordance, and the
+        // view observes that smaller window so its page size and scroll
+        // bounds match what is painted.
+        let shown = overlay_budget.saturating_sub(1).max(1);
+        view.observe(shown, rows.len());
+        let top = view.top();
+        let hidden_below = rows.len().saturating_sub(top + shown);
+        let mut out: Vec<RenderRow> = rows.into_iter().skip(top).take(shown).collect();
+        let n = u64::try_from(hidden_below).unwrap_or(u64::MAX);
+        out.push(
+            RenderRow::new(
+                crate::copy::render(
+                    crate::copy::ids::DIALOG_BODY_MORE,
+                    &[("n", &n.to_string())],
+                    n,
+                ),
+                Role::Dim,
+            )
+            .clipped(w, mode),
+        );
+        out
+    }
+}
+
+/// The picker's overlay rows: title, the no-match fallback or visible
+/// options, then the hint. The no-match `/model {id}` fallback is a
+/// selectable row like the options: it needs the same `>` focus marker, not
+/// just a color.
+fn picker_overlay_rows(picker: &PickerUi) -> Vec<RenderRow> {
+    let mut rows = vec![RenderRow::new(picker.title.clone(), Role::Accent)];
+    if let Some(id) = picker.model_filter_fallback() {
+        let selected = picker.is_selected(picker.selected_fallback_index());
+        rows.push(RenderRow::new(
+            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
+            if selected { Role::Accent } else { Role::Dim },
+        ));
+    } else {
+        let range = picker.visible_range();
+        if picker.is_empty() {
+            rows.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
+        }
+        for index in range {
+            if let Some(option) = picker.visible_option(index) {
+                let selected = picker.is_selected(index);
+                rows.push(RenderRow::new(
+                    format!(
+                        "{} {}",
+                        if selected { ">" } else { " " },
+                        escape(&option.label)
+                    ),
+                    if selected { Role::Accent } else { Role::Dim },
+                ));
+            }
+        }
+    }
+    rows.push(RenderRow::new(
+        if picker.is_settings() {
+            crate::copy::ids::SETTINGS_HINT
+        } else {
+            crate::copy::ids::PICKER_HINT
+        },
+        Role::Dim,
+    ));
+    rows
+}
+
 /// The interactive tail: an open dialog, a picker, or the composer and hint.
 fn overlay_rows(
     input: &FrameInput<'_>,
@@ -376,46 +497,22 @@ fn overlay_rows(
             input.diagram_settings,
             input.diagram_cache,
         ));
+    } else if input.screen == Screen::Inline
+        && let Some(view) = input.live.expanded()
+    {
+        // The expand view takes the overlay rows a dialog or picker would
+        // take: the card's `budget.overlay` rows, scrolled by the view. Rows
+        // are never capped here — the window plus the view's scroll keys are
+        // the named expand path, so every row stays reachable. When content
+        // exceeds the window the last slot carries the scroll affordance
+        // (the dialog footer's `... {n} more lines · pgdn`), and the view
+        // observes the one-row-smaller window so page size and scroll bounds
+        // match what is painted.
+        bottom.extend(expanded_overlay_rows(input, view, budget.overlay, w, mode));
     } else if let Some(signin) = input.signin {
         bottom.extend(signin.rows(w, mode, budget.overlay));
     } else if let Some(picker) = input.picker {
-        bottom.push(RenderRow::new(picker.title.clone(), Role::Accent));
-        if let Some(id) = picker.model_filter_fallback() {
-            bottom.push(RenderRow::new(
-                format!("/model {}", escape(id)),
-                if picker.is_selected(picker.selected_fallback_index()) {
-                    Role::Accent
-                } else {
-                    Role::Dim
-                },
-            ));
-        } else {
-            let range = picker.visible_range();
-            if picker.is_empty() {
-                bottom.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
-            }
-            for index in range {
-                if let Some(option) = picker.visible_option(index) {
-                    let selected = picker.is_selected(index);
-                    bottom.push(RenderRow::new(
-                        format!(
-                            "{} {}",
-                            if selected { ">" } else { " " },
-                            escape(&option.label)
-                        ),
-                        if selected { Role::Accent } else { Role::Dim },
-                    ));
-                }
-            }
-        }
-        bottom.push(RenderRow::new(
-            if picker.is_settings() {
-                crate::copy::ids::SETTINGS_HINT
-            } else {
-                crate::copy::ids::PICKER_HINT
-            },
-            Role::Dim,
-        ));
+        bottom.extend(picker_overlay_rows(picker));
     } else if input.exit_draft {
         bottom.push(RenderRow::plain(
             format!(
@@ -512,6 +609,343 @@ fn fullscreen_rows(
         RenderRow::new(String::new(), Role::Text)
     });
     rows.extend(bottom);
+    rows.into_iter().map(|row| row.clipped(w, mode)).collect()
+}
+
+/// The card an entry can expand to, when one exists. The scan keeps the last
+/// eligible block of an assistant entry, matching the newest-first rule the
+/// expand key resolves over.
+pub(crate) fn expanded_card(entry: &EntryView, diagrams: DiagramSettings) -> Option<ExpandedCard> {
+    let assistant_card = |block, kind: &Block| match kind {
+        Block::Reasoning { text, .. } if !text.trim().is_empty() => {
+            Some(ExpandedCard::Reasoning { entry: entry.id })
+        }
+        Block::Text { text, .. } if diagrams.enabled => {
+            // The newest eligible completed fence wins: `fence` indexes
+            // `fence_spans` over all completed fences, a deterministic scan
+            // that stays fixed under append-only text growth.
+            let fence = crate::markdown::fence_spans(text)
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, span)| {
+                    (span.routable && DiagramKind::parse(&text[span.info.clone()]).is_some())
+                        .then_some(index)
+                });
+            fence.map(|fence| ExpandedCard::Diagram {
+                entry: entry.id,
+                block,
+                fence,
+            })
+        }
+        _ => None,
+    };
+    match &entry.kind {
+        EntryKind::ToolResult { .. } => Some(ExpandedCard::Tool { entry: entry.id }),
+        EntryKind::Assistant { content, .. } => content
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(block, kind)| assistant_card(block, kind)),
+        _ => None,
+    }
+}
+
+/// The row a card resolves to when its content can no longer be located in
+/// the visible history — the entry left the branch, or the fence ordinal no
+/// longer parses against the committed text.
+fn expanded_missing_row() -> Vec<RenderRow> {
+    vec![RenderRow::new(
+        "the expanded card is no longer in the visible history",
+        Role::Dim,
+    )]
+}
+
+/// All rendered rows of the open card, in full on every surface: the painted
+/// window plus the view's scroll keys are the named expand path DESIGN
+/// requires, so no row is ever dropped behind a truncation footer.
+fn expanded_rows(
+    input: &FrameInput<'_>,
+    expanded: &ExpandedView,
+    cap: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let Some(entry) = input
+        .view
+        .entries
+        .items
+        .iter()
+        .find(|entry| expanded_entry_id(expanded.card) == entry.id)
+    else {
+        // The entry left the branch while the view was open; the card's
+        // header row stays in scrollback, so the view shows the absence.
+        return expanded_missing_row();
+    };
+    match expanded.card {
+        ExpandedCard::Reasoning { .. } => expanded_reasoning_rows(entry, cap, mode),
+        ExpandedCard::Tool { .. } => expanded_tool_rows(input, expanded, entry, cap, mode),
+        ExpandedCard::Diagram { block, fence, .. } => {
+            expanded_diagram_rows(entry, block, fence, cap, mode)
+        }
+    }
+}
+
+/// The `TextBlob` digests the card resolves through `TuiAgent::blob` when the
+/// view opens. Only tool cards carry stored parts; each digest is requested
+/// once. A digest that fails to parse is skipped: the row falls back to the
+/// storage stub instead of waiting on a read that can never start.
+pub(crate) fn expanded_blob_ids(entry: &EntryView, card: ExpandedCard) -> Vec<BlobId> {
+    let ExpandedCard::Tool { .. } = card else {
+        return Vec::new();
+    };
+    let EntryKind::ToolResult { parts, .. } = &entry.kind else {
+        return Vec::new();
+    };
+    let mut ids: Vec<BlobId> = parts
+        .iter()
+        .filter_map(|part| match part {
+            JournalPart::TextBlob { blob, .. } => BlobId::parse(blob).ok(),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable_by_key(|id| *id.as_bytes());
+    ids.dedup();
+    ids
+}
+
+fn expanded_entry_id(card: ExpandedCard) -> EntryId {
+    match card {
+        ExpandedCard::Reasoning { entry }
+        | ExpandedCard::Tool { entry }
+        | ExpandedCard::Diagram { entry, .. } => entry,
+    }
+}
+
+/// `Thinking · {n} steps · ctrl+o to hide` plus every reasoning row in dim.
+/// A long single step still wraps to its full row count — the view window
+/// scrolls, so no step is dropped and no step loses its first rows.
+fn expanded_reasoning_rows(entry: &EntryView, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+    let EntryKind::Assistant { content, .. } = &entry.kind else {
+        return Vec::new();
+    };
+    let steps: Vec<&str> = content
+        .iter()
+        .filter_map(|block| match block {
+            Block::Reasoning { text, .. } => Some(text.as_ref()),
+            _ => None,
+        })
+        .flat_map(str::lines)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    // Reasoning blocks carry no timing, so the duration field stays empty and
+    // the double separator collapses.
+    let header = crate::copy::render(
+        crate::copy::ids::THINKING_OPEN,
+        &[("n", &steps.len().to_string()), ("dur", "")],
+        u64::try_from(steps.len()).unwrap_or(u64::MAX),
+    )
+    .replace(" ·  · ", " · ");
+    let mut rows = vec![gutter_row(RenderRow::new(header, Role::Dim))];
+    for step in &steps {
+        rows.extend(dim_prose_rows(step, cap, mode));
+    }
+    rows
+}
+
+/// Guttered dim rows of verbatim text, the role DESIGN assigns expanded
+/// reasoning steps.
+fn dim_prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+    prose_rows(text, cap, mode)
+        .into_iter()
+        .map(|mut row| {
+            row.role = Role::Dim;
+            gutter_row(row)
+        })
+        .collect()
+}
+
+/// The settled header, then the result's stored text and image notes.
+/// `TextBlob` parts resolve through the reads the view opened with; while a
+/// read is pending or after it fails the row names the blob honestly instead
+/// of dropping the content. `Blob`/`ImageBlob` parts keep their non-text
+/// stub: the TUI never decodes a PDF or image payload into text rows.
+fn expanded_tool_rows(
+    input: &FrameInput<'_>,
+    expanded: &ExpandedView,
+    entry: &EntryView,
+    cap: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let EntryKind::ToolResult {
+        call,
+        name,
+        error,
+        parts,
+        elapsed_ms,
+        ..
+    } = &entry.kind
+    else {
+        return Vec::new();
+    };
+    let duration = input
+        .transcript
+        .tool_duration(call.as_str())
+        .or_else(|| elapsed_ms.map(std::time::Duration::from_millis));
+    let summary = parts
+        .iter()
+        .find_map(|part| match part {
+            JournalPart::Text { text } => Some(text.as_ref()),
+            _ => None,
+        })
+        .unwrap_or("");
+    let mut header = tool_card_row(name, *error, summary, duration);
+    let _ = write!(header.text, " · {}", crate::copy::ids::TOOL_COLLAPSE);
+    let mut rows = vec![gutter_row(header)];
+    for part in parts {
+        match part {
+            JournalPart::Text { text } => {
+                rows.extend(prose_rows(text, cap, mode).into_iter().map(gutter_row));
+            }
+            JournalPart::Image { .. } | JournalPart::ImageBlob { .. } => {
+                rows.push(gutter_row(RenderRow::new(
+                    crate::copy::ids::IMAGE_OPEN,
+                    Role::Dim,
+                )));
+            }
+            JournalPart::TextBlob { blob, bytes } => {
+                rows.extend(text_blob_rows(expanded, blob, *bytes, cap, mode));
+            }
+            JournalPart::Blob { mime, blob, bytes } => {
+                rows.push(gutter_row(RenderRow::new(
+                    format!("[{bytes} bytes of {mime} stored in blob {blob}]"),
+                    Role::Dim,
+                )));
+            }
+        }
+    }
+    rows
+}
+
+/// One `TextBlob` part's rows: the decoded text once the view's read lands,
+/// the read's own error text when it fails, or an honest in-flight row.
+fn text_blob_rows(
+    expanded: &ExpandedView,
+    blob: &str,
+    bytes: u64,
+    cap: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let read = BlobId::parse(blob).ok().and_then(|id| expanded.blob(&id));
+    let row = |text: String| gutter_row(RenderRow::new(text, Role::Dim));
+    match read {
+        Some(BlobRead::Text(text)) => prose_rows(&text, cap, mode)
+            .into_iter()
+            .map(gutter_row)
+            .collect(),
+        Some(BlobRead::Failed(reason)) => vec![row(format!(
+            "[{bytes} bytes stored in blob {blob} · {}]",
+            escape(&reason.replace('\n', " "))
+        ))],
+        Some(BlobRead::Pending) => {
+            vec![row(format!("[reading {bytes} bytes from blob {blob}]"))]
+        }
+        // No read was requested (an unparseable digest): the storage stub.
+        None => vec![row(format!("[{bytes} bytes stored in blob {blob}]"))],
+    }
+}
+
+/// `diagram {kind} · {n} rows · ctrl+o collapses` over the fenced source,
+/// every row on every surface; the view window scrolls through them.
+/// `fence` re-resolves through the same `fence_spans` scan `expanded_card`
+/// ran; a committed text is frozen, but a mid-stream shrink of the visible
+/// entries still degrades to the absence row instead of clipping wrong.
+fn expanded_diagram_rows(
+    entry: &EntryView,
+    block: usize,
+    fence: usize,
+    cap: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let EntryKind::Assistant { content, .. } = &entry.kind else {
+        return expanded_missing_row();
+    };
+    let Some((kind, source)) = content.get(block).and_then(|block| match block {
+        Block::Text { text, .. } => {
+            let spans = crate::markdown::fence_spans(text);
+            let span = spans.get(fence)?;
+            let kind = span
+                .routable
+                .then(|| DiagramKind::parse(&text[span.info.clone()]))??;
+            Some((kind, crate::markdown::fence_body(text, span)))
+        }
+        _ => None,
+    }) else {
+        return expanded_missing_row();
+    };
+    let rows_count = source.lines().count();
+    let header = crate::copy::render(
+        crate::copy::ids::DIAGRAM_READY_OPEN,
+        &[("kind", kind.label()), ("n", &rows_count.to_string())],
+        u64::try_from(rows_count).unwrap_or(u64::MAX),
+    );
+    let mut rows = vec![gutter_row(RenderRow::new(header, Role::Dim))];
+    rows.extend(prose_rows(source, cap, mode).into_iter().map(gutter_row));
+    rows
+}
+
+/// The expand view: the fullscreen skeleton with the card's rows in place of
+/// the transcript window, scrolled by the view's own offset. Composer rows
+/// paint without a caret since the view owns every key.
+fn expand_view_rows(
+    input: &FrameInput<'_>,
+    notice_rows: Vec<RenderRow>,
+    bottom: Vec<RenderRow>,
+    model: Option<&str>,
+    width: u16,
+    height: u16,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let w = usize::from(width);
+    let h = usize::from(height);
+    let header = crate::screen::fullscreen::header_rows(width, height);
+    let above = header + notice_rows.len();
+    let available = h.saturating_sub(above + bottom.len());
+    let cap = prose_cap(w).saturating_sub(2);
+    let Some(view) = input.live.expanded() else {
+        return Vec::new();
+    };
+    let mut content = expanded_rows(input, view, cap, mode);
+    content = content
+        .into_iter()
+        .map(|row| row.clipped(w, mode))
+        .collect();
+    view.observe(available, content.len());
+    let top = view.top();
+    let window = content
+        .into_iter()
+        .skip(top)
+        .take(available)
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(h);
+    if header > 0 {
+        rows.push(RenderRow::new(
+            format!(
+                "dal · {} · {}",
+                escape(input.view.session.name.as_deref().unwrap_or("session")),
+                model.unwrap_or("no model")
+            ),
+            Role::Accent,
+        ));
+    }
+    rows.extend(notice_rows);
+    rows.extend(window);
+    rows.resize_with(above + available, || {
+        RenderRow::new(String::new(), Role::Text)
+    });
+    rows.extend(bottom.into_iter().map(|mut row| {
+        row.cursor = None;
+        row
+    }));
     rows.into_iter().map(|row| row.clipped(w, mode)).collect()
 }
 
@@ -662,17 +1096,19 @@ fn live_assistant_rows(
     mode: WidthMode,
     limit: usize,
 ) -> Vec<RenderRow> {
-    let text = input.live.assistant_text();
-    if text.is_empty() {
+    if input.live.assistant_text().is_empty() {
         return Vec::new();
     }
-    let cap = prose_cap(w);
-    let rows = match wire_block(&input.diagram_settings, input.diagram_cache, text, cap) {
-        Some(wired) => wired_rows(wired, cap, mode),
-        None => input
-            .live
-            .assistant_rows(cap, w.saturating_sub(2), mode, limit),
-    };
+    // The markdown stream wires each completed routable fence itself: the
+    // whole-block check is gone, so embedded diagram cards and the pending
+    // placeholder reach the live region mid-prose.
+    let rows = input.live.assistant_rows(
+        prose_cap(w),
+        w.saturating_sub(2),
+        mode,
+        limit,
+        Some((&input.diagram_settings, input.diagram_cache)),
+    );
     rows.into_iter().map(gutter_row).collect()
 }
 
@@ -757,17 +1193,37 @@ pub(crate) fn entry_rows_timed(
             .collect()
         }
         EntryKind::Assistant { content, .. } => {
+            // Only the block `expanded_card` selects may advertise the key.
+            // Ctrl+O resolves the newest eligible entry at press time, so a
+            // header committed on a now-older entry names the newer card it
+            // opens — the review's call-site granularity, not per-entry
+            // truth: committed rows freeze.
+            let expanded_block = match expanded_card(entry, diagram_settings) {
+                Some(ExpandedCard::Diagram { block, .. }) => Some(block),
+                _ => None,
+            };
+            let prose = Prose::Markdown {
+                full: usize::from(columns).saturating_sub(2),
+            };
             let mut rows = Vec::new();
-            for block in content {
+            for (index, block) in content.iter().enumerate() {
                 match block {
-                    Block::Text { text } => {
+                    Block::Text { text, .. } if expanded_block == Some(index) => {
+                        rows.extend(expandable_text_rows(
+                            text,
+                            cap,
+                            mode,
+                            usize::from(columns).saturating_sub(2),
+                            diagram_settings,
+                            diagram_cache,
+                        ));
+                    }
+                    Block::Text { text, .. } => {
                         rows.extend(text_rows(
                             text,
                             cap,
                             mode,
-                            Prose::Markdown {
-                                full: usize::from(columns).saturating_sub(2),
-                            },
+                            prose,
                             diagram_settings,
                             diagram_cache,
                         ));
@@ -800,7 +1256,7 @@ pub(crate) fn entry_rows_timed(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RichLine {
     pub(crate) text: String,
     pub(crate) links: Vec<RenderLink>,
@@ -978,36 +1434,14 @@ pub(crate) fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderR
     rows
 }
 
+/// Wraps one styled line through `width::wrap_ranges`, the same
+/// word-boundary policy markdown tables and prose use; each emitted row keeps
+/// the spans and links it overlaps.
 pub(crate) fn wrap_rich_line(line: &RichLine, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
-    if line.text.is_empty() {
-        return vec![RenderRow::new(String::new(), Role::Text)];
-    }
-    let cap = cap.max(1);
-    let mut rows = Vec::new();
-    let mut start = 0;
-    let mut row_width = 0;
-    for (index, cluster) in line.text.grapheme_indices(true) {
-        let cluster_width = crate::width::width(cluster, mode);
-        if start < index
-            && (row_width + cluster_width > cap
-                || (cluster_width == 2 && row_width == cap.saturating_sub(1)))
-        {
-            rows.push(linked_row(line, start, index));
-            start = index;
-            row_width = 0;
-        }
-        row_width += cluster_width;
-        let end = index + cluster.len();
-        if cluster_width > cap {
-            rows.push(linked_row(line, start, end));
-            start = end;
-            row_width = 0;
-        }
-    }
-    if start < line.text.len() || rows.is_empty() {
-        rows.push(linked_row(line, start, line.text.len()));
-    }
-    rows
+    crate::width::wrap_ranges(&line.text, cap, mode)
+        .into_iter()
+        .map(|(start, end)| linked_row(line, start, end))
+        .collect()
 }
 
 fn linked_row(line: &RichLine, start: usize, end: usize) -> RenderRow {
@@ -1058,18 +1492,110 @@ pub(crate) fn text_rows(
     settings: DiagramSettings,
     cache: &RenderCache,
 ) -> Vec<RenderRow> {
-    let Some(wired) = wire_block(&settings, cache, text, cap) else {
-        return match prose {
-            Prose::Verbatim => prose_rows(text, cap, mode),
-            Prose::Markdown { full } => crate::markdown::markdown_rows(text, cap, full, mode),
-        };
+    match prose {
+        // The whole-block fast path stays for verbatim user text: a single
+        // supported fence still renders straight to its card, and user
+        // entries never carry the ctrl+o header because the expand key only
+        // resolves committed assistant cards.
+        Prose::Verbatim => wire_block(&settings, cache, text, cap).map_or_else(
+            || prose_rows(text, cap, mode),
+            |(_, wired)| wired_rows(wired, cap, mode),
+        ),
+        Prose::Markdown { full } => {
+            crate::markdown::markdown_wired_rows(text, cap, full, mode, Some((&settings, cache)))
+        }
+    }
+}
+
+/// `text_rows` for a committed assistant block Ctrl+O would open: the ready
+/// card of the fence `expanded_card` resolved also carries the DESIGN
+/// `diagram {kind} · {n} rows · ctrl+o expands` header at the fence's own
+/// position, the promise matching the key that resolves it. User fences,
+/// dialog previews and the still-streaming live block use `text_rows`, so
+/// they never advertise a key that cannot reach them.
+fn expandable_text_rows(
+    text: &str,
+    cap: usize,
+    mode: WidthMode,
+    full: usize,
+    settings: DiagramSettings,
+    cache: &RenderCache,
+) -> Vec<RenderRow> {
+    let wire = Some((&settings, cache));
+    let spans = crate::markdown::fence_spans(text);
+    let Some((kind, span)) = spans.iter().rev().find_map(|span| {
+        let kind = span
+            .routable
+            .then(|| DiagramKind::parse(&text[span.info.clone()]))??;
+        Some((kind, span))
+    }) else {
+        return crate::markdown::markdown_wired_rows(text, cap, full, mode, wire);
     };
-    wired_rows(wired, cap, mode)
+    // `wire_source` stays the one scheduling rule: the resolved fence wires
+    // through the same cache/budget as markdown materialization, and a
+    // `Pending` or `Fallback` result needs no expand header. Ready art or
+    // pixels get `wired_card_rows` so the header lands exactly at the
+    // fence's position inside the surrounding prose.
+    let body = crate::markdown::fence_body(text, span);
+    let Some(wired) = crate::diagram::wire_source(&settings, cache, kind, body, cap) else {
+        return crate::markdown::markdown_wired_rows(text, cap, full, mode, wire);
+    };
+    if !matches!(wired, WiredBlock::Art(_) | WiredBlock::Pixels(_)) {
+        return crate::markdown::markdown_wired_rows(text, cap, full, mode, wire);
+    }
+    let mut rows = Vec::new();
+    if let Some(prefix) = text
+        .get(..span.span.start)
+        .and_then(|prefix| prefix.strip_suffix('\n'))
+        && !prefix.is_empty()
+    {
+        rows.extend(crate::markdown::markdown_wired_rows(
+            prefix, cap, full, mode, wire,
+        ));
+    }
+    rows.extend(wired_card_rows(kind, wired, cap, mode));
+    if let Some(suffix) = text.get(span.span.end..)
+        && let Some(suffix) = suffix.strip_prefix('\n')
+        && !suffix.is_empty()
+    {
+        rows.extend(crate::markdown::markdown_wired_rows(
+            suffix, cap, full, mode, wire,
+        ));
+    }
+    if rows.is_empty() {
+        rows.push(RenderRow::plain(String::new(), Role::Text));
+    }
+    rows
+}
+
+/// `wired_rows` plus the settled `ctrl+o expands` header: the card of the
+/// exact fence or block Ctrl+O opens. `kind` comes from the caller's scan so
+/// the header never re-parses the text the rows were already scheduled from.
+fn wired_card_rows(
+    kind: DiagramKind,
+    wired: WiredBlock,
+    cap: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let rows = wired_rows(wired, cap, mode);
+    let n = rows.len();
+    let header = RenderRow::new(
+        crate::copy::render(
+            crate::copy::ids::DIAGRAM_READY,
+            &[("kind", kind.label()), ("n", &n.to_string())],
+            u64::try_from(n).unwrap_or(u64::MAX),
+        ),
+        Role::Dim,
+    );
+    let mut card = Vec::with_capacity(n + 1);
+    card.push(header);
+    card.extend(rows);
+    card
 }
 
 /// The rows of a rendered diagram block: art, a failure card over its source, an
 /// image card, or the pending placeholder.
-fn wired_rows(wired: WiredBlock, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+pub(crate) fn wired_rows(wired: WiredBlock, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
     match wired {
         WiredBlock::Art(art) => art.rows.iter().map(|cells| art_row(cells)).collect(),
         WiredBlock::Fallback {
@@ -1246,7 +1772,7 @@ fn prose_cap(width: usize) -> usize {
 mod tests {
     use std::num::NonZeroU64;
 
-    use dal_core::{EntryId, EntryKind, EntryView, JournalPart};
+    use dal_core::{Block, EntryId, EntryKind, EntryView, JournalPart};
 
     use super::entry_rows;
     use crate::WidthMode;
@@ -1328,9 +1854,62 @@ mod tests {
         assert!(
             on_transcript
                 .row_data(0)
-                .is_some_and(|(_, spans)| !spans.is_empty())
+                .is_some_and(|(_, spans)| !spans.is_empty()),
+            "a user card is not Ctrl+O-eligible, so no header shifts the art to row 1"
         );
         assert_eq!(on_cache.renders(), 1);
+    }
+
+    #[test]
+    fn only_the_committed_assistant_card_advertises_ctrl_o() {
+        use dal_core::AssistantStop;
+
+        let fence = "```mermaid\ngraph TD; A-->B\n```";
+        let user = EntryView {
+            id: EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: EntryKind::User {
+                parts: vec![JournalPart::Text { text: fence.into() }],
+            },
+        };
+        let assistant = EntryView {
+            id: EntryId::new(NonZeroU64::new(2).unwrap()),
+            parent: None,
+            kind: EntryKind::Assistant {
+                api: dal_core::Family::Chat,
+                model: "model".into(),
+                content: vec![Block::Text {
+                    text: fence.into(),
+                    replay: None,
+                }],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: AssistantStop::Done,
+                route: None,
+                replay: None,
+            },
+        };
+        let settings = DiagramSettings { enabled: true };
+        let cache = RenderCache::default();
+        let hint = "ctrl+o expands";
+        assert!(
+            !entry_rows(&user, 80, WidthMode::Narrow, settings, &cache)
+                .iter()
+                .any(|row| row.text.contains(hint)),
+            "a user fence card cannot be opened, so it cannot promise ctrl+o"
+        );
+        assert!(
+            entry_rows(&assistant, 80, WidthMode::Narrow, settings, &cache)
+                .iter()
+                .any(|row| row.text.contains(hint)),
+            "the committed assistant card is the one Ctrl+O opens"
+        );
     }
     #[test]
     fn the_hint_row_folds_by_the_deck_priority() {
@@ -1499,10 +2078,7 @@ mod tests {
             text,
             "run: mv a b \\u{202e}evil\\u{202c} \\u{2066}ok\\u{2069}\\u{61c}\\u{200e}\\u{200f}\\u{202a}\\u{202b}\\u{202d}"
         );
-        assert!(
-            !text.chars().any(crate::width::is_bidi_control),
-            "no bidi control survives: {text}"
-        );
+        assert!(text.is_ascii(), "no bidi control survives: {text}");
     }
 
     #[test]
@@ -1522,5 +2098,345 @@ mod tests {
     fn arabic_and_hebrew_prose_render_untouched() {
         let rows = super::prose_rows("مرحبا שלום", 80, WidthMode::Narrow);
         assert_eq!(rows[0].text, "مرحبا שלום");
+    }
+
+    /// One assistant entry whose text block holds `fences` joined by prose.
+    fn assistant_with_fences(fences: &[&str]) -> EntryView {
+        use dal_core::AssistantStop;
+        EntryView {
+            id: EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: EntryKind::Assistant {
+                api: dal_core::Family::Chat,
+                model: "model".into(),
+                content: vec![Block::Text {
+                    text: format!("intro\n{}\noutro", fences.join("\nmiddle\n")).into(),
+                    replay: None,
+                }],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: AssistantStop::Done,
+                route: None,
+                replay: None,
+            },
+        }
+    }
+
+    #[test]
+    fn expansion_targets_the_newest_fence_in_a_multi_fence_block() {
+        let entry = assistant_with_fences(&[
+            "```mermaid\ngraph TD; A-->B\n```",
+            "~~~\nplain code\n~~~",
+            "```mermaid\ngraph LR; C-->D\n```",
+        ]);
+        let card = super::expanded_card(&entry, DiagramSettings { enabled: true });
+        // The last eligible completed fence wins: index 2 into all
+        // completed fences, skipping the non-routable tilde fence.
+        assert!(matches!(
+            card,
+            Some(super::ExpandedCard::Diagram {
+                block: 0,
+                fence: 2,
+                ..
+            })
+        ));
+        let rows = super::expanded_diagram_rows(&entry, 0, 2, 40, WidthMode::Narrow);
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(texts.iter().any(|row| row.contains("C-->D")), "{texts:?}");
+        assert!(!texts.iter().any(|row| row.contains("A-->B")), "{texts:?}");
+        assert!(
+            texts[0].contains("diagram mermaid") && texts[0].contains("ctrl+o collapses"),
+            "{texts:?}"
+        );
+        // A fence ordinal that no longer resolves degrades to the absence row.
+        let missing = super::expanded_diagram_rows(&entry, 0, 9, 40, WidthMode::Narrow);
+        assert_eq!(
+            missing[0].text,
+            "the expanded card is no longer in the visible history"
+        );
+    }
+
+    #[test]
+    fn an_embedded_ready_fence_carries_the_expand_header_at_its_position() {
+        let entry = assistant_with_fences(&["```mermaid\ngraph TD; A-->B\n```"]);
+        let rows = entry_rows(
+            &entry,
+            80,
+            WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &RenderCache::default(),
+        );
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        let header = texts
+            .iter()
+            .position(|row| row.contains("ctrl+o expands"))
+            .expect("the resolved fence advertises ctrl+o");
+        assert_eq!(texts[0], "  intro", "{texts:?}");
+        assert!(header > 0, "prose precedes the card header: {texts:?}");
+        assert_eq!(texts.last(), Some(&"  outro"), "{texts:?}");
+        assert!(
+            !texts
+                .iter()
+                .any(|row| row.contains("```") || row.contains("graph TD")),
+            "the fenced source never leaks into transcript rows: {texts:?}"
+        );
+    }
+
+    /// A `FrameInput` over `live` with one committed `entry` in the view.
+    fn expanded_frame<'a>(
+        view: &'a dal_core::View,
+        live: &'a crate::live::Live,
+        transcript: &'a Transcript,
+        viewport: &'a crate::screen::fullscreen::Viewport,
+        opts: &'a crate::TuiOptions,
+        theme: &'a crate::theme::ResolvedTheme,
+        dialog: &'a crate::dialog::DialogUi,
+        cache: &'a RenderCache,
+    ) -> super::FrameInput<'a> {
+        super::FrameInput {
+            view,
+            screen: crate::Screen::Inline,
+            composer: "",
+            cursor: 0,
+            exit_draft: false,
+            branch: None,
+            popup: &[],
+            live,
+            dialog,
+            picker: None,
+            help: None,
+            signin: None,
+            transcript,
+            viewport,
+            opts,
+            kitty_keyboard: false,
+            theme,
+            diagram_settings: DiagramSettings::default(),
+            diagram_cache: cache,
+        }
+    }
+
+    /// The tool-result entry behind the scroll-path test's paged card: forty
+    /// numbered lines, so the first window ends in a scroll affordance.
+    fn scroll_path_tool_entry() -> EntryView {
+        use dal_core::CallId;
+
+        let lines: Vec<String> = (1..=40).map(|n| format!("line {n:02}")).collect();
+        EntryView {
+            id: EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: EntryKind::ToolResult {
+                call: CallId::new("call-1"),
+                name: "read".into(),
+                error: false,
+                parts: vec![JournalPart::Text {
+                    text: lines.join("\n").into(),
+                }],
+                changes: Vec::new(),
+                elapsed_ms: None,
+            },
+        }
+    }
+
+    /// The small reasoning entry the scroll-path test opens second: it fits
+    /// the window, so no truncation footer may paint.
+    fn scroll_path_reasoning_entry() -> EntryView {
+        EntryView {
+            id: EntryId::new(NonZeroU64::new(2).unwrap()),
+            parent: None,
+            kind: EntryKind::Assistant {
+                api: dal_core::Family::Chat,
+                model: "model".into(),
+                content: vec![Block::Reasoning {
+                    text: "step one\nstep two".into(),
+                    replay: dal_core::RawJson::null(),
+                }],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::Done,
+                route: None,
+                replay: None,
+            },
+        }
+    }
+
+    /// The two-entry idle view behind the scroll-path test.
+    fn scroll_path_view(tool_entry: EntryView, reasoning_entry: EntryView) -> dal_core::View {
+        use dal_core::{Gen, Seq, SessionId, Timestamp};
+
+        let workspace = dal_core::Workspace::new(std::env::temp_dir()).unwrap();
+        dal_core::View {
+            r#gen: Gen::new(NonZeroU64::MIN),
+            seq: Seq::new(NonZeroU64::MIN),
+            session: dal_core::SessionInfo {
+                id: SessionId::new_v7(),
+                name: None,
+                preview: "".into(),
+                workspace,
+                updated_at: Timestamp::UNIX_EPOCH,
+                created_at: Some(Timestamp::UNIX_EPOCH),
+                archived: Some(false),
+                last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            },
+            turn: dal_core::TurnState::Idle,
+            entries: dal_core::Page {
+                items: vec![tool_entry, reasoning_entry],
+                next_before: None,
+            },
+            tree: dal_core::TreeOutline {
+                branches: Vec::new(),
+            },
+            settings: dal_core::SettingsView {
+                model: None,
+                thinking: dal_core::ThinkingLevel::Medium,
+                approval: dal_core::ApprovalMode::Ask,
+                mode: dal_core::Mode::Normal,
+                name: None,
+            },
+            open: Vec::new(),
+            changes: Vec::new(),
+            usage: dal_core::UsageView {
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                context_tokens: 0,
+                context_window: 128_000,
+            },
+            stats: dal_core::Stats {
+                steers_queued: 0,
+                follow_ups_queued: 0,
+                retries: 0,
+                dropped_observations: 0,
+                auto_compaction: dal_core::AutoCompaction::Off,
+            },
+        }
+    }
+
+    /// The headless options behind the scroll-path test with the runtime
+    /// whose handle they carry; the runtime stays alive beside the options.
+    fn scroll_path_opts() -> (tokio::runtime::Runtime, crate::TuiOptions) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let opts = crate::TuiOptions {
+            session: dal_agent::SessionRef::Ephemeral {
+                workspace: dal_core::Workspace::new(std::env::temp_dir()).unwrap(),
+            },
+            screen: crate::Screen::Inline,
+            theme_request: crate::ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "true".into(),
+            color: crate::ColorMode::Never,
+            binary: "dal",
+            env: crate::EnvFacts::default(),
+            rt: runtime.handle().clone(),
+        };
+        (runtime, opts)
+    }
+
+    #[test]
+    fn the_inline_expanded_window_names_the_scroll_path() {
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+
+        let mut live = crate::live::Live::default();
+        live.open_expand(
+            super::ExpandedCard::Tool {
+                entry: EntryId::new(NonZeroU64::MIN),
+            },
+            Vec::new(),
+        );
+        let paint = |live: &crate::live::Live| {
+            super::frame_rows(
+                expanded_frame(
+                    &view,
+                    live,
+                    &transcript,
+                    &viewport,
+                    &opts,
+                    &theme,
+                    &dialog,
+                    &cache,
+                ),
+                80,
+                24,
+            )
+        };
+
+        // First paint: the window shows a scroll affordance naming pgdn and
+        // the hidden-below count.
+        let first = paint(&live);
+        let footer = first
+            .iter()
+            .find(|row| row.text.contains("pgdn"))
+            .expect("the paged card names its scroll path");
+        assert!(footer.text.contains("more line"), "{footer:?}");
+
+        // Every row stays reachable: scrolling down lands the last line.
+        let mut rows = first.clone();
+        for _ in 0..64 {
+            live.expanded().expect("view open").scroll_down();
+            rows = paint(&live);
+            if rows.iter().any(|row| row.text.contains("line 40")) {
+                break;
+            }
+        }
+        assert!(
+            rows.iter().any(|row| row.text.contains("line 40")),
+            "the final row is reachable through the named scroll path"
+        );
+        live.close_expand();
+
+        // A card that fits the window paints no truncation footer.
+        live.open_expand(
+            super::ExpandedCard::Reasoning {
+                entry: EntryId::new(NonZeroU64::new(2).unwrap()),
+            },
+            Vec::new(),
+        );
+        let small = paint(&live);
+        assert!(small.iter().any(|row| row.text.contains("step two")));
+        assert!(
+            !small.iter().any(|row| row.text.contains("more line")),
+            "a fully visible card keeps every row and no footer: {:?}",
+            small
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        live.close_expand();
     }
 }

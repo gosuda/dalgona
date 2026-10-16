@@ -1,13 +1,14 @@
 use crate::theme::ResolvedTheme;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use dal_agent::SessionRef;
 use dal_agent::login::{Method, SecretString};
 use dal_core::{
-    Answer, CancelScope, Chooser, ClientId, Command, Expect, FrontAction, Output, PageReq, Reply,
-    RequestId, Stop, TurnId, TurnState, UpdateKind,
+    Answer, BlobId, CancelScope, Chooser, ClientId, Command, Expect, FrontAction, Output, PageReq,
+    Reply, RequestId, ResolutionCause, Stop, TurnId, TurnState, UpdateKind,
 };
 
 use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
@@ -15,7 +16,7 @@ use crate::composer::Composer;
 use crate::dialog::DialogUi;
 use crate::help::HelpUi;
 use crate::keys::{Action, InputEvent, KeyDecoder, Owner, resolve_in};
-use crate::live::Live;
+use crate::live::{BlobRead, Live};
 use crate::picker::{ModelOption, PickerAction, PickerUi};
 use crate::render::{FrameInput, entry_rows_timed};
 use crate::screen::driver::Painter;
@@ -33,6 +34,38 @@ enum ExitDialog {
 }
 
 const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Renders the outcome note for a request this client showed.
+///
+/// The wording follows the resolution cause alone: a missing cause (an old
+/// journal) or one this build does not know reads as a neutral "resolved"
+/// note and is never guessed from the answering client, the answer or time.
+fn resolution_notice(
+    cause: Option<ResolutionCause>,
+    by: &ClientId,
+    answer: &Answer,
+    title: &str,
+) -> String {
+    use crate::copy::ids;
+
+    let template = match cause {
+        Some(ResolutionCause::Answered) => ids::REQUEST_RESOLVED_BY,
+        Some(ResolutionCause::TimedOut) => ids::REQUEST_TIMED_OUT,
+        Some(ResolutionCause::Cancelled) => ids::REQUEST_CANCELLED,
+        Some(ResolutionCause::Withdrawn) => ids::REQUEST_WITHDRAWN,
+        Some(ResolutionCause::NoController) => ids::REQUEST_NO_CONTROLLER,
+        None | Some(_) => ids::REQUEST_RESOLVED,
+    };
+    crate::copy::render(
+        template,
+        &[
+            ("client", by.as_str()),
+            ("answer", &crate::copy::answer_word(answer)),
+            ("title", &crate::width::escape(title)),
+        ],
+        1,
+    )
+}
 
 /// Local composer and exit state; transport to `Agent::submit` lands with `Host::open`.
 #[derive(Debug, Default)]
@@ -70,10 +103,13 @@ struct Session {
     cancel_deadline: Option<std::time::Instant>,
     /// The one `Run` command still executing off this thread.
     inflight: Option<InflightRun>,
+    /// The blob read worker serving the open expand view, for structured
+    /// cancellation and a clean join at teardown.
+    blob_load: Option<BlobReadWork>,
 }
 
-/// A terminal-only request that needs the host; the loop runs it after the
-/// input pass.
+/// A terminal-only request that needs the host or agent; the loop runs it
+/// after the input pass.
 #[derive(Debug)]
 enum FrontRequest {
     /// Sign in to a provider.
@@ -89,6 +125,9 @@ enum FrontRequest {
     Logout(Box<str>),
     /// Remove every credential after the confirmation.
     LogoutAll,
+    /// Start the expand view's blob reads on a worker: the `Weak` sink dies
+    /// with the view, so closing the card cancels every remaining read.
+    LoadBlobs(Weak<Mutex<HashMap<BlobId, BlobRead>>>),
 }
 
 struct CommandContext<H, M> {
@@ -176,10 +215,10 @@ impl Session {
         }
     }
 
-    /// Ctrl+C: stop a running sign-in, close a finished overlay, picker, or
-    /// the key help, copy the fullscreen transcript selection, else interrupt
-    /// the turn.
-    fn interrupt_or_dismiss(&mut self, transcript: &Transcript) {
+    /// Ctrl+C: stop a running sign-in, close a finished overlay, picker, expand
+    /// view, or the key help, copy the fullscreen transcript selection, else
+    /// interrupt the turn.
+    fn interrupt_or_dismiss(&mut self, live: &mut Live, transcript: &Transcript) {
         if let Some(signin) = self.signin.as_mut() {
             if signin.is_running() {
                 signin.cancel();
@@ -190,6 +229,8 @@ impl Session {
             self.picker = None;
         } else if self.help.is_some() {
             self.help = None;
+        } else if live.close_expand() {
+            // The expand view owns input while open; Ctrl+C only closes it.
         } else if let Some(selection) = self.viewport.selected_text(transcript) {
             self.pending_copies.push(selection.into_boxed_str());
         } else {
@@ -301,6 +342,30 @@ impl Drop for InflightRun {
     }
 }
 
+/// One blob read call's worst-case wait; a wedged remote answers the expand
+/// view with its timeout, never with silence.
+const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The worker reading a card's `TextBlob` parts off the loop thread.
+/// Dropping it abandons the wait; the join is taken only when the worker
+/// already finished, so a slow remote read never stalls the loop.
+#[derive(Debug)]
+struct BlobReadWork {
+    abandon: Arc<tokio::sync::Notify>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for BlobReadWork {
+    fn drop(&mut self) {
+        self.abandon.notify_one();
+        if let Some(worker) = self.worker.take()
+            && worker.is_finished()
+        {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// Runs one `Run` command on its own thread. The thread blocks on the same
 /// runtime handle the loop uses for every other host call, and gives up the
 /// wait when the returned guard is dropped.
@@ -334,6 +399,88 @@ fn start_run<A: TuiAgent>(
         abandon,
         worker: Some(worker),
     })
+}
+
+/// Reads each `TextBlob` the expanded card names on its own thread, one read
+/// at a time and each under [`BLOB_READ_TIMEOUT`]. The sink is a `Weak`: when
+/// the view closes, upgrades fail and the worker exits; `abandon` also cuts
+/// an in-flight read on teardown. Every blob reads at most once — no per
+/// frame refetch.
+fn start_blob_load<A: TuiAgent>(
+    runtime: &tokio::runtime::Handle,
+    agent: &A,
+    sink: &Weak<Mutex<HashMap<BlobId, BlobRead>>>,
+) -> BlobReadWork {
+    let abandon = Arc::new(tokio::sync::Notify::new());
+    let runtime = runtime.clone();
+    let agent = agent.clone();
+    let weak = sink.clone();
+    let abandoned = Arc::clone(&abandon);
+    let worker = std::thread::Builder::new()
+        .name("dal-tui-blob-read".to_owned())
+        .spawn(move || {
+            let Some(sink) = weak.upgrade() else {
+                return;
+            };
+            let ids: Vec<BlobId> = sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys()
+                .copied()
+                .collect();
+            drop(sink);
+            for id in ids {
+                let read = runtime.block_on(async {
+                    let read =
+                        std::pin::pin!(tokio::time::timeout(BLOB_READ_TIMEOUT, agent.blob(id),));
+                    let given_up = std::pin::pin!(abandoned.notified());
+                    match futures::future::select(read, given_up).await {
+                        futures::future::Either::Left((outcome, _)) => Some(outcome),
+                        futures::future::Either::Right(((), _)) => None,
+                    }
+                });
+                let Some(outcome) = read else {
+                    return;
+                };
+                let write = match outcome {
+                    Ok(Ok(bytes)) => {
+                        BlobRead::Text(Arc::from(String::from_utf8_lossy(&bytes).as_ref()))
+                    }
+                    Ok(Err(error)) => BlobRead::Failed(Arc::from(error.to_string().as_str())),
+                    Err(_) => BlobRead::Failed(Arc::from("the blob read timed out")),
+                };
+                let Some(sink) = weak.upgrade() else {
+                    return;
+                };
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id, write);
+            }
+        });
+    match worker {
+        Ok(worker) => BlobReadWork {
+            abandon,
+            worker: Some(worker),
+        },
+        // No worker: resolve every pending slot so the view renders the
+        // failure instead of reading forever.
+        Err(error) => {
+            if let Some(sink) = sink.upgrade() {
+                let mut slots = sink
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let reason: Arc<str> =
+                    Arc::from(format!("the blob reader failed to start: {error}").as_str());
+                for slot in slots.values_mut() {
+                    *slot = BlobRead::Failed(Arc::clone(&reason));
+                }
+            }
+            BlobReadWork {
+                abandon,
+                worker: None,
+            }
+        }
+    }
 }
 
 pub(super) fn run<H, M, S>(
@@ -713,6 +860,9 @@ where
                 &mut surfaces.session,
                 &mut surfaces.dialog,
                 &surfaces.transcript,
+                &mut surfaces.live,
+                &surfaces.view.entries.items,
+                surfaces.diagram_settings,
                 event,
                 probe.kitty_keyboard,
                 opts.screen,
@@ -720,7 +870,12 @@ where
         }
         surfaces.flush_answers(opts, agent);
         surfaces.submit_commands(opts, agent, &mut model_source)?;
-        surfaces.run_front(opts, &host);
+        surfaces.run_front(opts, &host, agent);
+        // A closed expand view drops its sink; the read worker then has no
+        // reason to exist and its guard is released here.
+        if surfaces.live.expanded().is_none() {
+            surfaces.session.blob_load = None;
+        }
         surfaces.poll_signin(opts, io, &mut model_source);
         poll_model_retry(&mut surfaces.session, &mut model_source);
         surfaces.write_copies(io);
@@ -1033,16 +1188,18 @@ impl Surfaces {
                 self.dialog.opened(request.clone());
                 self.view.open.push(request.clone());
             }
-            UpdateKind::RequestResolved { id, by, .. } => {
+            UpdateKind::RequestResolved {
+                id,
+                answer,
+                by,
+                cause,
+            } => {
+                // Only a dialog this client saw (open now, or answered here
+                // before a snapshot dropped it) announces the outcome; queued
+                // requests the user never saw stay silent.
                 if let Some(title) = self.dialog.resolved(&id.to_string()) {
-                    self.live.notice(crate::copy::render(
-                        crate::copy::ids::REQUEST_RESOLVED_BY,
-                        &[
-                            ("client", by.as_str()),
-                            ("title", &crate::width::escape(&title)),
-                        ],
-                        1,
-                    ));
+                    self.live
+                        .notice(resolution_notice(*cause, by, answer, &title));
                 }
                 self.view.open.retain(|request| request.id != *id);
             }
@@ -1249,8 +1406,8 @@ impl Surfaces {
             .commit(&format!("command-{}", self.session.command_seq), &rows);
     }
 
-    /// Runs the host-backed requests the input pass queued.
-    fn run_front<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H) {
+    /// Runs the host- and agent-backed requests the input pass queued.
+    fn run_front<H: TuiHost, A: TuiAgent>(&mut self, opts: &TuiOptions, host: &H, agent: &A) {
         for request in std::mem::take(&mut self.session.front) {
             match request {
                 FrontRequest::Login(provider) => self.begin_login(opts, host, &provider),
@@ -1266,6 +1423,9 @@ impl Surfaces {
                 FrontRequest::LogoutPicker(filter) => self.logout_picker(opts, host, &filter),
                 FrontRequest::Logout(provider) => self.logout(opts, host, Some(&provider)),
                 FrontRequest::LogoutAll => self.logout(opts, host, None),
+                FrontRequest::LoadBlobs(sink) => {
+                    self.session.blob_load = Some(start_blob_load(&opts.rt, agent, &sink));
+                }
             }
         }
     }
@@ -1411,28 +1571,36 @@ impl Surfaces {
     }
 
     /// Polls the open-request page while the dialog awaits resolution.
+    ///
+    /// The poll is the fallback for a lost `RequestResolved` update, so it
+    /// starts one full interval after the answer was sent: the pump gets the
+    /// first chance to deliver the resolution before a snapshot can drop the
+    /// answered dialog.
     fn poll_resolution<A: TuiAgent>(
         &mut self,
         opts: &TuiOptions,
         agent: &A,
         resolution_poll: &mut Instant,
     ) {
-        if self.dialog.awaiting_resolution() {
-            let now = Instant::now();
-            if now >= *resolution_poll {
-                *resolution_poll = now + RESOLUTION_POLL_INTERVAL;
-                let view_request = snapshot_page();
-                let refreshed = opts.rt.block_on(async {
-                    tokio::time::timeout(RESOLUTION_POLL_INTERVAL, agent.view(view_request)).await
-                });
-                if let Ok(Ok(fresh)) = refreshed {
-                    self.dialog.resync(fresh.open.clone());
-                    self.session.active_turn = match fresh.turn {
-                        TurnState::Running { turn } | TurnState::Settling { turn } => Some(turn),
-                        _ => None,
-                    };
-                }
-            }
+        let now = Instant::now();
+        if !self.dialog.awaiting_resolution() {
+            *resolution_poll = now + RESOLUTION_POLL_INTERVAL;
+            return;
+        }
+        if now < *resolution_poll {
+            return;
+        }
+        *resolution_poll = now + RESOLUTION_POLL_INTERVAL;
+        let view_request = snapshot_page();
+        let refreshed = opts.rt.block_on(async {
+            tokio::time::timeout(RESOLUTION_POLL_INTERVAL, agent.view(view_request)).await
+        });
+        if let Ok(Ok(fresh)) = refreshed {
+            self.dialog.resync(fresh.open);
+            self.session.active_turn = match fresh.turn {
+                TurnState::Running { turn } | TurnState::Settling { turn } => Some(turn),
+                _ => None,
+            };
         }
     }
 
@@ -1595,6 +1763,9 @@ fn probe_terminal(
                 &mut surfaces.session,
                 &mut surfaces.dialog,
                 &surfaces.transcript,
+                &mut surfaces.live,
+                &surfaces.view.entries.items,
+                surfaces.diagram_settings,
                 &parser.finish(),
                 opts.screen,
             );
@@ -1622,6 +1793,9 @@ fn probe_terminal(
                 &mut surfaces.session,
                 &mut surfaces.dialog,
                 &surfaces.transcript,
+                &mut surfaces.live,
+                &surfaces.view.entries.items,
+                surfaces.diagram_settings,
                 &keys,
                 opts.screen,
             );
@@ -1635,6 +1809,9 @@ fn probe_terminal(
                 &mut surfaces.session,
                 &mut surfaces.dialog,
                 &surfaces.transcript,
+                &mut surfaces.live,
+                &surfaces.view.entries.items,
+                surfaces.diagram_settings,
                 &held,
                 opts.screen,
             );
@@ -1651,6 +1828,9 @@ fn apply_type_ahead(
     session: &mut Session,
     dialog: &mut DialogUi,
     transcript: &Transcript,
+    live: &mut Live,
+    entries: &[dal_core::EntryView],
+    diagrams: crate::diagram::DiagramSettings,
     bytes: &[u8],
     screen: crate::Screen,
 ) {
@@ -1658,13 +1838,15 @@ fn apply_type_ahead(
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
-        apply_event(session, dialog, transcript, event, false, screen);
+        apply_event(
+            session, dialog, transcript, live, entries, diagrams, event, false, screen,
+        );
     }
 }
 
 /// Paste bytes land in the surface that owns the input; an overlay with no
 /// text field consumes them so nothing reaches the composer behind it.
-fn apply_paste(session: &mut Session, dialog: &mut DialogUi, bytes: &[u8]) {
+fn apply_paste(session: &mut Session, dialog: &mut DialogUi, live: &Live, bytes: &[u8]) {
     if dialog.is_open() {
         dialog.paste(bytes);
         return;
@@ -1673,7 +1855,14 @@ fn apply_paste(session: &mut Session, dialog: &mut DialogUi, bytes: &[u8]) {
         signin.paste(&String::from_utf8_lossy(bytes));
         return;
     }
+    if let Some(picker) = session.picker.as_mut() {
+        // The picker's one-line filter is a text field: paste filters like
+        // typed characters and never submits.
+        picker.paste(&String::from_utf8_lossy(bytes));
+        return;
+    }
     let composer_owns_input = !session.overlay
+        && live.expanded().is_none()
         && session.dialog.is_none()
         && session.picker.is_none()
         && session.help.is_none();
@@ -1860,6 +2049,9 @@ fn apply_event(
     session: &mut Session,
     dialog: &mut DialogUi,
     transcript: &Transcript,
+    live: &mut Live,
+    entries: &[dal_core::EntryView],
+    diagrams: crate::diagram::DiagramSettings,
     event: InputEvent,
     kitty: bool,
     screen: crate::Screen,
@@ -1869,12 +2061,26 @@ fn apply_event(
     let InputEvent::Key(key) = event else {
         if let InputEvent::Paste(bytes) = event {
             session.viewport.clear_selection();
-            apply_paste(session, dialog, &bytes);
+            apply_paste(session, dialog, live, &bytes);
         }
         return;
     };
+    // A modal surface arriving over the expand view closes it first so the
+    // overlay rows never have two owners — and before Ctrl+C below, so the
+    // view the user cannot see never swallows the interrupt its row order
+    // already gave to the modal.
+    if live.expanded().is_some()
+        && (dialog.is_open()
+            || session.dialog.is_some()
+            || session.signin.is_some()
+            || session.picker.is_some()
+            || session.help.is_some()
+            || session.overlay)
+    {
+        live.close_expand();
+    }
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-        session.interrupt_or_dismiss(transcript);
+        session.interrupt_or_dismiss(live, transcript);
         return;
     }
     if let Some(ExitDialog::DiscardDraft) = session.dialog {
@@ -1909,6 +2115,10 @@ fn apply_event(
         apply_overlay_key(session, transcript, key, kitty);
         return;
     }
+    if live.expanded().is_some() {
+        apply_expand_key(live, key, kitty);
+        return;
+    }
     let viewport = screen == crate::Screen::Fullscreen;
     if viewport && session.viewport.search_text().is_some() {
         apply_search_key(session, transcript, key);
@@ -1920,13 +2130,47 @@ fn apply_event(
     {
         return;
     }
-    apply_composer_action(session, transcript, key, action);
+    apply_composer_action(session, transcript, live, entries, diagrams, key, action);
     session.update_popup();
+}
+
+/// Expand-view keys: the view owns the input. Esc, q, or the same Ctrl+O that
+/// opened it collapse it; the transcript page keys scroll the card's rows and
+/// Up/Down scroll one row; everything else is swallowed so no typed text
+/// reaches the composer behind the view.
+fn apply_expand_key(live: &mut Live, key: crate::keys::Key, kitty: bool) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _)
+        | (KeyCode::Char('q'), KeyModifiers::NONE)
+        | (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            live.close_expand();
+            return;
+        }
+        _ => {}
+    }
+    let Some(view) = live.expanded() else {
+        return;
+    };
+    match (key.code, key.modifiers) {
+        (KeyCode::Up, KeyModifiers::NONE) => view.scroll_up(),
+        (KeyCode::Down, KeyModifiers::NONE) => view.scroll_down(),
+        _ => match resolve_in(key, kitty, &[Owner::Transcript]) {
+            Some(Action::TranscriptPageUp) => view.page_up(),
+            Some(Action::TranscriptPageDown) => view.page_down(),
+            Some(Action::TranscriptJumpLatest) => view.jump_latest(),
+            _ => {}
+        },
+    }
 }
 
 fn apply_composer_action(
     session: &mut Session,
     transcript: &Transcript,
+    live: &mut Live,
+    entries: &[dal_core::EntryView],
+    diagrams: crate::diagram::DiagramSettings,
     key: crate::keys::Key,
     action: Option<Action>,
 ) {
@@ -1940,8 +2184,8 @@ fn apply_composer_action(
         }
         Some(Action::Submit) => {
             session.viewport.clear_selection();
-            let line = session.composer.text().to_owned();
-            session.submit_line(&line);
+            let submitted = session.composer.text().to_owned();
+            session.submit_line(&submitted);
         }
         Some(Action::CloseOverlayOrInterrupt | Action::Interrupt) => session.interrupt(),
         Some(Action::CopySelection) => {
@@ -1963,6 +2207,23 @@ fn apply_composer_action(
             }
         }
         Some(Action::Help) => session.help = Some(HelpUi::default()),
+        Some(Action::ExpandCollapse) => {
+            let opened = entries.iter().rev().find_map(|entry| {
+                crate::render::expanded_card(entry, diagrams).map(|card| {
+                    let blob_ids = crate::render::expanded_blob_ids(entry, card);
+                    (card, blob_ids)
+                })
+            });
+            if let Some((card, blob_ids)) = opened {
+                let needs_load = !blob_ids.is_empty();
+                live.open_expand(card, blob_ids);
+                if needs_load && let Some(view) = live.expanded() {
+                    session
+                        .front
+                        .push(FrontRequest::LoadBlobs(view.blob_sink()));
+                }
+            }
+        }
         Some(action) if apply_edit_action(&mut session.composer, action) => {
             session.viewport.clear_selection();
         }
@@ -2107,7 +2368,54 @@ mod tests {
 
     use super::{ExitDialog, Session, apply_event, poll_model_retry};
 
-    /// Applies one key to a fresh dialog and transcript on the inline screen.
+    /// A resolution that names `core` and the default deny answer: the shape
+    /// every deadline resolution has, so no cause can be read off it.
+    #[test]
+    fn resolution_notice_follows_the_cause_and_never_guesses_one() {
+        use dal_core::{Answer, ClientId, ResolutionCause};
+
+        let notice = |cause| {
+            super::resolution_notice(cause, &ClientId::new("core"), &Answer::Decline, "ship it")
+        };
+        let default_word = crate::copy::answer_word(&Answer::Decline);
+        let causes = [
+            Some(ResolutionCause::Answered),
+            Some(ResolutionCause::TimedOut),
+            Some(ResolutionCause::Cancelled),
+            Some(ResolutionCause::Withdrawn),
+            Some(ResolutionCause::NoController),
+            None,
+        ];
+        let notices: Vec<String> = causes.into_iter().map(notice).collect();
+
+        let distinct: std::collections::HashSet<&String> = notices.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            causes.len(),
+            "every cause, and a missing one, reads differently: {notices:?}"
+        );
+        assert!(notices.iter().all(|text| text.contains("ship it")));
+        for cause in [ResolutionCause::TimedOut, ResolutionCause::NoController] {
+            assert!(
+                notice(Some(cause)).contains(&default_word),
+                "{cause:?} names the default dal used"
+            );
+        }
+        for cause in [ResolutionCause::Cancelled, ResolutionCause::Withdrawn] {
+            assert!(
+                !notice(Some(cause)).contains(&default_word),
+                "{cause:?} answered nothing, so it names no answer"
+            );
+        }
+        let legacy = notice(None);
+        assert!(
+            notices[..5].iter().all(|text| *text != legacy),
+            "a missing cause must not borrow a known cause's wording: {legacy}"
+        );
+    }
+
+    /// Applies one key to a fresh dialog, live region, and transcript on the
+    /// inline screen.
     fn apply_key(session: &mut Session, key: crate::keys::Key) {
         use crate::keys::InputEvent;
 
@@ -2115,6 +2423,9 @@ mod tests {
             session,
             &mut crate::dialog::DialogUi::default(),
             &crate::transcript::Transcript::default(),
+            &mut crate::live::Live::default(),
+            &[],
+            crate::diagram::DiagramSettings::default(),
             InputEvent::Key(key),
             false,
             crate::Screen::Inline,
@@ -2388,6 +2699,9 @@ mod tests {
             &mut session,
             &mut crate::dialog::DialogUi::default(),
             &crate::transcript::Transcript::default(),
+            &mut crate::live::Live::default(),
+            &[],
+            crate::diagram::DiagramSettings::default(),
             InputEvent::Paste(b"ignored paste".to_vec()),
             false,
             crate::Screen::Inline,
@@ -2660,6 +2974,9 @@ mod tests {
                 session,
                 dialog,
                 transcript,
+                &mut crate::live::Live::default(),
+                &[],
+                crate::diagram::DiagramSettings::default(),
                 InputEvent::Key(key),
                 false,
                 crate::Screen::Fullscreen,
@@ -2735,6 +3052,9 @@ mod tests {
                     &mut session,
                     &mut dialog,
                     &transcript,
+                    &mut crate::live::Live::default(),
+                    &[],
+                    crate::diagram::DiagramSettings::default(),
                     InputEvent::Key(shift(code)),
                     false,
                     crate::Screen::Inline,
@@ -2753,6 +3073,9 @@ mod tests {
                 &mut session,
                 &mut dialog,
                 &transcript,
+                &mut crate::live::Live::default(),
+                &[],
+                crate::diagram::DiagramSettings::default(),
                 InputEvent::Key(control_c()),
                 false,
                 crate::Screen::Inline,

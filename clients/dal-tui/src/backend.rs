@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dal_agent::login::{LoginIo, LoginOutcome, Method, StoredCredential};
 use dal_agent::{Agent, Delivery, Host, SessionRef, Subscription};
 use dal_core::{
-    Answer, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
+    Answer, BlobId, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
     SessionId, Update, View,
 };
 
@@ -50,6 +50,16 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     async fn submit(&self, command: Command) -> Result<Reply, TuiError>;
     /// Resolves exactly one open request.
     async fn answer(&self, id: RequestId, answer: Answer) -> Result<(), TuiError>;
+    /// Reads one stored session blob, the same read `Agent::blob` performs.
+    ///
+    /// The default denies: a client without a blob channel (a test agent, a
+    /// backend that never named one) reports the gap instead of the caller
+    /// reading local paths a remote workspace does not share.
+    async fn blob(&self, _id: BlobId) -> Result<Arc<[u8]>, TuiError> {
+        Err(TuiError::Terminal(
+            "dal-tui: this host cannot read session blobs".to_owned(),
+        ))
+    }
     /// Returns busy extension status rows already published at attach time.
     fn ext_status(&self) -> Vec<ExtStatus>;
     /// Whether the session workspace lives on this machine's disk. A remote
@@ -140,6 +150,10 @@ impl TuiAgent for Agent {
 
     async fn answer(&self, id: RequestId, answer: Answer) -> Result<(), TuiError> {
         Ok(self.answer(id, answer).await?)
+    }
+
+    async fn blob(&self, id: BlobId) -> Result<Arc<[u8]>, TuiError> {
+        Ok(self.blob(id).await?.into())
     }
 
     fn ext_status(&self) -> Vec<ExtStatus> {
