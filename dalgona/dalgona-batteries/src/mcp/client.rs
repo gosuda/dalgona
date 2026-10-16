@@ -909,7 +909,7 @@ impl Client {
     ) -> Result<McpResponse, McpError> {
         let mut responses: Option<String> = None;
         let mut request_state: Option<String> = None;
-        for _ in 0..=MRTR_MAX {
+        for attempt in 0..=MRTR_MAX {
             let params = call_params(
                 &req.tool,
                 &req.arguments,
@@ -933,7 +933,13 @@ impl Client {
                 .get("resultType")
                 .and_then(JsonValueTrait::as_str)
                 .unwrap_or("complete");
-            if result_type == "input_required" {
+            let input_required = result_type == "input_required";
+            // The reply of the last permitted request has no retry left to
+            // carry answers, so it is terminal before anything is asked.
+            if input_required && attempt == MRTR_MAX {
+                break;
+            }
+            if input_required {
                 responses = Some(answer_inputs(&result, session, who).await?);
                 request_state = result
                     .get("requestState")
@@ -972,7 +978,7 @@ impl Client {
             return "no MCP servers in this session.".into();
         }
         let instances = session.instances.lock().await;
-        let mut lines = Vec::new();
+        let mut rows = Vec::new();
         for (key, decl) in declarations.iter() {
             let (state, count, grant) = if let Some(instance) = instances.get(key) {
                 let (state, count) = instance.status().await;
@@ -989,16 +995,19 @@ impl Client {
                 McpServerDecl::Stdio { .. } => "stdio",
                 McpServerDecl::Http { .. } => "http",
             };
-            lines.push(format!(
-                "{} | {} | {} | {} tools | {grant}",
-                key.display(),
-                transport,
-                state,
-                count
-            ));
+            let display = key.display();
+            let row = format!("- {display} | {transport} | {state} | {count} tools | {grant}");
+            rows.push((display, row));
         }
-        lines.sort();
-        lines.join("\n")
+        // Rows order by display key byte order; keys are unique, so the key
+        // alone decides and the row text never does.
+        rows.sort();
+        let mut body = String::from("MCP servers in this session:");
+        for (_, row) in rows {
+            body.push('\n');
+            body.push_str(&row);
+        }
+        body
     }
 }
 
@@ -1478,7 +1487,11 @@ pub(crate) enum StreamEvent {
 /// progress token `progress_token`. A matching progress notification and
 /// the correlated reply are the only events that act; every other message
 /// — unknown notification methods, foreign progress tokens, replies to
-/// other ids — is skipped as unknown traffic.
+/// other ids, and server-initiated requests — is skipped as unknown traffic.
+///
+/// A reply carries no `method`. A server request such as the legacy
+/// `elicitation/create` has its own id namespace, so a request whose id
+/// equals this call's id is still not this call's reply.
 pub(crate) fn classify_stream_event(value: &Value, id: u64, progress_token: &str) -> StreamEvent {
     let progress =
         value.get("method").and_then(JsonValueTrait::as_str) == Some("notifications/progress");
@@ -1490,7 +1503,8 @@ pub(crate) fn classify_stream_event(value: &Value, id: u64, progress_token: &str
     if progress && token == Some(progress_token) {
         return StreamEvent::Progress;
     }
-    if value.get("id").and_then(JsonValueTrait::as_u64) == Some(id) {
+    if value.get("method").is_none() && value.get("id").and_then(JsonValueTrait::as_u64) == Some(id)
+    {
         return StreamEvent::Reply;
     }
     StreamEvent::Ignored

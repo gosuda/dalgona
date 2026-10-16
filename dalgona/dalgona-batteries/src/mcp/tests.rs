@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! MCP battery behavior tests through declared feeds, lifecycle hooks, and tool calls.
 
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
-
-#[cfg(unix)]
-use std::path::Path;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 #[cfg(unix)]
 use crate::mcp::STDERR_RING;
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig,
+    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
     tools::{decode_tool_page, fold_tool_name},
@@ -17,18 +20,18 @@ use crate::mcp::{
 #[cfg(unix)]
 use dal_agent::ext::{ArgError, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::{
-    Agent, Delivery, Env, Host, Product, SessionRef,
+    Agent, AnswerScope, Delivery, Env, Host, Product, SessionRef,
     ext::{BoxFuture, ExtensionBuilder, HookCx, HookError, ObserveHook},
 };
 #[cfg(unix)]
 use dal_core::ext::McpLaunch;
 use dal_core::{
     Answer, ClientId, Command, Config, ConfigProduct, Expect, JournalPart, Output, PageReq, Part,
-    Question, Reply, ServiceSet, SessionId, UpdateKind, Workspace,
+    Question, RawJson, Reply, ServiceSet, SessionId, UpdateKind, Workspace,
     ext::{McpBlock, McpEndpoint, McpServerDecl, Name, SkillRecord},
 };
 #[cfg(unix)]
-use dal_core::{McpRequest, ModelInfo, RawJson, ToolClass, ToolSpec, Visibility};
+use dal_core::{McpRequest, ModelInfo, ToolClass, ToolSpec, Visibility};
 use reqwest::Url;
 use sonic_rs::JsonValueTrait;
 use tokio::{
@@ -176,6 +179,56 @@ impl Tool for InjectProbe {
     }
 }
 
+/// How the scripted front end answers a server-originated form question
+/// (an MCP elicitation reaching the ask door as `Select` or `Text`).
+#[derive(Clone, Copy)]
+enum AskMode {
+    /// Answers with a value: the first offered choice, or fixed text.
+    Accept,
+    /// Declines the question.
+    Decline,
+    /// No ask-capable front end is attached, so the real `ask` service has
+    /// no answerer. A question that opened anyway would be accepted, so an
+    /// accepted answer reaching the server proves the door was not closed.
+    Unavailable,
+}
+
+impl AskMode {
+    fn answer(self, question: &Question) -> Answer {
+        match (self, question) {
+            (Self::Decline, _) => Answer::Decline,
+            (Self::Accept | Self::Unavailable, Question::Select { options, .. }) => {
+                let label = options.first().expect("a select offers a choice");
+                let json = sonic_rs::to_string(&*label.label).expect("encode choice");
+                Answer::Value(RawJson::parse(&json).expect("raw choice answer"))
+            }
+            (Self::Accept | Self::Unavailable, _) => {
+                Answer::Value(RawJson::parse("\"us-west1\"").expect("raw text"))
+            }
+        }
+    }
+}
+
+/// The hermetic process environment one scripted host run owns.
+fn hosted_env(workspace: &Path) -> Env {
+    Env {
+        vars: BTreeMap::from([
+            ("OPENAI_API_KEY".into(), "sk-test".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "HOME".into(),
+                std::env::temp_dir().display().to_string().into(),
+            ),
+            (
+                "TMPDIR".into(),
+                std::env::temp_dir().display().to_string().into(),
+            ),
+        ]),
+        cwd: workspace.to_path_buf(),
+        sandbox_helper: None,
+    }
+}
+
 struct HostedFixture {
     host: Option<Host>,
     agent: Agent,
@@ -183,6 +236,9 @@ struct HostedFixture {
     grant_answer: Answer,
     notices: Vec<String>,
     grants_answered: std::sync::Mutex<usize>,
+    approvals_answered: std::sync::Mutex<usize>,
+    asked: std::sync::Mutex<Vec<Question>>,
+    ask_mode: AskMode,
     cleanup: Vec<PathBuf>,
 }
 
@@ -270,22 +326,7 @@ impl HostedFixture {
             extensions: vec![skill, mcp],
             bundled: Vec::new(),
         };
-        let env = Env {
-            vars: BTreeMap::from([
-                ("OPENAI_API_KEY".into(), "sk-test".into()),
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                (
-                    "HOME".into(),
-                    std::env::temp_dir().display().to_string().into(),
-                ),
-                (
-                    "TMPDIR".into(),
-                    std::env::temp_dir().display().to_string().into(),
-                ),
-            ]),
-            cwd: workspace.clone(),
-            sandbox_helper: None,
-        };
+        let env = hosted_env(&workspace);
         let host = Host::start(product, config, env)
             .await
             .expect("host starts");
@@ -312,6 +353,9 @@ impl HostedFixture {
             grant_answer,
             notices: Vec::new(),
             grants_answered: std::sync::Mutex::new(0),
+            approvals_answered: std::sync::Mutex::new(0),
+            asked: std::sync::Mutex::new(Vec::new()),
+            ask_mode: AskMode::Decline,
             cleanup: vec![data, workspace],
         }
     }
@@ -340,7 +384,17 @@ impl HostedFixture {
                 *self.grants_answered.lock().expect("grant count") += 1;
                 self.grant_answer.clone()
             }
-            Question::Approval { .. } => Answer::ApproveForSession,
+            Question::Approval { .. } => {
+                *self.approvals_answered.lock().expect("approval count") += 1;
+                Answer::ApproveForSession
+            }
+            question @ (Question::Select { .. } | Question::Text { .. }) => {
+                self.asked
+                    .lock()
+                    .expect("asked questions")
+                    .push(question.clone());
+                self.ask_mode.answer(question)
+            }
             _ => Answer::Decline,
         };
         self.agent
@@ -348,6 +402,23 @@ impl HostedFixture {
             .await
             .expect("scripted frontend answer");
         true
+    }
+
+    /// Replaces the subscription with a live one that resolves approvals but
+    /// cannot answer extension questions, so the real `ask` service finds no
+    /// answerer for the server's form questions. Grants are asked through
+    /// the same door, so call this only after the session grants are settled.
+    fn withdraw_ask_answerer(&mut self) {
+        self.subscription = self
+            .agent
+            .subscribe_scoped(
+                None,
+                AnswerScope {
+                    approval: true,
+                    ask: false,
+                },
+            )
+            .expect("approval-only subscription");
     }
 
     async fn turn_ended(&mut self) {
@@ -786,6 +857,23 @@ done
 enum HttpScenario {
     PaginatedCache,
     PageCap,
+    /// A modern server whose `lookup` tool answers `input_required` for
+    /// `rounds` retries before it completes. The round is read back from the
+    /// `requestState` the client echoes, so the server keeps no state of its
+    /// own.
+    InputRequired {
+        rounds: usize,
+        form: Form,
+    },
+}
+
+/// The form an input-required reply asks the user to fill.
+#[derive(Clone, Copy)]
+enum Form {
+    /// One free-text property.
+    Text,
+    /// A free-text property beside an enum property.
+    TextAndChoice,
 }
 
 struct HttpRequest {
@@ -872,7 +960,7 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
     match request.method.as_str() {
         "server/discover" => match scenario {
             HttpScenario::PaginatedCache => rpc_error(id, -32601, "unsupported method"),
-            HttpScenario::PageCap => rpc_result(id, "{}"),
+            HttpScenario::PageCap | HttpScenario::InputRequired { .. } => rpc_result(id, "{}"),
         },
         "initialize" | "notifications/initialized" => rpc_result(id, "{}"),
         "tools/list" => match scenario {
@@ -897,8 +985,15 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
                 id,
                 r#"{"tools":[{"name":"partial","description":"partial","inputSchema":{"type":"object","properties":{}}}],"nextCursor":"again","ttlMs":0}"#,
             ),
+            HttpScenario::InputRequired { .. } => rpc_result(
+                id,
+                r#"{"tools":[{"name":"lookup","description":"lookup","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}],"nextCursor":null,"ttlMs":600000}"#,
+            ),
         },
         "tools/call" => {
+            if let HttpScenario::InputRequired { rounds, form } = scenario {
+                return input_required_reply(id, &value, rounds, form);
+            }
             let tool = value
                 .get("params")
                 .and_then(|params| params.get("name"))
@@ -915,6 +1010,43 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
         }
         _ => rpc_error(id, -32601, "unsupported method"),
     }
+}
+
+const INPUT_REQUIRED_RESULT: &str = r#"{"resultType":"input_required","inputRequests":{"form":{"method":"elicitation/create","params":{"message":"Need details","requestedSchema":{"type":"object","properties":@PROPERTIES@}}}},"requestState":"@STATE@"}"#;
+
+/// One `tools/call` reply of the input-required server. A request whose
+/// echoed `requestState` names a round below `rounds` is answered with
+/// another `input_required` result carrying the next state; any later
+/// request completes with the `inputResponses` it received, so a retry that
+/// dropped or rewrote the state restarts the exchange instead of finishing.
+fn input_required_reply(id: u64, request: &sonic_rs::Value, rounds: usize, form: Form) -> String {
+    let params = request.get("params");
+    let round = params
+        .and_then(|params| params.get("requestState"))
+        .and_then(JsonValueTrait::as_str)
+        .and_then(|state| state.strip_prefix("round-"))
+        .and_then(|round| round.parse::<usize>().ok())
+        .unwrap_or(0);
+    if round >= rounds {
+        let answers = params
+            .and_then(|params| params.get("inputResponses"))
+            .and_then(|responses| sonic_rs::to_string(responses).ok())
+            .unwrap_or_else(|| "none".to_owned());
+        let text = sonic_rs::to_string(&format!("answered:{answers}")).expect("encode answers");
+        let result =
+            format!("{{\"content\":[{{\"type\":\"text\",\"text\":{text}}}],\"isError\":false}}");
+        return rpc_result(id, &result);
+    }
+    let properties = match form {
+        Form::TextAndChoice => {
+            r#"{"region":{"type":"string"},"tier":{"type":"string","enum":["basic","pro"]}}"#
+        }
+        Form::Text => r#"{"region":{"type":"string"}}"#,
+    };
+    let result = INPUT_REQUIRED_RESULT
+        .replace("@PROPERTIES@", properties)
+        .replace("@STATE@", &format!("round-{}", round + 1));
+    rpc_result(id, &result)
 }
 
 #[expect(
@@ -1107,6 +1239,269 @@ async fn loopback_http_list_page_limit_stops_publishing_partial_tools() {
         "incomplete pages stay unpublished in the real host: {status}"
     );
     fixture.shutdown().await;
+}
+
+/// What the real client, host, grants, and approval ladder did against the
+/// loopback input-required server for one mapped `lookup` call.
+struct InputRequiredRun {
+    requests: Vec<HttpRequest>,
+    asked: Vec<Question>,
+    result: (bool, String),
+    grants_during_call: usize,
+    approvals_during_call: usize,
+}
+
+/// Drives one declared HTTP server through the entry call, then one mapped
+/// `lookup` call whose replies are `input_required` for `rounds` retries.
+/// The loopback server accepts exactly the requests the retry cap allows, so
+/// a client that sent one more would find no listener and fail the call.
+async fn run_input_required(rounds: usize, form: Form, mode: AskMode) -> InputRequiredRun {
+    let retries = rounds.min(usize::try_from(MRTR_MAX).expect("retry cap fits usize"));
+    // Discovery, one listing, the first request, and one request per retry.
+    let expected = 3 + retries;
+    let (declaration, url, server) =
+        start_http_fixture(expected, HttpScenario::InputRequired { rounds, form }).await;
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let lookup = fold_tool_name(SKILL, SERVER, "lookup");
+    let mut fixture = HostedFixture::with_transport(
+        declaration,
+        vec![
+            scripted_tool_step("entry-input", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("lookup-input", &lookup, r#"{"query":"x"}"#),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+        Some(url),
+    )
+    .await;
+    fixture.ask_mode = mode;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    // The grant store asks through the same door as `ask`, so the answerer
+    // leaves only after the session grants are settled by the entry call.
+    if matches!(mode, AskMode::Unavailable) {
+        fixture.withdraw_ask_answerer();
+    }
+    let grants_before = *fixture.grants_answered.lock().expect("grant count");
+    let approvals_before = *fixture.approvals_answered.lock().expect("approval count");
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let grants_after = *fixture.grants_answered.lock().expect("grant count");
+    let approvals_after = *fixture.approvals_answered.lock().expect("approval count");
+    let mut results = fixture.tool_results(&lookup);
+    assert_eq!(results.len(), 1, "the mapped call ends in one result");
+    let result = results.remove(0);
+    let asked = std::mem::take(&mut *fixture.asked.lock().expect("asked questions"));
+    let requests = finish_http_fixture(server).await;
+    fixture.shutdown().await;
+    InputRequiredRun {
+        requests,
+        asked,
+        result,
+        grants_during_call: grants_after - grants_before,
+        approvals_during_call: approvals_after - approvals_before,
+    }
+}
+
+/// The decoded JSON-RPC body of every `tools/call` the server received, in
+/// send order.
+fn tool_calls(requests: &[HttpRequest]) -> Vec<sonic_rs::Value> {
+    requests
+        .iter()
+        .filter(|request| request.method == "tools/call")
+        .map(|request| sonic_rs::from_str(&request.body).expect("tools/call body is JSON"))
+        .collect()
+}
+
+/// Follows `path` through nested JSON objects.
+fn at<'a>(value: &'a sonic_rs::Value, path: &[&str]) -> Option<&'a sonic_rs::Value> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+}
+
+fn request_state(call: &sonic_rs::Value) -> Option<&str> {
+    at(call, &["params", "requestState"]).and_then(JsonValueTrait::as_str)
+}
+
+/// What every input-required exchange keeps, whatever the answers were: the
+/// grant and the approval are settled once before the first request and never
+/// re-raised by a retry, every request takes a new id with its own progress
+/// token, and the original argument bytes never change.
+fn assert_retry_envelope(run: &InputRequiredRun, calls: &[sonic_rs::Value]) {
+    assert_eq!(run.grants_during_call, 0, "a retry never re-asks the grant");
+    assert!(
+        run.approvals_during_call <= 1,
+        "the call is approved once, not once per retry: {}",
+        run.approvals_during_call
+    );
+    let mut ids = Vec::new();
+    for call in calls {
+        let id = at(call, &["id"])
+            .and_then(JsonValueTrait::as_u64)
+            .expect("request id");
+        let token = at(call, &["params", "_meta", "progressToken"])
+            .and_then(JsonValueTrait::as_str)
+            .expect("progress token");
+        assert_eq!(token, format!("t-{id}"), "the token names its own request");
+        ids.push(id);
+    }
+    let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "every retry takes a new id: {ids:?}"
+    );
+    let arguments = |call: &sonic_rs::Value| {
+        sonic_rs::to_string(at(call, &["params", "arguments"]).expect("call arguments"))
+            .expect("encode arguments")
+    };
+    let original = arguments(&calls[0]);
+    for retry in &calls[1..] {
+        assert_eq!(
+            arguments(retry),
+            original,
+            "retries keep the argument bytes"
+        );
+    }
+}
+
+/// Accepted answers: one input-required round maps each form property to
+/// one ask question, and the single retry carries the answers, the server's
+/// `requestState` unchanged, and a new id.
+#[tokio::test]
+async fn input_required_accepted_answers_ride_one_retry() {
+    let run = run_input_required(1, Form::TextAndChoice, AskMode::Accept).await;
+    assert!(
+        !run.result.0,
+        "an accepted exchange completes: {:?}",
+        run.result
+    );
+    let calls = tool_calls(&run.requests);
+    assert_eq!(calls.len(), 2, "one input-required round costs one retry");
+    assert_eq!(request_state(&calls[0]), None);
+    assert!(at(&calls[0], &["params", "inputResponses"]).is_none());
+    assert_eq!(request_state(&calls[1]), Some("round-1"));
+    let answer = at(&calls[1], &["params", "inputResponses", "form"])
+        .expect("answers are keyed by their input request");
+    assert_eq!(
+        at(answer, &["action"]).and_then(JsonValueTrait::as_str),
+        Some("accept")
+    );
+    assert_eq!(
+        at(answer, &["content", "region"]).and_then(JsonValueTrait::as_str),
+        Some("us-west1")
+    );
+    assert_eq!(
+        at(answer, &["content", "tier"]).and_then(JsonValueTrait::as_str),
+        Some("basic")
+    );
+    assert_eq!(run.asked.len(), 2, "one question per form property");
+    let selects = run
+        .asked
+        .iter()
+        .filter_map(|question| match question {
+            Question::Select { options, multi, .. } => {
+                assert!(!*multi, "an enum property is a single choice");
+                Some(
+                    options
+                        .iter()
+                        .map(|choice| choice.label.as_ref())
+                        .collect::<Vec<&str>>(),
+                )
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selects, vec![vec!["basic", "pro"]]);
+    assert_eq!(
+        run.asked
+            .iter()
+            .filter(|question| matches!(question, Question::Text { .. }))
+            .count(),
+        1
+    );
+    assert_retry_envelope(&run, &calls);
+}
+
+/// A declined or unavailable answerer still answers the server, with a
+/// decline and no content, and the exchange continues with one retry.
+fn assert_declined_retry(run: &InputRequiredRun, asks: usize) {
+    assert!(
+        !run.result.0,
+        "a declined exchange still completes: {:?}",
+        run.result
+    );
+    let calls = tool_calls(&run.requests);
+    assert_eq!(calls.len(), 2, "a decline is an answer, not a stop");
+    assert_eq!(run.asked.len(), asks);
+    assert_eq!(request_state(&calls[1]), Some("round-1"));
+    let answer = at(&calls[1], &["params", "inputResponses", "form"])
+        .expect("the decline is keyed by its input request");
+    assert_eq!(
+        at(answer, &["action"]).and_then(JsonValueTrait::as_str),
+        Some("decline")
+    );
+    assert!(
+        at(answer, &["content"]).is_none(),
+        "a decline has no content"
+    );
+    assert_retry_envelope(run, &calls);
+}
+
+/// A front end that declines the first question ends the form there: the
+/// second property is never asked.
+#[tokio::test]
+async fn input_required_declined_answer_retries_with_decline_after_one_question() {
+    let run = run_input_required(1, Form::TextAndChoice, AskMode::Decline).await;
+    assert_declined_retry(&run, 1);
+}
+
+/// With no ask-capable front end attached the real `ask` service has no
+/// answerer: no question opens, even though a front end that would accept is
+/// scripted, and the server still receives a decline.
+#[tokio::test]
+async fn input_required_without_an_ask_answerer_declines_without_asking() {
+    let run = run_input_required(1, Form::TextAndChoice, AskMode::Unavailable).await;
+    assert_declined_retry(&run, 0);
+}
+
+/// A server that never completes is cut at the retry cap: the first request
+/// plus `MRTR_MAX` retries, each retry carrying the state of the reply before
+/// it, then the typed limit error. The terminal reply is not asked, because
+/// no retry remains to carry the answer.
+#[tokio::test]
+async fn input_required_stops_at_the_retry_cap_with_the_typed_error() {
+    let cap = usize::try_from(MRTR_MAX).expect("retry cap fits usize");
+    let run = run_input_required(usize::MAX, Form::Text, AskMode::Accept).await;
+    assert!(
+        run.result.0,
+        "an exchange that never completes fails: {:?}",
+        run.result
+    );
+    assert!(
+        run.result
+            .1
+            .contains(&McpError::InputRequiredLimit.to_string()),
+        "the terminal error is the typed limit: {:?}",
+        run.result
+    );
+    let calls = tool_calls(&run.requests);
+    assert_eq!(calls.len(), cap + 1, "the first request plus {cap} retries");
+    let states = calls
+        .iter()
+        .map(|call| request_state(call).map(str::to_owned))
+        .collect::<Vec<_>>();
+    let expected = std::iter::once(None)
+        .chain((1..=cap).map(|round| Some(format!("round-{round}"))))
+        .collect::<Vec<_>>();
+    assert_eq!(states, expected, "each retry carries the latest state");
+    assert_eq!(
+        run.asked.len(),
+        cap,
+        "only a reply that a retry can answer is asked"
+    );
+    assert_retry_envelope(&run, &calls);
 }
 
 /// This proves public HTTPS authority/port handoff and a TLS attempt only.
@@ -1713,7 +2108,7 @@ mod property {
                 "sampling/createMessage",
                 "ping",
             ]),
-            4_u64..=13,
+            0_u64..=13,
             "[a-z0-9-]{0,8}",
         )
         .prop_map(|(method, id, token)| {
@@ -1724,7 +2119,9 @@ mod property {
     }
 
     /// Unknown notifications and progress with a foreign token
-    /// never satisfy the reply wait; only the exact token resets it.
+    /// never satisfy the reply wait; only the exact token resets it. A
+    /// server-initiated request never does either, even when its id equals
+    /// the call id: the two directions number their requests independently.
     #[test]
     fn stream_events_classify_with_unknown_traffic_ignored() {
         let mut runner = proptest::test_runner::TestRunner::deterministic();
