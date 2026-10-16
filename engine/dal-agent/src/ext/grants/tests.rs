@@ -43,7 +43,7 @@ fn grant_key_is_sorted_exact_and_excludes_ask() {
 use std::sync::Arc;
 use std::time::Duration;
 
-use dal_core::{Answer, ClientId, DenyReason, ServiceSet, Timestamp, TurnId};
+use dal_core::{Answer, ClientId, DenyReason, ResolutionCause, ServiceSet, Timestamp, TurnId};
 use tokio_util::sync::CancellationToken;
 
 use crate::Broker;
@@ -78,7 +78,13 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
 fn open_store(dir: &tempfile::TempDir, timeout: Duration) -> (Arc<GrantStore>, Arc<Broker>) {
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
-        GrantStore::with_runtime(dir.path().to_path_buf(), timeout, broker.clone()).expect("store"),
+        GrantStore::with_runtime_scoped(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            timeout,
+            broker.clone(),
+        )
+        .expect("store"),
     );
     (store, broker)
 }
@@ -161,7 +167,8 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         assert_eq!(mode, 0o600);
     }
     let store2 = Arc::new(
-        GrantStore::with_runtime(
+        GrantStore::with_runtime_scoped(
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Duration::from_secs(30),
             broker.clone(),
@@ -198,7 +205,8 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     let after = std::fs::read_to_string(dir.path().join("grants.toml")).expect("row again");
     assert_eq!(text, after);
     let fresh_dir = tempfile::tempdir().expect("fresh");
-    let fresh = GrantStore::with_runtime(
+    let fresh = GrantStore::with_runtime_scoped(
+        fresh_dir.path().to_path_buf(),
         fresh_dir.path().to_path_buf(),
         Duration::from_secs(30),
         broker.clone(),
@@ -541,8 +549,7 @@ async fn a_turnless_question_survives_turn_ends_and_declines_fail_closed() {
         // A turn ending cancels that turn's requests only; this one has none.
         let ended = broker.resolve_turn(
             TurnId::new(std::num::NonZeroU64::MIN),
-            Answer::Cancel,
-            tui(),
+            ResolutionCause::Cancelled,
         );
         assert_eq!(ended.len(), 0, "a turnless question belongs to no turn");
         answer_and_release(&broker, id, Answer::Decline, tui());
@@ -606,8 +613,13 @@ async fn an_approval_before_the_data_root_exists_is_stored() {
     let data = dir.path().join("fresh").join("data");
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
-        GrantStore::with_runtime(data.clone(), Duration::from_secs(30), broker.clone())
-            .expect("a missing grants file loads empty"),
+        GrantStore::with_runtime_scoped(
+            data.clone(),
+            data.clone(),
+            Duration::from_secs(30),
+            broker.clone(),
+        )
+        .expect("a missing grants file loads empty"),
     );
     let inject = ServiceSet::from_names(["sidecar"]).expect("inject");
     let cancel = CancellationToken::new();
@@ -673,7 +685,8 @@ async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
         dir.path().join("different-workspace"),
         Duration::from_secs(30),
         broker,
-    ).expect("second workspace");
+    )
+    .expect("second workspace");
     moved_workspace.set_answerer(Arc::new(|| false));
     assert!(matches!(
         moved_workspace.ensure(&caller, Service::Net, &cancel).await,
@@ -692,18 +705,34 @@ async fn legacy_and_expired_rows_do_not_authorize_calls() {
         digest: "a".repeat(64).into_boxed_str(),
         workspace: dir.path().to_path_buf(),
     };
-    grants.grant(key.clone(), tui(), Timestamp::UNIX_EPOCH).await.expect("expired record");
-    assert!(!grants.contains(&key).await.expect("expired record never matches"));
+    grants
+        .grant(key.clone(), tui(), Timestamp::UNIX_EPOCH)
+        .await
+        .expect("expired record");
+    assert!(
+        !grants
+            .contains(&key)
+            .await
+            .expect("expired record never matches")
+    );
 
     let legacy = "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"net\"]\nby = \"tui\"\napproved_at = \"2026-01-01T00:00:00Z\"\n";
     std::fs::write(dir.path().join("grants.toml"), legacy).expect("legacy file");
     let (store, _) = open_store(&dir, Duration::from_secs(30));
     store.set_answerer(Arc::new(|| false));
-    let denied = store.ensure(
-        &test_caller(key.services),
-        Service::Net,
-        &CancellationToken::new()
-    ).await;
-    assert!(matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))));
-    assert_eq!(std::fs::read_to_string(dir.path().join("grants.toml")).expect("unchanged"), legacy);
+    let denied = store
+        .ensure(
+            &test_caller(key.services),
+            Service::Net,
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        denied,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("grants.toml")).expect("unchanged"),
+        legacy
+    );
 }
