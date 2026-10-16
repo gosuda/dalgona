@@ -1020,6 +1020,9 @@ fn a_cap_marks_the_cut_inside_the_cap_and_leaves_fitting_text_whole() {
 
 const CLEAN_REPLY: &str = r#"{"verdict":"clean","findings":[],"summary":"ok"}"#;
 
+/// The untracked files pushing `git status --short` past `MAX_DIFF_BYTES`.
+const OVERFLOW_FILES: usize = 2500;
+
 fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEvent> {
     let mut events = vec![dal_core::StreamEvent::Delta {
         channel: dal_core::StreamChannel::Text,
@@ -1450,6 +1453,180 @@ async fn a_real_git_repository_hands_the_reviewer_the_modified_diff()
     Ok(())
 }
 
+/// Private text a stored record can carry. A decode diagnostic that quotes
+/// stored bytes would put it in the tool result.
+const STORED_SENTINEL: &str = "SENTINEL-private-stored-text";
+
+/// The valid first record that every undecodable case follows.
+const STORED_FIRST_RECORD: &str = r#"{"session":"019263a5-7c1a-7000-8000-000000000001","round":1,"verdict":"findings","new_count":1,"findings":[{"path":"src/lib.rs","line":7,"severity":"major","title":"Unchecked index","detail":"It can panic."}]}"#;
+
+/// Stored records that are each one JSON value, so they pass the store
+/// boundary, but fail the typed decode with a message that quotes
+/// [`STORED_SENTINEL`]: an unknown variant and a wrongly typed value, each at
+/// the top level and inside a finding.
+fn undecodable_stored_records() -> [String; 4] {
+    let session = "019263a5-7c1a-7000-8000-000000000001";
+    let record = |round: &str, verdict: &str, findings: &str| {
+        format!(
+            r#"{{"session":"{session}","round":{round},"verdict":"{verdict}","new_count":1,"findings":[{findings}]}}"#
+        )
+    };
+    let finding = |line: &str, severity: &str| {
+        format!(
+            r#"{{"path":"src/lib.rs","line":{line},"severity":"{severity}","title":"t","detail":"d"}}"#
+        )
+    };
+    let quoted_sentinel = format!("\"{STORED_SENTINEL}\"");
+    [
+        record("1", STORED_SENTINEL, ""),
+        record(&quoted_sentinel, "findings", ""),
+        record("1", "findings", &finding(&quoted_sentinel, "major")),
+        record("1", "findings", &finding("7", STORED_SENTINEL)),
+    ]
+}
+
+/// Seeds the valid first record, then `body`.
+fn seed_records(fake: &FakeReviewServices, body: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut records = locked(&fake.records);
+    let bodies = records.entry("review".to_owned()).or_default();
+    bodies.push(dal_core::RawJson::parse(STORED_FIRST_RECORD)?);
+    bodies.push(dal_core::RawJson::parse(body)?);
+    Ok(())
+}
+
+/// The message of a refused round; any other outcome fails the test.
+fn refusal_text(
+    outcome: dal_agent::ext::ToolOutcome,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match outcome {
+        dal_agent::ext::ToolOutcome::Err(error) => Ok(error.to_string()),
+        other => {
+            let message = outcome_text(other);
+            Err(format!("the round was not refused: {message}").into())
+        }
+    }
+}
+
+/// Nothing past the stored-record decode ran: both git outputs staged by
+/// `staged_cx` are still queued, no route was probed, no reviewer request was
+/// sent, and no record was appended.
+fn assert_round_stopped_at_decode(fake: &FakeReviewServices) {
+    assert_eq!(locked(&fake.runs).len(), 2, "a git call ran");
+    assert!(
+        locked(&fake.probes).is_empty(),
+        "the reviewer route was probed"
+    );
+    assert!(
+        locked(&fake.requests).is_empty(),
+        "the reviewer ran over an undecodable record"
+    );
+    assert!(
+        locked(&fake.appended).is_empty(),
+        "a refused round appended a record"
+    );
+}
+
+#[tokio::test]
+async fn an_undecodable_stored_record_refuses_the_round_without_echoing_its_content()
+-> Result<(), Box<dyn std::error::Error>> {
+    for body in undecodable_stored_records() {
+        let raw_failure = sonic_rs::from_str::<ReviewRecord>(&body)
+            .err()
+            .ok_or("the seeded record must not decode")?;
+        assert!(
+            raw_failure.to_string().contains(STORED_SENTINEL),
+            "the case must be one whose raw decode message quotes the stored text: {raw_failure}"
+        );
+        let cfg = named_route_config();
+        let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+        let fake = Arc::new(FakeReviewServices::default());
+        seed_records(&fake, &body)?;
+        *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+        let cx = staged_cx(&fake);
+
+        let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+        let refused = refusal_text(outcome)?;
+
+        assert!(
+            refused.starts_with("stored review record 2 did not decode: "),
+            "{refused}"
+        );
+        assert!(
+            !refused.contains(STORED_SENTINEL),
+            "the refusal echoes stored content: {refused}"
+        );
+        assert!(
+            refused.contains(&format!("line {}", raw_failure.line())),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&format!("column {}", raw_failure.column())),
+            "{refused}"
+        );
+        assert_round_stopped_at_decode(&fake);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_undecodable_stored_record_refuses_a_granted_restart_and_spends_the_grant()
+-> Result<(), Box<dyn std::error::Error>> {
+    let [body, ..] = undecodable_stored_records();
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    seed_records(&fake, &body)?;
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let cx = staged_cx(&fake);
+    status.authorize_restart(cx.session());
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await;
+    let refused = refusal_text(outcome)?;
+
+    assert!(
+        refused.starts_with("stored review record 2 did not decode: "),
+        "{refused}"
+    );
+    assert_round_stopped_at_decode(&fake);
+    assert!(
+        !status.take_restart_authorization(cx.session()),
+        "a refused call still spends the restart grant"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_records_with_unknown_members_still_decode_and_the_round_continues()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    let session = SessionId::new_v7();
+    locked(&fake.records)
+        .entry("review".to_owned())
+        .or_default()
+        .push(dal_core::RawJson::parse(&format!(
+            r#"{{"session":"{session}","round":1,"verdict":"findings","new_count":1,"findings":[{{"path":"src/lib.rs","line":7,"severity":"major","title":"unchecked index","detail":"It can panic.","confidence":{{"score":[1,2,{{"x":null}}]}}}}],"written_by":"a newer release"}}"#
+        ))?);
+    *locked(&fake.provider) = Provider::Replies(text_events(ONE_FINDING, None));
+    let cx = staged_cx(&fake);
+
+    let text = round(&cfg, &status, &cx, None).await;
+
+    assert!(text.starts_with("Review round 2 of 3: findings."), "{text}");
+    let sent = request_text(&locked(&fake.requests)[0]);
+    assert!(
+        sent.contains("src/lib.rs\tunchecked index"),
+        "the stored finding must reach the reviewer as a prior finding: {sent}"
+    );
+    let appended = locked(&fake.appended);
+    assert_eq!(appended.len(), 1);
+    let record: ReviewRecord = sonic_rs::from_str(&appended[0])?;
+    assert_eq!(record.session, session);
+    assert_eq!(record.round, 2);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_round_is_refused_while_a_job_runs() -> Result<(), Box<dyn std::error::Error>> {
     use crate::orchestration::View;
@@ -1487,5 +1664,152 @@ async fn a_round_is_refused_while_a_job_runs() -> Result<(), Box<dyn std::error:
         "{refused}"
     );
     assert!(refused.contains("1 job"), "{refused}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_stored_record_keeps_history_and_runs_no_provider_or_append()
+-> Result<(), Box<dyn std::error::Error>> {
+    let [body, ..] = undecodable_stored_records();
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    seed_records(&fake, &body)?;
+    let before: Vec<String> = locked(&fake.records)
+        .get("review")
+        .map(|bodies| bodies.iter().map(|body| body.as_str().to_owned()).collect())
+        .unwrap_or_default();
+    assert_eq!(before.len(), 2);
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let cx = staged_cx(&fake);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    assert!(
+        refused.starts_with("stored review record 2 did not decode: "),
+        "{refused}"
+    );
+    assert!(
+        !refused.contains(STORED_SENTINEL),
+        "the refusal echoes stored content: {refused}"
+    );
+    assert_round_stopped_at_decode(&fake);
+    assert!(
+        locked(&fake.notices).is_empty(),
+        "a refused round posts no notice"
+    );
+    // The stored history is byte-identical: the same two bodies remain, the
+    // first still decodes at round 1, the second still refuses.
+    {
+        let kept = locked(&fake.records);
+        let bodies = kept
+            .get("review")
+            .ok_or("a refused round must keep the stored history")?;
+        let after: Vec<String> = bodies.iter().map(|body| body.as_str().to_owned()).collect();
+        assert_eq!(after, before, "a refused round must not rewrite history");
+        let first: ReviewRecord = sonic_rs::from_str(bodies[0].as_str())?;
+        assert_eq!(first.round, 1);
+        assert!(
+            sonic_rs::from_str::<ReviewRecord>(bodies[1].as_str()).is_err(),
+            "a refused round must not repair the undecodable record"
+        );
+    }
+    // Adjacent valid boundary: the same valid first record alone continues
+    // at round 2, so the refusal above is conditional, not unconditional.
+    let clean = Arc::new(FakeReviewServices::default());
+    locked(&clean.records)
+        .entry("review".to_owned())
+        .or_default()
+        .push(dal_core::RawJson::parse(STORED_FIRST_RECORD)?);
+    *locked(&clean.provider) = Provider::Replies(text_events(ONE_FINDING, None));
+    let next = staged_cx(&clean);
+    let outcome = review_round(&cfg, &status, &next, None, RoundRequest::Continue).await;
+    assert!(
+        matches!(outcome, dal_agent::ext::ToolOutcome::Ok(_)),
+        "the valid adjacent history must continue the round"
+    );
+    let first_stored: ReviewRecord = sonic_rs::from_str(STORED_FIRST_RECORD)?;
+    assert_eq!(locked(&clean.requests).len(), 1);
+    let appended = locked(&clean.appended);
+    assert_eq!(appended.len(), 1);
+    let continued: ReviewRecord = sonic_rs::from_str(&appended[0])?;
+    assert_eq!(continued.session, first_stored.session);
+    assert_eq!(continued.round, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_over_limit_real_git_status_refuses_before_the_reviewer_runs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let repo = real_git::TempRepo::new()?;
+    repo.git(&["init", "--quiet"])?;
+    std::fs::write(repo.path.join("baseline.txt"), "baseline\n")?;
+    repo.git(&["add", "baseline.txt"])?;
+    repo.git(&["commit", "--quiet", "-m", "baseline"])?;
+    // Push `git status --short` past MAX_DIFF_BYTES with real untracked
+    // files: each short line is ~127 bytes, so 2500 files are ~317 kB.
+    let pad = "x".repeat(90);
+    let mut overflow_names = Vec::with_capacity(OVERFLOW_FILES);
+    for index in 0..OVERFLOW_FILES {
+        let name = format!("review-status-overflow-{index:05}-{pad}.txt");
+        std::fs::write(repo.path.join(&name), "overflow\n")?;
+        overflow_names.push(name);
+    }
+
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    *locked(&fake.repo) = Some(repo.path.clone());
+    let services: Arc<dyn dal_agent::ext::Services> = fake.clone();
+    let cx = ToolCx::for_test(services);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    assert_eq!(
+        refused,
+        ReviewError::StatusTooLarge {
+            limit: MAX_DIFF_BYTES
+        }
+        .to_string()
+    );
+    assert!(
+        locked(&fake.probes).is_empty(),
+        "an over-limit status must refuse before the route probe"
+    );
+    assert!(
+        locked(&fake.requests).is_empty(),
+        "an over-limit status must refuse before the reviewer request"
+    );
+    assert!(
+        locked(&fake.appended).is_empty(),
+        "a refused round appends no record"
+    );
+    assert!(
+        locked(&fake.notices).is_empty(),
+        "a refused round posts no notice"
+    );
+    assert!(
+        status.payload(cx.session()).is_none(),
+        "status must be idle"
+    );
+    // Adjacent valid boundary: the same harness with a fitting status runs
+    // the reviewer and appends round 1, so the refusal is conditional.
+    for name in &overflow_names {
+        std::fs::remove_file(repo.path.join(name))?;
+    }
+    std::fs::write(repo.path.join("baseline.txt"), "baseline, reviewed\n")?;
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    assert!(
+        matches!(outcome, dal_agent::ext::ToolOutcome::Ok(_)),
+        "the fitting adjacent status must run the reviewer"
+    );
+    assert_eq!(locked(&fake.requests).len(), 1);
+    let appended = locked(&fake.appended);
+    assert_eq!(appended.len(), 1);
+    let continued: ReviewRecord = sonic_rs::from_str(&appended[0])?;
+    assert_eq!(continued.round, 1);
     Ok(())
 }
