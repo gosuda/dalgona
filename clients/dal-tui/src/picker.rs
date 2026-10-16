@@ -144,6 +144,15 @@ impl PickerUi {
         self.refilter();
     }
 
+    /// Pasted text joins the query like typed characters: the one-line
+    /// filter drops newlines (same normalization as the sign-in input),
+    /// refiltering once, and never activates a row or submits.
+    pub(crate) fn paste(&mut self, text: &str) {
+        self.filter
+            .extend(text.chars().filter(|c| !matches!(c, '\r' | '\n')));
+        self.refilter();
+    }
+
     pub(crate) fn activate_selected(&mut self) -> Option<PickerAction> {
         if let Some(id) = self.model_filter_fallback() {
             return Some(PickerAction::Command(Command::Run {
@@ -552,6 +561,55 @@ mod picker_tests {
                 save: dal_core::command::Save::SessionAndDefault,
             }
         ));
+    }
+
+    #[test]
+    fn pasted_text_filters_like_typed_text_and_clamps_selection() {
+        let mut picker = PickerUi::new(
+            "Pick",
+            "",
+            vec![
+                PickerOption {
+                    label: "alpha".to_owned(),
+                    action: PickerAction::Command(Command::Run {
+                        name: "model".into(),
+                        args: "openai/alpha".into(),
+                        expected: None,
+                    }),
+                },
+                PickerOption {
+                    label: "beta".to_owned(),
+                    action: PickerAction::Command(Command::Run {
+                        name: "model".into(),
+                        args: "openai/beta".into(),
+                        expected: None,
+                    }),
+                },
+            ],
+        );
+        picker.move_selection(true);
+        picker.paste("beta");
+        assert_eq!(picker.filter(), "beta");
+        assert_eq!(picker.visible_len(), 1);
+        assert_eq!(picker.selected_fallback_index(), 0);
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run { args, .. })) if args.as_ref() == "openai/beta"
+        ));
+    }
+
+    #[test]
+    fn pasted_id_reaches_the_failed_model_picker_fallback_without_newlines() {
+        let mut picker = super::model_picker_failed("");
+        picker.paste("acme/gpt-6\r\nignored-second-line");
+        assert_eq!(picker.filter(), "acme/gpt-6ignored-second-line");
+        assert_eq!(picker.visible_len(), 1);
+        assert!(picker.is_selected(picker.selected_fallback_index()));
+        let activated = picker.activate_selected();
+        assert!(
+            matches!(&activated, Some(PickerAction::Command(Command::Run { name, args, .. })) if name.as_ref() == "model" && args.as_ref() == "acme/gpt-6ignored-second-line"),
+            "pasted id must run /model, got {activated:?}"
+        );
     }
 
     #[test]

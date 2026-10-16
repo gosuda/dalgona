@@ -261,13 +261,13 @@ pub fn resolve(key: Key, kitty: bool) -> Option<Action> {
 
 /// Resolves a key only in the currently active input contexts, in owner order.
 #[must_use]
-pub fn resolve_in(key: Key, kitty: bool, owners: &[Owner]) -> Option<Action> {
+pub fn resolve_in(key: Key, _kitty: bool, owners: &[Owner]) -> Option<Action> {
     owners.iter().find_map(|owner| {
         BINDINGS.iter().find_map(|binding| {
             if binding.owner != *owner {
                 return None;
             }
-            let matches = binding.default == key || (!kitty && binding.legacy == Some(key));
+            let matches = binding.default == key || binding.legacy == Some(key);
             matches.then_some(binding.action)
         })
     })
@@ -478,10 +478,10 @@ mod tests {
         let mut decoder = KeyDecoder::default();
         assert_eq!(
             decoder.feed(b"\x1b[<0;10;\x1ca", start),
-            [InputEvent::Key(Key::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE
-            ))]
+            [
+                InputEvent::Key(Key::new(KeyCode::Char('\\'), KeyModifiers::CONTROL)),
+                InputEvent::Key(Key::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            ]
         );
     }
 
@@ -550,6 +550,244 @@ mod tests {
         assert_eq!(
             decoder.tick(start + Duration::from_secs(2)),
             [InputEvent::Paste(b"hi".to_vec())]
+        );
+    }
+
+    #[test]
+    fn legacy_unit_separator_decodes_to_ctrl_underscore_and_resolves_undo() {
+        let now = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(&[0x1c], now),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('\\'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            decoder.feed(&[0x1d], now),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char(']'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            decoder.feed(&[0x1e], now),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('^'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+
+        let events = decoder.feed(&[0x1f], now);
+        assert_eq!(
+            events,
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('_'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        let InputEvent::Key(key) = events[0] else {
+            panic!("expected key event");
+        };
+        assert_eq!(
+            resolve_in(key, false, &[Owner::Composer]),
+            Some(Action::Undo)
+        );
+        assert_eq!(
+            resolve_in(key, true, &[Owner::Composer]),
+            Some(Action::Undo)
+        );
+
+        let mut csi_decoder = KeyDecoder::default();
+        let csi_events = csi_decoder.feed(b"\x1b[95;5u", now);
+        assert_eq!(
+            csi_events,
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('_'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        let InputEvent::Key(csi_key) = csi_events[0] else {
+            panic!("expected csi key event");
+        };
+        assert_eq!(
+            resolve_in(csi_key, true, &[Owner::Composer]),
+            Some(Action::Undo)
+        );
+        assert_eq!(
+            resolve_in(csi_key, false, &[Owner::Composer]),
+            Some(Action::Undo)
+        );
+    }
+
+    #[test]
+    fn byte_eight_and_delete_decode_to_backspace_and_alt_backspace_deletes_word() {
+        let now = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(&[0x08], now),
+            [InputEvent::Key(Key::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE
+            ))]
+        );
+        assert_eq!(
+            decoder.feed(&[0x7f], now),
+            [InputEvent::Key(Key::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE
+            ))]
+        );
+
+        let mut alt_bs_del = KeyDecoder::default();
+        let events_del = alt_bs_del.feed(b"\x1b\x7f", now);
+        assert_eq!(
+            events_del,
+            [InputEvent::Key(Key::new(
+                KeyCode::Backspace,
+                KeyModifiers::ALT
+            ))]
+        );
+        let InputEvent::Key(alt_bs_key) = events_del[0] else {
+            panic!("expected key event");
+        };
+        assert_eq!(
+            resolve_in(alt_bs_key, false, &[Owner::Composer]),
+            Some(Action::DeleteWordBack)
+        );
+        assert_eq!(
+            resolve_in(alt_bs_key, true, &[Owner::Composer]),
+            Some(Action::DeleteWordBack)
+        );
+
+        let mut alt_bs_eight = KeyDecoder::default();
+        let events_eight = alt_bs_eight.feed(b"\x1b\x08", now);
+        assert_eq!(
+            events_eight,
+            [InputEvent::Key(Key::new(
+                KeyCode::Backspace,
+                KeyModifiers::ALT
+            ))]
+        );
+    }
+
+    #[test]
+    fn documented_legacy_alternative_chords_resolve_under_kitty_and_legacy_modes() {
+        let now = Instant::now();
+        let composer = [Owner::Composer];
+
+        let mut ctrl_b_dec = KeyDecoder::default();
+        let legacy_ctrl_b = ctrl_b_dec.feed(&[0x02], now);
+        assert_eq!(
+            legacy_ctrl_b,
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        let InputEvent::Key(b_key) = legacy_ctrl_b[0] else {
+            panic!("expected key");
+        };
+        assert_eq!(
+            resolve_in(b_key, true, &composer),
+            Some(Action::CharLeft),
+            "Ctrl+B must move cursor left even when kitty negotiation is active"
+        );
+        assert_eq!(resolve_in(b_key, false, &composer), Some(Action::CharLeft));
+
+        let mut csi_b_dec = KeyDecoder::default();
+        let csi_b = csi_b_dec.feed(b"\x1b[98;5u", now);
+        assert_eq!(csi_b, legacy_ctrl_b);
+
+        let mut left_dec = KeyDecoder::default();
+        let left_events = left_dec.feed(b"\x1b[D", now);
+        let InputEvent::Key(left_key) = left_events[0] else {
+            panic!("expected key");
+        };
+        assert_eq!(
+            resolve_in(left_key, true, &composer),
+            Some(Action::CharLeft)
+        );
+        assert_eq!(
+            resolve_in(left_key, false, &composer),
+            Some(Action::CharLeft)
+        );
+
+        let mut newline_dec = KeyDecoder::default();
+        let j_events = newline_dec.feed(b"\n", now);
+        assert_eq!(
+            j_events,
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        let InputEvent::Key(j_key) = j_events[0] else {
+            panic!("expected key");
+        };
+        assert_eq!(
+            resolve_in(j_key, true, &composer),
+            Some(Action::Newline),
+            "Ctrl+J must insert newline even when kitty negotiation is active"
+        );
+        assert_eq!(resolve_in(j_key, false, &composer), Some(Action::Newline));
+
+        let mut shift_enter_dec = KeyDecoder::default();
+        let se_events = shift_enter_dec.feed(b"\x1b[13;2u", now);
+        let InputEvent::Key(se_key) = se_events[0] else {
+            panic!("expected key");
+        };
+        assert_eq!(resolve_in(se_key, true, &composer), Some(Action::Newline));
+        assert_eq!(resolve_in(se_key, false, &composer), Some(Action::Newline));
+    }
+
+    #[test]
+    fn shared_keys_respect_explicit_owner_precedence_in_both_modes() {
+        let ctrl_b = Key::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            resolve_in(ctrl_b, false, &[Owner::Composer, Owner::Transcript]),
+            Some(Action::CharLeft)
+        );
+        assert_eq!(
+            resolve_in(ctrl_b, true, &[Owner::Composer, Owner::Transcript]),
+            Some(Action::CharLeft)
+        );
+        assert_eq!(
+            resolve_in(ctrl_b, false, &[Owner::Transcript, Owner::Composer]),
+            Some(Action::TranscriptPageUp)
+        );
+        assert_eq!(
+            resolve_in(ctrl_b, true, &[Owner::Transcript, Owner::Composer]),
+            Some(Action::TranscriptPageUp)
+        );
+
+        let esc = Key::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert_eq!(
+            resolve_in(esc, false, &[Owner::Dialog, Owner::App]),
+            Some(Action::ApprovalDeny)
+        );
+        assert_eq!(
+            resolve_in(esc, true, &[Owner::Dialog, Owner::App]),
+            Some(Action::ApprovalDeny)
+        );
+        assert_eq!(
+            resolve_in(esc, false, &[Owner::App, Owner::Dialog]),
+            Some(Action::CloseOverlayOrInterrupt)
+        );
+        assert_eq!(
+            resolve_in(esc, true, &[Owner::App, Owner::Dialog]),
+            Some(Action::CloseOverlayOrInterrupt)
+        );
+        assert_eq!(
+            resolve_in(esc, false, &[Owner::Picker, Owner::App]),
+            Some(Action::PickerCancel)
+        );
+        assert_eq!(
+            resolve_in(esc, true, &[Owner::Picker, Owner::App]),
+            Some(Action::PickerCancel)
         );
     }
 }
