@@ -11,8 +11,8 @@ use std::{
 };
 
 use dal_core::{
-    BlobId, BranchMode, EntryId, Gen, Header, ListQuery, Page, Product, Record, SessionId,
-    SessionInfo, Workspace,
+    BlobId, BranchMode, EntryId, EntryView, Gen, Header, ListQuery, Page, Product, Record,
+    SessionId, SessionInfo, Workspace,
 };
 
 use crate::{
@@ -291,6 +291,30 @@ impl Store {
         self.inner
             .listing
             .newest(&self.workspace_dir(), &self.inner.workspace)
+    }
+
+    /// Reads one journal entry as JSON-ready data, read-only and lock-free.
+    ///
+    /// The session is located under `data_root/sessions` in any workspace,
+    /// so a closed session resolves without its live actor or workspace. The
+    /// journal is validated through the same complete-prefix scan the open
+    /// preflight uses, bounded by any rollback marker; the file is never
+    /// locked, repaired, truncated, or opened for writing. Only the entry on
+    /// the validator's leaf path — the branch the projection serves live —
+    /// is returned, so an off-branch entry stays missing.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NotFound`] when no journal exists for the
+    /// session, [`StoreError::UnknownEntry`] when the entry is absent or
+    /// off-branch, [`StoreError::Damaged`] or [`StoreError::UnknownVersion`]
+    /// for a corrupt prefix, [`StoreError::Invalid`] for an unsafe file, or
+    /// [`StoreError::Io`] for another filesystem failure.
+    pub fn read_session_entry(
+        data_root: &Path,
+        session: SessionId,
+        entry: EntryId,
+    ) -> Result<EntryView, StoreError> {
+        read_session_entry_in_root(data_root, session, entry)
     }
 
     /// Returns the journal file path for a session without touching the filesystem.
@@ -1627,6 +1651,85 @@ fn encode_records<'a>(
     Ok(bytes)
 }
 
+/// Locates one session journal under `data_root` in any workspace and reads
+/// one entry from it, strictly read-only.
+///
+/// The workspace key is not derivable from a session id — it mixes the
+/// workspace path with a hash — so the immediate workspace directories of
+/// `data_root/sessions` are scanned and the first candidate journal wins.
+/// A `SessionId` is a `UUIDv7` minted per session, so a collision across
+/// workspaces is an invariant breach, never a lookup ambiguity. Symlinked
+/// and non-regular journal files refuse typed, exactly as sidecar reads do.
+fn read_session_entry_in_root(
+    data_root: &Path,
+    session: SessionId,
+    entry: EntryId,
+) -> Result<EntryView, StoreError> {
+    let journal_path = locate_session_journal(data_root, session)?;
+    let journal_path = journal_path.ok_or_else(|| StoreError::NotFound {
+        path: data_root.join("sessions").join(session.to_string()),
+    })?;
+    match journal::scan_entry(&journal_path, entry) {
+        Ok(Some(view)) => Ok(view),
+        Ok(None) => Err(StoreError::UnknownEntry { id: session, entry }),
+        Err(failure) => Err(map_open_failure(&journal_path, failure)),
+    }
+}
+
+/// Scans the immediate workspace directories for the session's journal.
+///
+/// The scan stops at the first workspace directory spelling the session id,
+/// so a hostile later entry cannot shadow the first hit. A journal that is
+/// not a regular file — a symlink or anything else — refuses typed instead
+/// of being skipped, exactly as sidecar reads do; a missing journal keeps
+/// the scan looking in the remaining workspaces.
+fn locate_session_journal(
+    data_root: &Path,
+    session: SessionId,
+) -> Result<Option<PathBuf>, StoreError> {
+    let sessions_dir = data_root.join("sessions");
+    let workspaces = match fs::read_dir(&sessions_dir) {
+        Ok(workspaces) => workspaces,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(util::io_err(&sessions_dir, source)),
+    };
+    let name = session.to_string();
+    for workspace in workspaces {
+        let workspace = workspace.map_err(|source| util::io_err(&sessions_dir, source))?;
+        let candidate = workspace.path().join(&name).join("journal.jsonl");
+        let Some(metadata) = candidate_metadata(&candidate)? else {
+            continue;
+        };
+        if !metadata.is_file() {
+            return Err(StoreError::Invalid {
+                reason: format!("session file {} is not a regular file", candidate.display())
+                    .into(),
+            });
+        }
+        return Ok(Some(candidate));
+    }
+    Ok(None)
+}
+
+/// The candidate journal's metadata without following a symlink.
+///
+/// `None` means the workspace directory holds no such session: the journal is
+/// absent, or the entry is a stray file rather than a workspace directory.
+fn candidate_metadata(candidate: &Path) -> Result<Option<fs::Metadata>, StoreError> {
+    match fs::symlink_metadata(candidate) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(source) => Err(util::io_err(candidate, source)),
+    }
+}
+
 fn map_open_failure(path: &Path, failure: journal::OpenFailure) -> StoreError {
     match failure {
         journal::OpenFailure::UnknownVersion(found) => StoreError::UnknownVersion {
@@ -1775,10 +1878,46 @@ fn validate_record_values(records: &[Record]) -> Result<(), StoreError> {
                     "approval attribution must be nonempty and at most 128 bytes",
                 ));
             }
+            Record::Resolved {
+                answer,
+                was_default,
+                cause: Some(cause),
+                ..
+            } if resolution_cause_conflicts(*cause, answer, *was_default) => {
+                return Err(invalid_record(format!(
+                    "resolved record contradicts its resolution cause: cause {cause:?}, \
+                     answer {answer:?}, was_default {was_default}"
+                )));
+            }
             _ => {}
         }
     }
     Ok(())
+}
+/// Whether a caused resolution contradicts its answer or default selection:
+/// an actor cause (`cancelled`, `withdrawn`) never carries a selected request
+/// default and must answer `cancel`, a client `answered` cause never carries
+/// a selected default but answers freely, and deadline causes (`timed_out`,
+/// `no_controller`) always carry the selected default. Session-grant
+/// Answered-only-ness lives in fold preflight and the `AllowAlways` mint, not
+/// here. Records without a
+/// cause stay unconstrained here — legacy journals predate causes — and
+/// unknown future causes are not second-guessed.
+fn resolution_cause_conflicts(
+    cause: dal_core::ResolutionCause,
+    answer: &dal_core::Answer,
+    was_default: bool,
+) -> bool {
+    match cause {
+        dal_core::ResolutionCause::Answered => was_default,
+        dal_core::ResolutionCause::Cancelled | dal_core::ResolutionCause::Withdrawn => {
+            was_default || !matches!(answer, dal_core::Answer::Cancel)
+        }
+        dal_core::ResolutionCause::TimedOut | dal_core::ResolutionCause::NoController => {
+            !was_default
+        }
+        _ => false,
+    }
 }
 fn generation_after(mut generation: Gen, records: &[Record]) -> Gen {
     for record in records {

@@ -9,12 +9,24 @@ use crate::diagram::{DiagramSettings, RenderCache};
 use crate::render::{Prose, RenderRow, prose_rows, text_rows};
 use crate::theme::Role;
 
+/// How many locally answered titles the resync cache retains at most.
+///
+/// A live queue only ever has a couple of answers waiting for their
+/// resolution updates; the cap only bounds a host that stops resolving
+/// altogether. Eviction drops the oldest answer, whose dialog is long gone.
+const ANSWERED_TITLE_CAP: usize = 32;
+
 /// Pending requests in open order with sent-answer tracking.
 #[derive(Debug, Default)]
 pub struct RequestQueue {
     open: Vec<Request>,
     answered: HashSet<dal_core::RequestId>,
     keys_disabled: bool,
+    /// Titles of locally answered requests, retained so a snapshot resync
+    /// that drops a request before its `RequestResolved` update arrives can
+    /// still announce the outcome. Entries are removed when the resolution
+    /// is announced, and the cap keeps the cache from tracking the session.
+    answered_titles: Vec<(dal_core::RequestId, String)>,
 }
 
 impl RequestQueue {
@@ -27,17 +39,33 @@ impl RequestQueue {
     }
 
     /// Resolves a request by id, returning its title for the outcome notice.
+    ///
+    /// A request the user answered may already have left `open` through a
+    /// snapshot resync; its retained title keeps the resolution notice honest.
     pub fn resolved(&mut self, id: &str) -> Option<String> {
-        let position = self
+        if let Some(position) = self
             .open
             .iter()
-            .position(|request| request.id.to_string() == id)?;
-        let request = self.open.remove(position);
-        self.sync_disabled();
-        Some(dialog_title(&request.question))
+            .position(|request| request.id.to_string() == id)
+        {
+            let request = self.open.remove(position);
+            self.sync_disabled();
+            self.answered_titles
+                .retain(|(answered, _)| *answered != request.id);
+            return Some(dialog_title(&request.question));
+        }
+        let position = self
+            .answered_titles
+            .iter()
+            .position(|(answered, _)| answered.to_string() == id)?;
+        Some(self.answered_titles.remove(position).1)
     }
 
-    /// Rebuilds the queue from a `Resync` view; silently drops vanished ids.
+    /// Rebuilds the queue from a `Resync` view.
+    ///
+    /// A vanished id is dropped silently, except that an id this client
+    /// answered keeps its retained title so its still-pending resolution
+    /// update can announce the outcome here.
     pub fn resync(&mut self, open: Vec<Request>) {
         self.open = open;
         self.sync_disabled();
@@ -59,9 +87,19 @@ impl RequestQueue {
     }
 
     /// Marks an answer sent; returns false when the id already answered.
+    ///
+    /// The request title is retained until its resolution is announced, so a
+    /// snapshot resync cannot orphan the pending outcome notice.
     pub fn mark_answered(&mut self, id: dal_core::RequestId) -> bool {
         if !self.answered.insert(id) {
             return false;
+        }
+        if let Some(request) = self.open.iter().find(|request| request.id == id) {
+            self.answered_titles
+                .insert(0, (id, dialog_title(&request.question)));
+            if self.answered_titles.len() > ANSWERED_TITLE_CAP {
+                self.answered_titles.pop();
+            }
         }
         self.keys_disabled = true;
         true
@@ -910,6 +948,89 @@ mod tests {
         assert!(queue.mark_answered(id));
         assert!(!queue.mark_answered(id));
         assert!(queue.keys_disabled());
+    }
+
+    #[test]
+    fn a_snapshot_that_drops_an_answered_request_still_announces_it_once() {
+        let mut queue = RequestQueue::default();
+        let id = dal_core::RequestId::new_v7();
+        let request = approval(id);
+        let title = super::dialog_title(&request.question);
+        queue.opened(request);
+        assert!(queue.mark_answered(id));
+
+        // Event order of the saved-evidence race: the snapshot poll lands
+        // before the pending `RequestResolved` update.
+        queue.resync(Vec::new());
+        assert!(
+            !queue.keys_disabled(),
+            "an empty snapshot frees the keyboard"
+        );
+
+        assert_eq!(queue.resolved(&id.to_string()), Some(title));
+        assert_eq!(
+            queue.resolved(&id.to_string()),
+            None,
+            "a repeated resolution must not announce twice"
+        );
+    }
+
+    #[test]
+    fn an_answered_request_resolved_while_still_open_announces_once() {
+        let mut queue = RequestQueue::default();
+        let id = dal_core::RequestId::new_v7();
+        let request = approval(id);
+        let title = super::dialog_title(&request.question);
+        queue.opened(request);
+        assert!(queue.mark_answered(id));
+
+        assert_eq!(queue.resolved(&id.to_string()), Some(title));
+        assert_eq!(
+            queue.resolved(&id.to_string()),
+            None,
+            "the open path must not leave a retained title behind"
+        );
+    }
+
+    #[test]
+    fn a_request_never_answered_here_resolves_silently_after_a_snapshot() {
+        let mut queue = RequestQueue::default();
+        let visible = dal_core::RequestId::new_v7();
+        let queued = dal_core::RequestId::new_v7();
+        queue.opened(approval(visible));
+        queue.opened(approval(queued));
+        assert!(queue.mark_answered(visible));
+
+        queue.resync(Vec::new());
+
+        assert_eq!(
+            queue.resolved(&queued.to_string()),
+            None,
+            "a request this client never answered has no title to announce"
+        );
+    }
+
+    #[test]
+    fn retained_answered_titles_stay_bounded() {
+        let mut queue = RequestQueue::default();
+        let ids: Vec<_> = (0..super::ANSWERED_TITLE_CAP + 8)
+            .map(|_| dal_core::RequestId::new_v7())
+            .collect();
+        for id in &ids {
+            queue.opened(approval(*id));
+            assert!(queue.mark_answered(*id));
+            queue.resync(Vec::new());
+        }
+
+        assert_eq!(queue.answered_titles.len(), super::ANSWERED_TITLE_CAP);
+        let oldest = ids.first().copied().unwrap();
+        let newest = ids.last().copied().unwrap();
+        assert_eq!(
+            queue.resolved(&oldest.to_string()),
+            None,
+            "the oldest answer is evicted once the cap is reached"
+        );
+        assert!(queue.resolved(&newest.to_string()).is_some());
     }
 
     #[test]

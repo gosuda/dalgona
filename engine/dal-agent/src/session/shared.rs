@@ -14,7 +14,7 @@ use std::sync::{
 };
 
 use dal_core::{
-    ApprovalMode, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, Seq, Session,
+    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, Seq, Session,
     ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
 };
 
@@ -39,6 +39,18 @@ struct SetupState {
     notices: Vec<Notice>,
 }
 
+/// The prompt customization one child session carries across turns and
+/// reloads, journaled by its start and replayed with the journal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ChildPromptPolicy {
+    /// Replaces the product-owned base sections of the system prompt;
+    /// extension-contributed sections still render.
+    System(Box<str>),
+    /// Appends one prompt section after the assembled base prompt, so
+    /// siblings on one model share the cached prefix.
+    Role(Box<str>),
+}
+
 /// Synchronous snapshot of one live session.
 pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
@@ -50,6 +62,7 @@ pub(crate) struct Shared {
     promoted: Mutex<Arc<BTreeSet<Name>>>,
     allow_always: Mutex<Arc<BTreeSet<Name>>>,
     tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
+    child_prompt_policy: OnceLock<ChildPromptPolicy>,
     /// The tool-round bound the next turn takes; the turn consumes it.
     next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
     service_grants: ServiceGrants,
@@ -112,6 +125,7 @@ impl Shared {
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
             allow_always: Mutex::new(Arc::new(BTreeSet::new())),
             tool_allowlist: OnceLock::new(),
+            child_prompt_policy: OnceLock::new(),
             next_turn_step_cap: Mutex::new(None),
             service_grants: ServiceGrants::default(),
         }
@@ -164,6 +178,17 @@ impl Shared {
     /// The tool names the session may use; `None` means no restriction.
     pub(crate) fn tool_allowlist(&self) -> Option<Arc<BTreeSet<Name>>> {
         self.tool_allowlist.get().map(Arc::clone)
+    }
+
+    /// Sets the child prompt policy; the first policy stands and a later
+    /// call cannot replace it.
+    pub(crate) fn set_child_prompt_policy(&self, policy: ChildPromptPolicy) {
+        let _ = self.child_prompt_policy.set(policy);
+    }
+
+    /// The child prompt policy, when the session carries one.
+    pub(crate) fn child_prompt_policy(&self) -> Option<&ChildPromptPolicy> {
+        self.child_prompt_policy.get()
     }
 
     /// The run grants approved calls lent their extensions in this session.
@@ -514,6 +539,18 @@ impl Shared {
                 Subscriber::close(&shared);
             }
         }
+    }
+}
+
+/// Process progress rides the keyed publication: each subscriber queue
+/// replaces its unsent row for the same call, so a running child leaves
+/// one transient card per watcher.
+impl crate::proc::ProgressPort for Shared {
+    fn publish_progress(&self, call: &CallId, tail: Box<str>) {
+        self.publish(UpdateKind::ToolProgress {
+            call: call.clone(),
+            tail,
+        });
     }
 }
 

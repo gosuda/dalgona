@@ -11,15 +11,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
-    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StateError,
-    StateKey, StateNs, StateOp, StateRecord, StreamFireAction,
+    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, InputVerdict, Origin, Receipt,
+    StateError, StateKey, StateNs, StateOp, StateRecord, StreamFireAction,
 };
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, EntryId,
     EntryKind, Event, Family, InferFailure, Inference, MailMode, ModelRoute, Name, Part,
-    PartialResponse, Phase, Policy, Record, Rejection, Reply, Request, RequestId, ResolvedCall,
-    Session, SessionId, StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState,
-    UpdateKind, Workspace,
+    PartialResponse, Phase, Policy, Record, Rejection, Reply, Request, RequestId, ResolutionCause,
+    ResolvedCall, Session, SessionId, StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply,
+    TurnSource, TurnState, UpdateKind, Workspace,
 };
 use dal_store::Journal;
 use tokio::sync::{mpsc, oneshot};
@@ -33,8 +33,10 @@ use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
 use crate::broker::{AnswerWait, Broker, Resolved, default_timeout};
 use crate::error::{ActualTurn, AgentError, ServiceError, TurnPhase, ValidationError, deny_text};
 use crate::ext::Services;
+use crate::ext::generation::Generation;
 use crate::ext::hooks::{
-    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, join_before_turn,
+    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, input_failed_notice,
+    join_before_turn,
 };
 
 /// Bound for actor-to-driver effect batches.
@@ -550,9 +552,14 @@ const OPENING_CHANNEL: usize = COMMAND_CHANNEL;
 pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
     let (opening_tx, opening_rx) = mpsc::channel(OPENING_CHANNEL);
-    let control = Arc::new(Mutex::new(ControlCell::new()));
+    // The inbox owns the broker so every claim does its compare-and-swap
+    // under the inbox lock; the cell needs the inbox for classification, so
+    // both are built here before the actor takes the broker.
+    let resolutions = Arc::new(crate::session::ResolutionInbox::new(Arc::clone(
+        &deps.broker,
+    )));
+    let control = Arc::new(Mutex::new(ControlCell::new(Arc::clone(&resolutions))));
     let (driver_tx, ops_rx) = mpsc::channel(DRIVER_CHANNEL);
-    let resolutions = Arc::new(crate::session::ResolutionInbox::new());
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
@@ -648,6 +655,10 @@ struct FoldOutcome {
     delivered: Vec<dal_core::ext::ReadView>,
     /// A cancelled turn whose end update waits for its journal receipts.
     cancelled_end: Option<TurnId>,
+    /// A just-folded `RequestOpened` whose parked turn-cancel claim hands
+    /// over only after the fold accepted the event; `None` for every other
+    /// work report. A rejected `RequestOpened` leaves the claim parked.
+    opened: Option<RequestId>,
 }
 
 struct WatchCommit {
@@ -890,6 +901,16 @@ impl Actor {
             }
         }
         self.drain_resolutions().await;
+        // Run exit: fence the inbox and release every remainder
+        // waiter-only — folded leftovers were already settled, and parked
+        // claims of never-folded requests never publish. No producer can
+        // hang on a waiter the gone actor would never release.
+        for resolved in self.resolutions.close() {
+            self.broker.cancel(&resolved);
+        }
+        for parked in self.broker.parked() {
+            self.broker.cancel(&parked);
+        }
     }
 
     /// Folds mailbox requests that arrived before a woken inbox resolution.
@@ -952,9 +973,12 @@ impl Actor {
     /// so the services slot reopens only after the terminal record landed.
     async fn drain_resolutions(&mut self) {
         let already_waiting = self.flags.begin_hook_suspension();
-        while let Some((id, work)) = self.resolutions.take() {
+        while let Some(resolved) = self.resolutions.take() {
             self.drain_service_queued().await;
-            self.on_work(work).await;
+            let id = resolved.request.id;
+            self.on_work(TurnWork::Answered { resolved }).await;
+            // Every drained item settles its id, including unknown-question
+            // fail-closed claims — that is what frees services admission.
             self.resolutions.mark_settled(id);
         }
         if !already_waiting {
@@ -1126,9 +1150,12 @@ impl Actor {
         };
         let mut queue: VecDeque<Effect> = VecDeque::new();
         let mut effects = Vec::new();
-        let outcome = self.classify(work, &mut queue, &mut effects);
+        let mut outcome = self.classify(work, &mut queue, &mut effects);
         if let Some(event) = outcome.event {
-            self.step(event, &mut effects);
+            match outcome.opened.take() {
+                Some(opened) => self.fold_opened(event, opened, &mut queue, &mut effects),
+                None => self.step(event, &mut effects),
+            }
         }
         queue.extend(effects);
         let durable = self.execute(queue.into(), None).await;
@@ -1297,7 +1324,12 @@ impl Actor {
     ) -> FoldOutcome {
         let mut outcome = FoldOutcome::default();
         let event = match work {
-            TurnWork::Asked { request } => Some(Event::RequestOpened { request }),
+            TurnWork::Asked { request } => {
+                // The actor folds the event itself below, then hands over
+                // the parked claim only when the fold accepted it.
+                outcome.opened = Some(request.id);
+                Some(Event::RequestOpened { request })
+            }
             TurnWork::CallStarted { turn, call } => Some(Event::CallStarted { turn, call }),
             TurnWork::Settled {
                 turn,
@@ -1374,9 +1406,10 @@ impl Actor {
                 // confirmation — the kill ladder of an in-flight call has
                 // completed by now; other stops already published at `Emit`.
                 if stop == dal_core::Stop::Cancelled {
-                    let resolved = self
-                        .broker
-                        .resolve_turn(turn, Answer::Cancel, core_client());
+                    // The driver confirmed the cancel, so leftover asks
+                    // journal `Cancelled` — the single durable record that
+                    // frees every abandoned admission entry on this turn.
+                    let resolved = self.broker.resolve_turn(turn, ResolutionCause::Cancelled);
                     for item in resolved {
                         self.queue_resolved_or_cancel(&item, queue);
                     }
@@ -1427,6 +1460,29 @@ impl Actor {
         let _ = self.fold.step(event, Timestamp::now(), effects);
     }
 
+    /// Steps the fold for one `TurnWork::Asked`, then queues the request's
+    /// parked turn-cancel claim only when the fold accepted its
+    /// `RequestOpened` — so the claim's `RequestResolved` always follows the
+    /// open. A rejected open leaves the claim parked; the run-exit sweep
+    /// releases its waiter, so no producer hangs on a fold it missed.
+    fn fold_opened(
+        &mut self,
+        event: Event,
+        opened: RequestId,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let accepted = self.fold.step(event, Timestamp::now(), effects).is_ok();
+        queue.extend(std::mem::take(effects));
+        if !accepted {
+            return;
+        }
+        let Some(claim) = self.broker.report_opened(opened) else {
+            return;
+        };
+        self.queue_resolved_or_cancel(&claim, queue);
+    }
+
     /// Marks complete read views delivered at the shared cursor so later
     /// captures freeze the right cutoff.
     fn mark_delivered(&mut self, delivered: &[dal_core::ext::ReadView]) {
@@ -1442,10 +1498,58 @@ impl Actor {
         }
     }
 
+    /// Runs the fenced, finite shutdown drain. Classification already
+    /// happened in `SessionHandle::begin_shutdown` before any lifecycle
+    /// fire, so nothing here classifies; every drain below is a bounded
+    /// loop, never a recursive future. `Shutdown` travels the command
+    /// lane, so this opening-lane drain cannot re-enter this function.
     async fn on_shutdown(&mut self) {
-        self.control().cancel_opening();
+        // 1. Quiesce session tasks; their drops claim and enqueue.
         self.tasks.stop().await;
-
+        // 2. No nested execute may open a turn past this point.
+        let already = self.flags.begin_hook_suspension();
+        // 3. Fence the opening lane: new sends fail `SessionClosed`, so
+        // producers never publish past this point.
+        self.opening_rx.close();
+        self.flags.mark_opening_closed();
+        // 4. Fold everything enqueued before the fence. `Receiver::close`
+        // makes `recv` return `None` once the buffer and the permits
+        // reserved before the close are exhausted, so this is finite.
+        // Boxed: `on_request` can step `Shutdown`, which awaits this
+        // function again, so the unboxed futures would recurse in type.
+        while let Some(request) = self.opening_rx.recv().await {
+            Box::pin(self.on_request(request)).await;
+        }
+        // 5. Fence the inbox claims and fold the finite remainder after
+        // their `Asked`; each id settles so admission frees without a
+        // fabricated record.
+        for resolved in self.resolutions.close() {
+            let id = resolved.request.id;
+            self.on_work(TurnWork::Answered { resolved }).await;
+            self.resolutions.mark_settled(id);
+        }
+        // 6. Overdue slots become `TimedOut` or `NoController`, as on the
+        // steady-state tick.
+        self.sweep_expiry().await;
+        // 7. Claim every still-unresolved open request. Slots the fold
+        // registered journal `Withdrawn`; unregistered slots release
+        // waiter-only through the fail-closed path, never published.
+        let mut queue = VecDeque::new();
+        for request in self.broker.open_requests() {
+            if let Some(claim) = self.broker.withdraw(request.id) {
+                self.queue_resolved_or_cancel(&claim, &mut queue);
+            }
+        }
+        self.execute(queue.into_iter().collect(), None).await;
+        // 8. No wake-opening tail: the hook reentrancy guard exits once.
+        if !already {
+            self.flags.exit_hook_wait();
+        }
+        // 9. Unclassified lifecycle re-fire, after the drains, while the
+        // opening-shutdown marker stays set.
+        self.control().cancel_opening();
+        // 10. Journal, snapshot, then the closing latch that breaks the run
+        // loop.
         let _ = self.journal.close().await;
         self.shared.close_all();
         self.flags.mark_closing();
@@ -1636,9 +1740,13 @@ impl Actor {
     /// then feeds the joined verdict as a Guard event.
     ///
     /// Prompt and follow-up openings run the input hooks before the
-    /// `before_turn` hooks; wake openings skip the input hooks. A cancel that
-    /// lands while the hooks run wins: the fold drops a verdict whose phase
-    /// moved on.
+    /// `before_turn` hooks; wake openings skip the input hooks. The folded
+    /// input content reaches the fold as an `Input` guard ahead of the
+    /// `before_turn` guard, so the first `User` record and the provider
+    /// request carry the same final parts. A cancelled opening keeps its
+    /// admitted content: transforms from an opening that did not finish are
+    /// not admitted. A cancel that lands while the hooks run wins: the fold
+    /// drops a verdict whose phase moved on.
     async fn drive_opening(&mut self) -> Option<Vec<Effect>> {
         if self.settling.is_some() {
             return None;
@@ -1657,30 +1765,12 @@ impl Actor {
             turn_deadline: deadline,
             script: self.hook_script(),
         };
-        let mut content = content;
-        if run_input {
-            for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
-                let cx = scope.cx(&caller, Some(turn));
-                let step = self
-                    .pump_opening(dispatch_input(
-                        extension.name(),
-                        &cx,
-                        matches!(extension.origin(), Origin::Builtin),
-                        generation.inputs(index),
-                        &InputEvent {
-                            content: content.clone(),
-                        },
-                    ))
-                    .await;
-                content = step.content;
-                for notice in step.notices {
-                    self.notice(turn, "hook.input", &notice);
-                }
-                if step.stop {
-                    break;
-                }
-            }
-        }
+        let content = if run_input {
+            self.fold_input_hooks(&scope, &generation, turn, content)
+                .await
+        } else {
+            content
+        };
         let event = BeforeTurn {
             turn,
             text: content_text(&content).into(),
@@ -1706,12 +1796,16 @@ impl Actor {
             return None;
         }
         self.control().end_opening(turn);
+        let mut effects = Vec::new();
+        if run_input && !cancel.is_cancelled() && !self.guard_input(turn, content, &mut effects) {
+            self.control().cancel_opening();
+            return None;
+        }
         let add = join_before_turn(&texts).map(Into::into);
         let Ok(outcome) = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(add))
         else {
             return None;
         };
-        let mut effects = Vec::new();
         if self
             .fold
             .step(
@@ -1730,6 +1824,68 @@ impl Actor {
         }
         self.control().cancel_opening();
         None
+    }
+
+    /// Folds every extension's `input` hooks over `content` in canonical
+    /// order and returns the final parts. Transforms feed the next hook and
+    /// the first stopping extension ends the fold. A share that would leave
+    /// non-empty input without parts is refused with one notice and keeps
+    /// the running content, as a failed hook does.
+    async fn fold_input_hooks(
+        &mut self,
+        scope: &HookScope<'_>,
+        generation: &Generation,
+        turn: TurnId,
+        mut content: Vec<Part>,
+    ) -> Vec<Part> {
+        for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
+            let cx = scope.cx(&caller, Some(turn));
+            let step = self
+                .pump_opening(dispatch_input(
+                    extension.name(),
+                    &cx,
+                    matches!(extension.origin(), Origin::Builtin),
+                    generation.inputs(index),
+                    &InputEvent {
+                        content: content.clone(),
+                    },
+                ))
+                .await;
+            for notice in step.notices {
+                self.notice(turn, "hook.input", &notice);
+            }
+            if step.content.is_empty() && !content.is_empty() {
+                self.notice(turn, "hook.input", &input_failed_notice(extension.name()));
+            } else {
+                content = step.content;
+            }
+            if step.stop {
+                break;
+            }
+        }
+        content
+    }
+
+    /// Feeds the folded input content to the fold as one `Input` guard.
+    /// Returns `false` when the fold refuses the guard. The guard emits no
+    /// record and no effect; the `before_turn` guard that follows journals
+    /// the first `User` record with these parts. Empty content is only an
+    /// admitted empty follow-up, which no hook replaced: nothing to send.
+    fn guard_input(&mut self, turn: TurnId, content: Vec<Part>, effects: &mut Vec<Effect>) -> bool {
+        if content.is_empty() {
+            return true;
+        }
+        let verdict = HookVerdict::Input(InputVerdict::Transform(content));
+        let Ok(outcome) = HookOutcome::new(HookEvent::Input, verdict) else {
+            return false;
+        };
+        let event = Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome,
+        };
+        self.fold.step(event, Timestamp::now(), effects).is_ok()
     }
 
     /// Publishes one turn-scoped hook notice.
@@ -1784,9 +1940,15 @@ impl Actor {
             UpdateKind::TurnEnded { turn, stop } => {
                 assert!(self.settling.replace(*turn).is_none());
                 self.control().end_turn(*turn);
-                let resolved = self
-                    .broker
-                    .resolve_turn(*turn, Answer::Cancel, core_client());
+                // The turn's terminal record is already journaled; its
+                // backstop cause is `Cancelled` when the driver confirmed a
+                // cancel and `Withdrawn` for any other end.
+                let cause = if *stop == dal_core::Stop::Cancelled {
+                    ResolutionCause::Cancelled
+                } else {
+                    ResolutionCause::Withdrawn
+                };
+                let resolved = self.broker.resolve_turn(*turn, cause);
                 for item in resolved {
                     self.queue_resolved_or_cancel(&item, queue);
                 }
@@ -1833,6 +1995,7 @@ impl Actor {
                     answer: item.answer.clone(),
                     by,
                     was_default: item.was_default,
+                    cause: item.cause,
                 },
                 Timestamp::now(),
                 &mut effects,
@@ -1960,7 +2123,14 @@ impl Actor {
     }
 
     async fn sweep_expiry(&mut self) {
-        let expired = self.broker.expire(Instant::now());
+        // The caller computes controller availability per request class:
+        // approvals and grants expire `NoController` with no approval
+        // answerer attached; everything else expires `TimedOut` unless no
+        // ask answerer is attached. The probe runs after the broker lock is
+        // released, so it may take any attachment lock the registry needs.
+        let expired = self
+            .broker
+            .expire(Instant::now(), |question| self.unattended(question));
         if expired.is_empty() {
             return;
         }
@@ -1971,6 +2141,17 @@ impl Actor {
             }
         }
         self.execute(queue.into_iter().collect(), None).await;
+    }
+
+    /// Says whether no answerer for `question` is attached, by the class
+    /// that could have resolved it.
+    fn unattended(&self, question: &dal_core::Question) -> bool {
+        match question {
+            dal_core::Question::Approval { .. } | dal_core::Question::Grant { .. } => {
+                !self.shared.attached_approval()
+            }
+            _ => !self.shared.attached_ask(),
+        }
     }
     /// Publishes one content-addressed blob through the journal.
     fn put_blob(&mut self, bytes: Vec<u8>) -> Result<BlobId, AgentError> {

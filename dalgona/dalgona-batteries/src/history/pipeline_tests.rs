@@ -697,6 +697,7 @@ fn assistant(parts: Vec<AssistantPart>) -> ContextItem {
             model: "claude".into(),
         },
         parts,
+        replay: None,
     }
 }
 
@@ -705,6 +706,7 @@ fn call(args: &str) -> AssistantPart {
         call: CallId::new("c1"),
         name: "read".into(),
         args: RawJson::parse(args).expect("fixture JSON parses"),
+        replay: None,
     }
 }
 
@@ -747,6 +749,7 @@ fn every_role() -> Vec<CoveredEntry> {
                 },
                 AssistantPart::Text {
                     text: "on it".into(),
+                    replay: None,
                 },
                 call(r#"{"path":"a.rs"}"#),
             ]),
@@ -876,6 +879,7 @@ async fn journal_input_drives_the_pipeline_and_names_roles_in_letter_text() {
             assistant(vec![
                 AssistantPart::Text {
                     text: "on it".into(),
+                    replay: None,
                 },
                 call("{\"path\":\"\u{1F680}.rs\"}"),
             ]),

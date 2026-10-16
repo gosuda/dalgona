@@ -2,6 +2,7 @@ use super::{
     Answer, CallId, ClientId, Entry, EntryId, FileChange, Gen, Header, InferredPurpose, JobEvent,
     JobId, Mail, Owner, RawJson, RequestId, RouteError, TurnEndStop, TurnId, Usage, fmt,
 };
+use crate::update::ResolutionCause;
 
 /// One journal record from a supported line format.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +129,10 @@ pub enum Record {
         /// Whether the answer was the request's default. The member is
         /// written only when it is true.
         was_default: bool,
+        /// Why the request resolved. Absent in records written before
+        /// causes existed; the member is written only when present, so a
+        /// record without one re-encodes byte-for-byte.
+        cause: Option<ResolutionCause>,
     },
     /// A client granted a tool always-allowance.
     AllowAlways {
@@ -319,6 +324,13 @@ pub enum EncodeError {
     /// replay one, so the record is refused instead of written.
     #[error("cannot encode an empty model id")]
     EmptyModel,
+    /// An assistant entry replay holds an explicit JSON `null`.
+    ///
+    /// Only an absent member means absent replay: the decoder rejects a
+    /// present `null`, so the record is refused instead of written as a
+    /// line no reader accepts.
+    #[error("cannot encode a null assistant replay")]
+    NullReplay,
 }
 
 /// The fixed prefix of a tree record, read without allocation.

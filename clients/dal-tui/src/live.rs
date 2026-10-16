@@ -1,10 +1,11 @@
 //! Live blocks fed by sequenced updates; settled rows commit exactly once.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dal_core::{ExtStatus, Stop, StreamChannel, Update, UpdateKind};
+use dal_core::{BlobId, ExtStatus, Stop, StreamChannel, Update, UpdateKind};
 
 const EXT_VISIBLE_ROWS: usize = 3;
 
@@ -37,8 +38,152 @@ pub struct Live {
     notices: Vec<String>,
     ext_busy: BTreeMap<Box<str>, ExtStatus>,
     jobs: HashSet<dal_core::JobId>,
+    /// The card the expand view holds open, with its scroll offset.
+    expand: Option<ExpandedView>,
     spinner_frame: usize,
     spinner_last: Option<Instant>,
+}
+
+/// One card the user expanded with the newest-card action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpandedCard {
+    /// The reasoning blocks of an assistant entry.
+    Reasoning { entry: dal_core::EntryId },
+    /// The full stored output of a settled tool result entry.
+    Tool { entry: dal_core::EntryId },
+    /// The source of the fence at `fence` inside the `block` text block of an
+    /// assistant entry.
+    Diagram {
+        /// The entry holding the fenced source block.
+        entry: dal_core::EntryId,
+        /// Index into the entry's content blocks.
+        block: usize,
+        /// Index into `markdown::fence_spans` over that block's text: the
+        /// ordinal is stable under append because the scan is deterministic
+        /// and committed text is immutable.
+        fence: usize,
+    },
+}
+
+/// Open expand view: which card plus its window geometry and blob reads.
+///
+/// `scroll` is the first visible content row, `window` the last observed
+/// window height, and `content` the last measured row count; the cells update
+/// at render time so scroll keys never race the frame that measured them.
+/// `blobs` records one read per `TextBlob` part the card names, filled by the
+/// worker the runtime starts when the view opens; the worker holds a `Weak`,
+/// so closing or retargeting the view cancels the read for it.
+#[derive(Debug)]
+pub(crate) struct ExpandedView {
+    /// The expanded card.
+    pub(crate) card: ExpandedCard,
+    /// One `Pending` slot per `TextBlob` part, resolved once by the read.
+    blobs: Arc<Mutex<HashMap<BlobId, BlobRead>>>,
+    scroll: Cell<usize>,
+    window: Cell<usize>,
+    content: Cell<usize>,
+}
+
+/// The one read of a card's stored blob: in flight, decoded text, or failed.
+#[derive(Debug, Clone)]
+pub(crate) enum BlobRead {
+    /// The runtime's worker has not answered yet.
+    Pending,
+    /// The stored bytes decoded as the UTF-8 text a `TextBlob` always holds.
+    Text(Arc<str>),
+    /// The read failed; the message is the agent's own error text.
+    Failed(Arc<str>),
+}
+
+impl ExpandedView {
+    /// Opens the view pinned to the card's first row, registering one pending
+    /// read per `TextBlob` digest the card names.
+    pub(crate) fn new(card: ExpandedCard, blob_ids: Vec<BlobId>) -> Self {
+        Self {
+            card,
+            blobs: Arc::new(Mutex::new(
+                blob_ids
+                    .into_iter()
+                    .map(|id| (id, BlobRead::Pending))
+                    .collect(),
+            )),
+            scroll: Cell::new(0),
+            window: Cell::new(0),
+            content: Cell::new(0),
+        }
+    }
+
+    /// The weak end of the shared slot map the runtime's read worker fills:
+    /// the worker upgrades per write, so dropping this view cancels the read.
+    pub(crate) fn blob_sink(&self) -> std::sync::Weak<Mutex<HashMap<BlobId, BlobRead>>> {
+        Arc::downgrade(&self.blobs)
+    }
+
+    /// The recorded read of one blob, cloning nothing but the Arc inside.
+    pub(crate) fn blob(&self, id: &BlobId) -> Option<BlobRead> {
+        self.blobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    /// The row count the last painted frame produced, when one did. A view
+    /// that has not painted yet reports `None` so the allocator grants the
+    /// full overlay allowance rather than guessing a smaller natural height.
+    pub(crate) fn measured_rows(&self) -> Option<usize> {
+        (self.content.get() > 0).then(|| self.content.get())
+    }
+
+    /// Records the window height and row count one frame just painted, then
+    /// re-pins the scroll inside them.
+    pub(crate) fn observe(&self, window: usize, content: usize) {
+        self.window.set(window);
+        self.content.set(content);
+        self.clamp();
+    }
+
+    /// Scrolls one row up or down.
+    pub(crate) fn scroll_up(&self) {
+        self.scroll.set(self.scroll.get().saturating_sub(1));
+    }
+
+    /// Scrolls one row down, stopping at the last page.
+    pub(crate) fn scroll_down(&self) {
+        self.scroll.set(self.scroll.get().saturating_add(1));
+        self.clamp();
+    }
+
+    /// Scrolls up one observed window.
+    pub(crate) fn page_up(&self) {
+        let page = self.window.get().max(1);
+        self.scroll.set(self.scroll.get().saturating_sub(page));
+    }
+
+    /// Scrolls down one observed window, stopping at the last page.
+    pub(crate) fn page_down(&self) {
+        let page = self.window.get().max(1);
+        self.scroll.set(self.scroll.get().saturating_add(page));
+        self.clamp();
+    }
+
+    /// Jumps to the last page of content.
+    pub(crate) fn jump_latest(&self) {
+        self.scroll.set(usize::MAX);
+        self.clamp();
+    }
+
+    /// Returns the first visible content row, clamped to the last window.
+    #[must_use]
+    pub(crate) fn top(&self) -> usize {
+        self.clamp();
+        self.scroll.get()
+    }
+
+    fn clamp(&self) {
+        let max = self.content.get().saturating_sub(self.window.get().max(1));
+        self.scroll.set(self.scroll.get().min(max));
+    }
 }
 
 /// One tool card from started through settled.
@@ -228,17 +373,22 @@ impl Live {
     }
 
     /// The last `limit` rows of the assistant text as markdown, rendering only the
-    /// lines completed since the previous call.
+    /// lines completed since the previous call. `wire` offers completed
+    /// routable fences to the diagram engine; `None` renders them as code.
     pub(crate) fn assistant_rows(
         &self,
         cap: usize,
         full: usize,
         mode: crate::width::WidthMode,
         limit: usize,
+        wire: Option<(
+            &crate::diagram::DiagramSettings,
+            &crate::diagram::RenderCache,
+        )>,
     ) -> Vec<crate::render::RenderRow> {
         self.stream
             .borrow_mut()
-            .rows(&self.assistant_text, cap, full, mode, limit)
+            .rows(&self.assistant_text, cap, full, mode, limit, wire)
     }
 
     /// Returns how long the tool call `call` has run: the settled duration, or
@@ -289,6 +439,23 @@ impl Live {
         }
     }
 
+    /// The card the expand view holds open, when one does.
+    #[must_use]
+    pub(crate) fn expanded(&self) -> Option<&ExpandedView> {
+        self.expand.as_ref()
+    }
+
+    /// Opens or retargets the expand view; `blob_ids` names the `TextBlob`
+    /// parts the card resolves through the runtime's read worker.
+    pub(crate) fn open_expand(&mut self, card: ExpandedCard, blob_ids: Vec<BlobId>) {
+        self.expand = Some(ExpandedView::new(card, blob_ids));
+    }
+
+    /// Closes the expand view; returns whether one was open.
+    pub(crate) fn close_expand(&mut self) -> bool {
+        self.expand.take().is_some()
+    }
+
     /// Rebuilds transient state from a fresh view after replay was lost.
     pub fn reset_after_resync(&mut self) {
         self.assistant_text.clear();
@@ -297,6 +464,10 @@ impl Live {
         self.tool_cards.clear();
         self.tool_order.clear();
         self.jobs.clear();
+        // A resync swaps the branch; a card the view no longer holds cannot
+        // stay expanded. Dropping the view also drops its blob map, which
+        // ends the read worker the moment it finishes its current wait.
+        self.expand = None;
     }
 
     /// One-word activity for the status row, if anything is still open.
@@ -577,7 +748,7 @@ mod tests {
             },
         };
         let rows = |live: &Live| -> Vec<String> {
-            live.assistant_rows(40, 40, WidthMode::Narrow, usize::MAX)
+            live.assistant_rows(40, 40, WidthMode::Narrow, usize::MAX, None)
                 .into_iter()
                 .map(|row| row.text)
                 .collect()
@@ -589,6 +760,47 @@ mod tests {
         live.take_assistant_text();
         live.apply_update(&delta(3, "fresh"));
         assert_eq!(rows(&live), ["fresh"]);
+    }
+
+    #[test]
+    fn an_embedded_diagram_fence_reaches_the_live_stream() {
+        use crate::diagram::{DiagramSettings, RenderCache};
+        use crate::width::WidthMode;
+        let mut live = super::Live::default();
+        let delta = |seq: u64, text: &str| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind: UpdateKind::Delta {
+                turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
+                channel: dal_core::StreamChannel::Text,
+                text: text.into(),
+            },
+        };
+        live.apply_update(&delta(1, "prose\n```mermaid\ngraph TD; A-->B\n```\ntail\n"));
+        let settings = DiagramSettings { enabled: true };
+        let cache = RenderCache::default();
+        let texts: Vec<String> = live
+            .assistant_rows(
+                40,
+                40,
+                WidthMode::Narrow,
+                usize::MAX,
+                Some((&settings, &cache)),
+            )
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        // The completed fence materializes its card inline: the source never
+        // appears as code rows, while the surrounding prose survives in order.
+        assert!(texts.first().is_some_and(|row| row.contains("prose")));
+        assert!(texts.last().is_some_and(|row| row.contains("tail")));
+        assert!(
+            !texts
+                .iter()
+                .any(|row| row.contains("graph TD") || row.contains("```")),
+            "{texts:?}"
+        );
+        assert_eq!(cache.renders(), 1);
     }
 
     #[test]

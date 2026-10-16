@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::{FunctionMetrics, GuardConfig, TurnState, metrics, report};
+use super::{FunctionMetrics, GuardConfig, SummaryDues, TurnState, metrics, report};
 
 #[expect(
     clippy::too_many_lines,
@@ -8,8 +8,7 @@ use super::{FunctionMetrics, GuardConfig, TurnState, metrics, report};
 )]
 pub(super) fn build(
     cfg: &GuardConfig,
-    reset_due: &mut bool,
-    announced_blocks: &mut bool,
+    dues: &mut SummaryDues,
     seen_warnings: &mut HashSet<(Box<str>, Box<str>)>,
     turn: &mut TurnState,
 ) -> Option<String> {
@@ -80,7 +79,7 @@ pub(super) fn build(
         new_files: turn.new_files.len(),
         reduction_ask: turn.reduction_ask,
         pure_additions,
-        announce_reset: *reset_due,
+        announce_reset: dues.reset_due,
         bands,
         mass_rows,
         erosion,
@@ -89,10 +88,10 @@ pub(super) fn build(
         warnings,
         stream: stream_lines,
     };
-    *reset_due = false;
+    dues.reset_due = false;
     let mut lines = Vec::new();
-    if !cfg.cannot_block.is_empty() && !*announced_blocks {
-        *announced_blocks = true;
+    if !cfg.cannot_block.is_empty() && !dues.announced_blocks {
+        dues.announced_blocks = true;
         lines.extend(
             cfg.cannot_block
                 .iter()

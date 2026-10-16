@@ -1,6 +1,7 @@
 //! Provider transport values and SSE framing for dal.
 
 mod auth;
+pub mod capability;
 mod catalog;
 mod claude_fingerprint;
 mod compact;
@@ -11,6 +12,7 @@ mod lifecycle;
 mod provider;
 mod replay;
 mod retry;
+mod run;
 mod scripted;
 mod sse;
 mod stream;
@@ -56,6 +58,7 @@ pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, 
 pub use retry::{
     MAX_RETRY_WAIT, RequestState, RetryAfterTooLong, RetryDecision, classify, delay_for_attempt,
 };
+pub use run::{HostToolResult, ProviderRun, RunLostReason, RunState};
 pub use scripted::{Operation, Script, ScriptError, ScriptStep, StepKind};
 pub use sse::{SSE_EVENT_LIMIT, SSE_LINE_LIMIT, SseEvent, decode_stream, encode};
 pub use stream::{

@@ -1,4 +1,5 @@
 use super::*;
+use crate::update::ResolutionCause;
 
 /// Every canonical vector whose members are spec-shaped. The
 /// `req_0142`/`job_0091` lines are shorthand the document uses for
@@ -83,6 +84,7 @@ fn assistant_entry(model: &str, route: Option<AssistantRoute>) -> Entry {
             },
             stop: AssistantStop::Done,
             route,
+            replay: None,
         },
     }
 }
@@ -147,6 +149,99 @@ fn resolved_and_extended_records_round_trip() -> Result<(), Box<dyn std::error::
         );
     }
     Ok(())
+}
+
+const RESOLVED_HEAD: &str = "{\"v\":1,\"type\":\"resolved\",\"at\":\"2026-09-25T10:15:36.000Z\",\"request\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"answer\":\"cancel\",\"by\":\"core\"";
+
+/// Every resolution cause beside its durable literal.
+const RESOLUTION_CAUSES: [(ResolutionCause, &str); 5] = [
+    (ResolutionCause::Answered, "answered"),
+    (ResolutionCause::TimedOut, "timed_out"),
+    (ResolutionCause::Cancelled, "cancelled"),
+    (ResolutionCause::Withdrawn, "withdrawn"),
+    (ResolutionCause::NoController, "no_controller"),
+];
+
+fn resolved_line(tail: &str) -> String {
+    format!("{RESOLVED_HEAD}{tail}}}\n")
+}
+
+fn resolved_record(
+    was_default: bool,
+    cause: Option<ResolutionCause>,
+) -> Result<Record, Box<dyn std::error::Error>> {
+    Ok(Record::Resolved {
+        at: "2026-09-25T10:15:36.000Z".parse()?,
+        request: RequestId::parse("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f")?,
+        answer: Answer::Cancel,
+        by: ClientId::new("core"),
+        was_default,
+        cause,
+    })
+}
+
+#[test]
+fn resolved_cause_round_trips_every_literal_through_the_codec()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (cause, literal) in RESOLUTION_CAUSES {
+        for (was_default, default_member) in [(false, ""), (true, ",\"was_default\":true")] {
+            let line = resolved_line(&format!("{default_member},\"cause\":\"{literal}\""));
+            let record = resolved_record(was_default, Some(cause))?;
+            assert_eq!(decode(line.as_bytes())?.record, record, "{line}");
+            assert_eq!(encode(&record)?.as_slice(), line.as_bytes(), "{line}");
+        }
+    }
+
+    // Decoding ignores member order; encoding always writes the declared
+    // order, with `cause` after `was_default`.
+    let reordered = resolved_line(",\"cause\":\"timed_out\",\"was_default\":true");
+    let canonical = resolved_line(",\"was_default\":true,\"cause\":\"timed_out\"");
+    let record = resolved_record(true, Some(ResolutionCause::TimedOut))?;
+    assert_eq!(decode(reordered.as_bytes())?.record, record);
+    assert_eq!(encode(&record)?.as_slice(), canonical.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn legacy_resolved_records_have_no_cause_and_re_encode_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (tail, was_default) in [("", false), (",\"was_default\":true", true)] {
+        let line = resolved_line(tail);
+        let legacy = resolved_record(was_default, None)?;
+        assert_eq!(decode(line.as_bytes())?.record, legacy, "{line}");
+        assert_eq!(encode(&legacy)?.as_slice(), line.as_bytes(), "{line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn resolved_cause_rejects_unknown_literals_and_non_string_members() {
+    // A present member never reads as a missing cause: the closed payload
+    // refuses a corrupt or future spelling instead of fabricating `None`.
+    let cases = [
+        "\"soon\"",
+        "\"\"",
+        "\"Answered\"",
+        "\"timed-out\"",
+        "\"answered \"",
+        "null",
+        "7",
+        "true",
+        "[\"answered\"]",
+        "{\"answered\":true}",
+    ];
+    for bad in cases {
+        let line = resolved_line(&format!(",\"cause\":{bad}"));
+        let marker = "\"cause\":";
+        let expected_offset = line.find(marker).unwrap() + marker.len();
+        assert!(
+            matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if offset == expected_offset
+            ),
+            "{bad}"
+        );
+    }
 }
 
 #[test]
@@ -1312,5 +1407,205 @@ fn reservation_format_preserves_legacy_bytes_and_rejects_old_version()
         decode(future),
         Err(DecodeError::UnsupportedVersion { found: 3 })
     ));
+    Ok(())
+}
+
+fn assistant_with_replay(content: Vec<Block>, replay: Option<RawJson>) -> Record {
+    Record::Assistant(Entry {
+        id: EntryId::new(nz(5)),
+        parent: None,
+        at: "2026-09-25T10:15:35.410Z"
+            .parse()
+            .expect("valid fixture timestamp"),
+        kind: EntryKind::Assistant {
+            api: Family::Anthropic,
+            model: "m".into(),
+            content,
+            usage: Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+            },
+            stop: AssistantStop::Done,
+            route: None,
+            replay,
+        },
+    })
+}
+
+/// Legacy assistant bytes predate block and entry replay: a text
+/// `"replay":null` reads as absent, a tool call with no replay member stays
+/// absent, and the entry carries no replay. The line re-encodes byte for byte.
+#[test]
+fn legacy_assistant_blocks_without_replay_re_encode_identically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let line = "{\"v\":1,\"type\":\"assistant\",\"id\":5,\"parent\":4,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"I will read the lexer.\",\"replay\":null},{\"type\":\"tool_call\",\"id\":\"toolu_01\",\"name\":\"read\",\"input\":{\"path\":\"lib/lexer.ml\"}}],\"usage\":{\"input\":1200,\"output\":85,\"cache_read\":0,\"cache_write\":1100,\"reasoning\":null,\"cost_micro_usd\":4210},\"stop\":\"tool_use\"}\n";
+    let decoded = decode(line.as_bytes())?;
+    let Record::Assistant(entry) = &decoded.record else {
+        return Err("expected an assistant record".into());
+    };
+    let EntryKind::Assistant {
+        content, replay, ..
+    } = &entry.kind
+    else {
+        return Err("expected an assistant entry".into());
+    };
+    assert_eq!(*replay, None);
+    assert!(matches!(
+        content.as_slice(),
+        [Block::Text { text, replay: None }, Block::ToolCall { replay: None, .. }]
+        if text.as_ref() == "I will read the lexer."
+    ));
+    assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+    Ok(())
+}
+
+/// A present replay payload is opaque bytes: interior whitespace, escapes and
+/// non-ASCII survive the round trip on text blocks, tool calls and the
+/// assistant entry alike, and decode hands back the same value.
+#[test]
+fn present_replay_payloads_survive_byte_for_byte() -> Result<(), Box<dyn std::error::Error>> {
+    let raw = "{\"b\":2,  \"a\":\"h\u{00e9}llo \\\"w\u{00f6}rld\\\"\\n \u{2603} \u{00e9}\"}";
+    let replay = || RawJson::parse(raw);
+    let record = Record::Assistant(Entry {
+        id: EntryId::new(nz(5)),
+        parent: None,
+        at: "2026-09-25T10:15:35.410Z".parse()?,
+        kind: EntryKind::Assistant {
+            api: Family::Anthropic,
+            model: "m".into(),
+            content: vec![
+                Block::Text {
+                    text: "hi".into(),
+                    replay: Some(replay()?),
+                },
+                Block::ToolCall {
+                    id: CallId::new("toolu_01"),
+                    name: "read".into(),
+                    input: RawJson::parse("{}")?,
+                    replay: Some(replay()?),
+                },
+            ],
+            usage: Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+            },
+            stop: AssistantStop::Done,
+            route: None,
+            replay: Some(replay()?),
+        },
+    });
+    let line = String::from_utf8(encode(&record)?)?;
+    assert_eq!(line.matches(raw).count(), 3, "replay bytes changed: {line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(
+        encode(&decode(line.as_bytes())?.record)?,
+        line.as_bytes(),
+        "a replay-bearing line re-encodes identically"
+    );
+    Ok(())
+}
+
+/// An explicit entry-level replay null is malformed, not absent: like `route`,
+/// a present member never reads as a missing one.
+#[test]
+fn assistant_entry_rejects_an_explicit_replay_null() {
+    let line = assistant_line("m", None)
+        .replace("\"stop\":\"done\"}", "\"stop\":\"done\",\"replay\":null}");
+    assert!(
+        matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+        "{line}"
+    );
+}
+
+/// The direct `EntryKind` serde path keeps entry replay: a present payload
+/// round-trips through the derived spelling and the wire line alike, instead
+/// of dropping silently while the journal decoder preserves it.
+#[test]
+fn assistant_replay_round_trips_through_direct_entry_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let payload = RawJson::parse(r#"{"api":"anthropic"}"#)?;
+    let record = assistant_with_replay(Vec::new(), Some(payload));
+    let Record::Assistant(entry) = &record else {
+        return Err("expected an assistant record".into());
+    };
+    let serde_text = sonic_rs::to_string(&entry.kind)?;
+    assert!(
+        serde_text.contains(r#""replay":{"api":"anthropic"}"#),
+        "{serde_text}"
+    );
+    assert_eq!(sonic_rs::from_str::<EntryKind>(&serde_text)?, entry.kind);
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(line.contains(r#""replay":{"api":"anthropic"}"#), "{line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    Ok(())
+}
+
+/// A present `null` entry replay is malformed on the direct serde path too:
+/// only an absent member reads as missing replay.
+#[test]
+fn direct_entry_decode_rejects_an_explicit_replay_null() -> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(Vec::new(), None);
+    let Record::Assistant(entry) = &record else {
+        return Err("expected an assistant record".into());
+    };
+    let serde_text = sonic_rs::to_string(&entry.kind)?;
+    assert!(!serde_text.contains("\"replay\""), "{serde_text}");
+    let injected = format!("{},\"replay\":null}}", &serde_text[..serde_text.len() - 1]);
+    assert!(
+        sonic_rs::from_str::<EntryKind>(&injected).is_err(),
+        "{injected}"
+    );
+    Ok(())
+}
+
+/// The encoder refuses a caller-built null entry replay: the member is
+/// skip-None, so `Some(null)` would write the explicit null the decoder
+/// rejects. The value is reported, never normalized to absent.
+#[test]
+fn encode_rejects_null_assistant_replay_the_decoder_would_reject() {
+    let record = assistant_with_replay(Vec::new(), Some(RawJson::null()));
+    assert!(matches!(encode(&record), Err(EncodeError::NullReplay)));
+}
+
+/// A tool call without replay writes no replay member: the encoded line and
+/// the serde spelling both stay free of it, and both paths round-trip.
+#[test]
+fn tool_call_without_replay_writes_no_replay_member() -> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(
+        vec![Block::ToolCall {
+            id: CallId::new("toolu_01"),
+            name: "read".into(),
+            input: RawJson::parse("{}")?,
+            replay: None,
+        }],
+        None,
+    );
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(!line.contains("replay"), "{line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    let serde_text = sonic_rs::to_string(&Block::ToolCall {
+        id: CallId::new("toolu_01"),
+        name: "read".into(),
+        input: RawJson::parse("{}")?,
+        replay: None,
+    })?;
+    assert!(!serde_text.contains("replay"), "{serde_text}");
+    assert_eq!(
+        sonic_rs::from_str::<Block>(&serde_text)?,
+        Block::ToolCall {
+            id: CallId::new("toolu_01"),
+            name: "read".into(),
+            input: RawJson::parse("{}")?,
+            replay: None,
+        }
+    );
     Ok(())
 }

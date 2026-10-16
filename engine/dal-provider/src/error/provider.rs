@@ -8,7 +8,7 @@ use std::{error::Error, fmt, path::PathBuf, time::Duration};
 use dal_core::{Family, InferFailure};
 
 use super::{CONTEXT_OVERFLOW_CODES, THINKING_LEVEL_NAMES, capped_message_line, family_label};
-use crate::{scripted::ScriptError, usage::LUNA_RESERVE_MODEL};
+use crate::{run::RunLostReason, scripted::ScriptError, usage::LUNA_RESERVE_MODEL};
 
 /// A failure of one provider request, credential file, sign-in flow, or model
 /// resolution, with the exact text the caller may show.
@@ -104,6 +104,16 @@ pub enum ProviderError {
         family: Family,
         /// The violated rule, in one short sentence.
         detail: String,
+    },
+    /// A provider run kept open across tool exchanges can no longer continue.
+    ///
+    /// The failure is final: the loop never replays it, and nothing starts a
+    /// new run in its place.
+    RunLost {
+        /// The provider API family of the run.
+        family: Family,
+        /// Why the run cannot continue.
+        reason: RunLostReason,
     },
     /// A protocol or body size limit was exceeded.
     Limit(super::LimitError),
@@ -304,6 +314,7 @@ impl ProviderError {
     ///
     /// The request lifecycle consults this only for failures after the first
     /// delivered event; before delivery the lifecycle owns its own retries.
+    /// A lost run ([`ProviderError::RunLost`]) is never replayable.
     #[must_use]
     pub fn retryable_by_loop(&self) -> bool {
         matches!(
@@ -377,6 +388,9 @@ impl fmt::Display for ProviderError {
                     "{} sent an invalid stream: {detail}",
                     family_label(*family)
                 )
+            }
+            Self::RunLost { family, reason } => {
+                write!(f, "{} run lost: {reason}", family_label(*family))
             }
             Self::Limit(error) => write!(f, "{error}"),
             Self::PlainHttp { host } => {
@@ -479,7 +493,9 @@ impl Error for ProviderError {}
 /// its final 429 asked for; every other retryable failure has none. A refused
 /// `Retry-After` over 60 s ([`ProviderError::RetryAfterTooLong`]) fails at
 /// once and is [`InferFailure::Fatal`], like every other failure, with its
-/// fix. Each message is the error's display text.
+/// fix. A lost run ([`ProviderError::RunLost`]) is [`InferFailure::Fatal`]
+/// whatever its reason, so it is never replayed. Each message is the error's
+/// display text.
 impl From<ProviderError> for InferFailure {
     fn from(error: ProviderError) -> Self {
         use ProviderError as E;
@@ -519,6 +535,7 @@ impl From<ProviderError> for InferFailure {
             | E::SignInExpired { .. }
             | E::NoCredentials { .. }
             | E::Protocol { .. }
+            | E::RunLost { .. }
             | E::Limit(_)
             | E::PlainHttp { .. }
             | E::CompactionMissing { .. }

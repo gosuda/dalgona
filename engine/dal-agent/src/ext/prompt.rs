@@ -1,10 +1,12 @@
-//! Prompt sections: one immutable section per extension.
+//! Prompt sections: ordered sections contributed by an extension.
 //!
 //! A [`PromptSection`] is either [`PromptSection::Static`] fixed bytes or
 //! [`PromptSection::Session`] bytes rendered through a [`SectionFn`] once at
-//! session open and again only on generation publish. The
-//! builder enforces at most one section per extension
-//! ([`MAX_SECTIONS_PER_EXTENSION`]); this module only carries the data.
+//! session open and again only on generation publish. An extension may
+//! register several sections at distinct [`PromptOrder`] positions; the
+//! builder rejects two sections at the same order
+//! ([`dal_core::RegistrationError::DuplicatePromptSection`], capacity
+//! [`MAX_SECTIONS_PER_EXTENSION`]). This module only carries the data.
 //!
 //! Render inputs ride one read-only aggregate ([`SectionCx`]): the
 //! session/turn/services/caller view plus the generation snapshot id, the
@@ -22,8 +24,13 @@ use super::{Caller, Services, ToolDescription};
 /// Joins rendered sections with one blank line, byte-stable.
 pub const SECTION_SEPARATOR: &str = "\n\n";
 
-/// One prompt section per extension; the builder rejects the second.
-pub const MAX_SECTIONS_PER_EXTENSION: usize = 1;
+/// Prompt slots an extension may fill: the closed [`PromptOrder`] domain.
+///
+/// One section per order is the design rule (two at the same order are
+/// rejected); this bound is derived as the highest position plus one, so
+/// admitting every distinct order is possible without an arbitrary count.
+// Widening u8 -> usize; lossless.
+pub const MAX_SECTIONS_PER_EXTENSION: usize = PromptOrder::DocsLine.position() as usize + 1;
 
 /// Product prompt section order.
 ///

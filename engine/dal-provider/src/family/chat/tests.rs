@@ -84,6 +84,7 @@ fn request_body_matches_the_member_order_byte_for_byte() {
             },
             ContextItem::Assistant {
                 source: replay_source(),
+                replay: None,
                 parts: vec![
                     AssistantPart::Thinking {
                         text: "hidden".into(),
@@ -91,11 +92,13 @@ fn request_body_matches_the_member_order_byte_for_byte() {
                     },
                     AssistantPart::Text {
                         text: "Checking.".into(),
+                        replay: None,
                     },
                     AssistantPart::ToolCall {
                         call: CallId::new("call_1"),
                         name: "read".into(),
                         args: raw(r#"{"path": "a.txt" ,"n":1.50}"#),
+                        replay: None,
                     },
                 ],
             },
@@ -138,6 +141,7 @@ fn request_body_without_tools_omits_tool_members_and_unsent_parameters() {
             },
             ContextItem::Assistant {
                 source: replay_source(),
+                replay: None,
                 parts: vec![AssistantPart::Thinking {
                     text: "only reasoning".into(),
                     replay: Some(raw("{}")),
@@ -524,10 +528,12 @@ fn request_body_maps_mapped_tool_names_for_advertisements_and_history() {
         }],
         vec![ContextItem::Assistant {
             source: replay_source(),
+            replay: None,
             parts: vec![AssistantPart::ToolCall {
                 call: CallId::new("call-1"),
                 name: "deploy.web-x.list".into(),
                 args: raw("{}"),
+                replay: None,
             }],
         }],
     );
@@ -538,6 +544,53 @@ fn request_body_maps_mapped_tool_names_for_advertisements_and_history() {
         2
     );
     assert!(!body.contains("deploy.web-x.list"));
+}
+
+#[test]
+fn request_body_ignores_text_tool_and_message_replay() {
+    let payload = || Some(raw(r#"{"foreign":"payload"}"#));
+    let plain = request(
+        Vec::new(),
+        vec![ContextItem::Assistant {
+            source: replay_source(),
+            replay: None,
+            parts: vec![
+                AssistantPart::Text {
+                    text: "Hi.".into(),
+                    replay: None,
+                },
+                AssistantPart::ToolCall {
+                    call: CallId::new("call-9"),
+                    name: "read".into(),
+                    args: raw("{}"),
+                    replay: None,
+                },
+            ],
+        }],
+    );
+    let laden = request(
+        Vec::new(),
+        vec![ContextItem::Assistant {
+            source: replay_source(),
+            replay: payload(),
+            parts: vec![
+                AssistantPart::Text {
+                    text: "Hi.".into(),
+                    replay: payload(),
+                },
+                AssistantPart::ToolCall {
+                    call: CallId::new("call-9"),
+                    name: "read".into(),
+                    args: raw("{}"),
+                    replay: payload(),
+                },
+            ],
+        }],
+    );
+    assert_eq!(
+        body_text(&laden, &plan(None, None)),
+        body_text(&plain, &plan(None, None))
+    );
 }
 
 #[test]

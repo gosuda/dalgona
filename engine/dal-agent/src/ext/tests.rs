@@ -148,7 +148,46 @@ fn builder_rejects_duplicate_records() {
 }
 
 #[test]
-fn builder_rejects_second_prompt_section() {
+fn builder_accepts_distinct_prompt_orders_and_keeps_other_registrations() {
+    let ext = builder()
+        .skill(skill("ordered"))
+        .prompt_section(PromptSection::static_text(
+            super::PromptOrder::Identity,
+            "identity".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            super::PromptOrder::Instructions,
+            "instructions".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            super::PromptOrder::DocsLine,
+            "docs".into(),
+        ))
+        .build()
+        .expect("distinct orders accepted");
+    let sections = ext.prompt_sections();
+    assert_eq!(
+        sections
+            .iter()
+            .map(PromptSection::order)
+            .collect::<Vec<_>>(),
+        vec![
+            super::PromptOrder::Identity,
+            super::PromptOrder::Instructions,
+            super::PromptOrder::DocsLine,
+        ],
+        "registration order is preserved"
+    );
+    assert_eq!(
+        ext.prompt_section().map(PromptSection::order),
+        Some(super::PromptOrder::Identity),
+        "singular accessor keeps the first section"
+    );
+    assert_eq!(ext.skills().len(), 1, "other registrations survive");
+}
+
+#[test]
+fn builder_rejects_duplicate_prompt_order() {
     let err = builder()
         .prompt_section(PromptSection::static_text(
             super::PromptOrder::Instructions,
@@ -159,7 +198,7 @@ fn builder_rejects_second_prompt_section() {
             "b".into(),
         ))
         .build()
-        .expect_err("second section");
+        .expect_err("second section at the same order");
     assert!(matches!(err, RegistrationError::DuplicatePromptSection));
 }
 #[test]

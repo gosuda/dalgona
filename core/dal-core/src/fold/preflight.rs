@@ -7,6 +7,45 @@ use super::{
     InferFailure, Name, PartialResponse, Phase, Rejection, RequestId, Session, Stop, StreamEvent,
     StreamVerdict, ToolCallVerdict, TurnId, TurnStage, TurnState,
 };
+use crate::update::ResolutionCause;
+
+/// Rejects a broker resolution whose cause contradicts its answer or its
+/// default flag.
+///
+/// A contradictory record would state something false in the journal: a
+/// timeout carrying a client's answer, or a cancellation that approved a
+/// tool. The fold refuses such a live input before it changes the session,
+/// so no contradiction reaches the journal or subscribers.
+fn check_resolution_cause(
+    answer: &Answer,
+    was_default: bool,
+    cause: ResolutionCause,
+) -> Result<(), Rejection> {
+    let deadline = matches!(
+        cause,
+        ResolutionCause::TimedOut | ResolutionCause::NoController
+    );
+    if deadline != was_default {
+        return Err(invalid(
+            "a resolution is a request default exactly when its cause is a deadline",
+        ));
+    }
+    let abandoned = matches!(
+        cause,
+        ResolutionCause::Cancelled | ResolutionCause::Withdrawn
+    );
+    if abandoned && *answer != Answer::Cancel {
+        return Err(invalid(
+            "a cancelled or withdrawn request resolves with the cancel answer",
+        ));
+    }
+    if *answer == Answer::ApproveForSession && cause != ResolutionCause::Answered {
+        return Err(invalid(
+            "only a client answer can approve a tool for the session",
+        ));
+    }
+    Ok(())
+}
 
 impl Session {
     pub(super) fn preflight(&self, event: &Event) -> Result<(), Rejection> {
@@ -19,10 +58,18 @@ impl Session {
             Event::Wake { .. } => self.preflight_wake(),
             Event::GrantResolved {
                 request,
-                answer: Answer::ApproveForSession,
-                by: Some(_),
-                was_default: false,
-            } => self.preflight_session_grant(*request),
+                answer,
+                by,
+                was_default,
+                cause,
+            } => {
+                check_resolution_cause(answer, *was_default, *cause)?;
+                if *answer == Answer::ApproveForSession && by.is_some() {
+                    self.preflight_session_grant(*request)
+                } else {
+                    Ok(())
+                }
+            }
             Event::Guard {
                 turn,
                 call,
@@ -219,6 +266,8 @@ impl Session {
     fn preflight_response_entries(&self, inference: &super::Inference) -> Result<(), Rejection> {
         let stop = inference.events.iter().rev().find_map(|event| match event {
             StreamEvent::Stop(stop) => Some(*stop),
+            // The capture rides the closing entry; it journals no entry of
+            // its own and cannot open one, so it counts nothing here.
             _ => None,
         });
         let calls = if stop == Some(Stop::EndTurn) {
@@ -247,7 +296,18 @@ impl Session {
                     }
                     | StreamEvent::ThinkingReplay { .. }
                     | StreamEvent::ToolCall { .. } => true,
-                    _ => false,
+                    // MessageReplay is not visible output: it never opens an
+                    // entry, with or without tool calls. Tool-argument
+                    // fragments are not content either, and a native
+                    // compaction outcome is a refused event, not an entry.
+                    StreamEvent::Delta {
+                        channel: super::StreamChannel::ToolArgs { .. },
+                        ..
+                    }
+                    | StreamEvent::MessageReplay { .. }
+                    | StreamEvent::Usage(_)
+                    | StreamEvent::Stop(_)
+                    | StreamEvent::Compaction { .. } => false,
                 }),
         );
         let reminders = if stop == Some(Stop::Cancelled) {
@@ -432,6 +492,177 @@ impl Session {
             Phase::Running { turn, .. } => TurnState::Running { turn: *turn },
             Phase::Settling { turn, .. } => TurnState::Settling { turn: *turn },
             Phase::Compacting { job: Some(job) } => TurnState::Compacting { job: *job },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::QuestionRef;
+    use super::super::{ClientId, Effect, Emit, Record, UpdateKind};
+    use super::*;
+    use crate::update::ResolutionCause::{Answered, Cancelled, NoController, TimedOut, Withdrawn};
+
+    const STAMP: jiff::Timestamp = jiff::Timestamp::UNIX_EPOCH;
+    const TOOL: &str = "deploy.web-x.list";
+
+    /// A session tracking one turnless question, as `RequestOpened` leaves it.
+    fn tracked(tool: Option<&str>) -> (Session, RequestId) {
+        let mut session = Session::replay([], STAMP).unwrap().0;
+        let request = RequestId::new_v7();
+        session.open_questions.push((
+            request,
+            QuestionRef {
+                tool: tool.map(Into::into),
+                turn: None,
+            },
+        ));
+        (session, request)
+    }
+
+    /// The live event the actor builds from one broker resolution.
+    fn resolution(
+        request: RequestId,
+        answer: Answer,
+        was_default: bool,
+        cause: ResolutionCause,
+    ) -> Event {
+        Event::GrantResolved {
+            request,
+            answer,
+            by: (!was_default).then(|| ClientId::new("tester")),
+            was_default,
+            cause,
+        }
+    }
+
+    #[test]
+    fn a_coherent_resolution_folds_and_publishes_its_cause() {
+        let coherent = [
+            (Answered, Answer::Approve, false),
+            (Answered, Answer::Decline, false),
+            (Answered, Answer::Cancel, false),
+            (TimedOut, Answer::Decline, true),
+            (TimedOut, Answer::Cancel, true),
+            (NoController, Answer::Decline, true),
+            (Cancelled, Answer::Cancel, false),
+            (Withdrawn, Answer::Cancel, false),
+        ];
+        for (cause, answer, was_default) in coherent {
+            let (mut session, request) = tracked(None);
+            let mut out = Vec::new();
+            session
+                .step(
+                    resolution(request, answer.clone(), was_default, cause),
+                    STAMP,
+                    &mut out,
+                )
+                .unwrap();
+            let [Effect::Emit(emit)] = out.as_slice() else {
+                panic!("{cause:?} must emit exactly one batch: {out:?}");
+            };
+            assert!(
+                matches!(
+                    emit.records.as_slice(),
+                    [Record::Resolved { answer: recorded, was_default: flag, cause: journaled, .. }]
+                        if *recorded == answer && *flag == was_default && *journaled == Some(cause)
+                ),
+                "{cause:?} must journal its own cause: {:?}",
+                emit.records
+            );
+            assert!(
+                matches!(
+                    emit.updates.as_slice(),
+                    [UpdateKind::RequestResolved { cause: published, .. }]
+                        if *published == Some(cause)
+                ),
+                "{cause:?} must publish its own cause: {:?}",
+                emit.updates
+            );
+            assert_eq!(
+                session.open_questions,
+                [],
+                "a resolved request must leave no open question"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contradictory_resolution_is_refused_before_it_changes_anything() {
+        let contradictory = [
+            // Only a deadline resolves with the request default.
+            (Answered, Answer::Approve, true),
+            (Cancelled, Answer::Cancel, true),
+            (Withdrawn, Answer::Cancel, true),
+            (TimedOut, Answer::Decline, false),
+            (NoController, Answer::Decline, false),
+            // Nobody answered a cancelled or withdrawn request.
+            (Cancelled, Answer::Approve, false),
+            (Withdrawn, Answer::Decline, false),
+            // A session allowance needs a real client answer.
+            (Cancelled, Answer::ApproveForSession, false),
+            (Withdrawn, Answer::ApproveForSession, false),
+            (TimedOut, Answer::ApproveForSession, true),
+            (NoController, Answer::ApproveForSession, true),
+        ];
+        for (cause, answer, was_default) in contradictory {
+            let (mut session, request) = tracked(Some(TOOL));
+            let before = session.clone();
+            let mut out = Vec::new();
+            let result = session.step(
+                resolution(request, answer.clone(), was_default, cause),
+                STAMP,
+                &mut out,
+            );
+            assert!(
+                matches!(result, Err(Rejection::Invalid { .. })),
+                "{cause:?} with {answer:?} (default {was_default}) must be refused: {result:?}"
+            );
+            assert_eq!(session, before, "a refused resolution changes nothing");
+            assert!(out.is_empty(), "a refused resolution emits nothing");
+        }
+    }
+
+    #[test]
+    fn only_a_client_answer_mints_a_session_allowance() {
+        let tool = Name::parse_mapped_tool(TOOL).unwrap();
+        let (mut session, request) = tracked(Some(TOOL));
+        let mut out = Vec::new();
+        session
+            .step(
+                resolution(request, Answer::ApproveForSession, false, Answered),
+                STAMP,
+                &mut out,
+            )
+            .unwrap();
+        assert!(session.allow_always().contains(&tool));
+
+        // The fold's own mint guard holds even when a caller skips preflight.
+        for cause in [TimedOut, Cancelled, Withdrawn, NoController] {
+            let (mut session, request) = tracked(Some(TOOL));
+            let mut emit = Emit::default();
+            session
+                .grant_resolved(
+                    request,
+                    &Answer::ApproveForSession,
+                    Some(ClientId::new("tester")),
+                    false,
+                    cause,
+                    STAMP,
+                    &mut emit,
+                )
+                .unwrap();
+            assert!(
+                session.allow_always().is_empty(),
+                "{cause:?} must not mint a session allowance"
+            );
+            assert!(
+                !emit
+                    .records
+                    .iter()
+                    .any(|record| matches!(record, Record::AllowAlways { .. })),
+                "{cause:?} must not journal a session allowance"
+            );
         }
     }
 }

@@ -7,7 +7,7 @@ use dal_agent::login::{
     CredentialKind, LoginIo, LoginOutcome, LoginProgress, Method, StoredCredential,
 };
 use dal_core::{
-    Answer, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
+    Answer, BlobId, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
     SessionId, View,
 };
 use dal_tui::TuiError;
@@ -227,6 +227,15 @@ impl TuiAgent for RemoteSession {
     async fn answer(&self, id: RequestId, answer: Answer) -> Result<(), TuiError> {
         self.0
             .answer(id, answer)
+            .await
+            .map_err(|error| TuiError::Backend(Box::new(error)))
+    }
+
+    /// The wire protocol's `blob/read` on the session's own server; the
+    /// terminal never opens workspace paths on a remote host.
+    async fn blob(&self, id: BlobId) -> Result<Arc<[u8]>, TuiError> {
+        self.0
+            .blob(&id)
             .await
             .map_err(|error| TuiError::Backend(Box::new(error)))
     }

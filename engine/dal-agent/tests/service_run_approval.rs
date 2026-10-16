@@ -822,7 +822,7 @@ async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
         };
         kinds.push(format!("{:?}", update.kind));
         match &update.kind {
-            UpdateKind::RequestResolved { id, answer, by } if *id == request => {
+            UpdateKind::RequestResolved { id, answer, by, .. } if *id == request => {
                 resolutions.push((answer.clone(), by.clone()));
             }
             UpdateKind::TurnEnded { stop: ended, .. } => {

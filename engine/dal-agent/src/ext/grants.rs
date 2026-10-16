@@ -340,18 +340,6 @@ impl GrantStore {
         }
     }
 
-    /// Opens the session-gated store, failing fast on a malformed file.
-    pub(crate) fn with_runtime(
-        data_dir: PathBuf,
-        ask_timeout: Duration,
-        broker: Arc<Broker>,
-    ) -> Result<Self, GrantStoreError> {
-        let persistent = load(&data_dir)?;
-        let store = Self::empty(data_dir.clone(), data_dir, ask_timeout, Some(broker));
-        store.lock().persistent = persistent;
-        Ok(store)
-    }
-
     /// Opens a session's grant store with the exact session workspace scope.
     pub(crate) fn with_runtime_scoped(
         data_dir: PathBuf,
@@ -1152,9 +1140,7 @@ impl GrantStore {
 }
 
 fn mcp_row_matches(row: &GrantRow, key: &McpGrantKey) -> bool {
-    row_active(row)
-        && row.mcp_set.as_deref() == Some(key.set.as_ref())
-        && row_key(row) == key.key
+    row_active(row) && row.mcp_set.as_deref() == Some(key.set.as_ref()) && row_key(row) == key.key
 }
 
 /// Durable approvals expire after 90 days even when code and root do not change.

@@ -250,6 +250,61 @@ fn prepare_sets_the_request_contract() {
 }
 
 #[test]
+fn prepare_sends_a_bytes_accept_and_no_total_when_it_carries_none() {
+    let client = build_client();
+    let agent = user_agent("0.1.0", "linux", "7.0", "x86_64");
+
+    let get = client.get("https://h.example/video/1");
+    let (_, request) = prepare(
+        Family::Chat,
+        get,
+        &agent,
+        Exchange::Bytes {
+            accept: "video/*",
+            total: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(request.headers()[ACCEPT], "video/*");
+    assert_eq!(request.timeout(), None);
+    assert!(!request.headers().contains_key(CONTENT_TYPE));
+
+    let bounded = client.get("https://h.example/audio/1");
+    let (_, request) = prepare(
+        Family::Chat,
+        bounded,
+        &agent,
+        Exchange::Bytes {
+            accept: "audio/*",
+            total: Some(NON_STREAM_TOTAL_TIMEOUT),
+        },
+    )
+    .unwrap();
+    assert_eq!(request.headers()[ACCEPT], "audio/*");
+    assert_eq!(request.timeout(), Some(&NON_STREAM_TOTAL_TIMEOUT));
+}
+
+#[test]
+fn prepare_refuses_an_invalid_bytes_accept_before_any_connection() {
+    let client = build_client();
+    let request = client.get("https://h.example/video/1");
+    let error = prepare(
+        Family::Chat,
+        request,
+        "dalgon/0",
+        Exchange::Bytes {
+            accept: "video/*\r\nx-evil: 1",
+            total: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        transport_reason(error),
+        "accept \"video/*\\r\\nx-evil: 1\" is not a header value"
+    );
+}
+
+#[test]
 fn prepare_refuses_plain_http_and_bad_agents() {
     let client = build_client();
     let exchange = Exchange::Json {
@@ -305,10 +360,16 @@ fn send_drops_the_request_when_the_header_deadline_has_passed() {
 #[test]
 fn body_cap_admits_the_limit_and_refuses_one_byte_more() {
     let mut body = Vec::new();
-    append_capped(&mut body, &vec![b'a'; BODY_LIMIT - 1]).unwrap();
-    append_capped(&mut body, b"b").unwrap();
+    append_capped(
+        &mut body,
+        &vec![b'a'; BODY_LIMIT - 1],
+        BODY_LIMIT,
+        LimitError::Body,
+    )
+    .unwrap();
+    append_capped(&mut body, b"b", BODY_LIMIT, LimitError::Body).unwrap();
     assert_eq!(body.len(), BODY_LIMIT);
-    let error = append_capped(&mut body, b"c").unwrap_err();
+    let error = append_capped(&mut body, b"c", BODY_LIMIT, LimitError::Body).unwrap_err();
     assert!(matches!(error, ProviderError::Limit(LimitError::Body)));
     assert_eq!(body.len(), BODY_LIMIT);
 }
@@ -350,6 +411,37 @@ fn read_body_admits_the_limit_and_refuses_one_byte_more() {
     assert!(matches!(
         block_on(read_body(Family::Chat, declared)),
         Err(ProviderError::Limit(LimitError::Body))
+    ));
+}
+
+#[test]
+fn read_body_limited_reports_the_limit_it_applied() {
+    const LIMIT: usize = 8;
+    let under = streamed(vec![Ok(b"1234567".to_vec())]);
+    assert_eq!(
+        block_on(read_body_limited(Family::Chat, under, LIMIT)).unwrap(),
+        b"1234567"
+    );
+
+    let at_limit = streamed(vec![Ok(b"1234567".to_vec()), Ok(vec![b'8'])]);
+    assert_eq!(
+        block_on(read_body_limited(Family::Chat, at_limit, LIMIT)).unwrap(),
+        b"12345678"
+    );
+
+    let one_over = streamed(vec![Ok(b"12345678".to_vec()), Ok(vec![b'9'])]);
+    assert!(matches!(
+        block_on(read_body_limited(Family::Chat, one_over, LIMIT)),
+        Err(ProviderError::Limit(LimitError::Payload { limit: 8 }))
+    ));
+
+    let declared = reqwest::Response::from(hyper::http::Response::new(reqwest::Body::from(vec![
+        b'a';
+        LIMIT + 1
+    ])));
+    assert!(matches!(
+        block_on(read_body_limited(Family::Chat, declared, LIMIT)),
+        Err(ProviderError::Limit(LimitError::Payload { limit: 8 }))
     ));
 }
 
@@ -488,4 +580,154 @@ async fn the_no_redirect_client_surfaces_each_hop_to_its_caller() {
         .unwrap();
     assert_eq!(followed.status(), reqwest::StatusCode::OK);
     assert_eq!(followed.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn bytes_exchange_sends_its_accept_and_reads_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let seen = tokio::spawn(async move {
+        let (mut socket, _) = server.accept().await.unwrap();
+        let mut buffer = vec![0; 8192];
+        let length = socket.read(&mut buffer).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\nRIFF")
+            .await
+            .unwrap();
+        buffer.truncate(length);
+        String::from_utf8_lossy(&buffer).into_owned()
+    });
+
+    let request = build_client().get(format!("http://127.0.0.1:{port}/audio/1"));
+    let response = send(
+        Family::Chat,
+        request,
+        "dalgon/0",
+        Exchange::Bytes {
+            accept: "audio/*",
+            total: Some(Duration::from_secs(5)),
+        },
+        tokio::time::sleep,
+    )
+    .await
+    .unwrap();
+    let body = read_body_limited(Family::Chat, response, 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(body, b"RIFF");
+    let wire = tokio::time::timeout(Duration::from_secs(5), seen)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        wire.contains("accept: audio/*\r\n"),
+        "the accept header reached the server, got {wire:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_body_held_past_its_total_is_a_transport_error_never_a_partial_ok() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut socket, _) = server.accept().await.unwrap();
+        let mut buffer = vec![0; 8192];
+        if socket.read(&mut buffer).await.is_err() {
+            return;
+        }
+        let head = b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\nconnection: close\r\n\r\n";
+        if socket.write_all(head).await.is_err() {
+            return;
+        }
+        // Hold the body open past every deadline: the half-open socket keeps
+        // the read pending instead of ending it.
+        let _ = socket.read(&mut buffer).await;
+    });
+
+    let request = build_client().get(format!("http://127.0.0.1:{port}/video/1"));
+    let response = send(
+        Family::Chat,
+        request,
+        "dalgon/0",
+        Exchange::Bytes {
+            accept: "video/*",
+            total: Some(Duration::from_millis(200)),
+        },
+        tokio::time::sleep,
+    )
+    .await
+    .unwrap();
+    transport_reason(
+        read_body_limited(Family::Chat, response, 1 << 20)
+            .await
+            .unwrap_err(),
+    );
+}
+
+#[tokio::test]
+async fn loopback_bounds_apply_to_declared_and_streamed_bodies() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        for _ in 0..3 {
+            let Ok((mut socket, _)) = server.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0; 8192];
+            let Ok(length) = socket.read(&mut buffer).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&buffer[..length]).into_owned();
+            let reply = if request.starts_with("GET /declared ") {
+                "HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\n123456789"
+                    .to_owned()
+            } else if request.starts_with("GET /streamed ") {
+                "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n9\r\n123456789\r\n0\r\n\r\n"
+                    .to_owned()
+            } else {
+                "HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\n12345678"
+                    .to_owned()
+            };
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+
+    for (path, want) in [
+        ("/declared", None),
+        ("/streamed", None),
+        ("/exact", Some(b"12345678".as_slice())),
+    ] {
+        let request = build_client().get(format!("http://127.0.0.1:{port}{path}"));
+        let response = send(
+            Family::Chat,
+            request,
+            "dalgon/0",
+            Exchange::Bytes {
+                accept: "application/octet-stream",
+                total: Some(Duration::from_secs(5)),
+            },
+            tokio::time::sleep,
+        )
+        .await
+        .unwrap();
+        match want {
+            Some(text) => assert_eq!(
+                read_body_limited(Family::Chat, response, 8).await.unwrap(),
+                text
+            ),
+            None => assert!(matches!(
+                read_body_limited(Family::Chat, response, 8).await,
+                Err(ProviderError::Limit(LimitError::Payload { limit: 8 }))
+            )),
+        }
+    }
 }

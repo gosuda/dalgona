@@ -398,7 +398,7 @@ impl PieceBuilder {
         for (index, part) in parts.iter().enumerate() {
             let index = u32::try_from(index).ok()?;
             match part {
-                AssistantPart::Text { text } => {
+                AssistantPart::Text { text, .. } => {
                     self.text(entry, index, Role::Assistant, text)?;
                 }
                 AssistantPart::Thinking { text, .. } => self.reasoning(entry, index, text)?,

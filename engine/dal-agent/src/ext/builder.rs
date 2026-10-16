@@ -265,7 +265,12 @@ impl ExtensionBuilder {
         self.rule_files.push(file);
         self
     }
-    /// Registers the extension's prompt section; at most one is allowed.
+    /// Registers a prompt section at its order.
+    ///
+    /// An extension may own several sections at distinct
+    /// [`PromptOrder`](crate::ext::prompt::PromptOrder) positions; two
+    /// sections at the same order fail the build with
+    /// [`RegistrationError::DuplicatePromptSection`].
     #[must_use]
     pub fn prompt_section(mut self, section: PromptSection) -> Self {
         self.prompt_sections.push(section);
@@ -475,7 +480,10 @@ impl ExtensionBuilder {
                 for (export, _) in &exports {
                     let id = OpId::Export(export.id.clone()).to_string();
                     hash_part(&mut hasher, id.as_bytes());
-                    hash_part(&mut hasher, &(export.uses.iter().count() as u64).to_le_bytes());
+                    hash_part(
+                        &mut hasher,
+                        &(export.uses.iter().count() as u64).to_le_bytes(),
+                    );
                     for operation in export.uses.iter() {
                         hash_part(&mut hasher, operation.to_string().as_bytes());
                     }
@@ -562,8 +570,15 @@ impl ExtensionBuilder {
                 rival: Claimant::Plugin(owner.clone()),
             });
         }
-        if self.prompt_sections.len() > 1 {
-            return Err(RegistrationError::DuplicatePromptSection);
+        // Position indexes the order table (u8 -> usize widening, lossless);
+        // the table length is the derived capacity, so every slot exists.
+        let mut prompt_orders = [false; super::prompt::MAX_SECTIONS_PER_EXTENSION];
+        for section in &self.prompt_sections {
+            let slot = section.order().position() as usize;
+            if prompt_orders[slot] {
+                return Err(RegistrationError::DuplicatePromptSection);
+            }
+            prompt_orders[slot] = true;
         }
         if self.statuses.len() > 1 {
             return Err(RegistrationError::DuplicateStatusKind { ext: owner.clone() });
@@ -732,10 +747,19 @@ impl Extension {
     pub fn rule_files(&self) -> &[RuleFile] {
         &self.rule_files
     }
-    /// Borrows the prompt section, when registered.
+    /// Borrows the first prompt section, when registered.
+    ///
+    /// Prefer [`Extension::prompt_sections`] for extensions that register
+    /// several sections at distinct orders; this accessor keeps the
+    /// first-section view working for single-section consumers.
     #[must_use]
     pub fn prompt_section(&self) -> Option<&PromptSection> {
         self.prompt_sections.first()
+    }
+    /// Borrows every registered prompt section in registration order.
+    #[must_use]
+    pub fn prompt_sections(&self) -> &[PromptSection] {
+        &self.prompt_sections
     }
     /// Borrows the status kind and its poll, when registered.
     #[must_use]
@@ -832,9 +856,21 @@ mod grant_identity_tests {
                 .expect("registered")
         };
         let original = build("a", "1.0.0", 1);
-        assert_eq!(original.grant_digest(), build("a", "1.0.0", 1).grant_digest());
-        assert_ne!(original.grant_digest(), build("b", "1.0.0", 1).grant_digest());
-        assert_ne!(original.grant_digest(), build("a", "1.0.1", 1).grant_digest());
-        assert_ne!(original.grant_digest(), build("a", "1.0.0", 2).grant_digest());
+        assert_eq!(
+            original.grant_digest(),
+            build("a", "1.0.0", 1).grant_digest()
+        );
+        assert_ne!(
+            original.grant_digest(),
+            build("b", "1.0.0", 1).grant_digest()
+        );
+        assert_ne!(
+            original.grant_digest(),
+            build("a", "1.0.1", 1).grant_digest()
+        );
+        assert_ne!(
+            original.grant_digest(),
+            build("a", "1.0.0", 2).grant_digest()
+        );
     }
 }

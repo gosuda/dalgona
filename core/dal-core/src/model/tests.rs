@@ -283,6 +283,11 @@ fn native_tags_preserve_raw_args_and_nested_replay() -> TestResult {
         2,
         "raw nested values changed: {encoded}"
     );
+    assert_eq!(
+        encoded.matches("\"replay\"").count(),
+        1,
+        "the tool call without replay stays absent: {encoded}"
+    );
     assert_eq!(sonic_rs::from_str::<ContextItem>(&encoded)?, context);
     let thinking_at = encoded
         .find(r#""type":"thinking""#)
@@ -416,6 +421,7 @@ fn request_and_inference_round_trip_through_nested_carriers() -> TestResult {
                 text: "plan".into(),
                 replay: Some(RawJson::parse(r#"{"z":1e+02, "a":2}"#)?),
             }],
+            replay: None,
         }]),
         params: RequestParams {
             thinking: ThinkingLevel::Xhigh,
@@ -497,5 +503,54 @@ fn thinking_replay_event_preserves_raw_payload_after_delta() -> TestResult {
         "replay payload changed: {encoded}"
     );
     assert_eq!(sonic_rs::from_str::<Inference>(&encoded)?, inference);
+    Ok(())
+}
+
+/// `MessageReplay` nests its discriminant under `capture.status`: the capture
+/// is never flattened into the event's own `type` tag, so a flattened or
+/// mistagged capture is rejected rather than misread.
+#[test]
+fn message_replay_keeps_its_nested_status_discriminant() -> TestResult {
+    let payload = r#"{"records":[]}"#;
+    let captured = StreamEvent::MessageReplay {
+        capture: ReplayCapture::Captured {
+            payload: RawJson::parse(payload)?,
+        },
+    };
+    let encoded = sonic_rs::to_string(&captured)?;
+    assert_eq!(
+        encoded,
+        format!(
+            r#"{{"type":"message_replay","capture":{{"status":"captured","payload":{payload}}}}}"#
+        ),
+        "message replay changed shape: {encoded}"
+    );
+    assert_eq!(sonic_rs::from_str::<StreamEvent>(&encoded)?, captured);
+    let refused = StreamEvent::MessageReplay {
+        capture: ReplayCapture::Refused {
+            reason: ReplayRefusal::LineBound,
+        },
+    };
+    let encoded = sonic_rs::to_string(&refused)?;
+    assert_eq!(
+        encoded,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":"line_bound"}}"#,
+        "refusal changed shape: {encoded}"
+    );
+    assert_eq!(sonic_rs::from_str::<StreamEvent>(&encoded)?, refused);
+    for text in [
+        r#"{"type":"message_replay"}"#,
+        r#"{"type":"message_replay","capture":{"status":"alien","payload":{}}}"#,
+        r#"{"type":"message_replay","capture":{"type":"captured","payload":{}}}"#,
+        r#"{"type":"message_replay","capture":{"status":"captured"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":"alien"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":null}}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<StreamEvent>(text).is_err(),
+            "accepted {text}"
+        );
+    }
     Ok(())
 }

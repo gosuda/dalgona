@@ -217,7 +217,7 @@ fn parse_escape(bytes: &[u8]) -> EscapeParse {
             None => EscapeParse::Partial,
         },
         b'[' => parse_csi(bytes),
-        0x7f => EscapeParse::Key(Key::new(KeyCode::Backspace, KeyModifiers::ALT), 2),
+        0x08 | 0x7f => EscapeParse::Key(Key::new(KeyCode::Backspace, KeyModifiers::ALT), 2),
         byte if byte.is_ascii() => EscapeParse::Key(
             Key::new(KeyCode::Char(char::from(byte)), KeyModifiers::ALT),
             2,
@@ -333,6 +333,7 @@ fn parse_csi_key(parameters: &[u8], final_byte: u8) -> Option<(Option<KeyCode>, 
                 13 => Some(KeyCode::Enter),
                 9 => Some(KeyCode::Tab),
                 27 => Some(KeyCode::Esc),
+                8 | 127 => Some(KeyCode::Backspace),
                 value => char::from_u32(value).map(KeyCode::Char),
             }
         }
@@ -360,12 +361,16 @@ fn control_key(byte: u8) -> Option<Key> {
     match byte {
         b'\r' => Some(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
         b'\t' => Some(Key::new(KeyCode::Tab, KeyModifiers::NONE)),
-        0x7f => Some(Key::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        0x08 | 0x7f => Some(Key::new(KeyCode::Backspace, KeyModifiers::NONE)),
         0 => Some(Key::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
         1..=26 => Some(Key::new(
             KeyCode::Char(char::from(b'a' + byte - 1)),
             KeyModifiers::CONTROL,
         )),
+        0x1c => Some(Key::new(KeyCode::Char('\\'), KeyModifiers::CONTROL)),
+        0x1d => Some(Key::new(KeyCode::Char(']'), KeyModifiers::CONTROL)),
+        0x1e => Some(Key::new(KeyCode::Char('^'), KeyModifiers::CONTROL)),
+        0x1f => Some(Key::new(KeyCode::Char('_'), KeyModifiers::CONTROL)),
         _ => None,
     }
 }

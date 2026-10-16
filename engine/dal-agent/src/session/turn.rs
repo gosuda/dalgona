@@ -8,11 +8,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dal_core::{ModelRequest, ModelRoute, SessionId, Stop, StreamChannel, StreamEvent};
-use dal_provider::{EventStream, StopReason, StreamEvent as ProviderEvent, ToolArgs};
+use dal_core::{
+    BlobId, ContextItem, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
+    StreamChannel, StreamEvent,
+};
+use dal_provider::{
+    EventStream, ProviderError, StopReason, StreamEvent as ProviderEvent, ToolArgs,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::ServiceError;
+use super::SessionHandle;
+use crate::error::{AgentError, ServiceError};
 use crate::host::HostState;
 
 /// Session inputs for one provider request.
@@ -97,24 +103,181 @@ pub(crate) async fn model_ready(
 
 /// Opens one provider stream for a model request.
 ///
-/// Scripted providers bypass the catalog; live providers resolve through
-/// one catalog fetch. Open failures return a stream yielding the single
-/// error, so callers handle transport and content uniformly.
+/// Stored images are read back into the request first, so a registered
+/// model, the scripted provider, and a live provider all receive inline
+/// bytes. Scripted providers then bypass the catalog; live providers
+/// resolve through one catalog fetch. Hydration and open failures return a
+/// stream yielding the single error, so callers handle transport and
+/// content uniformly.
 pub(crate) async fn infer_stream(
     deps: &RequestDeps,
-    req: ModelRequest,
+    mut req: ModelRequest,
     cancel: &CancellationToken,
 ) -> EventStream {
+    if let Err(error) = hydrate_images(deps, &mut req, cancel).await {
+        return failed(error);
+    }
     if let Some(found) = crate::ext::synthetic::find_route(&deps.host.shared, &req.model) {
         return crate::ext::synthetic::open(deps, found, req, cancel).await;
     }
     match open_stream(deps, &req, cancel).await {
         Ok(stream) => crate::ext::synthetic::observe(stream),
-        Err(error) => {
-            let items = vec![Err(error)];
-            EventStream::new(futures::stream::iter(items), || {})
+        Err(error) => failed(error),
+    }
+}
+
+/// A stream that yields `error` and ends.
+fn failed(error: ProviderError) -> EventStream {
+    let items = vec![Err(error)];
+    EventStream::new(futures::stream::iter(items), || {})
+}
+
+/// Replaces every stored image of the request context with its bytes.
+///
+/// The session store moves an image of 16 KiB or more out of the journal,
+/// and the projection then names it by digest. Neither a provider nor a
+/// registered model can read the store, so this is where those references
+/// become inline images again, before any route is chosen. Order, media
+/// types, and every other part are unchanged. A request that names no
+/// stored image is left as it is: nothing is cloned, and inline images are
+/// never copied.
+///
+/// A blob that is absent, unreadable, from a session that is not open, or
+/// not the recorded length refuses the request: the image is never
+/// skipped, and nothing is sent without it.
+async fn hydrate_images(
+    deps: &RequestDeps,
+    req: &mut ModelRequest,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let Some(first) = req
+        .context
+        .iter()
+        .flat_map(|item| parts(item).iter())
+        .find_map(stored_image)
+    else {
+        return Ok(());
+    };
+    let Some(handle) = session_handle(deps) else {
+        return Err(ProviderError::UnresolvedBlob { blob_id: first });
+    };
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    // The blob path alone copies the message list; the no-blob path above
+    // returns `req` untouched.
+    let mut items = req.context.to_vec();
+    for item in &mut items {
+        for part in parts_mut(item) {
+            hydrate_part(&handle, part, cancel).await?;
         }
     }
+    req.context = items.into();
+    Ok(())
+}
+
+/// Replaces `part` with the stored bytes when it names a stored image.
+async fn hydrate_part(
+    handle: &SessionHandle,
+    part: &mut Part,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let Part::Blob {
+        blob_id,
+        mime,
+        bytes: recorded,
+    } = part
+    else {
+        return Ok(());
+    };
+    if !mime.starts_with("image/") {
+        return Ok(());
+    }
+    let bytes = read_image(handle, *blob_id, *recorded, cancel).await?;
+    *part = Part::Image {
+        mime: std::mem::take(mime),
+        bytes,
+    };
+    Ok(())
+}
+
+/// The digest behind a part that names a stored image.
+fn stored_image(part: &Part) -> Option<BlobId> {
+    match part {
+        Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => Some(*blob_id),
+        Part::Blob { .. } | Part::Text { .. } | Part::Image { .. } => None,
+    }
+}
+
+/// The content parts of one context message; an assistant message has none.
+fn parts(item: &ContextItem) -> &[Part] {
+    match item {
+        ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts.as_slice(),
+        ContextItem::Assistant { .. } => &[],
+    }
+}
+
+/// The content parts of one context message, for in-place replacement.
+fn parts_mut(item: &mut ContextItem) -> &mut [Part] {
+    match item {
+        ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts.as_mut_slice(),
+        ContextItem::Assistant { .. } => &mut [],
+    }
+}
+
+/// The actor port of the request's session, while that session is open.
+fn session_handle(deps: &RequestDeps) -> Option<SessionHandle> {
+    deps.host
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&deps.session)
+        .map(|entry| entry.handle.clone())
+}
+
+/// Reads one stored image through the session actor.
+///
+/// A cancelled request stops waiting at once. An absent digest is the typed
+/// unresolved-blob refusal; every other failure, and a stored length that
+/// differs from the journal's record, is a fatal inference failure naming
+/// the blob.
+async fn read_image(
+    handle: &SessionHandle,
+    id: BlobId,
+    recorded: u64,
+    cancel: &CancellationToken,
+) -> Result<Box<[u8]>, ProviderError> {
+    let read = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(cancelled()),
+        read = handle.blob(id) => read,
+    };
+    match read {
+        Ok(bytes) if u64::try_from(bytes.len()).is_ok_and(|length| length == recorded) => {
+            Ok(bytes.into_boxed_slice())
+        }
+        Ok(bytes) => Err(fatal(format!(
+            "image blob {id} holds {} bytes but its journal part records {recorded}; the image was not sent.",
+            bytes.len()
+        ))),
+        Err(AgentError::BlobNotFound { .. }) => Err(ProviderError::UnresolvedBlob { blob_id: id }),
+        Err(error) => Err(fatal(format!(
+            "image blob {id} could not be read from the session store: {error}"
+        ))),
+    }
+}
+
+/// The typed failure of a request cancelled before it was sent.
+fn cancelled() -> ProviderError {
+    ProviderError::Synthetic(InferFailure::Cancelled)
+}
+
+/// A terminal request failure with no next-action text.
+fn fatal(message: String) -> ProviderError {
+    ProviderError::Synthetic(InferFailure::Fatal {
+        message: message.into(),
+        fix: None,
+    })
 }
 
 /// Opens the provider stream for one request.
@@ -202,6 +365,9 @@ impl StreamConverter {
                     });
                 }
                 out
+            }
+            In::MessageReplay { capture } => {
+                vec![StreamEvent::MessageReplay { capture }]
             }
             In::Usage { usage } => vec![StreamEvent::Usage(usage)],
             In::Stop { reason } => vec![StreamEvent::Stop(map_stop(&reason))],

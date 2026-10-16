@@ -729,7 +729,7 @@ fn split_cells(line: &str) -> Vec<String> {
 
 #[test]
 fn truth_commands_page() {
-    use dal_ext::commands::{BUILTINS, MODE};
+    use dal_ext::commands::specs;
     let pages = load_manual();
     let commands = pages.get("commands").expect("commands page");
     let rows: Vec<Vec<String>> = commands
@@ -737,7 +737,7 @@ fn truth_commands_page() {
         .filter(|line| line.starts_with("| /"))
         .map(split_cells)
         .collect();
-    let specs: Vec<_> = BUILTINS.iter().chain(std::iter::once(&MODE)).collect();
+    let specs: Vec<_> = specs().collect();
     assert_eq!(rows.len(), specs.len(), "one row per registry entry");
     for (row, spec) in rows.iter().zip(specs.iter()) {
         assert_eq!(row[1], format!("/{}", spec.name), "name column");

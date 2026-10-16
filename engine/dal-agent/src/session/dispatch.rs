@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use dal_core::ext::ToolCallEvent;
 use dal_core::{
     Answer, CallId, ClientId, GrantSpec, JobEnd, JobId, Mode, Name, Owner, Policy, Preview,
-    Question, RawJson, Request, ResolvedCall, SessionId, SettledOutcome, ToolClass, TurnId, Unit,
-    Workspace,
+    Question, RawJson, Request, ResolutionCause, ResolvedCall, SessionId, SettledOutcome,
+    ToolClass, TurnId, Unit, Workspace,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -963,13 +963,14 @@ impl CallRuntime {
             answer,
             by,
             resolution,
+            cause,
         }) = answered
         else {
             return Err(DenyReason::Unavailable {
                 what: "turn cancelled".into(),
             });
         };
-        self.report_answered(&request, &answer, &by, resolution, false)
+        self.report_answered(&request, &answer, &by, resolution, cause)
             .await;
         match answer {
             Answer::Approve | Answer::ApproveForSession => {
@@ -1028,7 +1029,34 @@ impl CallRuntime {
             .publish(dal_core::UpdateKind::RequestOpened(request.clone()));
         Ok(())
     }
+}
 
+/// Builds the journal echo of one broker settlement: `Some` cause is forwarded
+/// verbatim with its default flag derived from the cause, `None` (a fail-closed
+/// settlement, which records nothing) yields no echo.
+pub(crate) fn echo_resolved(
+    request: &Request,
+    answer: &Answer,
+    by: &ClientId,
+    resolution: Resolution,
+    cause: Option<ResolutionCause>,
+) -> Option<Resolved> {
+    let cause = cause?;
+    let was_default = matches!(
+        cause,
+        ResolutionCause::TimedOut | ResolutionCause::NoController
+    );
+    Some(Resolved {
+        request: request.clone(),
+        answer: answer.clone(),
+        by: by.clone(),
+        resolution,
+        cause,
+        was_default,
+    })
+}
+
+impl CallRuntime {
     /// Buffers one broker resolution for journaling.
     async fn report_answered(
         &self,
@@ -1036,17 +1064,15 @@ impl CallRuntime {
         answer: &Answer,
         by: &ClientId,
         resolution: Resolution,
-        was_default: bool,
+        cause: Option<ResolutionCause>,
     ) {
-        self.reports.lock().await.push(TurnWork::Answered {
-            resolved: Resolved {
-                request: request.clone(),
-                answer: answer.clone(),
-                by: by.clone(),
-                resolution,
-                was_default,
-            },
-        });
+        let Some(resolved) = echo_resolved(request, answer, by, resolution, cause) else {
+            return;
+        };
+        self.reports
+            .lock()
+            .await
+            .push(TurnWork::Answered { resolved });
     }
 }
 
@@ -1183,10 +1209,18 @@ impl ToolCxRuntime for CallRuntime {
             permit,
             Some(fd_permit),
         )
+        .map(|proc| {
+            let progress = Arc::clone(&self.shared);
+            proc.with_progress(progress)
+        })
     }
 
     fn detach(&self, proc: Proc) -> JobId {
         let job = proc.job_id();
+        // A parked child never publishes again: the dispatch loop settles
+        // this call without the child, and detached output belongs to the
+        // job table, not to a live progress card.
+        let proc = proc.without_progress();
         let park = ParkDetached {
             jobs: Arc::clone(&self.jobs),
             ledger: Arc::clone(&self.ledger),
@@ -2488,6 +2522,10 @@ impl ParkDetached {
             tool,
             proc,
         } = self;
+        // Every park entry arrives stripped: a parked child never publishes
+        // again, even if a future caller forgets `without_progress` before
+        // constructing the park. Clearing an already-clear port is a no-op.
+        let proc = proc.without_progress();
         let job = proc.job_id();
         let log_path = proc.log_path().to_path_buf();
         let mut ledger = ledger.lock().await;
@@ -2736,6 +2774,90 @@ mod tests {
             .expect("monotonic clock has run for half a second");
         let ms = execution_ms(started, Duration::from_millis(200));
         assert!((300..500).contains(&ms), "{ms}");
+    }
+    fn echo_request() -> Request {
+        Request {
+            id: dal_core::RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Grant {
+                ext: "test".into(),
+                origin: "bundled".into(),
+                capabilities: Vec::new(),
+                detail: None,
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Cancel,
+        }
+    }
+
+    #[test]
+    fn echo_forwards_journaled_cause_verbatim() {
+        let request = echo_request();
+        let by = ClientId::new("core");
+        let resolved = echo_resolved(
+            &request,
+            &Answer::Approve,
+            &by,
+            Resolution::Answered,
+            Some(ResolutionCause::Answered),
+        )
+        .expect("journaled cause echoes");
+        assert_eq!(resolved.request, request);
+        assert_eq!(resolved.answer, Answer::Approve);
+        assert_eq!(resolved.by, by);
+        assert_eq!(resolved.resolution, Resolution::Answered);
+        assert_eq!(resolved.cause, ResolutionCause::Answered);
+        assert!(!resolved.was_default);
+    }
+
+    #[test]
+    fn echo_derives_default_only_from_deadline_causes() {
+        let request = echo_request();
+        let by = ClientId::new("core");
+        for cause in [ResolutionCause::TimedOut, ResolutionCause::NoController] {
+            let resolved = echo_resolved(
+                &request,
+                &Answer::Decline,
+                &by,
+                Resolution::Unavailable,
+                Some(cause),
+            )
+            .expect("deadline cause echoes");
+            assert_eq!(resolved.cause, cause);
+            assert!(resolved.was_default, "{cause:?}");
+        }
+        for cause in [
+            ResolutionCause::Answered,
+            ResolutionCause::Cancelled,
+            ResolutionCause::Withdrawn,
+        ] {
+            let resolved = echo_resolved(
+                &request,
+                &Answer::Cancel,
+                &by,
+                Resolution::Cancelled,
+                Some(cause),
+            )
+            .expect("non-deadline cause echoes");
+            assert_eq!(resolved.cause, cause);
+            assert!(!resolved.was_default, "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn echo_skips_fail_closed_settlements() {
+        let request = echo_request();
+        assert!(
+            echo_resolved(
+                &request,
+                &Answer::Cancel,
+                &ClientId::new("core"),
+                Resolution::Cancelled,
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]

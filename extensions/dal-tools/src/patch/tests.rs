@@ -2661,3 +2661,218 @@ async fn patch_dispatch_malformed_json_gets_documented_error() {
         );
     }
 }
+
+#[cfg(unix)]
+mod modes {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    use crate::patch::ir::ErrorClass;
+
+    use super::*;
+
+    fn file_mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("published file metadata")
+            .mode()
+            & 0o777
+    }
+
+    fn restrict(path: &std::path::Path, bits: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))
+            .expect("seed permissions");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_target_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("secret.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o600);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"secret.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        assert_eq!(file_mode(&path), 0o600, "update keeps the target mode");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_executable_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("script.sh");
+        tokio::fs::write(&path, b"old\n").await.expect("seed");
+        restrict(&path, 0o755);
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"script.sh\",\"old\":\"old\",\"new\":\"new\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"new\n");
+        assert_eq!(file_mode(&path), 0o755, "exec bit survives an update");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_readonly_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("locked.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o400);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"locked.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        assert_eq!(file_mode(&path), 0o400, "read-only target stays read-only");
+    }
+
+    #[tokio::test]
+    async fn commit_update_stamps_bits_the_umask_narrowed_at_creation() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("shared.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o664);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"shared.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        // The staged temp is born with the saved mode narrowed by the umask,
+        // which drops group write under the usual 022. Only the exact stamp
+        // on the open handle restores it before publication.
+        assert_eq!(file_mode(&path), 0o664, "update keeps narrowed bits");
+    }
+
+    #[tokio::test]
+    async fn failed_later_publication_restores_a_published_read_only_update() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let locked = dir.path().join("locked.txt");
+        tokio::fs::write(&locked, b"before\n").await.expect("seed");
+        // The owner class denies writing, so the published file cannot be
+        // reopened for write. The group bit is one a 022 umask strips at
+        // creation, so only the exact stamp can bring it back.
+        restrict(&locked, 0o464);
+        // Planning and staging only touch short temp names, so a name past
+        // NAME_MAX is refused only when publication renames onto it: a real
+        // failure after the earlier update has already published.
+        let overlong = "x".repeat(300);
+        assert!(
+            std::fs::File::create(dir.path().join(&overlong)).is_err(),
+            "fixture needs a filesystem that refuses 300-byte names"
+        );
+        let session = test_session(dir.path(), false);
+        let created = format!(r#"{{"path":"{overlong}","create":"body\n"}}"#);
+        let input = format!(
+            r#"{{"changes":[{{"path":"locked.txt","old":"before","new":"after"}},{created}]}}"#
+        );
+        let staged = plan(&session, DialectId::Replace, &input)
+            .await
+            .expect("plan");
+        // Commit publishes in plan order, and plans sort by path.
+        assert_eq!(staged.files[0].path, std::path::Path::new("locked.txt"));
+
+        let output = commit(&session, staged, &[]).await;
+
+        assert_eq!(output.error_class, Some(ErrorClass::Io));
+        assert!(
+            output.text.contains("Nothing was written"),
+            "{}",
+            output.text
+        );
+        assert_eq!(tokio::fs::read(&locked).await.expect("read"), b"before\n");
+        assert_eq!(file_mode(&locked), 0o464, "rollback keeps the mode");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read workspace")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect();
+        assert_eq!(names, ["locked.txt"], "nothing else survives");
+    }
+
+    #[tokio::test]
+    async fn commit_create_uses_0644_under_umask() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("new.txt");
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"new.txt\",\"create\":\"body\\n\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"body\n");
+        // 0644 can only be narrowed by the umask, never widened: group and
+        // other write bits must be absent under any umask.
+        let mode = file_mode(&path);
+        assert_eq!(
+            mode & 0o022,
+            0,
+            "new file must not be group- or other-writable: {mode:o}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_rename_carries_source_mode_to_destination() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        std::fs::write(dir.path().join("a.txt"), b"alpha\n").expect("seed source");
+        restrict(&dir.path().join("a.txt"), 0o750);
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"a.txt\",\"rename\":\"sub/b.txt\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let destination = dir.path().join("sub/b.txt");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"alpha\n"
+        );
+        assert_eq!(
+            file_mode(&destination),
+            0o750,
+            "destination keeps the source mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_update_with_rename_preserves_source_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        std::fs::write(dir.path().join("a.txt"), b"one\ntwo\n").expect("seed source");
+        restrict(&dir.path().join("a.txt"), 0o750);
+        let session = test_session(dir.path(), false);
+        let input = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: a.txt\n",
+            "*** Move to: b.txt\n",
+            "@@\n",
+            "-two\n",
+            "+dos\n",
+            "*** End Patch\n",
+        );
+        let staged = plan(&session, DialectId::ApplyPatch, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let destination = dir.path().join("b.txt");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"one\ndos\n"
+        );
+        assert_eq!(file_mode(&destination), 0o750);
+        assert!(std::fs::metadata(dir.path().join("a.txt")).is_err());
+    }
+}

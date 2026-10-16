@@ -7,23 +7,25 @@ use super::{
     MailMode, Mode, Product, RawJson, RequestId, Serialize, SessionId, ThinkingLevel, TurnId,
     Workspace,
 };
+use crate::update::ResolutionCause;
 
 pub(super) struct BlockWire<'a>(pub(super) &'a Block);
 
 impl Serialize for BlockWire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0 {
-            Block::Text { text } => {
+            Block::Text { text, replay } => {
+                // Absent replay stays the historical explicit `null`.
                 #[derive(Serialize)]
                 struct TextMember<'a> {
                     r#type: &'static str,
                     text: &'a str,
-                    replay: Option<()>,
+                    replay: Option<&'a RawJson>,
                 }
                 TextMember {
                     r#type: "text",
                     text: text.as_ref(),
-                    replay: None,
+                    replay: replay.as_ref(),
                 }
                 .serialize(serializer)
             }
@@ -41,19 +43,27 @@ impl Serialize for BlockWire<'_> {
                 }
                 .serialize(serializer)
             }
-            Block::ToolCall { id, name, input } => {
+            Block::ToolCall {
+                id,
+                name,
+                input,
+                replay,
+            } => {
                 #[derive(Serialize)]
                 struct ToolCallMember<'a> {
                     r#type: &'static str,
                     id: &'a CallId,
                     name: &'a str,
                     input: &'a RawJson,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    replay: Option<&'a RawJson>,
                 }
                 ToolCallMember {
                     r#type: "tool_call",
                     id,
                     name: name.as_ref(),
                     input,
+                    replay: replay.as_ref(),
                 }
                 .serialize(serializer)
             }
@@ -111,6 +121,8 @@ pub(super) struct AssistantWire<'a> {
     pub(super) stop: AssistantStopWire<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) route: Option<AssistantRoute>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) replay: Option<&'a RawJson>,
 }
 
 #[derive(Serialize)]
@@ -310,6 +322,29 @@ pub(super) struct ResolvedWire<'a> {
     pub(super) by: &'a ClientId,
     #[serde(skip_serializing_if = "is_false")]
     pub(super) was_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) cause: Option<ResolutionCauseWire>,
+}
+
+/// The `cause` member's journal literals: `answered`, `timed_out`,
+/// `cancelled`, `withdrawn`, `no_controller`.
+///
+/// The journal lens maps rather than delegates to the enum's serde
+/// spelling, so a rename of the public update wire cannot silently change
+/// durable bytes. The match is exhaustive, so a new cause has to choose its
+/// durable literal here; `decode_records::cause_member` reads the same five.
+pub(super) struct ResolutionCauseWire(pub(super) ResolutionCause);
+
+impl Serialize for ResolutionCauseWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self.0 {
+            ResolutionCause::Answered => "answered",
+            ResolutionCause::TimedOut => "timed_out",
+            ResolutionCause::Cancelled => "cancelled",
+            ResolutionCause::Withdrawn => "withdrawn",
+            ResolutionCause::NoController => "no_controller",
+        })
+    }
 }
 
 /// The `was_default` member appears only when it is true.

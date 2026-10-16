@@ -88,6 +88,11 @@ pub enum UpdateKind {
         answer: Answer,
         /// The client that supplied the answer.
         by: ClientId,
+        /// Why the request resolved. Absent when the producer predates
+        /// resolution causes or reported a cause this reader does not know;
+        /// it is never inferred from the answer or the answering client.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<ResolutionCause>,
     },
     /// A registered rule matched during the turn.
     RuleFired {
@@ -192,6 +197,43 @@ struct RequestResolvedFields {
     id: RequestId,
     answer: Answer,
     by: ClientId,
+    #[serde(default, deserialize_with = "cause_or_none")]
+    cause: Option<ResolutionCause>,
+}
+
+/// Reads the optional resolution cause of a request-resolved update.
+///
+/// Updates stay forward compatible per member: a cause string this reader
+/// does not know reads as no cause, never as a guessed one, and `null` reads
+/// as absent. A member of any other JSON type is malformed and fails the
+/// decode.
+fn cause_or_none<'de, D>(deserializer: D) -> Result<Option<ResolutionCause>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CauseVisitor;
+
+    impl serde::de::Visitor<'_> for CauseVisitor {
+        type Value = Option<ResolutionCause>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a resolution cause string or null")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            use serde::de::IntoDeserializer;
+
+            let known: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                value.into_deserializer();
+            Ok(ResolutionCause::deserialize(known).ok())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(CauseVisitor)
 }
 
 #[derive(Deserialize)]
@@ -292,6 +334,7 @@ impl<'de> Deserialize<'de> for UpdateKind {
                     id: fields.id,
                     answer: fields.answer,
                     by: fields.by,
+                    cause: fields.cause,
                 }
             }
             "rule_fired" => {
@@ -349,6 +392,28 @@ pub enum TurnCause {
     Wake,
     /// A queued follow-up started the turn.
     FollowUp,
+}
+
+/// Why a client-facing request reached its terminal record.
+///
+/// The cause says who ended the request, not what the answer was: a client
+/// named `core` may answer and still carry [`Answered`](Self::Answered).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionCause {
+    /// A client supplied the answer.
+    Answered,
+    /// The request's deadline passed while an answerer was attached.
+    TimedOut,
+    /// A turn cancellation fired the turn's token first.
+    Cancelled,
+    /// The request's owner gave up without a turn cancellation: holder drop,
+    /// script or task finish, normal turn end, or cleanup.
+    Withdrawn,
+    /// The request's deadline passed with no answerer attached.
+    NoController,
 }
 
 /// A completed tool result projected for update subscribers.
@@ -430,9 +495,120 @@ pub struct Notice {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtState, TurnCause, Update, UpdateKind};
+    use super::{ExtState, ResolutionCause, TurnCause, Update, UpdateKind};
+    use crate::{Answer, ClientId, RequestId};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    const REQUEST: &str = "01927f40-0000-7000-8000-000000000001";
+
+    /// Wire text of a cancelled request update with the given extra members.
+    fn resolved_kind(cause_member: &str) -> String {
+        format!(
+            r#"{{"type":"request_resolved","requestId":"{REQUEST}","answer":{{"type":"cancel"}},"by":"core"{cause_member}}}"#
+        )
+    }
+
+    fn decode_resolved(cause_member: &str) -> Result<UpdateKind, Box<dyn std::error::Error>> {
+        let wire = format!(
+            r#"{{"gen":1,"seq":9,"kind":{}}}"#,
+            resolved_kind(cause_member)
+        );
+        Ok(sonic_rs::from_str::<Update>(&wire)?.kind)
+    }
+
+    fn resolved_with(
+        cause: Option<ResolutionCause>,
+    ) -> Result<UpdateKind, Box<dyn std::error::Error>> {
+        Ok(UpdateKind::RequestResolved {
+            id: RequestId::parse(REQUEST)?,
+            answer: Answer::Cancel,
+            by: ClientId::new("core"),
+            cause,
+        })
+    }
+
+    #[test]
+    fn request_resolved_without_cause_decodes_to_none_and_encodes_unchanged() -> TestResult {
+        let old = decode_resolved("")?;
+        assert_eq!(old, resolved_with(None)?);
+        assert_eq!(sonic_rs::to_string(&old)?, resolved_kind(""));
+        Ok(())
+    }
+
+    #[test]
+    fn request_resolved_round_trips_every_known_cause_on_its_wire_string() -> TestResult {
+        for (cause, wire) in [
+            (ResolutionCause::Answered, "answered"),
+            (ResolutionCause::TimedOut, "timed_out"),
+            (ResolutionCause::Cancelled, "cancelled"),
+            (ResolutionCause::Withdrawn, "withdrawn"),
+            (ResolutionCause::NoController, "no_controller"),
+        ] {
+            let member = format!(r#","cause":"{wire}""#);
+            let decoded = decode_resolved(&member)?;
+            assert_eq!(decoded, resolved_with(Some(cause))?, "{wire}");
+            assert_eq!(
+                sonic_rs::to_string(&decoded)?,
+                resolved_kind(&member),
+                "{wire}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn request_resolved_reads_an_unknown_or_null_cause_as_none() -> TestResult {
+        for member in [
+            r#","cause":"superseded""#,
+            r#","cause":"""#,
+            r#","cause":"Answered""#,
+            r#","cause":null"#,
+        ] {
+            let decoded = decode_resolved(member)?;
+            assert_eq!(decoded, resolved_with(None)?, "{member}");
+            assert_eq!(
+                sonic_rs::to_string(&decoded)?,
+                resolved_kind(""),
+                "{member}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn request_resolved_rejects_a_cause_that_is_not_a_string() {
+        for member in [
+            r#","cause":7"#,
+            r#","cause":true"#,
+            r#","cause":["answered"]"#,
+            r#","cause":{"kind":"answered"}"#,
+        ] {
+            assert!(decode_resolved(member).is_err(), "{member}");
+        }
+    }
+
+    #[test]
+    fn resolution_cause_itself_decodes_only_its_five_wire_strings() -> TestResult {
+        for wire in [
+            "answered",
+            "timed_out",
+            "cancelled",
+            "withdrawn",
+            "no_controller",
+        ] {
+            let quoted = format!("\"{wire}\"");
+            let cause: ResolutionCause = sonic_rs::from_str(&quoted)?;
+            assert_eq!(sonic_rs::to_string(&cause)?, quoted);
+        }
+        for wire in ["\"superseded\"", "\"TimedOut\"", "\"\"", "null", "3"] {
+            assert!(
+                sonic_rs::from_str::<ResolutionCause>(wire).is_err(),
+                "{wire}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn ext_status_round_trips_and_ignores_unknown_state() -> TestResult {

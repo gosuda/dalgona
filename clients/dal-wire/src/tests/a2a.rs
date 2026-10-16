@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use dal_core::{
-    Answer, Choice, Notice, Owner, Part, Preview, Question, Request, RequestId, SessionId, Stop,
-    StreamChannel, TurnId, UpdateKind,
+    Answer, Choice, Notice, Owner, Part, Preview, Question, Request, RequestId, ResolutionCause,
+    SessionId, Stop, StreamChannel, TurnId, UpdateKind,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
@@ -420,6 +420,7 @@ fn stream_events_follow_the_plan_order() {
             id: asked.id,
             answer: Answer::Value(dal_core::RawJson::parse(r#""a""#).expect("raw")),
             by: dal_core::ClientId::new("a2a#1"),
+            cause: Some(ResolutionCause::Answered),
         },
         UpdateKind::TurnEnded {
             turn: task_key.turn,

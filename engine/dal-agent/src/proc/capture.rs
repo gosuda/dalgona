@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, io, path::PathBuf};
+use std::{collections::VecDeque, io};
 
 use tokio::io::AsyncReadExt;
 
@@ -18,24 +18,18 @@ pub(super) struct CaptureResult {
 }
 
 /// Drains both pipes in arrival order into one durable log.
+///
+/// The log file was opened exclusively by the spawn door before launch;
+/// capture only writes into that handle, so the content can never touch a
+/// path chosen from call text.
 pub(super) async fn run_capture(
     mut stdout: tokio::process::ChildStdout,
     mut stderr: tokio::process::ChildStderr,
-    log_path: PathBuf,
+    log_file: tokio::fs::File,
     stdout_prefix_limit: usize,
     live_tail: tokio::sync::watch::Sender<VecDeque<u8>>,
 ) -> Result<CaptureResult, io::Error> {
-    use tokio::fs::{self, OpenOptions};
-
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&log_path)
-        .await?;
+    let mut file = log_file;
     let marker = TRUNCATION_MARKER.as_bytes();
     let payload_cap = OUTPUT_FILE_CAP_BYTES.saturating_sub(marker.len() as u64);
     let mut kept = 0_u64;

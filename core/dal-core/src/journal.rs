@@ -13,6 +13,13 @@
 //! `"synthetic"`, `"harness"`, or `{"api":<family>}`. Records that predate
 //! route metadata omit this member.
 //!
+//! Provider replay payloads are raw JSON kept byte for byte. A `text` block
+//! writes its payload as `replay`, or the historical `"replay":null` when it
+//! has none. A `tool_call` block and an assistant record write `replay` as
+//! their last member only when a payload exists, so records that predate it
+//! keep their bytes. A present `null` assistant `replay` is malformed, like
+//! a present `null` route.
+//!
 //! Money is the integer `cost_micro_usd` member of the usage object,
 //! never a float on disk. [`Usage`] holds provider-reported dollars in
 //! `cost_usd`, so the codec converts at this boundary: encoding rounds a
@@ -57,6 +64,9 @@ pub use types::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, Block, EntryKind, Header, JournalPart,
     Product, Source, TurnEndStop, VERSION,
 };
+
+/// The largest one encoded journal line may be, in bytes, line feed included.
+pub const MAX_RECORD: u64 = 67_108_864;
 
 #[cfg(test)]
 mod tests;

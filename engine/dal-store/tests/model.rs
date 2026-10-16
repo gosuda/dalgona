@@ -145,9 +145,11 @@ fn assistant_pair(id: u64) -> Vec<Record> {
                     id: CallId::new(format!("call-{id}")),
                     name: "read".into(),
                     input,
+                    replay: None,
                 }],
                 usage: usage(),
                 stop: AssistantStop::ToolUse,
+                replay: None,
             },
         }),
         Record::ToolResult(Entry {

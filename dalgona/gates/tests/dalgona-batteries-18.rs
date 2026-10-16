@@ -27,6 +27,34 @@ fn skills(product: &dal_agent::Product) -> support::TestResult<Vec<dal_core::ext
     Ok(extension.skills().to_vec())
 }
 
+/// Checks that an unknown-skill failure names the missing skill and every
+/// loaded alternative in byte order, without leaking any body. The live
+/// names are byte-sorted here so the check asserts resolver order, not the
+/// extension's record declaration order.
+fn assert_missing_skill_names_alternatives<'a, I>(text: &str, skills: I) -> Result<(), io::Error>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    if !text.contains("nope") {
+        return Err(io::Error::other(format!(
+            "failure text omits the missing name: {text}"
+        )));
+    }
+    let mut live: Vec<(&str, &str)> = skills.into_iter().collect();
+    live.sort_unstable();
+    let mut offset = 0;
+    for (name, body) in live {
+        let Some(at) = text[offset..].find(name) else {
+            return Err(io::Error::other(format!("failure text omits {name}")));
+        };
+        offset += at + name.len();
+        if text.contains(body) {
+            return Err(io::Error::other("failure text must not leak a skill body"));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn skills_and_search_defaults_gate() -> support::TestResult<()> {
     let scratch = support::Scratch::new("skills-search-defaults")?;
@@ -75,11 +103,17 @@ fn skills_and_search_defaults_gate() -> support::TestResult<()> {
             .clone();
         let doc = host.doc("skill://initializer-and-sprints")?;
         assert!(format!("{doc:?}").contains(&format!("{:?}", &*body)));
-        let missing = host.doc("skill://nope");
-        assert_eq!(
-            missing.err().map(|error| error.to_string()).as_deref(),
-            Some("unknown skill: nope")
-        );
+        // An unknown skill URI names the missing skill and every loaded
+        // alternative in byte order, leaking no body.
+        let text = host
+            .doc("skill://nope")
+            .err()
+            .ok_or_else(|| io::Error::other("an unknown skill URI must fail"))?
+            .to_string();
+        let alternatives = records
+            .iter()
+            .map(|skill| (skill.name.as_str(), &*skill.body));
+        assert_missing_skill_names_alternatives(&text, alternatives)?;
         let report = host.shutdown(Duration::from_secs(2)).await;
         assert_eq!(report.sessions_closed, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())

@@ -244,7 +244,7 @@ fn journal_assistant_text_count(journal: &str, expected: &str) -> Result<usize, 
             .filter(|block| {
                 matches!(
                     block,
-                    dal_core::Block::Text { text } if text.as_ref() == expected
+                    dal_core::Block::Text { text, .. } if text.as_ref() == expected
                 )
             })
             .count();
@@ -427,7 +427,6 @@ fn a_bad_section_fails_the_build_and_names_the_bad_key() -> Result<(), Box<dyn E
             "[plugin.review]\nmax_rounds = 11\n",
             "plugin.review.max_rounds",
         ),
-        ("[plugin.history]\nshare = 0.9\n", "share"),
         ("[plugin.judged]\nthinkin = true\n", "thinkin"),
         ("[plugin.mcp]\nservers = 1\n", "servers"),
         ("[plugin.quality]\nstrict = true\n", "strict"),
@@ -459,6 +458,31 @@ fn each_enabled_switch_removes_only_its_battery() -> Result<(), Box<dyn Error>> 
         expected.remove(battery);
         assert_eq!(names(&product), expected, "{battery}");
     }
+    Ok(())
+}
+
+#[test]
+fn an_invalid_history_section_still_builds_with_its_failing_compactor() -> Result<(), Box<dyn Error>>
+{
+    let product = build("[plugin.history]\nshare = 0.9\n")?;
+    let history = product
+        .extensions
+        .iter()
+        .find(|extension| extension.name() == "history")
+        .ok_or("history extension must stay registered for an invalid section")?;
+    assert_eq!(history.compactors().len(), 1);
+    // The registered compactor is the real primary one that refuses every
+    // compaction, not a silent fallback that pretends success.
+    assert!(!history.is_fallback_compactor("history"));
+    Ok(())
+}
+
+#[test]
+fn an_invalid_history_section_does_not_rescue_a_bad_neighbour_section() -> Result<(), Box<dyn Error>>
+{
+    let toml = "[plugin.history]\nshare = 0.9\n[plugin.web]\nbogus = 1\n";
+    let error = failure(toml)?;
+    assert!(error.contains("bogus"), "{toml:?} -> {error}");
     Ok(())
 }
 

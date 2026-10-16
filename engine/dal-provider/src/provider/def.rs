@@ -2,12 +2,15 @@
 //!
 //! Every other site asks [`PROVIDERS`] or carries a [`ProviderDef`] resolved
 //! once from it. The rows are plain `const` data; a sign-in method is derived
-//! from a row by [`ProviderDef::methods`] and never stored.
+//! from a row by [`ProviderDef::methods`] and never stored. The vendor rows
+//! live here; the API-key presets live in `presets` and join the same table.
 
 use dal_core::Family;
 
 use super::{AuthStyle, Shape, Transport};
 use crate::auth::{login::Method, oauth::CODEX_ORIGINATOR};
+
+mod presets;
 
 /// One built-in provider: identity, wire family, endpoint, and how it signs in.
 #[derive(Clone, Copy, Debug)]
@@ -19,6 +22,8 @@ pub struct ProviderDef {
     pub name: &'static str,
     /// The API family the provider implements.
     pub family: Family,
+    /// How an explicit `providers.<id>.api` override treats the row's family.
+    pub(crate) family_policy: FamilyPolicy,
     /// The default endpoint base URL.
     pub base_url: &'static str,
     /// The default transport.
@@ -29,6 +34,25 @@ pub struct ProviderDef {
     pub oauth: Option<OAuthSpec>,
     /// The request-time header set.
     pub shape: Shape,
+}
+
+/// How a built-in row treats an explicit `providers.<id>.api` override.
+///
+/// The distinction lives on the row, set once at its single construction
+/// site, so no module keeps its own list of which ids are native and which
+/// are presets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FamilyPolicy {
+    /// A native vendor row: the endpoint, credentials, and header set speak
+    /// one family, so any other `api` is refused. (`openai` additionally
+    /// accepts its documented Chat alternate; see `decode_builtin` in the
+    /// parent module.)
+    Native,
+    /// A generic API-key compatibility preset: an explicit `api` names any
+    /// supported key family and wins, exactly as the named-provider path did
+    /// before the row existed. The row's endpoint default, key material, and
+    /// key-only sign-in are unchanged.
+    Compatible,
 }
 
 /// How a provider takes an API key.
@@ -158,6 +182,7 @@ pub(crate) const OPENAI: ProviderDef = ProviderDef {
     id: "openai",
     name: "OpenAI",
     family: Family::Responses,
+    family_policy: FamilyPolicy::Native,
     base_url: "https://api.openai.com/v1",
     transport: Transport::Https,
     key: Some(KeySpec {
@@ -172,6 +197,7 @@ pub(crate) const ANTHROPIC: ProviderDef = ProviderDef {
     id: "anthropic",
     name: "Anthropic",
     family: Family::Anthropic,
+    family_policy: FamilyPolicy::Native,
     base_url: "https://api.anthropic.com",
     transport: Transport::Https,
     key: Some(KeySpec {
@@ -217,6 +243,7 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
     id: "openai-codex",
     name: "OpenAI Codex",
     family: Family::Codex,
+    family_policy: FamilyPolicy::Native,
     base_url: "https://chatgpt.com/backend-api/codex",
     transport: Transport::Websocket,
     key: None,
@@ -262,8 +289,27 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
     shape: Shape::Codex,
 };
 
-/// Every built-in provider, in the order the configuration lists them.
-pub const PROVIDERS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC];
+const VENDOR_ROWS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC];
+const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
+
+/// The vendor rows, then the presets, joined at compile time.
+const TABLE: [ProviderDef; ROWS] = {
+    let mut rows = [OPENAI; ROWS];
+    let mut index = 0;
+    while index < ROWS {
+        rows[index] = if index < VENDOR_ROWS.len() {
+            VENDOR_ROWS[index]
+        } else {
+            presets::PRESETS[index - VENDOR_ROWS.len()]
+        };
+        index += 1;
+    }
+    rows
+};
+
+/// Every built-in provider, in the order the configuration lists them: the
+/// vendor rows, then the API-key presets by id.
+pub const PROVIDERS: &[ProviderDef] = &TABLE;
 
 /// The built-in provider with `id`, if any.
 #[must_use]

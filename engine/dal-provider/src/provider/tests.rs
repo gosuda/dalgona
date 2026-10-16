@@ -7,16 +7,19 @@ use std::{
 };
 
 use crate::{
-    auth::credential::{Credential, OAuthCredential},
-    catalog::{CatalogEntry, ResolvedModel},
+    auth::{
+        credential::{Credential, OAuthCredential, SecretString},
+        login::{LoginIo, LoginSite, Method, login},
+    },
+    catalog::{CatalogEntry, CatalogSource, ResolvedModel},
     compact::{CompactOutcome, CompactedHistory},
     error::ProviderError,
     stream::{EventStream, NoticeSink, StreamEvent},
     thinking::ThinkingSupport,
 };
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose, RawJson,
-    RequestParams, SessionId, ThinkingLevel, Usage,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
+    Purpose, RawJson, RequestParams, SessionId, ThinkingLevel, Usage,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1240,4 +1243,381 @@ async fn stream_limit_releases_the_provider_admission_permit() -> TestResult {
     ));
     assert_eq!(gate.available_permits(), 1);
     Ok(())
+}
+
+fn anthropic_reply() -> String {
+    String::from(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","content":[],"model":"preset-model","stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+    )
+}
+
+/// A provider set decoded from `toml` through the strict configuration, so a
+/// preset row reaches the request lifecycle the way a host configures it.
+fn preset_set(
+    dir: &TestDir,
+    toml: &str,
+    env: &[(&str, &str)],
+) -> Result<ProviderSet, Box<dyn Error>> {
+    let config = Config::load(ConfigProduct::Dalgon, dir.path(), "", Some(toml))?;
+    let providers = ProviderConfig::from_config(&config)?;
+    Ok(ProviderSet::new(
+        &providers,
+        identity(),
+        EnvSnapshot::test(env),
+        dir.path(),
+        dir.path(),
+    )?)
+}
+
+/// Opens one text turn on `id`, checks its events, and returns the request
+/// head the loopback server captured, lowercased.
+async fn say_hello(
+    set: &ProviderSet,
+    id: &str,
+    family: Family,
+    captured: &mut CapturedServer,
+) -> Result<String, Box<dyn Error>> {
+    let mut route = resolved(id, family, "preset-model");
+    if family == Family::Anthropic {
+        route.entry.thinking = ThinkingSupport::UnknownAdaptive;
+    }
+    let provider = set.provider(route)?;
+    let request = request(family, "preset-model", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello")),
+        "{id} streamed no text"
+    );
+    assert!(
+        matches!(events.last(), Some(StreamEvent::Stop { .. })),
+        "{id} did not stop"
+    );
+    let request = captured.join_next().await.expect("server completes")??;
+    Ok(String::from_utf8_lossy(&request[0]).to_ascii_lowercase())
+}
+
+/// One preset row and what its request must look like on the wire.
+struct PresetCase {
+    id: &'static str,
+    family: Family,
+    /// The path prefix of the loopback base URL the configuration selects.
+    prefix: &'static str,
+    env: &'static [(&'static str, &'static str)],
+    reply: fn() -> String,
+    path: &'static str,
+    headers: &'static [&'static str],
+    forbidden: &'static [&'static str],
+}
+
+fn preset_cases() -> [PresetCase; 6] {
+    [
+        // A Chat row whose base has no version segment, keyed by its first variable.
+        PresetCase {
+            id: "deepseek",
+            family: Family::Chat,
+            prefix: "",
+            env: &[("DEEPSEEK_API_KEY", "deepseek-secret")],
+            reply: chat_reply,
+            path: "/chat/completions",
+            headers: &["authorization: bearer deepseek-secret"],
+            forbidden: &["\nx-api-key:", "\nanthropic-version:"],
+        },
+        // Both variables are set: the first one named by the row wins.
+        PresetCase {
+            id: "huggingface",
+            family: Family::Chat,
+            prefix: "/v1",
+            env: &[
+                ("HF_TOKEN", "hf-secret"),
+                ("HUGGINGFACE_HUB_TOKEN", "hub-secret"),
+            ],
+            reply: chat_reply,
+            path: "/v1/chat/completions",
+            headers: &["authorization: bearer hub-secret"],
+            forbidden: &["hf-secret"],
+        },
+        // Only the second variable is set: it still keys the row.
+        PresetCase {
+            id: "moonshot",
+            family: Family::Chat,
+            prefix: "/v1",
+            env: &[("KIMI_API_KEY", "kimi-secret")],
+            reply: chat_reply,
+            path: "/v1/chat/completions",
+            headers: &["authorization: bearer kimi-secret"],
+            forbidden: &["\nx-api-key:"],
+        },
+        PresetCase {
+            id: "xai",
+            family: Family::Responses,
+            prefix: "/v1",
+            env: &[("XAI_API_KEY", "xai-secret")],
+            reply: responses_reply,
+            path: "/v1/responses",
+            headers: &["authorization: bearer xai-secret"],
+            forbidden: &["\nx-api-key:"],
+        },
+        // A Messages host that expects a bearer token.
+        PresetCase {
+            id: "minimax",
+            family: Family::Anthropic,
+            prefix: "/anthropic",
+            env: &[("MINIMAX_API_KEY", "minimax-secret")],
+            reply: anthropic_reply,
+            path: "/anthropic/v1/messages",
+            headers: &[
+                "authorization: bearer minimax-secret",
+                "anthropic-version: 2023-06-01",
+            ],
+            forbidden: &["\nx-api-key:"],
+        },
+        // A Messages host that expects `x-api-key`.
+        PresetCase {
+            id: "umans",
+            family: Family::Anthropic,
+            prefix: "",
+            env: &[("UMANS_AI_CODING_PLAN_API_KEY", "umans-secret")],
+            reply: anthropic_reply,
+            path: "/v1/messages",
+            headers: &["x-api-key: umans-secret", "anthropic-version: 2023-06-01"],
+            forbidden: &["\nauthorization:"],
+        },
+    ]
+}
+
+#[tokio::test]
+async fn presets_reach_their_wire_through_strict_config_and_the_real_lifecycle() -> TestResult {
+    let dir = TestDir::new()?;
+    for case in preset_cases() {
+        let id = case.id;
+        let (base, mut captured) = server(case.prefix, vec![stream_reply((case.reply)())]).await?;
+        let toml = format!("[providers.{id}]\nbase_url = '{base}'\n");
+        let set = preset_set(&dir, &toml, case.env)?;
+        let head = say_hello(&set, id, case.family, &mut captured).await?;
+        assert!(
+            head.starts_with(&format!("post {} ", case.path)),
+            "{id}: {head}"
+        );
+        for line in case.headers {
+            assert!(head.contains(line), "{id}: {line} is not in {head}");
+        }
+        for text in case.forbidden {
+            assert!(!head.contains(text), "{id}: {text:?} is in {head}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_preset_without_a_key_refuses_with_the_typed_error_and_asks_nothing() -> TestResult {
+    let dir = TestDir::new()?;
+    // `xai` names its own variable, which replaces the row's; the row's
+    // variable is set but unused. An empty value counts as unset.
+    let set = preset_set(
+        &dir,
+        "[providers.xai]\nkey_env = 'ELSEWHERE_KEY'\n",
+        &[
+            ("OPENAI_API_KEY", "openai-secret"),
+            ("DEEPSEEK_API_KEY", "deepseek-secret"),
+            ("GROQ_API_KEY", ""),
+            ("XAI_API_KEY", "xai-secret"),
+        ],
+    )?;
+    for (id, family) in [
+        ("groq", Family::Chat),
+        ("minimax", Family::Anthropic),
+        ("xai", Family::Responses),
+    ] {
+        let Err(error) = set.provider(resolved(id, family, "preset-model")) else {
+            return Err(io::Error::other(format!("{id} resolved without a key")).into());
+        };
+        assert!(
+            matches!(&error, ProviderError::NoCredentials { provider } if provider == id),
+            "{id}: {error:?}"
+        );
+        assert_eq!(error.fix(), Some(format!("Run dalgon login {id}.")));
+        // No credential means no model-list request: the list is typed.
+        let fetch = set.load_models(id).await?;
+        assert_eq!(fetch.source, CatalogSource::Typed, "{id}");
+        assert!(
+            matches!(&fetch.live_error, Some(ProviderError::NoCredentials { provider }) if provider == id),
+            "{id}: {:?}",
+            fetch.live_error
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_signed_in_preset_key_outranks_the_environment_and_takes_no_oauth() -> TestResult {
+    let dir = TestDir::new()?;
+    let (paste, pasted) = oneshot::channel();
+    paste
+        .send(String::from("  deepseek-stored \n"))
+        .map_err(|_| io::Error::other("the key receiver was dropped"))?;
+    let (login_io, _progress) = LoginIo::channel(Some(pasted), CancellationToken::new());
+    let site = LoginSite::new(
+        dir.path().join("auth.json"),
+        dir.path().join("cache"),
+        "dal/test",
+    )?;
+    let signed_in = login("deepseek", Method::ApiKey, login_io, &site).await?;
+    assert_eq!(
+        signed_in,
+        Credential::ApiKey {
+            key: SecretString::from("deepseek-stored"),
+        }
+    );
+
+    let (base, mut captured) = server("/v1", vec![stream_reply(chat_reply())]).await?;
+    let toml = format!("[providers.deepseek]\nbase_url = '{base}'\n");
+    let set = preset_set(&dir, &toml, &[("DEEPSEEK_API_KEY", "deepseek-env")])?;
+    let head = say_hello(&set, "deepseek", Family::Chat, &mut captured).await?;
+    assert!(
+        head.contains("authorization: bearer deepseek-stored"),
+        "{head}"
+    );
+    assert!(!head.contains("deepseek-env"), "{head}");
+
+    let mut store = crate::auth::credential::AuthStore::load(dir.path().join("auth.json"))?;
+    let oauth = Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from("access"),
+        refresh_token: SecretString::from("refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: None,
+    });
+    assert!(matches!(
+        store.set("deepseek", oauth),
+        Err(ProviderError::AuthWrite { .. })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn preset_model_lists_ask_with_the_header_set_of_their_family() -> TestResult {
+    let dir = TestDir::new()?;
+    let listing = |body: &str| Reply {
+        status: 200,
+        content_type: "application/json",
+        body: body.to_owned(),
+    };
+    let (chat_base, mut chat_asked) = server(
+        "/v1",
+        vec![listing(r#"{"data":[{"id":"deepseek-listed"}]}"#)],
+    )
+    .await?;
+    let (claude_base, mut claude_asked) = server(
+        "/anthropic",
+        vec![listing(
+            r#"{"data":[{"id":"minimax-listed"}],"has_more":false}"#,
+        )],
+    )
+    .await?;
+    let toml = format!(
+        "[providers.deepseek]\nbase_url = '{chat_base}'\n[providers.minimax]\nbase_url = '{claude_base}'\n"
+    );
+    let set = preset_set(
+        &dir,
+        &toml,
+        &[
+            ("DEEPSEEK_API_KEY", "deepseek-secret"),
+            ("MINIMAX_API_KEY", "minimax-secret"),
+        ],
+    )?;
+
+    let chat = set.load_models("deepseek").await?;
+    assert_eq!(chat.source, CatalogSource::Live, "{:?}", chat.live_error);
+    assert_eq!(chat.entries.len(), 1);
+    assert_eq!(&*chat.entries[0].id, "deepseek-listed");
+    let request = chat_asked.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&request[0]).to_ascii_lowercase();
+    assert!(head.starts_with("get /v1/models "), "{head}");
+    assert!(
+        head.contains("authorization: bearer deepseek-secret"),
+        "{head}"
+    );
+    assert!(!head.contains("\nanthropic-version:"), "{head}");
+
+    let claude = set.load_models("minimax").await?;
+    assert_eq!(
+        claude.source,
+        CatalogSource::Live,
+        "{:?}",
+        claude.live_error
+    );
+    assert_eq!(claude.entries.len(), 1);
+    assert_eq!(&*claude.entries[0].id, "minimax-listed");
+    let request = claude_asked
+        .join_next()
+        .await
+        .expect("server completes")??;
+    let head = String::from_utf8_lossy(&request[0]).to_ascii_lowercase();
+    assert!(head.starts_with("get /anthropic/v1/models"), "{head}");
+    assert!(
+        head.contains("authorization: bearer minimax-secret"),
+        "{head}"
+    );
+    assert!(head.contains("anthropic-version: 2023-06-01"), "{head}");
+    assert!(!head.contains("\nx-api-key:"), "{head}");
+    Ok(())
+}
+
+#[test]
+fn preset_rows_keep_the_strict_config_contract() {
+    let refusal = |toml: &str| {
+        let config = Config::load(
+            ConfigProduct::Dalgon,
+            Path::new("/tmp/dal-provider-preset-test"),
+            "",
+            Some(toml),
+        )
+        .expect("test dal.toml parses");
+        ProviderConfig::from_config(&config)
+            .expect_err("the provider table must be refused")
+            .to_string()
+    };
+    assert_eq!(
+        refusal("[providers.deepseek]\napi = 'anthropic'\n"),
+        "providers.deepseek.api conflicts with its fixed family"
+    );
+    assert_eq!(
+        refusal("[providers.minimax]\ntransport = 'websocket'\n"),
+        "providers.minimax: transport websocket needs api openai_responses."
+    );
+    assert_eq!(
+        refusal("[providers.xai]\nbogus = 1\n"),
+        "providers.xai.bogus: unknown key"
+    );
 }

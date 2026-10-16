@@ -10,16 +10,16 @@ use dal_core::command::{Chooser, ErrorTriple, FrontAction, Output, Reply};
 
 use super::misc::{nothing_to_compact, share, trust_text};
 use super::model::{
-    ambiguous_model, no_catalog, parse_mode, parse_thinking, resolve_model, unknown_mode,
-    unknown_model, unknown_provider, unknown_thinking, unsupported_thinking,
+    ambiguous_model, no_catalog, no_credentials, parse_mode, parse_thinking, resolve_model,
+    unknown_mode, unknown_model, unknown_provider, unknown_thinking, unsupported_thinking,
 };
 use super::session::{
     check_name, copy_limit_check, export_format, no_reply, no_session, nothing_to_export,
 };
 use super::tree::{empty_session, no_fork_message, nothing_to_clone};
 use super::{
-    Arity, BUILTINS, MODE, RejectKind, Rejected, check_arity, plugin_raised, render, render_import,
-    spec, startup_error, suggest_in, valid_name,
+    Arity, RejectKind, Rejected, check_arity, plugin_raised, render, render_import, spec, specs,
+    startup_error, suggest_in, valid_name,
 };
 
 fn triple(what: &str, why: &str, fix: &str) -> ErrorTriple {
@@ -35,7 +35,7 @@ fn lex_error(raw: &str) -> dal_core::command::LexError {
 }
 #[test]
 fn registry_order() {
-    let names: Vec<&str> = BUILTINS.iter().map(|record| record.name).collect();
+    let names: Vec<&str> = specs().map(|record| record.name).collect();
     assert_eq!(
         names,
         [
@@ -63,28 +63,20 @@ fn registry_order() {
             "resume",
             "reload",
             "quit",
+            "mode",
         ]
     );
-    assert!(spec("mode").is_some());
-    assert_eq!(spec("mode"), Some(&MODE));
+    assert_eq!(spec("mode").map(|record| record.name), Some("mode"));
     assert_eq!(spec("docs"), None);
     assert_eq!(
-        BUILTINS[4],
-        super::BuiltinSpec {
-            name: "scoped-models",
-            hint: "",
-            summary: "choose the models that /model lists",
-            scope: super::Scope::Session,
-            idle: false,
-            arity: super::Arity::None,
-            single_instance: false,
-        }
+        spec("scoped-models").map(|record| record.summary),
+        Some("choose the models that /model lists"),
     );
-    assert!(BUILTINS[5].single_instance);
-    assert!(BUILTINS[15].single_instance);
-    assert!(BUILTINS[20].single_instance);
-    assert!(BUILTINS[22].single_instance);
-    assert!(!BUILTINS[14].single_instance);
+    assert!(spec("export").is_some_and(|record| record.single_instance));
+    assert!(spec("clone").is_some_and(|record| record.single_instance));
+    assert!(spec("compact").is_some_and(|record| record.single_instance));
+    assert!(spec("reload").is_some_and(|record| record.single_instance));
+    assert!(spec("fork").is_some_and(|record| !record.single_instance));
 }
 
 #[test]
@@ -199,13 +191,25 @@ fn busy_forms() {
 fn unknown_forms() {
     use dal_core::command::CommandError;
 
-    let names: Vec<&str> = BUILTINS
-        .iter()
-        .map(|record| record.name)
-        .chain(std::iter::once(MODE.name))
-        .collect();
+    let names: Vec<&str> = specs().map(|record| record.name).collect();
     assert_eq!(suggest_in(&names, "modle"), Some("model"));
+    assert_eq!(suggest_in(&names, "modl"), Some("model"));
+    assert_eq!(suggest_in(&names, "sesion"), Some("session"));
+    assert_eq!(suggest_in(&names, "chnglg"), None);
     assert_eq!(suggest_in(&names, "xyzzy"), None);
+    assert_eq!(
+        suggest_in(&super::model::THINKING_NAMES, "hgih"),
+        Some("high")
+    );
+    assert_eq!(
+        suggest_in(&super::model::THINKING_NAMES, "loud"),
+        Some("low")
+    );
+    assert_eq!(
+        suggest_in(&super::model::THINKING_NAMES, "hgihx"),
+        Some("high")
+    );
+    assert_eq!(suggest_in(&super::model::THINKING_NAMES, "quiet"), None);
     assert_eq!(
         render(&CommandError::Unknown {
             name: "modle".into(),
@@ -332,18 +336,20 @@ fn arity_contract() {
     ));
 }
 
-#[test]
-fn model_resolution_matrix() {
+fn resolution_pairs() -> [(&'static str, &'static str); 3] {
+    [
+        ("openai", "gpt-x"),
+        ("anthropic", "claude"),
+        ("other", "gpt-x"),
+    ]
+}
+
+fn assert_resolved_routes(pairs: &[(&str, &str)]) {
     use dal_core::{Family, Mode, ModelRoute};
 
     use super::model::ModelResolution;
 
-    let pairs = [
-        ("openai", "gpt-x"),
-        ("anthropic", "claude"),
-        ("other", "gpt-x"),
-    ];
-    match resolve_model(&pairs, "openai/gpt-x") {
+    match resolve_model(pairs, "openai/gpt-x") {
         ModelResolution::Route {
             provider,
             id,
@@ -361,14 +367,14 @@ fn model_resolution_matrix() {
         }
         other => panic!("qualified row must resolve, got {other:?}"),
     }
-    match resolve_model(&pairs, "claude") {
+    match resolve_model(pairs, "claude") {
         ModelResolution::Route { provider, id, .. } => {
             assert_eq!(&*provider, "anthropic");
             assert_eq!(&*id, "claude");
         }
         other => panic!("bare unique id must resolve, got {other:?}"),
     }
-    match resolve_model(&pairs, "gpt-x") {
+    match resolve_model(pairs, "gpt-x") {
         ModelResolution::Ambiguous { first, second } => {
             assert_eq!(&*first, "openai");
             assert_eq!(&*second, "other");
@@ -376,21 +382,29 @@ fn model_resolution_matrix() {
         other => panic!("shared bare id must be ambiguous, got {other:?}"),
     }
     assert!(matches!(
-        resolve_model(&pairs, "dalgon/eval-first"),
+        resolve_model(pairs, "dalgon/eval-first"),
         ModelResolution::Mode(Mode::EvalFirst)
     ));
     assert!(matches!(
-        resolve_model(&pairs, "zzz"),
+        resolve_model(pairs, "zzz"),
         ModelResolution::Unknown
     ));
     assert!(matches!(
-        resolve_model(&pairs, "dalgon/nope"),
+        resolve_model(pairs, "dalgon/nope"),
         ModelResolution::Unknown
     ));
     assert!(matches!(
-        resolve_model(&pairs, "openai/nope"),
+        resolve_model(pairs, "openai/nope"),
         ModelResolution::Unknown
     ));
+}
+
+#[test]
+fn model_resolution_matrix() {
+    use dal_core::Mode;
+
+    let pairs = resolution_pairs();
+    assert_resolved_routes(&pairs);
     assert_eq!(
         unknown_model("zzz"),
         triple(
@@ -405,6 +419,38 @@ fn model_resolution_matrix() {
             "Model id \"gpt-x\" is ambiguous",
             "it matches openai and other",
             "Type /model openai/gpt-x or /model other/gpt-x.",
+        )
+    );
+    assert_eq!(
+        no_credentials("openai"),
+        triple(
+            "openai has no credentials",
+            "auth.json has no entry for it",
+            "Type /login openai, or set OPENAI_API_KEY.",
+        )
+    );
+    assert_eq!(
+        no_credentials("anthropic"),
+        triple(
+            "anthropic has no credentials",
+            "auth.json has no entry for it",
+            "Type /login anthropic, or set ANTHROPIC_API_KEY.",
+        )
+    );
+    assert_eq!(
+        no_credentials("openai-codex"),
+        triple(
+            "openai-codex has no credentials",
+            "auth.json has no entry for it",
+            "Type /login openai-codex.",
+        )
+    );
+    assert_eq!(
+        no_credentials("zenmux"),
+        triple(
+            "zenmux has no credentials",
+            "auth.json has no entry for it",
+            "Type /login to pick from the list.",
         )
     );
     assert_eq!(parse_mode("normal"), Some(Mode::Normal));
@@ -453,6 +499,14 @@ fn thinking_matrix() {
         unknown_thinking("loud"),
         triple(
             "Unknown thinking level \"loud\"",
+            "the levels are off, minimal, low, medium, high, xhigh, max",
+            "Did you mean low? Type /thinking to pick from the list.",
+        )
+    );
+    assert_eq!(
+        unknown_thinking("quiet"),
+        triple(
+            "Unknown thinking level \"quiet\"",
             "the levels are off, minimal, low, medium, high, xhigh, max",
             "Type /thinking to pick from the list.",
         )
@@ -545,21 +599,24 @@ fn login_logout_flows() {
             provider: "anthropic".into(),
         })
     );
-    assert_eq!(
-        login(Some("openai-codexx")).unwrap_err(),
-        triple(
-            "Unknown provider \"openai-codexx\"",
-            "dalgon signs in to anthropic, openai, and openai-codex",
-            "Did you mean openai-codex? Type /login to pick from the list.",
-        )
+    // Unsupported providers stay rejected; the remedy names the command and
+    // the intended suggestion without pinning registry prose.
+    let unknown_login = login(Some("openai-codexx")).unwrap_err();
+    assert!(
+        unknown_login.fix.as_ref().contains("openai-codex"),
+        "unexpected fix: {}",
+        unknown_login.fix
     );
-    assert_eq!(
-        unknown_provider("logout", "xyz"),
-        triple(
-            "Unknown provider \"xyz\"",
-            "dalgon signs in to anthropic, openai, and openai-codex",
-            "Type /logout to pick from the list.",
-        )
+    assert!(
+        unknown_login.fix.as_ref().contains("/login"),
+        "unexpected fix: {}",
+        unknown_login.fix
+    );
+    let unknown_logout = unknown_provider("logout", "xyz");
+    assert!(
+        unknown_logout.fix.as_ref().contains("/logout"),
+        "unexpected fix: {}",
+        unknown_logout.fix
     );
     assert_eq!(
         logout(Some("openai")).unwrap(),

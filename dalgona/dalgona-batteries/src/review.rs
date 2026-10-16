@@ -53,6 +53,8 @@ pub(crate) enum ReviewError {
     Provider { cause: Box<str> },
     #[error("reviewer reply did not parse at round {round}: {reason}")]
     Parse { round: u8, reason: Box<str> },
+    #[error("stored review record {index} did not decode: {reason}")]
+    RecordDecode { index: usize, reason: Box<str> },
     #[error("reviewer returned {count} findings; the cap is 50; resolve the reported ones first")]
     TooManyFindings { count: usize },
     #[error(
@@ -432,10 +434,10 @@ async fn review_round(
         Ok(records) => records,
         Err(error) => return service_outcome(error),
     };
-    let records: Vec<rounds::ReviewRecord> = raw_records
-        .iter()
-        .filter_map(|record| sonic_rs::from_str(record.as_str()).ok())
-        .collect();
+    let records = match decode_records(&raw_records) {
+        Ok(records) => records,
+        Err(outcome) => return outcome,
+    };
     let work_round = match rounds::next_round(&records, cfg.max_rounds, request) {
         Ok(work_round) => work_round,
         Err(error) => return ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
@@ -507,6 +509,45 @@ async fn review_round(
         Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
         Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
     }
+}
+
+/// Decodes every stored review record. One undecodable record fails the
+/// round before the reviewer runs; records are never dropped or rewritten.
+fn decode_records(raw_records: &[Box<RawValue>]) -> Result<Vec<rounds::ReviewRecord>, ToolOutcome> {
+    raw_records
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            sonic_rs::from_str(raw.as_str())
+                .map_err(|error| record_decode_refusal(index + 1, &error))
+        })
+        .collect()
+}
+
+/// The refusal for the one-based stored record `index` that did not decode.
+fn record_decode_refusal(index: usize, error: &sonic_rs::Error) -> ToolOutcome {
+    let refusal = ReviewError::RecordDecode {
+        index,
+        reason: decode_failure_site(error),
+    };
+    ToolOutcome::Err(dal_agent::ToolError::message(refusal.to_string()))
+}
+
+/// Says how and where a stored record failed to decode, never what it held.
+///
+/// The `Display` of a `sonic_rs::Error` carries a window of the input around
+/// the failure, and its serde messages quote the offending value. A stored
+/// record can hold private text and this reason reaches the tool result, so
+/// only the failure class and the position are reported.
+fn decode_failure_site(error: &sonic_rs::Error) -> Box<str> {
+    use sonic_rs::error::Category;
+    let class = match error.classify() {
+        Category::Syntax => "malformed JSON",
+        Category::Eof => "truncated JSON",
+        Category::TypeUnmatched => "does not match the review record schema",
+        _ => "unreadable",
+    };
+    format!("{class} (line {}, column {})", error.line(), error.column()).into()
 }
 
 fn record_body(record: &rounds::ReviewRecord) -> Result<RawJson, Box<ToolOutcome>> {

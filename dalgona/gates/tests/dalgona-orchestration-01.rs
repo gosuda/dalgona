@@ -33,7 +33,7 @@ fn close_ends_the_battery_within_5s_and_holds_the_last_mode() -> support::TestRe
                         extension,
                         &scratch.path().join("ws"),
                     )
-                        .expect("registered extension has a code identity"),
+                    .expect("registered extension has a code identity"),
                     dal_core::ClientId::new("shutdown-gate"),
                     dal_core::Timestamp::now(),
                 )

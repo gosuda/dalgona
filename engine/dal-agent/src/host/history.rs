@@ -22,7 +22,7 @@ pub(crate) fn opening_texts(fold: &Session) -> Vec<String> {
             content
                 .iter()
                 .filter_map(|block| match block {
-                    Block::Text { text } => Some(&**text),
+                    Block::Text { text, .. } => Some(&**text),
                     _ => None,
                 })
                 .collect::<String>()

@@ -516,7 +516,11 @@ fn validate_context_item(value: &value::Value) -> Result<(), Box<str>> {
     let role = object_tag(value, "role", "request.context[]")?;
     let fields = match role {
         "user" => strict_object(value, "request.context[]", &["role", "parts"])?,
-        "assistant" => strict_object(value, "request.context[]", &["role", "source", "parts"])?,
+        "assistant" => strict_object(
+            value,
+            "request.context[]",
+            &["role", "source", "parts", "replay"],
+        )?,
         "tool_result" => strict_object(
             value,
             "request.context[]",
@@ -529,26 +533,40 @@ fn validate_context_item(value: &value::Value) -> Result<(), Box<str>> {
             strict_object(source, "request.context[].source", &["family", "model"])?;
         }
         if let Some(parts) = get_field(fields, "parts") {
-            validate_parts(parts, true)?;
+            validate_assistant_parts(parts)?;
         }
     } else if let Some(parts) = get_field(fields, "parts") {
-        validate_parts(parts, false)?;
+        validate_user_parts(parts)?;
     }
     Ok(())
 }
 
-fn validate_parts(value: &value::Value, assistant: bool) -> Result<(), Box<str>> {
+fn validate_user_parts(value: &value::Value) -> Result<(), Box<str>> {
     let value::Value::List(parts) = value else {
         return Err("request.context[].parts must be a list".into());
     };
     for part in parts {
         let kind = object_tag(part, "type", "request.context[].parts[]")?;
-        let allowed = match (assistant, kind) {
-            (_, "text") => &["type", "text"][..],
-            (false, "image") => &["type", "mime", "bytes"][..],
-            (false, "blob") => &["type", "blob_id", "mime", "bytes"][..],
-            (true, "thinking") => &["type", "text", "replay"][..],
-            (true, "tool_call") => &["type", "call", "name", "args"][..],
+        let allowed = match kind {
+            "text" => &["type", "text"][..],
+            "image" => &["type", "mime", "bytes"][..],
+            "blob" => &["type", "blob_id", "mime", "bytes"][..],
+            _ => return Err(format!("request.context[].parts[] has unknown type `{kind}`").into()),
+        };
+        strict_object(part, "request.context[].parts[]", allowed)?;
+    }
+    Ok(())
+}
+
+fn validate_assistant_parts(value: &value::Value) -> Result<(), Box<str>> {
+    let value::Value::List(parts) = value else {
+        return Err("request.context[].parts must be a list".into());
+    };
+    for part in parts {
+        let kind = object_tag(part, "type", "request.context[].parts[]")?;
+        let allowed = match kind {
+            "text" | "thinking" => &["type", "text", "replay"][..],
+            "tool_call" => &["type", "call", "name", "args", "replay"][..],
             _ => return Err(format!("request.context[].parts[] has unknown type `{kind}`").into()),
         };
         strict_object(part, "request.context[].parts[]", allowed)?;
@@ -670,6 +688,52 @@ mod tests {
         let error = OpAdapter::decode_model_request(&request).expect_err("unknown field");
         assert!(
             error.contains("request.context[].parts[] has unknown field `extra`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn model_request_accepts_assistant_replay_and_preserves_raw() {
+        let request = Value::decode(
+            r#"{"purpose":"turn","model":{"kind":"api","family":"openai_chat","model":"gpt-6"},"system":"system","tools":[],"context":[{"role":"assistant","source":{"family":"openai_chat","model":"gpt-6"},"parts":[{"type":"text","text":"hello","replay":{"v":1}},{"type":"thinking","text":"plan","replay":{"t":2}},{"type":"tool_call","call":"c1","name":"tool","args":{"a":1},"replay":[1,2]}],"replay":{"m":3}}],"params":{"thinking":"off","effort":null,"temperature":null,"max_output_tokens":null},"cache_key":null}"#,
+        )
+        .expect("request transport value");
+        let request = OpAdapter::decode_model_request(&request).expect("assistant replay");
+        let [dal_core::ContextItem::Assistant { parts, replay, .. }] = request.context.as_ref()
+        else {
+            panic!("assistant context must survive decoding");
+        };
+        assert_eq!(
+            replay.as_ref().expect("message replay").as_str(),
+            r#"{"m":3}"#
+        );
+        assert_eq!(parts.len(), 3);
+        let dal_core::AssistantPart::Text { replay, .. } = &parts[0] else {
+            panic!("text part must survive decoding");
+        };
+        assert_eq!(replay.as_ref().expect("text replay").as_str(), r#"{"v":1}"#);
+        let dal_core::AssistantPart::Thinking { replay, .. } = &parts[1] else {
+            panic!("thinking part must survive decoding");
+        };
+        assert_eq!(
+            replay.as_ref().expect("thinking replay").as_str(),
+            r#"{"t":2}"#
+        );
+        let dal_core::AssistantPart::ToolCall { replay, .. } = &parts[2] else {
+            panic!("tool-call part must survive decoding");
+        };
+        assert_eq!(replay.as_ref().expect("call replay").as_str(), "[1,2]");
+    }
+
+    #[test]
+    fn model_request_rejects_user_replay() {
+        let request = Value::decode(
+            r#"{"purpose":"turn","model":{"kind":"api","family":"openai_chat","model":"gpt-6"},"system":"system","tools":[],"context":[{"role":"user","parts":[{"type":"text","text":"hello","replay":{"v":1}}]}],"params":{"thinking":"off","effort":null,"temperature":null,"max_output_tokens":null},"cache_key":null}"#,
+        )
+        .expect("request transport value");
+        let error = OpAdapter::decode_model_request(&request).expect_err("user replay");
+        assert!(
+            error.contains("request.context[].parts[] has unknown field `replay`"),
             "{error}"
         );
     }

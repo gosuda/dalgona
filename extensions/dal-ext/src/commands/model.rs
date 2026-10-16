@@ -27,7 +27,8 @@ fn provider_phrase(ids: &[&str]) -> String {
 }
 
 /// The thinking levels `/thinking` accepts, in display order.
-const THINKING_NAMES: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+pub(super) const THINKING_NAMES: [&str; 7] =
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Opens the settings picker; each row change submits its own command.
 pub(super) fn settings() -> Reply {
@@ -135,6 +136,32 @@ pub(super) fn no_catalog() -> ErrorTriple {
     )
 }
 
+/// The no-credentials pair: the sign-in remedy from the provider row.
+pub(super) fn no_credentials(provider: &str) -> ErrorTriple {
+    super::error_triple(
+        format!("{provider} has no credentials"),
+        "auth.json has no entry for it",
+        credential_fix(provider),
+    )
+}
+
+/// The no-credentials remedy: the sign-in command for a known provider,
+/// naming its key variables when the row takes one; an OAuth-only provider
+/// names no variable, and a provider outside the sign-in table points to
+/// the sign-in picker instead of a dead-end command.
+fn credential_fix(provider: &str) -> String {
+    let Some(def) = find_provider(provider) else {
+        return "Type /login to pick from the list.".to_owned();
+    };
+    let Some(key) = def.key else {
+        return format!("Type /login {provider}.");
+    };
+    if key.env.is_empty() {
+        return format!("Type /login {provider}.");
+    }
+    format!("Type /login {provider}, or set {}.", key.env.join(" or "))
+}
+
 /// The unknown-mode pair for `/mode` arguments outside the three modes.
 pub(super) fn unknown_mode(arg: &str) -> ErrorTriple {
     super::error_triple(
@@ -193,11 +220,7 @@ async fn apply_route(
         .iter()
         .any(|(stored, _)| &**stored == provider)
     {
-        return Err(super::error_triple(
-            format!("{provider} has no credentials"),
-            "auth.json has no entry for it",
-            format!("Type /login {provider} to sign in, then try again."),
-        ));
+        return Err(no_credentials(provider));
     }
     let old = cx.view().settings.model.clone();
     let after = cx.edit_style_for(&route);

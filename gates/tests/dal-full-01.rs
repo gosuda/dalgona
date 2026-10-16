@@ -6,11 +6,25 @@
 )]
 
 //! Full-load session lifecycle: hooks, phases, actor scheduling, and shutdown races.
+//!
+//! The load scenario also drives the real `dalgon` TUI on a pseudoterminal,
+//! attached over a loopback WebSocket to the host that carries the 500-child
+//! and 200-job load, and measures keypress echo and cancel latency there.
+#[cfg(unix)]
+#[expect(
+    dead_code,
+    reason = "PTY support includes helpers used by other gate targets"
+)]
+#[path = "support/pty.rs"]
+mod pty;
 #[expect(
     dead_code,
     reason = "gate helpers are shared across integration targets"
 )]
 mod support;
+#[cfg(unix)]
+#[path = "support/vt.rs"]
+mod vt;
 
 use std::{
     collections::HashMap,
@@ -71,6 +85,7 @@ const NESTED_MODEL: &str = "gate-stress/nested";
 const LEAF_MODEL: &str = "gate-stress/leaf";
 const MEMBER_MODEL: &str = "gate-stress/member";
 const JOB_MODEL: &str = "gate-stress/job";
+const TERMINAL_MODEL: &str = "gate-stress/terminal";
 const IDLE_MODEL: &str = "gate-stress/idle";
 const SHUTTLE_ROOT_MODEL: &str = "gate-stress/shuttle-root";
 const SHUTTLE_SLOW_MODEL: &str = "gate-stress/shuttle-slow";
@@ -378,6 +393,48 @@ impl ModelHandler for JobModel {
     }
 }
 
+/// Runs one exec job per terminal prompt. `JobModel` takes the first prompt
+/// in the context and answers at once once any exec result exists, so it
+/// serves one turn per session. This model reads the newest prompt and
+/// answers only a result that ends the context, so one long-lived terminal
+/// session can run many turns.
+struct TerminalJobModel;
+
+impl ModelHandler for TerminalJobModel {
+    fn run<'a>(
+        &'a self,
+        request: ModelRequest,
+        _cx: ModelCx<'a>,
+    ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        Box::pin(async move {
+            if matches!(
+                request.context.last(),
+                Some(ContextItem::ToolResult { name, .. }) if name.as_ref() == "exec"
+            ) {
+                return Ok(text_stream("process started"));
+            }
+            let Some(index) = request
+                .context
+                .iter()
+                .rev()
+                .filter_map(user_text)
+                .find_map(|text| {
+                    text.strip_prefix("process-job-")
+                        .and_then(|number| number.parse::<usize>().ok())
+                })
+            else {
+                return Err(ModelError::PrivateRounds);
+            };
+            let call = format!("process-{index}");
+            let args = format!(
+                r#"{{"command":"{}","timeout_seconds":600,"foreground_s":300}}"#,
+                process_command(index)
+            );
+            Ok(tool_call_stream(&call, &args))
+        })
+    }
+}
+
 struct ShuttleRootModel {
     mail_results: Arc<Mutex<Vec<(String, dal_core::Receipt)>>>,
     completed_sends: Arc<AtomicUsize>,
@@ -470,6 +527,22 @@ struct ProcessJob {
     turn: TurnId,
     pid_path: PathBuf,
     pid: Option<u32>,
+}
+
+/// Sessions the real terminal clients attached to the loaded host; empty
+/// where no pseudoterminal exists.
+#[derive(Default)]
+struct TuiSessions {
+    /// The session that only echoed typed keys. It never held a turn.
+    echo: Option<SessionId>,
+    /// The session whose terminal cancelled this many running exec turns.
+    cancel: Option<(SessionId, usize)>,
+}
+
+impl TuiSessions {
+    fn count(&self) -> usize {
+        usize::from(self.echo.is_some()) + usize::from(self.cancel.is_some())
+    }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -641,6 +714,17 @@ fn full_extension(
                 id: ModelId::parse(JOB_MODEL)?,
                 caps: caps(true),
                 handler: Arc::new(JobModel),
+                export: None,
+            })
+            .model(ModelRecord {
+                id: ModelId::parse(TERMINAL_MODEL)?,
+                // One session runs every terminal turn, so give it a window
+                // that 100 turns cannot fill.
+                caps: Caps {
+                    context_window: Some(1_000_000),
+                    ..caps(true)
+                },
+                handler: Arc::new(TerminalJobModel),
                 export: None,
             })
             .model(ModelRecord {
@@ -1308,8 +1392,555 @@ async fn wait_for_processes_to_exit(pids: &[u32]) -> Result<(), TestError> {
     }
 }
 
+/// The loaded-terminal proof: the real `dalgon` TUI on a pseudoterminal,
+/// attached over a loopback WebSocket to the host that carries the load.
+///
+/// Each observation binds terminal output to the input that caused it. An
+/// echo sample types a glyph that no other output can contain and waits for
+/// that glyph in the bytes written after the key. A cancel sample runs in a
+/// fresh terminal whose only turn is the one being cancelled, so the
+/// cancelled notice cannot be left over from an earlier sample. Samplers run
+/// on their own threads, because the host and its WebSocket listener need
+/// the test runtime while the terminal is read.
+#[cfg(unix)]
+mod loaded_tui {
+    use std::{
+        collections::BTreeMap,
+        io,
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::{self, JoinHandle},
+        time::{Duration, Instant},
+    };
+
+    use dal_agent::{Agent, Host, SessionRef};
+    use dal_core::{ApprovalMode, ClientId, Command, PageReq, Reply, Save, SessionId, Workspace};
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::{
+        PROCESS_JOBS, TERMINAL_MODEL, TestError,
+        pty::{self, PtyProcess},
+        read_pid,
+        support::TestDir,
+        synthetic_route,
+        vt::VtRecorder,
+    };
+
+    /// Loaded keypress echo bound on the timing lane: P99 below 24 ms.
+    pub(super) const ECHO_P99: Duration = Duration::from_millis(24);
+    /// Terminals driven on a shared runner, where counts are asserted but no
+    /// latency is.
+    pub(super) const SHARED_SAMPLES: usize = 3;
+    /// Most echo samples one run takes; the sampler otherwise runs until the
+    /// process storm has finished.
+    const MAX_ECHO_SAMPLES: u32 = 1000;
+    const COLUMNS: u16 = 100;
+    const ROWS: u16 = 30;
+    /// The status word while a tool call runs.
+    const WORKING: &[&str] = &[dal_tui::copy::ids::STATE_WORKING];
+    /// Every status word a turn shows while it runs; none is on screen once
+    /// the turn has ended.
+    const BUSY: &[&str] = &[
+        dal_tui::copy::ids::STATE_WORKING,
+        dal_tui::copy::ids::STATE_THINKING,
+    ];
+    // Liveness bounds, not timing claims: a terminal attached to a host
+    // carrying 700 sessions and 200 process chains can start slowly on a
+    // shared runner.
+    const READY_WAIT: Duration = Duration::from_secs(120);
+    const OUTPUT_WAIT: Duration = Duration::from_secs(60);
+    const PID_WAIT: Duration = if cfg!(target_os = "macos") {
+        Duration::from_secs(360)
+    } else {
+        Duration::from_secs(120)
+    };
+    const EXIT_WAIT: Duration = Duration::from_secs(30);
+    /// How often a sampler drains the terminal while it waits for output.
+    const POLL: Duration = Duration::from_micros(200);
+    const STARTUP_QUIET: Duration = Duration::from_millis(500);
+    const STARTUP_LIMIT: Duration = Duration::from_secs(10);
+    const KEY_QUIET: Duration = Duration::from_millis(15);
+    const KEY_LIMIT: Duration = Duration::from_millis(500);
+
+    /// The in-process host served on loopback, plus the home the terminal
+    /// clients run in.
+    pub(super) struct LoadedTerminal {
+        url: String,
+        client_home: TestDir,
+        stop: CancellationToken,
+        serve: tokio::task::JoinHandle<Result<(), dal_wire::WireError>>,
+    }
+
+    /// A terminal typing glyphs into the loaded host's composer.
+    pub(super) struct EchoSampler {
+        pub(super) session: SessionId,
+        stop: Arc<AtomicBool>,
+        done: oneshot::Receiver<io::Result<Vec<Duration>>>,
+        thread: JoinHandle<()>,
+        _owner: Agent,
+    }
+
+    /// Latencies and recorded process ids of the cancelled terminal turns,
+    /// all run in one session.
+    pub(super) struct CancelRun {
+        pub(super) session: SessionId,
+        pub(super) latencies: Vec<Duration>,
+        pub(super) pids: Vec<u32>,
+    }
+
+    struct CancelSample {
+        latency: Duration,
+        pid: u32,
+    }
+
+    /// The visible screen of a terminal, replayed from its raw output.
+    struct ScreenWatch {
+        vt: VtRecorder,
+        fed: usize,
+    }
+
+    impl ScreenWatch {
+        fn new() -> Self {
+            Self {
+                vt: VtRecorder::new(COLUMNS, ROWS),
+                fed: 0,
+            }
+        }
+
+        /// Replays the bytes written since the last call, then reports
+        /// whether any visible row shows one of `words`.
+        fn shows(&mut self, terminal: &PtyProcess, words: &[&str]) -> bool {
+            let output = terminal.output();
+            self.vt.feed(&output[self.fed..]);
+            self.fed = output.len();
+            self.vt
+                .screen_rows()
+                .iter()
+                .any(|row| words.iter().any(|word| row.contains(word)))
+        }
+    }
+
+    impl LoadedTerminal {
+        /// Serves `host` on a loopback port for the terminal clients.
+        pub(super) async fn serve(
+            host: &Host,
+            workspace: &Workspace,
+            data_root: &Path,
+        ) -> Result<Self, TestError> {
+            let options = dal_wire::router::RouterOptions {
+                bind: "127.0.0.1".to_owned(),
+                port: 0,
+                public: false,
+                a2a: false,
+                token_file: data_root.join("loaded-terminal.token"),
+                approval: ApprovalMode::Ask,
+                origins: Vec::new(),
+                aliases: BTreeMap::new(),
+                workspace: workspace.as_path().to_path_buf(),
+            };
+            let stop = CancellationToken::new();
+            let handle = dal_wire::serve_router(host.clone(), options, stop.clone()).await?;
+            let url = format!("ws://{}/v1/ws", handle.local_addr());
+            let serve = tokio::spawn(handle.wait());
+            Ok(Self {
+                url,
+                client_home: TestDir::new()?,
+                stop,
+                serve,
+            })
+        }
+
+        /// Starts a terminal on a new session and returns once it is ready to
+        /// be typed into, so sampling overlaps whatever load starts next.
+        pub(super) async fn start_echo(
+            &self,
+            host: &Host,
+            workspace: &Workspace,
+            minimum: usize,
+        ) -> Result<EchoSampler, TestError> {
+            let (owner, session) = open_session(host, workspace, None).await?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&stop);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (done_tx, done_rx) = oneshot::channel();
+            let url = self.url.clone();
+            let home = self.client_home.path().to_path_buf();
+            let thread = thread::Builder::new()
+                .name("stress-echo-sampler".to_owned())
+                .spawn(move || {
+                    let result = sample_echo(&url, session, &home, minimum, &flag, ready_tx);
+                    let _ = done_tx.send(result);
+                })?;
+            if ready_rx.await.is_err() {
+                // The sampler ended before it typed: its own error says why.
+                let result = done_rx.await;
+                join(thread)?;
+                return Err(match result {
+                    Ok(Err(error)) => error.into(),
+                    Ok(Ok(_)) => {
+                        io::Error::other("the echo sampler stopped before its terminal was ready")
+                            .into()
+                    }
+                    Err(error) => error.into(),
+                });
+            }
+            Ok(EchoSampler {
+                session,
+                stop,
+                done: done_rx,
+                thread,
+                _owner: owner,
+            })
+        }
+
+        /// Runs `samples` exec turns in one terminal session and cancels each
+        /// with Ctrl+C, recording how long the terminal took to stop showing
+        /// the turn as busy after the key.
+        pub(super) async fn sample_cancels(
+            &self,
+            host: &Host,
+            workspace: &Workspace,
+            samples: usize,
+        ) -> Result<CancelRun, TestError> {
+            let (_owner, session) = open_session(host, workspace, Some(TERMINAL_MODEL)).await?;
+            let url = self.url.clone();
+            let home = self.client_home.path().to_path_buf();
+            let jobs = workspace.as_path().to_path_buf();
+            let (done_tx, done_rx) = oneshot::channel();
+            let thread = thread::Builder::new()
+                .name("stress-cancel-sampler".to_owned())
+                .spawn(move || {
+                    let _ = done_tx.send(cancel_all(&url, session, &home, &jobs, samples));
+                })?;
+            let result = done_rx.await;
+            join(thread)?;
+            let taken = result??;
+            Ok(CancelRun {
+                session,
+                latencies: taken.iter().map(|sample| sample.latency).collect(),
+                pids: taken.iter().map(|sample| sample.pid).collect(),
+            })
+        }
+
+        /// Stops the listener once every terminal has exited.
+        pub(super) async fn stop(self) -> Result<(), TestError> {
+            self.stop.cancel();
+            self.serve.await??;
+            Ok(())
+        }
+    }
+
+    impl EchoSampler {
+        /// Ends sampling after the minimum count and returns every echo latency.
+        pub(super) async fn finish(self) -> Result<Vec<Duration>, TestError> {
+            self.stop.store(true, Ordering::Release);
+            let result = self.done.await;
+            join(self.thread)?;
+            Ok(result??)
+        }
+    }
+
+    fn join(thread: JoinHandle<()>) -> Result<(), TestError> {
+        thread
+            .join()
+            .map_err(|_| io::Error::other("a loaded-terminal sampler thread panicked").into())
+    }
+
+    /// Opens a session on the host. The terminal attaches to it by id, so a
+    /// model chosen here is the model the terminal's turns run on.
+    async fn open_session(
+        host: &Host,
+        workspace: &Workspace,
+        model: Option<&str>,
+    ) -> Result<(Agent, SessionId), TestError> {
+        let agent = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("stress-terminal"),
+            )
+            .await?;
+        if let Some(model) = model {
+            let reply = agent
+                .submit(Command::SetModel {
+                    model: synthetic_route(model),
+                    save: Save::SessionOnly,
+                })
+                .await?;
+            assert!(matches!(reply, Reply::Done(_)));
+        }
+        let id = agent.view(PageReq::default())?.session.id;
+        Ok((agent, id))
+    }
+
+    fn spawn_remote_tui(home: &Path, url: &str, session: SessionId) -> io::Result<PtyProcess> {
+        let mut command = pty::dalgon_command(home, &["the host supplies the provider"])?;
+        command.args([
+            "--screen",
+            "inline",
+            "--connect",
+            url,
+            &format!("--resume={session}"),
+        ]);
+        let mut terminal = PtyProcess::spawn(&mut command, COLUMNS, ROWS)?;
+        terminal.wait_for(
+            dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
+            READY_WAIT,
+        )?;
+        Ok(terminal)
+    }
+
+    fn sample_echo(
+        url: &str,
+        session: SessionId,
+        home: &Path,
+        minimum: usize,
+        stop: &AtomicBool,
+        ready: oneshot::Sender<()>,
+    ) -> io::Result<Vec<Duration>> {
+        let mut terminal = spawn_remote_tui(home, url, session)?;
+        // The first frame paints before the terminal probes finish; keys wait
+        // for startup to go quiet so launch work is not counted as an echo.
+        settle(&mut terminal, STARTUP_QUIET, STARTUP_LIMIT)?;
+        // The TUI owns echo only when it has turned the line discipline's
+        // echo off. With it on, the glyph below would be the kernel's reply.
+        if terminal
+            .termios()?
+            .local_modes
+            .contains(rustix::termios::LocalModes::ECHO)
+        {
+            return Err(io::Error::other(
+                "the terminal kept kernel echo on, so the measured echo would not be the TUI's",
+            ));
+        }
+        let _ = ready.send(());
+        let mut samples = Vec::with_capacity(minimum);
+        for index in 0..MAX_ECHO_SAMPLES {
+            if samples.len() >= minimum && stop.load(Ordering::Acquire) {
+                break;
+            }
+            samples.push(echo_once(&mut terminal, index)?);
+        }
+        quit(&mut terminal)?;
+        Ok(samples)
+    }
+
+    /// Types one glyph and returns the time until it is written back. Each
+    /// sample types a different CJK ideograph, which no frame, hint, or
+    /// status text prints, so only the echo of this key can contain it.
+    fn echo_once(terminal: &mut PtyProcess, index: u32) -> io::Result<Duration> {
+        let glyph = char::from_u32(0x4E00 + index)
+            .ok_or_else(|| io::Error::other("echo glyph is not a character"))?;
+        let needle = glyph.to_string().into_bytes();
+        let from = terminal.output().len();
+        let started = Instant::now();
+        terminal.write(&needle)?;
+        let seen = wait_for_output(terminal, from, &needle, OUTPUT_WAIT)?;
+        // Erase the glyph so the composer stays one cell wide, and let the
+        // repaint finish before the next key.
+        terminal.write(b"\x7f")?;
+        settle(terminal, KEY_QUIET, KEY_LIMIT)?;
+        Ok(seen.duration_since(started))
+    }
+
+    fn cancel_all(
+        url: &str,
+        session: SessionId,
+        home: &Path,
+        jobs: &Path,
+        samples: usize,
+    ) -> io::Result<Vec<CancelSample>> {
+        let mut terminal = spawn_remote_tui(home, url, session)?;
+        let mut watch = ScreenWatch::new();
+        settle(&mut terminal, STARTUP_QUIET, STARTUP_LIMIT)?;
+        let mut taken = Vec::with_capacity(samples);
+        for offset in 0..samples {
+            // Job numbers past the API-driven jobs keep each pid file distinct.
+            let job = PROCESS_JOBS + offset;
+            let pid_path = jobs.join(format!("child-{job}.pid"));
+            taken.push(cancel_once(&mut terminal, &mut watch, job, &pid_path)?);
+        }
+        quit(&mut terminal)?;
+        Ok(taken)
+    }
+
+    /// Runs one exec turn and cancels it with Ctrl+C.
+    ///
+    /// The cancelled notice cannot bind a sample: the TUI keeps the last
+    /// three notices on screen and never clears them, and every cancel adds
+    /// the same text. The busy word in the status row does bind it. The
+    /// terminal is idle before the prompt, so a busy word that appears is
+    /// this turn's, and the exec chain is running when the key is written,
+    /// so the word can only leave because of that key.
+    fn cancel_once(
+        terminal: &mut PtyProcess,
+        watch: &mut ScreenWatch,
+        job: usize,
+        pid_path: &Path,
+    ) -> io::Result<CancelSample> {
+        settle(terminal, KEY_QUIET, KEY_LIMIT)?;
+        if watch.shows(terminal, BUSY) {
+            return Err(io::Error::other(
+                "the terminal still showed a busy turn before the next prompt",
+            ));
+        }
+        terminal.write(format!("process-job-{job}\r").as_bytes())?;
+        let pid = wait_for_pid(terminal, pid_path)?;
+        wait_for_screen(terminal, watch, WORKING, |shown| shown)?;
+        settle(terminal, KEY_QUIET, KEY_LIMIT)?;
+        let started = Instant::now();
+        terminal.write(b"\x03")?;
+        let seen = wait_for_screen(terminal, watch, BUSY, |shown| !shown)?;
+        Ok(CancelSample {
+            latency: seen.duration_since(started),
+            pid,
+        })
+    }
+
+    /// Drains the terminal until `wanted` accepts whether the visible screen
+    /// shows one of `words`, and returns when that was seen.
+    fn wait_for_screen(
+        terminal: &mut PtyProcess,
+        watch: &mut ScreenWatch,
+        words: &[&str],
+        wanted: impl Fn(bool) -> bool,
+    ) -> io::Result<Instant> {
+        let deadline = Instant::now() + OUTPUT_WAIT;
+        loop {
+            terminal.collect_for(Duration::ZERO)?;
+            if wanted(watch.shows(terminal, words)) {
+                return Ok(Instant::now());
+            }
+            if Instant::now() >= deadline {
+                return Err(unseen(
+                    terminal,
+                    &format!("the wanted screen state for {words:?}"),
+                ));
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn wait_for_pid(terminal: &mut PtyProcess, path: &Path) -> io::Result<u32> {
+        let deadline = Instant::now() + PID_WAIT;
+        loop {
+            terminal.collect_for(Duration::from_millis(5))?;
+            if let Some(pid) = read_pid(path).map_err(io::Error::other)? {
+                return Ok(pid);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "{} never recorded a child pid",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    /// Drains the terminal until `needle` appears in bytes written after
+    /// offset `from`, and returns when it was seen.
+    fn wait_for_output(
+        terminal: &mut PtyProcess,
+        from: usize,
+        needle: &[u8],
+        timeout: Duration,
+    ) -> io::Result<Instant> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            terminal.collect_for(Duration::ZERO)?;
+            if pty::occurrences(&terminal.output()[from..], needle) > 0 {
+                return Ok(Instant::now());
+            }
+            if Instant::now() >= deadline {
+                return Err(unseen(
+                    terminal,
+                    &format!("{:?}", String::from_utf8_lossy(needle)),
+                ));
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn unseen(terminal: &PtyProcess, what: &str) -> io::Error {
+        let captured = String::from_utf8_lossy(terminal.output());
+        let tail = captured
+            .get(captured.len().saturating_sub(2048)..)
+            .unwrap_or(&captured);
+        io::Error::other(format!(
+            "terminal output never reached {what}\ncaptured tail:\n{tail}"
+        ))
+    }
+
+    /// Drains the terminal until it has written nothing for `quiet`, or
+    /// `limit` has passed.
+    fn settle(terminal: &mut PtyProcess, quiet: Duration, limit: Duration) -> io::Result<()> {
+        let started = Instant::now();
+        let mut seen = terminal.output().len();
+        let mut changed = started;
+        loop {
+            terminal.collect_for(Duration::ZERO)?;
+            let now = Instant::now();
+            let length = terminal.output().len();
+            if length != seen {
+                seen = length;
+                changed = now;
+            }
+            if now.duration_since(changed) >= quiet || now.duration_since(started) >= limit {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Quits on the empty composer with Ctrl+D and requires a clean exit.
+    fn quit(terminal: &mut PtyProcess) -> io::Result<()> {
+        settle(terminal, KEY_QUIET, KEY_LIMIT)?;
+        terminal.write(b"\x04")?;
+        let status = terminal.wait_for_exit(EXIT_WAIT)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "the remote TUI exited with {status}"
+            )))
+        }
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "SC gate is one long stress scenario")]
 async fn full_load_scenario() -> Result<(), TestError> {
+    // Wall-clock and resource bounds assert only on the nightly
+    // idle-machine lane; shared CI runners cannot hold them.
+    let budgets = std::env::var_os("DAL_TIMING_BUDGETS").is_some();
+    // The loaded keypress echo and cancel bounds are measured on the real
+    // TUI through a pseudoterminal. No pseudoterminal harness exists for
+    // this target, so the timing lane cannot be satisfied here: fail instead
+    // of passing without the proof.
+    #[cfg(not(unix))]
+    if budgets {
+        return Err(io::Error::other(
+            "the loaded keypress-echo and cancel proof needs the real TUI on a \
+             pseudoterminal, and this gate has no terminal harness for this target",
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    let tui_samples = if budgets {
+        CANCELLATIONS
+    } else {
+        loaded_tui::SHARED_SAMPLES
+    };
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only unix targets attach terminals")
+    )]
+    let mut tui_sessions = TuiSessions::default();
     let data = TestDir::new()?;
     let workspace_dir = TestDir::new()?;
     let workspace = Workspace::new(workspace_dir.path().to_path_buf())?;
@@ -1401,9 +2032,6 @@ async fn full_load_scenario() -> Result<(), TestError> {
     .await?;
     let idle_samples = idle_cancellations(&root, &mut idle_updates, &idle_starts).await?;
     let idle_p99 = nearest_rank_p99(&idle_samples);
-    // Wall-clock and resource bounds assert only on the nightly
-    // idle-machine lane; shared CI runners cannot hold them.
-    let budgets = std::env::var_os("DAL_TIMING_BUDGETS").is_some();
     if budgets {
         assert!(idle_p99 < CANCEL_P99, "idle cancel p99 was {idle_p99:?}");
     }
@@ -1413,8 +2041,27 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let web_dir = TestDir::new()?;
     let (server, websocket_url, token) = spawn_websocket_server(&web_dir).await?;
     let web_sockets = connect_websocket_clients(&websocket_url, &token).await?;
+    // The real TUI attaches to this loaded host over a loopback WebSocket
+    // before the process storm and types through it while the storm runs.
+    #[cfg(unix)]
+    let terminal = loaded_tui::LoadedTerminal::serve(&host, &workspace, data.path()).await?;
+    #[cfg(unix)]
+    let echo = terminal.start_echo(&host, &workspace, tui_samples).await?;
     let mut process_jobs = start_process_jobs(&host, &workspace).await?;
     let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
+    #[cfg(unix)]
+    {
+        tui_sessions.echo = Some(echo.session);
+        let echo_samples = echo.finish().await?;
+        let echo_p99 = nearest_rank_p99(&echo_samples);
+        if budgets {
+            assert!(
+                echo_p99 < loaded_tui::ECHO_P99,
+                "loaded keypress echo p99 was {echo_p99:?} over {} samples",
+                echo_samples.len()
+            );
+        }
+    }
     let after_jobs_spawn = open_handle_count()?;
     let rss = resident_set_bytes()?;
     let handles = open_handle_count()?;
@@ -1424,6 +2071,32 @@ async fn full_load_scenario() -> Result<(), TestError> {
             "resident memory was {rss} bytes"
         );
         assert!(handles < HANDLE_LIMIT, "open handle count was {handles}");
+    }
+    // Every job session and child session is still open with its process
+    // chain running: the terminal cancels below happen at peak load.
+    #[cfg(unix)]
+    {
+        let cancels = terminal
+            .sample_cancels(&host, &workspace, tui_samples)
+            .await?;
+        // The 201 job chains ran through every terminal turn above, so the
+        // latencies were taken with the whole process load alive.
+        let alive = live_processes(&pids)?.len();
+        assert_eq!(
+            alive, PROCESS_JOBS,
+            "only {alive} of {PROCESS_JOBS} job process chains survived the terminal samples"
+        );
+        wait_for_processes_to_exit(&cancels.pids).await?;
+        terminal.stop().await?;
+        let tui_cancel_p99 = nearest_rank_p99(&cancels.latencies);
+        if budgets {
+            assert!(
+                tui_cancel_p99 < CANCEL_P99,
+                "loaded terminal cancel p99 was {tui_cancel_p99:?} over {} samples",
+                cancels.latencies.len()
+            );
+        }
+        tui_sessions.cancel = Some((cancels.session, cancels.latencies.len()));
     }
     let loaded_samples = cancel_jobs(&mut process_jobs, CANCELLATIONS).await?;
     let loaded_p99 = nearest_rank_p99(&loaded_samples);
@@ -1456,11 +2129,11 @@ async fn full_load_scenario() -> Result<(), TestError> {
     assert_eq!(report.tasks_remaining, 0);
     assert_eq!(
         hooks.session_starts.load(Ordering::Acquire),
-        CHILD_SESSIONS + PROCESS_JOBS + 1
+        CHILD_SESSIONS + PROCESS_JOBS + 1 + tui_sessions.count()
     );
     assert_eq!(
         hooks.session_ends.load(Ordering::Acquire),
-        CHILD_SESSIONS + PROCESS_JOBS + 1
+        CHILD_SESSIONS + PROCESS_JOBS + 1 + tui_sessions.count()
     );
     assert!(hooks.inputs.load(Ordering::Acquire) > 0);
     assert!(hooks.before_turns.load(Ordering::Acquire) > 0);
@@ -1472,8 +2145,10 @@ async fn full_load_scenario() -> Result<(), TestError> {
     assert!(hooks.stream_starts.load(Ordering::Acquire) > 0);
     assert!(hooks.stream_deltas.load(Ordering::Acquire) > 0);
     assert!(hooks.stream_finishes.load(Ordering::Acquire) > 0);
-    let session_ids = expected_session_ids(root_id, &process_jobs, &reports, &hooks);
+    let mut session_ids = expected_session_ids(root_id, &process_jobs, &reports, &hooks);
     assert_eq!(session_ids.len(), CHILD_SESSIONS + PROCESS_JOBS + 1);
+    session_ids.extend(tui_sessions.echo);
+    session_ids.extend(tui_sessions.cancel.map(|(id, _)| id));
     {
         let ends_by_session = locked(&hooks.ends_by_session);
         assert_eq!(ends_by_session.len(), session_ids.len());
@@ -1489,6 +2164,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         &session_ids,
         root_id,
         expected_root_turns,
+        &tui_sessions,
     )
     .await?;
     drop(process_jobs);
@@ -1554,7 +2230,7 @@ fn assistant_text(view: &dal_core::View) -> String {
         })
         .flatten()
         .filter_map(|block| match block {
-            dal_core::Block::Text { text } => Some(text.as_ref()),
+            dal_core::Block::Text { text, .. } => Some(text.as_ref()),
             _ => None,
         })
         .collect()
@@ -1586,6 +2262,7 @@ async fn verify_journal_ends(
     session_ids: &[SessionId],
     root_id: SessionId,
     root_turns: usize,
+    tui: &TuiSessions,
 ) -> Result<(), TestError> {
     let store = Store::new(
         data_root.to_path_buf(),
@@ -1593,14 +2270,42 @@ async fn verify_journal_ends(
         StoreProduct::Dal,
     );
     for id in session_ids {
+        if tui.echo == Some(*id) {
+            // The echo-only session never held a turn, and a journal is
+            // written with its first entry, so it has none to open.
+            continue;
+        }
         let (mut journal, _) = store.open_session(*id).await?;
-        let ends = journal
+        // One entry per turn-end record: whether that turn ended cancelled.
+        let cancelled: Vec<bool> = journal
             .records()
             .iter()
-            .filter(|record| matches!(record, Record::TurnEnd { .. }))
-            .count();
-        let expected = if *id == root_id { root_turns } else { 1 };
-        assert_eq!(ends, expected, "session {id} had {ends} turn-end records");
+            .filter_map(|record| match record {
+                Record::TurnEnd { stop, .. } => Some(*stop == dal_core::TurnEndStop::Cancelled),
+                _ => None,
+            })
+            .collect();
+        let terminal_turns = tui
+            .cancel
+            .filter(|(cancelled_id, _)| cancelled_id == id)
+            .map(|(_, turns)| turns);
+        let expected = if *id == root_id {
+            root_turns
+        } else {
+            terminal_turns.unwrap_or(1)
+        };
+        assert_eq!(
+            cancelled.len(),
+            expected,
+            "session {id} had {} turn-end records",
+            cancelled.len()
+        );
+        if terminal_turns.is_some() {
+            assert!(
+                cancelled.iter().all(|ended| *ended),
+                "terminal session {id} did not end every turn as cancelled"
+            );
+        }
         journal.close().await?;
     }
     Ok(())

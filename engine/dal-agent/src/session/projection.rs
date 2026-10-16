@@ -366,10 +366,18 @@ fn part_bytes(part: &JournalPart) -> usize {
 
 /// Heuristic serialized size of one assistant block.
 fn block_bytes(block: &dal_core::Block) -> usize {
+    let replay_bytes = |replay: &Option<dal_core::RawJson>| {
+        replay.as_ref().map_or(0, |replay| replay.as_str().len())
+    };
     match block {
-        dal_core::Block::Text { text } => text.len(),
+        dal_core::Block::Text { text, replay } => text.len() + replay_bytes(replay),
         dal_core::Block::Reasoning { text, replay } => text.len() + replay.as_str().len(),
-        dal_core::Block::ToolCall { name, input, .. } => name.len() + input.as_str().len(),
+        dal_core::Block::ToolCall {
+            id: _id,
+            name,
+            input,
+            replay,
+        } => name.len() + input.as_str().len() + replay_bytes(replay),
     }
 }
 #[cfg(test)]

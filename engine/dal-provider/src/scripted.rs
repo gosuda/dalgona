@@ -10,12 +10,12 @@
 //! Every events step is checked against the neutral stream grammar when the
 //! script is built. A complete step is any number of text, reasoning,
 //! call-start, argument-fragment, and replay events, then exactly one
-//! `ToolCallsDone`, exactly one `Usage`, and exactly one `Stop`, in that
-//! order. A step that ends before `Stop` is a failing stream: the fail step
-//! that must follow it becomes the stream's error terminal, and both steps
-//! are consumed by one `open`. A fail step on its own fails `open` before any
-//! stream exists. Events are delivered verbatim; tool arguments are never
-//! reassembled or normalized.
+//! `ToolCallsDone`, at most one `MessageReplay`, exactly one `Usage`, and
+//! exactly one `Stop`, in that order. A step that ends before `Stop` is a
+//! failing stream: the fail step that must follow it becomes the stream's
+//! error terminal, and both steps are consumed by one `open`. A fail step on
+//! its own fails `open` before any stream exists. Events are delivered
+//! verbatim; tool arguments are never reassembled or normalized.
 //!
 //! Streams go through [`EventStream`], so the terminal guard and the
 //! at-most-once cancellation action are the ones every family uses. The queue
@@ -34,7 +34,7 @@ use std::{
     vec,
 };
 
-use dal_core::{Family, RawJson, Usage};
+use dal_core::{Family, RawJson, ReplayCapture, Usage};
 use futures::stream;
 use serde::Deserialize;
 
@@ -217,6 +217,14 @@ struct ReplayReplayWire {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReplayMessageReplayWire {
+    #[serde(rename = "type")]
+    kind: String,
+    capture: ReplayCapture,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplayToolCallsWire {
     #[serde(rename = "type")]
     kind: String,
@@ -361,6 +369,7 @@ fn decode_replay_event(raw: &RawJson, line: usize) -> Result<StreamEvent, Script
         "tool_call_started" => decode_call_started(raw, line),
         "tool_args_delta" => decode_args_delta(raw, line),
         "replay" => decode_replay_payload(raw, line),
+        "message_replay" => decode_message_replay(raw, line),
         "tool_calls_done" => decode_calls_done(raw, line),
         "usage" => decode_usage_event(raw, line),
         "stop" => decode_stop_event(raw, line),
@@ -434,6 +443,18 @@ fn decode_replay_payload(raw: &RawJson, line: usize) -> Result<StreamEvent, Scri
             model: wire.payload.model,
             item: wire.payload.item,
         },
+    })
+}
+
+fn decode_message_replay(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayMessageReplayWire>()
+        .map_err(|_| replay_error(line, "invalid message replay"))?;
+    if wire.kind.as_str() != "message_replay" {
+        return Err(replay_error(line, "invalid message replay"));
+    }
+    Ok(StreamEvent::MessageReplay {
+        capture: wire.capture,
     })
 }
 
@@ -575,8 +596,9 @@ impl Script {
     /// Decodes one JSON object per nonblank line into a scripted provider.
     ///
     /// Each line has one `kind`: `events`, `fail`, `usage`, or `compact`.
-    /// Event records use `type` names in snake case; raw replay and tool-arg
-    /// values remain raw JSON. A `fail` record becomes an `InvalidRequest`,
+    /// Event records use `type` names in snake case; raw replay, capture,
+    /// and tool-arg values remain raw JSON. A `fail` record becomes an
+    /// `InvalidRequest`,
     /// or, when it also carries both `status` (an HTTP status code) and
     /// `family` (the API family name), a [`ProviderError::Status`]; one of
     /// the two alone is a format error.
@@ -750,6 +772,7 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
     enum At {
         Body,
         Done,
+        Replay,
         Usage,
         Stopped,
     }
@@ -766,14 +789,27 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
                 | StreamEvent::Replay { .. },
             ) => At::Body,
             (At::Body, StreamEvent::ToolCallsDone { .. }) => At::Done,
+            (At::Body, StreamEvent::MessageReplay { .. }) => {
+                return Err("message replay before tool calls done");
+            }
             (At::Body, StreamEvent::Usage { .. }) => return Err("usage before tool calls done"),
             (At::Body, StreamEvent::Stop { .. }) => return Err("stop before tool calls done"),
-            (At::Done, StreamEvent::Usage { .. }) => At::Usage,
-            (At::Done, StreamEvent::ToolCallsDone { .. }) => {
+            (At::Done, StreamEvent::MessageReplay { .. }) => At::Replay,
+            (At::Done, StreamEvent::Usage { .. }) | (At::Replay, StreamEvent::Usage { .. }) => {
+                At::Usage
+            }
+            (At::Done, StreamEvent::ToolCallsDone { .. })
+            | (At::Replay, StreamEvent::ToolCallsDone { .. }) => {
                 return Err("a second tool calls done");
             }
-            (At::Done, StreamEvent::Stop { .. }) => return Err("stop before usage"),
-            (At::Done, _) => return Err("a delta or replay after tool calls done"),
+            (At::Done, StreamEvent::Stop { .. }) | (At::Replay, StreamEvent::Stop { .. }) => {
+                return Err("stop before usage");
+            }
+            (At::Done, _) => return Err("a delta, replay, or capture after tool calls done"),
+            (At::Replay, StreamEvent::MessageReplay { .. }) => {
+                return Err("a second message replay");
+            }
+            (At::Replay, _) => return Err("a delta or call after message replay"),
             (At::Usage, StreamEvent::Stop { .. }) => At::Stopped,
             (At::Usage, StreamEvent::Usage { .. }) => return Err("a second usage"),
             (At::Usage, _) => return Err("an event between usage and stop"),
@@ -788,3 +824,144 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod message_replay_tests {
+    //! Real grammar boundaries and fixture roundtrip for the capture event:
+    //! placement after `tool_calls_done` and before `usage`, the single
+    //! capture per response, typed refusals through the JSONL decoder, and
+    //! byte-faithful raw payloads.
+
+    use futures::executor::block_on;
+
+    use super::*;
+    use crate::stream::EventStream;
+
+    const TURN: &str = concat!(
+        r#"{"kind":"events","events":["#,
+        r#"{"type":"text_delta","text":"closing"},"#,
+        r#"{"type":"tool_calls_done","calls":[]},"#,
+        r#"{"type":"message_replay","capture":{"status":"captured","payload":{"cursor_history":[1,2]}}},"#,
+        r#"{"type":"usage","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+        r#"{"type":"stop","reason":"end_turn"}]}"#,
+    );
+
+    async fn drain(stream: &mut EventStream) -> Vec<Result<StreamEvent, ProviderError>> {
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+    }
+
+    fn capture_of(event: &StreamEvent) -> &ReplayCapture {
+        match event {
+            StreamEvent::MessageReplay { capture } => capture,
+            other => panic!("expected the capture event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_fixture_roundtrips_the_captured_payload() {
+        let script = Script::from_replay(TURN.as_bytes()).expect("turn fixture decodes");
+        let mut stream = script.open().expect("script opens");
+        let items = block_on(drain(&mut stream));
+        assert_eq!(items.len(), 5, "all five events deliver: {items:?}");
+        let capture = capture_of(items[2].as_ref().expect("capture delivers"));
+        match capture {
+            ReplayCapture::Captured { payload } => {
+                // Raw fidelity: the payload keeps its exact spelling.
+                assert_eq!(
+                    payload.as_str(),
+                    r#"{"cursor_history":[1,2]}"#,
+                    "payload was re-encoded: {}",
+                    payload.as_str()
+                );
+            }
+            ReplayCapture::Refused { reason } => {
+                panic!("expected a captured payload, got refusal {reason:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn replay_fixture_roundtrips_a_typed_refusal() {
+        let turn = TURN.replace(
+            r#""capture":{"status":"captured","payload":{"cursor_history":[1,2]}}""#,
+            r#""capture":{"status":"refused","reason":"user_record_not_found"}""#,
+        );
+        let script = Script::from_replay(turn.as_bytes()).expect("refusal fixture decodes");
+        let mut stream = script.open().expect("script opens");
+        let items = block_on(drain(&mut stream));
+        assert_eq!(items.len(), 5);
+        match capture_of(items[2].as_ref().expect("capture delivers")) {
+            ReplayCapture::Refused { reason } => {
+                assert_eq!(*reason, dal_core::ReplayRefusal::UserRecordNotFound);
+            }
+            other @ ReplayCapture::Captured { .. } => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_rejects_unknown_status_and_unknown_reason() {
+        for line in [
+            r#"{"kind":"events","events":[{"type":"message_replay","capture":{"status":"lost"}}]}"#,
+            r#"{"kind":"events","events":[{"type":"message_replay","capture":{"status":"refused","reason":"maybe"}}]}"#,
+            r#"{"kind":"events","events":[{"type":"message_replay","capture":{"status":"captured","payload":null}}]}"#,
+        ] {
+            assert!(
+                matches!(
+                    Script::from_replay(line.as_bytes()),
+                    Err(ScriptError::ReplayFormat { line: 1, .. })
+                ),
+                "{line} must decode as a format error"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_is_legal_only_after_tool_calls_done_and_before_usage() {
+        const CAPTURE: &str =
+            r#"{"type":"message_replay","capture":{"status":"refused","reason":"no_records"}}"#;
+        const CAPTURE_MESSAGE: &str = r#"{"type":"text_delta","text":"after capture"}"#;
+        const DONE: &str = r#"{"type":"tool_calls_done","calls":[]}"#;
+        const USAGE: &str = r#"{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}}"#;
+        const STOP: &str = r#"{"type":"stop","reason":"end_turn"}"#;
+        let step = |events: &str| format!(r#"{{"kind":"events","events":[{events}]}}"#);
+        let illegal: Vec<(String, &'static str)> = vec![
+            (
+                step(&format!("{CAPTURE},{DONE},{USAGE},{STOP}")),
+                "message replay before tool calls done",
+            ),
+            (
+                step(&format!("{DONE},{CAPTURE},{CAPTURE},{USAGE},{STOP}")),
+                "a second message replay",
+            ),
+            (
+                step(&format!("{DONE},{USAGE},{CAPTURE},{STOP}")),
+                "an event between usage and stop",
+            ),
+            (
+                step(&format!("{DONE},{CAPTURE},{STOP}")),
+                "stop before usage",
+            ),
+            (
+                step(&format!("{DONE},{CAPTURE},{DONE},{USAGE},{STOP}")),
+                "a second tool calls done",
+            ),
+            (
+                step(&format!(
+                    "{DONE},{CAPTURE},{CAPTURE_MESSAGE},{USAGE},{STOP}"
+                )),
+                "a delta or call after message replay",
+            ),
+        ];
+        for (line, detail) in illegal {
+            assert_eq!(
+                Script::from_replay(line.as_bytes()).unwrap_err(),
+                ScriptError::Grammar { step: 0, detail },
+                "{detail}"
+            );
+        }
+    }
+}

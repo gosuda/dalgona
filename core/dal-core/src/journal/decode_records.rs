@@ -1,8 +1,8 @@
 use super::decode::{
     blocks_member, bool_member, entry_id_member, i32_member, invalid, is_null, json_member,
     model_id_member, model_route_members, need, object_members, opt_entry_id_member,
-    opt_raw_json_member, opt_text_member, owner_member, parts_member, purpose_member, text_member,
-    u64_member, usage_member, want,
+    opt_raw_json_member, opt_text_member, owner_member, parts_member, purpose_member,
+    raw_json_member, text_member, u64_member, usage_member, want,
 };
 use super::scan::{Member, Members};
 use super::{
@@ -10,6 +10,7 @@ use super::{
     EntryId, EntryKind, Header, JobEvent, JobOutcome, Mail, Mode, NonZeroU64, Product, RawJson,
     Record, ScannedHead, SessionId, Source, TreeKind, TurnEndStop, TurnId, VERSION,
 };
+use crate::update::ResolutionCause;
 
 pub(super) fn answer_member(member: &Member<'_>) -> Result<Answer, DecodeError> {
     let (offset, raw) = (member.offset, member.value);
@@ -43,6 +44,16 @@ pub(super) fn assistant_route_member(
         .check_id(model)
         .map_err(|error| invalid(offset, error.to_string()))?;
     Ok(route)
+}
+
+/// Reads the assistant replay member: one raw JSON payload kept exactly as
+/// written. Absence is the caller's legacy case; a present `null` is
+/// malformed, like a present `null` route.
+pub(super) fn assistant_replay_member(member: &Member<'_>) -> Result<RawJson, DecodeError> {
+    if is_null(member) {
+        return Err(invalid(member.offset, "member `replay` must not be null"));
+    }
+    raw_json_member(member, "replay")
 }
 
 pub(super) fn assistant_stop_member(member: &Member<'_>) -> Result<AssistantStop, DecodeError> {
@@ -90,6 +101,25 @@ pub(super) fn turn_end_stop_member(member: &Member<'_>) -> Result<TurnEndStop, D
         .transpose()?
         .ok_or_else(|| invalid(offset, "a `stop` object needs a `failed` member"))?;
     Ok(TurnEndStop::Failed { message: failed })
+}
+
+/// Reads a resolved record's `cause`: one of the five durable literals.
+/// Absence is the caller's legacy case; a member that is present stays
+/// strict, so `null`, a non-string, or an unknown literal is an invalid
+/// record rather than a cause that was never written.
+pub(super) fn cause_member(member: &Member<'_>) -> Result<ResolutionCause, DecodeError> {
+    let literal = text_member(member, "cause")?;
+    match literal.as_ref() {
+        "answered" => Ok(ResolutionCause::Answered),
+        "timed_out" => Ok(ResolutionCause::TimedOut),
+        "cancelled" => Ok(ResolutionCause::Cancelled),
+        "withdrawn" => Ok(ResolutionCause::Withdrawn),
+        "no_controller" => Ok(ResolutionCause::NoController),
+        other => Err(invalid(
+            member.offset,
+            format!("unknown resolution cause literal `{other}`"),
+        )),
+    }
 }
 
 pub(super) fn job_outcome_member(member: &Member<'_>) -> Result<JobOutcome, DecodeError> {
@@ -520,6 +550,10 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                     Some(member) => bool_member(&member, "was_default")?,
                     None => false,
                 },
+                cause: match want(members, "cause") {
+                    Some(member) => Some(cause_member(&member)?),
+                    None => None,
+                },
             }),
             "before_request_mut" => Ok(Record::BeforeRequestMut {
                 at: json_member(&need(members, "at")?)?,
@@ -661,6 +695,9 @@ pub(super) fn decode_entry_kind(
                     .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
                 stop: assistant_stop_member(&need(members, "stop")?)?,
                 route,
+                replay: want(members, "replay")
+                    .map(|member| assistant_replay_member(&member))
+                    .transpose()?,
             }
         }
         "tool_result" => EntryKind::ToolResult {

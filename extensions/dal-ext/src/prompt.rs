@@ -60,30 +60,40 @@ fn section(sink: &mut impl FnMut(&str), tag: &str, body: &str) {
     sink(">\n");
 }
 
-fn emit_prefix<'a>(
-    input: &PromptInput<'_>,
-    plugins: impl Iterator<Item = &'a (Box<str>, Box<str>)>,
-    sink: &mut impl FnMut(&str),
-) {
+/// Emits the identity paragraph and the `D2` preference line.
+fn emit_head(product_name: &str, product_version: &str, sink: &mut impl FnMut(&str)) {
     sink("You are ");
-    sink(input.product_name);
+    sink(product_name);
     sink(" ");
-    sink(input.product_version);
+    sink(product_version);
     sink(
         ", a coding agent. Work in the current directory. Read files before you edit them. Keep responses short and factual. Finish the whole task before you report.\n",
     );
     sink(D2_PREFERENCE_LINE);
     sink("\n");
+}
 
-    if !input.tool_lines.is_empty() {
-        sink("<tools>\n");
-        for line in input.tool_lines {
-            sink("- ");
-            sink(line);
-            sink("\n");
-        }
-        sink("</tools>\n");
+/// Emits the `<tools>` block; emits nothing when there are no tool lines.
+fn emit_tool_block(tool_lines: &[Box<str>], sink: &mut impl FnMut(&str)) {
+    if tool_lines.is_empty() {
+        return;
     }
+    sink("<tools>\n");
+    for line in tool_lines {
+        sink("- ");
+        sink(line);
+        sink("\n");
+    }
+    sink("</tools>\n");
+}
+
+fn emit_prefix<'a>(
+    input: &PromptInput<'_>,
+    plugins: impl Iterator<Item = &'a (Box<str>, Box<str>)>,
+    sink: &mut impl FnMut(&str),
+) {
+    emit_head(input.product_name, input.product_version, sink);
+    emit_tool_block(input.tool_lines, sink);
     section(sink, "skills", input.skills.unwrap_or(""));
     section(sink, "rules", input.rules.unwrap_or(""));
     section(sink, "rulebook", input.rulebook.unwrap_or(""));
@@ -104,6 +114,51 @@ fn emit_prefix<'a>(
     }
 }
 
+/// Emits the `<instructions>` block; emits nothing when both inputs are empty.
+fn emit_instructions_block(
+    instructions: Option<&str>,
+    system_md: Option<&str>,
+    sink: &mut impl FnMut(&str),
+) {
+    let kept_instructions = instructions.filter(|text| !text.is_empty());
+    let kept_system_md = system_md.filter(|text| !text.is_empty());
+    if kept_instructions.is_some() || kept_system_md.is_some() {
+        sink("<instructions>\n");
+        if let Some(body) = kept_instructions {
+            sink(body);
+        }
+        if let Some(body) = kept_system_md {
+            if let Some(previous) = kept_instructions {
+                let trailing = previous
+                    .bytes()
+                    .rev()
+                    .take(2)
+                    .take_while(|&b| b == b'\n')
+                    .count();
+                let leading = body.bytes().take(2).take_while(|&b| b == b'\n').count();
+                sink(&"\n\n"[(trailing + leading).min(2)..]);
+            }
+            sink(body);
+        }
+        if !kept_system_md
+            .or(kept_instructions)
+            .is_some_and(|body| body.ends_with('\n'))
+        {
+            sink("\n");
+        }
+        sink("</instructions>\n");
+    }
+}
+
+/// Emits the docs line; `None` selects the default and an empty line omits it.
+fn emit_docs_line(docs_line: Option<&str>, sink: &mut impl FnMut(&str)) {
+    let line = docs_line.unwrap_or(DEFAULT_DOCS_LINE);
+    if !line.is_empty() {
+        sink(line);
+        sink("\n");
+    }
+}
+
 fn emit_suffix(input: &PromptInput<'_>, sink: &mut impl FnMut(&str)) {
     if !input.environment.is_empty() {
         sink("<environment>\n");
@@ -116,34 +171,7 @@ fn emit_suffix(input: &PromptInput<'_>, sink: &mut impl FnMut(&str)) {
         sink("</environment>\n");
     }
 
-    let instructions = input.instructions.filter(|text| !text.is_empty());
-    let system_md = input.system_md.filter(|text| !text.is_empty());
-    if instructions.is_some() || system_md.is_some() {
-        sink("<instructions>\n");
-        if let Some(body) = instructions {
-            sink(body);
-        }
-        if let Some(body) = system_md {
-            if let Some(previous) = instructions {
-                let trailing = previous
-                    .bytes()
-                    .rev()
-                    .take(2)
-                    .take_while(|&b| b == b'\n')
-                    .count();
-                let leading = body.bytes().take(2).take_while(|&b| b == b'\n').count();
-                sink(&"\n\n"[(trailing + leading).min(2)..]);
-            }
-            sink(body);
-        }
-        if !system_md
-            .or(instructions)
-            .is_some_and(|body| body.ends_with('\n'))
-        {
-            sink("\n");
-        }
-        sink("</instructions>\n");
-    }
+    emit_instructions_block(input.instructions, input.system_md, sink);
 
     if input.letter_fallback.iter().any(|text| !text.is_empty()) {
         sink("<letter-fallback>\n");
@@ -166,11 +194,7 @@ fn emit_suffix(input: &PromptInput<'_>, sink: &mut impl FnMut(&str)) {
         sink("</letter-fallback>\n");
     }
 
-    let docs_line = input.docs_line.unwrap_or(DEFAULT_DOCS_LINE);
-    if !docs_line.is_empty() {
-        sink(docs_line);
-        sink("\n");
-    }
+    emit_docs_line(input.docs_line, sink);
 }
 
 /// Builds a prompt with a stable prefix and a per-interaction suffix.
@@ -196,66 +220,116 @@ pub fn prefix_bytes(input: &PromptInput<'_>) -> usize {
     bytes
 }
 
-/// Session prompt section combining the stable identity/tools prefix with the
-/// host-resolved instructions and `SYSTEM.md` content.
-///
-/// Skills, rules, plugin sections, environment, fallback text, and the docs
-/// line ride their own extensions and host inputs; this section contributes
-/// identity, the diagram preference, generation tool lines, instructions,
-/// and system text, and omits nothing it owns (the identity paragraph always
-/// renders).
+/// Runs one emitter into a fresh buffer; `None` when it wrote nothing, so the
+/// assembler omits the section instead of joining an empty one.
+fn rendered(emit: impl FnOnce(&mut dyn FnMut(&str))) -> Option<String> {
+    let mut text = String::new();
+    emit(&mut |chunk: &str| text.push_str(chunk));
+    (!text.is_empty()).then_some(text)
+}
+
+/// The identity paragraph and the `D2` preference line, at
+/// [`PromptOrder::Identity`]. Always renders.
 #[derive(Clone, Debug)]
-struct PromptSectionFn {
+struct HeadSection {
     product_name: Box<str>,
     product_version: Box<str>,
 }
 
-impl SectionFn for PromptSectionFn {
+impl SectionFn for HeadSection {
+    fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
+        rendered(|mut sink| {
+            emit_head(&self.product_name, &self.product_version, &mut sink);
+        })
+    }
+}
+
+/// The `<tools>` block over the generation's model-visible tools, at
+/// [`PromptOrder::Tools`]. Omitted when the generation lists no tool.
+#[derive(Clone, Copy, Debug)]
+struct ToolsSection;
+
+impl SectionFn for ToolsSection {
     fn render(&self, cx: &SectionCx<'_>) -> Option<String> {
         let tool_lines: Vec<Box<str>> = cx
             .tools
             .iter()
             .map(|tool| format!("{}: {}", tool.name.as_str(), tool.description).into())
             .collect();
-        let empty: [(Box<str>, Box<str>); 0] = [];
-        let no_fallback: [Box<str>; 0] = [];
-        let input = PromptInput {
-            product_name: &self.product_name,
-            product_version: &self.product_version,
-            tool_lines: &tool_lines,
-            skills: None,
-            rules: None,
-            rulebook: None,
-            plugin_sections: &empty,
-            environment: &empty,
-            instructions: cx.instructions,
-            system_md: cx.system_md,
-            letter_fallback: &no_fallback,
-            docs_line: None,
-        };
-        Some(build(&input))
+        rendered(|mut sink| {
+            emit_tool_block(&tool_lines, &mut sink);
+        })
     }
 }
 
-/// Builds the `prompt` extension: one session prompt section at the identity
-/// order. The host renders it once at session open and again on generation
-/// publish; skills, rules, and plugin content arrive through their own
-/// sections.
+/// The `<instructions>` block over the host-resolved instructions and
+/// `SYSTEM.md` text, at [`PromptOrder::Instructions`]. Omitted when both are
+/// absent or empty.
+#[derive(Clone, Copy, Debug)]
+struct InstructionsSection;
+
+impl SectionFn for InstructionsSection {
+    fn render(&self, cx: &SectionCx<'_>) -> Option<String> {
+        rendered(|mut sink| {
+            emit_instructions_block(cx.instructions, cx.system_md, &mut sink);
+        })
+    }
+}
+
+/// The default docs line, at [`PromptOrder::DocsLine`]. Always renders.
+#[derive(Clone, Copy, Debug)]
+struct DocsSection;
+
+impl SectionFn for DocsSection {
+    fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
+        rendered(|mut sink| {
+            emit_docs_line(None, &mut sink);
+        })
+    }
+}
+
+/// Builds the `prompt` extension: four session prompt sections under one
+/// owner, each at the documented [`PromptOrder`] of the part it carries.
+///
+/// | Order | Section |
+/// |---|---|
+/// | `Identity` | identity paragraph and the `D2` preference line |
+/// | `Tools` | the `<tools>` block, omitted without tools |
+/// | `Instructions` | the `<instructions>` block, omitted without instructions or `SYSTEM.md` text |
+/// | `DocsLine` | the default docs line |
+///
+/// The assembler sorts every extension's sections by order, so skills, rules,
+/// the rulebook, and plugin sections land between the tools block and the
+/// instructions block wherever their extensions sit in the catalog. Each
+/// section carries the exact bytes [`build`] emits for that part, including
+/// its trailing newline; the assembler adds its own separator. The host
+/// renders them once at session open and again on generation publish.
 ///
 /// # Errors
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
 pub fn extension() -> Result<Extension, RegistrationError> {
-    let section = PromptSection::session(
-        PromptOrder::Identity,
-        Arc::new(PromptSectionFn {
-            product_name: "dal".into(),
-            product_version: env!("CARGO_PKG_VERSION").into(),
-        }),
-    );
     ExtensionBuilder::new("prompt", "0.1.0", ServiceSet::EMPTY)?
-        .prompt_section(section)
+        .prompt_section(PromptSection::session(
+            PromptOrder::Identity,
+            Arc::new(HeadSection {
+                product_name: "dal".into(),
+                product_version: env!("CARGO_PKG_VERSION").into(),
+            }),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::Tools,
+            Arc::new(ToolsSection),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::Instructions,
+            Arc::new(InstructionsSection),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::DocsLine,
+            Arc::new(DocsSection),
+        ))
         .build()
 }
 

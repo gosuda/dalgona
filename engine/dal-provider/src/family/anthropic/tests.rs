@@ -514,6 +514,7 @@ fn history() -> Vec<ContextItem> {
         },
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "t".into(),
@@ -531,16 +532,21 @@ fn history() -> Vec<ContextItem> {
                             .unwrap(),
                     ),
                 },
-                AssistantPart::Text { text: "ok".into() },
+                AssistantPart::Text {
+                    text: "ok".into(),
+                    replay: None,
+                },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_1"),
                     name: "read".into(),
                     args: RawJson::parse(r#"{"path": "a", "n": 1.50}"#).unwrap(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_2"),
                     name: "web_search".into(),
                     args: RawJson::parse("[1]").unwrap(),
+                    replay: None,
                 },
             ],
         },
@@ -590,6 +596,7 @@ fn unbound_tool_context(source: ReplaySource) -> Vec<ContextItem> {
     vec![
         ContextItem::Assistant {
             source,
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -602,11 +609,13 @@ fn unbound_tool_context(source: ReplaySource) -> Vec<ContextItem> {
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("call_1"),
                     name: "read".into(),
                     args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
+                    replay: None,
                 },
             ],
         },
@@ -629,6 +638,7 @@ fn unbound_replay_body(system: &str) -> String {
         system,
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -641,6 +651,7 @@ fn unbound_replay_body(system: &str) -> String {
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
             ],
         }],
@@ -665,6 +676,7 @@ fn unbound_redacted_replay_body() -> String {
         "Current system.",
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![AssistantPart::Thinking {
                 text: "".into(),
                 replay: Some(
@@ -697,6 +709,44 @@ fn foreign_family_replay_is_omitted_without_losing_text_or_tool_calls() {
 fn different_model_replay_is_omitted_without_losing_text_or_tool_calls() {
     let body = replay_body(replay_source(Family::Anthropic, "claude-opus-5"));
     assert_replay_was_filtered(&body);
+}
+
+#[test]
+fn foreign_text_tool_and_message_replay_never_reaches_the_wire() {
+    let foreign = || Some(RawJson::parse(r#"{"type":"text","text":"forged"}"#).unwrap());
+    let context = vec![
+        ContextItem::Assistant {
+            source: replay_source(Family::Chat, "other-model"),
+            replay: foreign(),
+            parts: vec![
+                AssistantPart::Text {
+                    text: "visible".into(),
+                    replay: foreign(),
+                },
+                AssistantPart::ToolCall {
+                    call: CallId::new("call_1"),
+                    name: "read".into(),
+                    args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
+                    replay: foreign(),
+                },
+            ],
+        },
+        ContextItem::ToolResult {
+            call: CallId::new("call_1"),
+            name: "read".into(),
+            is_error: false,
+            parts: vec![Part::Text {
+                text: "done".into(),
+            }],
+        },
+    ];
+    let body = anthropic_body(&request(context, vec![tool("read")]));
+    assert!(!body.contains("forged"), "{body}");
+    assert!(body.contains(r#""type":"text","text":"visible""#), "{body}");
+    assert!(
+        body.contains(r#""type":"tool_use","id":"call_1","name":"read""#),
+        "{body}"
+    );
 }
 
 #[test]
@@ -749,6 +799,7 @@ fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelTool
         system,
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -756,6 +807,7 @@ fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelTool
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
             ],
         }],
@@ -900,10 +952,12 @@ fn api_key_body_maps_mapped_tool_names_for_advertisements_and_history() {
         vec![
             ContextItem::Assistant {
                 source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+                replay: None,
                 parts: vec![AssistantPart::ToolCall {
                     call: CallId::new("call-1"),
                     name: "deploy.web-x.list".into(),
                     args: RawJson::parse("{}").unwrap(),
+                    replay: None,
                 }],
             },
             ContextItem::ToolResult {
@@ -1073,7 +1127,11 @@ fn bearer_budget_compaction_omits_temperature_with_enabled_thinking() {
     let context = vec![
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
-            parts: vec![AssistantPart::Text { text: "a".into() }],
+            replay: None,
+            parts: vec![AssistantPart::Text {
+                text: "a".into(),
+                replay: None,
+            }],
         },
         ContextItem::User {
             parts: vec![
@@ -1149,12 +1207,14 @@ fn unresolved_blob_is_refused() {
 fn call_item(ids: &[&str]) -> ContextItem {
     ContextItem::Assistant {
         source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+        replay: None,
         parts: ids
             .iter()
             .map(|id| AssistantPart::ToolCall {
                 call: CallId::new(*id),
                 name: "read".into(),
                 args: RawJson::parse("{}").unwrap(),
+                replay: None,
             })
             .collect(),
     }
@@ -1251,8 +1311,10 @@ fn adjacent_assistant_items_share_pending_calls() {
         call_item(&["toolu_a"]),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![AssistantPart::Text {
                 text: "more".into(),
+                replay: None,
             }],
         },
         result_item("toolu_a"),
@@ -1350,12 +1412,16 @@ fn replay_history(stored: &str) -> Vec<ContextItem> {
         user_item("hi"),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
                     replay: Some(RawJson::parse(stored).unwrap()),
                 },
-                AssistantPart::Text { text: "ok".into() },
+                AssistantPart::Text {
+                    text: "ok".into(),
+                    replay: None,
+                },
             ],
         },
     ]
@@ -1418,6 +1484,7 @@ fn a_native_search_round_trip_replays_the_call_and_result_untouched() {
         user_item("weather?"),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
@@ -1425,11 +1492,13 @@ fn a_native_search_round_trip_replays_the_call_and_result_untouched() {
                 },
                 AssistantPart::Text {
                     text: "Found it.".into(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_01"),
                     name: "get_weather".into(),
                     args: RawJson::parse(r#"{"location":"Oslo"}"#).unwrap(),
+                    replay: None,
                 },
             ],
         },

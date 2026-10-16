@@ -92,7 +92,8 @@ async fn single_answer_must_be_a_non_empty_string() -> TestResult {
         r#"{"selected":["a","b"]}"#,
         r#"{"text":"a"}"#,
         "7",
-        r#""Alpha""#,
+        r#"["Alpha"]"#,
+        r#""""#,
     ] {
         let controller = Host::answering([Reply::Value(rejected)]);
         assert_eq!(
@@ -101,6 +102,159 @@ async fn single_answer_must_be_a_non_empty_string() -> TestResult {
             "{rejected}"
         );
     }
+    Ok(())
+}
+
+fn args_for(kind: &str) -> String {
+    one(kind, if kind == "text" { "" } else { TWO_OPTIONS })
+}
+
+/// Both spellings an answering client may send decode to the same line: the
+/// canonical bare value from the wire adapters and the strict object the
+/// terminal dialog sends.
+#[tokio::test]
+async fn bare_and_object_spellings_answer_identically() -> TestResult {
+    for (kind, payload, expected) in [
+        ("single", r#""Alpha""#, "Pick: Alpha"),
+        ("single", r#"{"selected":["Alpha"]}"#, "Pick: Alpha"),
+        ("multi", r#"["a","b"]"#, "Pick: a, b"),
+        ("multi", r#"{"selected":["a","b"]}"#, "Pick: a, b"),
+        ("multi", r#"["a","b","c","d"]"#, "Pick: a, b, c, d"),
+        ("multi", r#"["only"]"#, "Pick: only"),
+        ("text", r#""because""#, "Pick: because"),
+        ("text", r#"{"text":"because"}"#, "Pick: because"),
+        ("text", r#"" use sqlite ""#, "Pick: use sqlite"),
+        ("text", r#"{"text":" use sqlite "}"#, "Pick: use sqlite"),
+    ] {
+        let controller = Host::answering([Reply::Value(payload)]);
+        assert_eq!(
+            ask_tool(&controller, &args_for(kind)).await?,
+            expected,
+            "{kind} {payload}"
+        );
+        assert!(locked(&controller.notices).is_empty(), "{kind} {payload}");
+        let asked = controller.asked();
+        let raised_kind = match asked.as_slice() {
+            [Question::Select { multi: false, .. }] => "single",
+            [Question::Select { multi: true, .. }] => "multi",
+            [Question::Text { .. }] => "text",
+            other => return Err(format!("{payload}: unexpected questions {other:?}").into()),
+        };
+        assert_eq!(raised_kind, kind, "{payload}");
+    }
+    Ok(())
+}
+
+/// A payload of the wrong shape for its kind is malformed in either
+/// spelling: no answer plus exactly one notice that names the question. An
+/// object keeps its strict member set, so an unknown member never decodes
+/// and never falls back to a bare-value reading.
+#[tokio::test]
+async fn wrong_shaped_answers_fail_closed_with_one_notice() -> TestResult {
+    for (kind, payload) in [
+        ("single", r#"["Alpha"]"#),
+        ("single", "7"),
+        ("single", "true"),
+        ("single", "null"),
+        ("single", r#"{"selected":["Alpha"],"role":"admin"}"#),
+        ("single", r#"{"selected":"Alpha"}"#),
+        ("single", r#"{"selected":["Alpha","Beta"]}"#),
+        ("single", r#"{"selected":[""]}"#),
+        ("single", r#"{"text":"Alpha"}"#),
+        ("multi", r#""a""#),
+        ("multi", r#"["a","b","c","d","e"]"#),
+        ("multi", r#"["a",""]"#),
+        ("multi", r#"["a",1]"#),
+        ("multi", r#"[["a"]]"#),
+        ("multi", r#"{"selected":["a"],"role":"admin"}"#),
+        ("multi", r#"{"text":"a"}"#),
+        ("text", r#"["a"]"#),
+        ("text", "7"),
+        ("text", "null"),
+        ("text", r#"{"text":"a","role":"admin"}"#),
+        ("text", r#"{"text":["a"]}"#),
+        ("text", r#"{"selected":["a"]}"#),
+    ] {
+        let controller = Host::answering([Reply::Value(payload)]);
+        assert_eq!(
+            ask_tool(&controller, &args_for(kind)).await?,
+            NO_ANSWER,
+            "{kind} {payload}"
+        );
+        let notices = locked(&controller.notices);
+        let [notice] = notices.as_slice() else {
+            return Err(format!("{kind} {payload}: expected exactly one notice").into());
+        };
+        assert_eq!(&*notice.kind, "ask", "{kind} {payload}");
+        assert!(
+            notice
+                .text
+                .contains("malformed answer for question \"Pick\""),
+            "{kind} {payload}: {}",
+            notice.text
+        );
+    }
+    Ok(())
+}
+
+/// A blank submission dismisses the question in either spelling: no answer
+/// and no notice, unlike a malformed payload.
+#[tokio::test]
+async fn blank_answers_dismiss_without_a_notice() -> TestResult {
+    for (kind, payload) in [
+        ("single", r#""""#),
+        ("single", r#""   ""#),
+        ("single", r#"{"selected":[]}"#),
+        ("multi", "[]"),
+        ("multi", r#"{"selected":[]}"#),
+        ("text", r#""""#),
+        ("text", r#""  ""#),
+        ("text", r#"{"text":"  "}"#),
+    ] {
+        let controller = Host::answering([Reply::Value(payload)]);
+        assert_eq!(
+            ask_tool(&controller, &args_for(kind)).await?,
+            NO_ANSWER,
+            "{kind} {payload}"
+        );
+        assert!(locked(&controller.notices).is_empty(), "{kind} {payload}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_call_takes_both_spellings_and_stops_at_a_malformed_answer() -> TestResult {
+    let mixed = Host::answering([
+        Reply::Value(r#""yes""#),
+        Reply::Value(r#"{"text":"b"}"#),
+        Reply::Value(r#""c""#),
+    ]);
+    assert_eq!(
+        ask_tool(&mixed, &three_questions()).await?,
+        "One: yes\nTwo: b\nThree: c"
+    );
+    assert!(locked(&mixed.notices).is_empty());
+
+    let stopped = Host::answering([
+        Reply::Value(r#""yes""#),
+        Reply::Value(r#"{"text":"b","role":"admin"}"#),
+    ]);
+    assert_eq!(
+        ask_tool(&stopped, &three_questions()).await?,
+        "One: yes\nUnanswered: Two, Three"
+    );
+    assert_eq!(stopped.asked().len(), 2, "the third is never raised");
+    let notices = locked(&stopped.notices);
+    let [notice] = notices.as_slice() else {
+        return Err("expected exactly one notice".into());
+    };
+    assert!(
+        notice
+            .text
+            .contains("malformed answer for question \"Two\""),
+        "{}",
+        notice.text
+    );
     Ok(())
 }
 

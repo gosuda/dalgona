@@ -17,8 +17,8 @@ use dal_core::ext::{McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerD
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
     JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarName, SidecarOp, Site,
-    StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
+    RequestParams, ResolutionCause, ScopeSpec, Service, ServiceSet, SessionId, SidecarName,
+    SidecarOp, Site, StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -51,9 +51,6 @@ struct FakeBackend {
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
-    /// Resolutions the ask guard asked the actor to journal.
-    resolved: Mutex<Vec<crate::broker::Resolved>>,
-    resolutions: Arc<crate::session::ResolutionInbox>,
     headless: std::sync::atomic::AtomicBool,
 }
 
@@ -193,13 +190,6 @@ impl SessionBackend for FakeBackend {
     }
     fn request_opened(&self, _request: dal_core::Request) -> ServiceFuture<'_, ()> {
         Box::pin(async { Ok(()) })
-    }
-    fn request_resolved(&self, resolved: crate::broker::Resolved) {
-        self.resolutions.mark_settled(resolved.request.id);
-        self.resolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(resolved);
     }
 
     fn answerer_attached(&self) -> bool {
@@ -378,6 +368,9 @@ impl ToolCxRuntime for FakeRt {
 struct Fixture {
     services: Arc<SessionServices>,
     broker: Arc<Broker>,
+    /// The claim inbox the services share with the session handle; tests
+    /// drain it the way the actor would.
+    inbox: Arc<crate::session::ResolutionInbox>,
     backend: Arc<FakeBackend>,
     rt: Arc<FakeRt>,
     temp: tempfile::TempDir,
@@ -403,13 +396,15 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let broker = Arc::new(Broker::new());
     let grants = Arc::new(
-        GrantStore::with_runtime(
+        GrantStore::with_runtime_scoped(
+            temp.path().to_path_buf(),
             temp.path().to_path_buf(),
             Duration::from_secs(120),
             Arc::clone(&broker),
         )
         .unwrap(),
     );
+    let inbox = Arc::new(crate::session::ResolutionInbox::new(Arc::clone(&broker)));
     let backend = Arc::new(FakeBackend::default());
     let rt = Arc::new(FakeRt::default());
     let cancel = CancellationToken::new();
@@ -441,7 +436,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
             Arc::new(move |_| Some(live.clone()))
         },
         cancel: cancel.clone(),
-        resolutions: Arc::clone(&backend.resolutions),
+        resolutions: Arc::clone(&inbox),
         ask_timeout,
         ephemeral,
         workspace,
@@ -449,6 +444,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     Fixture {
         services,
         broker,
+        inbox,
         backend,
         rt,
         temp,
@@ -505,12 +501,13 @@ fn cancel_next(broker: &Broker, turn: TurnId) {
         .next()
         .expect("an open request")
         .id;
-    let resolved = broker.resolve_turn(turn, Answer::Cancel, ClientId::new("test-front-end"));
+    let resolved = broker.resolve_turn(turn, ResolutionCause::Cancelled);
     assert!(
         resolved.iter().any(|item| item.request.id == id),
         "the turn cancel resolves the open question"
     );
     for item in &resolved {
+        assert_eq!(item.cause, ResolutionCause::Cancelled);
         broker.release(item);
     }
 }
@@ -940,8 +937,11 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let services = Arc::clone(&fx.services);
     let who = authorized.clone();
-    let approved =
-        spawn(async move { services.authorize_script_infer(&who, CancellationToken::new()).await });
+    let approved = spawn(async move {
+        services
+            .authorize_script_infer(&who, CancellationToken::new())
+            .await
+    });
     await_open(&fx.broker).await;
     let open = fx.broker.open_requests();
     assert!(
@@ -951,7 +951,10 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
         open[0].question
     );
     answer_next(&fx.broker, Answer::ApproveForSession);
-    approved.join().await.expect("the live controller approved Infer");
+    approved
+        .join()
+        .await
+        .expect("the live controller approved Infer");
     fx.services
         .authorize_script_infer(&authorized, cancel.clone())
         .await
@@ -984,7 +987,11 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
             "an origin or service-set change must invalidate grant reuse"
         );
     }
-    assert_eq!(open_count(&fx.broker), 0, "changed identities remain denied");
+    assert_eq!(
+        open_count(&fx.broker),
+        0,
+        "changed identities remain denied"
+    );
 
     // A session grant is scoped to its session's store, not just its plugin.
     let second_session = fixture(Duration::from_secs(30));
@@ -1212,19 +1219,24 @@ async fn ask_queue_preserves_answers_and_records_deadline_unavailable() {
             .expect("a timeout resolves")
             .is_none()
     );
-    {
-        let resolved = fx.backend.resolved.lock().unwrap();
-        assert!(
-            matches!(
-                resolved.as_slice(),
-                [item]
-                    if item.resolution == Resolution::Unavailable
-                        && item.was_default
-                        && item.answer == Answer::Cancel
-            ),
-            "the local deadline must journal one unavailable default: {resolved:?}"
-        );
-    }
+    let claim = fx
+        .inbox
+        .take()
+        .expect("the local deadline routes one claim");
+    assert!(
+        matches!(
+            claim,
+            crate::broker::Resolved {
+                resolution: Resolution::Unavailable,
+                was_default: true,
+                answer: Answer::Cancel,
+                cause: ResolutionCause::TimedOut,
+                ..
+            }
+        ),
+        "the local deadline must journal one attended unavailable default: {claim:?}"
+    );
+    fx.inbox.mark_settled(claim.request.id);
     assert!(
         fx.broker.open_requests().is_empty(),
         "the timed-out request is resolved in the broker"
@@ -1571,13 +1583,12 @@ async fn a_dropped_ask_resolves_its_broker_request() {
         "the question was published: {updates:?}"
     );
     drop(updates);
-    let resolved = fx.backend.resolved.lock().unwrap();
-    assert!(
-        resolved
-            .iter()
-            .any(|r| r.answer == dal_core::Answer::Cancel),
-        "the retired question was routed to the actor as Cancel: {resolved:?}"
-    );
+    let claim = fx
+        .inbox
+        .take()
+        .expect("the dropped guard routes one withdrawal claim");
+    assert_eq!(claim.answer, dal_core::Answer::Cancel);
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn);
 }
 
 #[tokio::test]
@@ -1712,6 +1723,210 @@ async fn the_child_policy_identity_is_denied_to_extensions() {
     );
 }
 
+/// A withdrawn ask slot keeps its admission occupied until the actor
+/// settles the claim: the capacity the dropped slot held is not reusable
+/// before `mark_settled`, which is what bounds the withdrawal queue.
+#[tokio::test]
+async fn a_withdrawn_ask_slot_stays_occupied_until_settlement() {
+    use super::MAX_OPEN_ASKS;
+
+    let fx = fixture(Duration::from_secs(60));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let withdrawn = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    let mut live = Vec::new();
+    for _ in 1..MAX_OPEN_ASKS {
+        live.push(spawn(ask(Arc::clone(&fx.services))));
+    }
+    for _ in 0..100 {
+        if open_count(&fx.broker) >= MAX_OPEN_ASKS {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        open_count(&fx.broker),
+        MAX_OPEN_ASKS,
+        "the ask battery fills to its cap"
+    );
+
+    // Aborting the task drops its armed guard, which claims a withdrawal;
+    // the claim is unsettled, so the slot's capacity stays occupied.
+    drop(withdrawn);
+    let claim = loop {
+        if let Some(claim) = fx.inbox.take() {
+            break claim;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn, "{claim:?}");
+    let busy = fx
+        .services
+        .ask(
+            &caller("focus", &["ask"], Some(turn())),
+            Question::Text {
+                prompt: "one more?".into(),
+                placeholder: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(busy, Err(ServiceError::Failed { .. })),
+        "an unsettled withdrawal blocks admission: {busy:?}"
+    );
+
+    // The actor's durable settlement frees the slot and the next ask opens.
+    fx.inbox.mark_settled(claim.request.id);
+    let reopened = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        reopened
+            .join()
+            .await
+            .expect("the reopened ask resolves")
+            .is_none(),
+        "settling the claim reopens the capacity"
+    );
+    drop(live);
+}
+
+/// A lost withdrawal race never wedges the battery: when another winner
+/// resolved the slot first, the armed drop's claim comes back `None` and
+/// the slot's admission frees at once, without any settlement.
+#[tokio::test]
+async fn a_raced_withdrawal_frees_the_ask_slot_without_settlement() {
+    let fx = fixture(Duration::from_secs(60));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let first = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+
+    // The actor's sweep wins the CAS: the request expires, journals its
+    // default, and releases the waiter before the dropped guard claims.
+    let id = fx
+        .broker
+        .open_requests()
+        .into_iter()
+        .next()
+        .expect("the ask opened")
+        .id;
+    let expired = fx
+        .broker
+        .expire_one(
+            id,
+            tokio::time::Instant::now() + Duration::from_secs(61),
+            false,
+        )
+        .expect("the sweep claims first");
+    fx.broker.release(&expired);
+    fx.inbox.mark_settled(id);
+    assert!(matches!(first.join().await, Ok(None)), "{expired:?}");
+
+    // The dropped guard races the already-resolved slot: no claim queues,
+    // the receipt is None, and the freed entry admits the next ask without
+    // any further settlement.
+    let claim = fx.inbox.take();
+    assert!(claim.is_none(), "no claim raced through: {claim:?}");
+    let second = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        second
+            .join()
+            .await
+            .expect("the next ask opens after a lost race")
+            .is_none()
+    );
+}
+
+/// A run approval whose slot was settled by the actor's sweep frees its
+/// exclusive admission on the guard's lost-race drop: a later run can
+/// approve again instead of failing busy forever.
+#[tokio::test]
+async fn a_raced_run_withdrawal_frees_the_run_slot_without_settlement() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    {
+        let mut script = fx.rt.script.lock().unwrap();
+        script.push_back(AuthorizeScript::AskThenApprove {
+            prefix: Vec::new(),
+            roots: Vec::new(),
+        });
+    }
+    let who = caller("focus", &["run"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let first = spawn(async move {
+        services
+            .run(&who, run_request(&["git", "status"], workspace))
+            .await
+    });
+    await_open(&fx.broker).await;
+
+    let id = fx
+        .broker
+        .open_requests()
+        .into_iter()
+        .next()
+        .expect("the run approval opened")
+        .id;
+    let expired = fx
+        .broker
+        .expire_one(
+            id,
+            tokio::time::Instant::now() + Duration::from_secs(301),
+            false,
+        )
+        .expect("the sweep settles the approval first");
+    fx.broker.release(&expired);
+    fx.inbox.mark_settled(id);
+    let error = first.join().await.unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Denied(DenyReason::Unavailable { .. })),
+        "a cancelled run approval fails closed with a typed refusal: {error:?}"
+    );
+
+    // The guard's armed drop found no claim: the exclusive slot freed at
+    // once, so a second run reaches its approval instead of failing busy.
+    assert!(fx.inbox.take().is_none(), "no run claim raced through");
+    let second_who = caller("focus", &["run"], Some(turn()));
+    let second_workspace = fx.temp.path().to_path_buf();
+    let services = Arc::clone(&fx.services);
+    let second = spawn(async move {
+        services
+            .run(&second_who, run_request(&["echo"], second_workspace))
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    let error = second.join().await.unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Denied(DenyReason::OutOfScope { .. })),
+        "the declined fresh approval is a typed refusal: {error:?}"
+    );
+}
+
 /// A dropped ask reopens only after its withdrawal reaches the durable
 /// owner: the next ask is never answered from a stale slot.
 #[tokio::test]
@@ -1732,17 +1947,23 @@ async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
     let first = spawn(ask(Arc::clone(&fx.services)));
     await_open(&fx.broker).await;
     drop(first);
-    for _ in 0..100 {
-        if !fx.backend.resolved.lock().unwrap().is_empty() {
-            break;
+    let claim = loop {
+        if let Some(claim) = fx.inbox.take() {
+            break claim;
         }
         tokio::task::yield_now().await;
-    }
+    };
     assert_eq!(
-        fx.backend.resolved.lock().unwrap().len(),
-        1,
+        claim.cause,
+        ResolutionCause::Withdrawn,
+        "the dropped ask must withdraw as its first resolution: {claim:?}"
+    );
+    assert!(
+        fx.inbox.take().is_none(),
         "the dropped ask must withdraw exactly once"
     );
+    // The actor's durable settlement is what frees the slot for reuse.
+    fx.inbox.mark_settled(claim.request.id);
     let second = spawn(ask(Arc::clone(&fx.services)));
     await_open(&fx.broker).await;
     answer_next(&fx.broker, Answer::Decline);

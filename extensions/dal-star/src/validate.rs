@@ -221,7 +221,7 @@ pub(crate) fn validate(
             declared: descriptor.name.as_str().into(),
         });
     }
-    let inject =
+    let mut inject =
         ServiceSet::from_names(descriptor.inject.iter().map(String::as_str)).map_err(|error| {
             LoadError::Registration {
                 path: site.path.clone(),
@@ -250,7 +250,6 @@ pub(crate) fn validate(
     // plugin's injection manifest: `uses` is the declaration the service
     // boundary reads, the same way an eval cell's ceiling resolves to its
     // services. An explicit `inject` list only ever adds to this.
-    let mut inject = inject;
     for uses in exports
         .iter()
         .map(|export| &export.uses)
@@ -261,7 +260,6 @@ pub(crate) fn validate(
         inject = inject.union(uses.services());
     }
 
-    let prompt = descriptor.prompt.clone().map(String::into_boxed_str);
     let rule_files = files
         .iter()
         .filter(|(path, _)| {
@@ -298,7 +296,7 @@ pub(crate) fn validate(
         rules: rules.into_boxed_slice(),
         rule_files,
         models: models.into_boxed_slice(),
-        prompt,
+        prompt: descriptor.prompt.clone().map(String::into_boxed_str),
         plugin: plugin_value.clone(),
         limits,
     })

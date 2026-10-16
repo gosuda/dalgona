@@ -4,7 +4,7 @@ use dal_core::{Config, Family, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{PROVIDERS, ProviderDef, Shape};
+use super::{PROVIDERS, ProviderDef, Shape, def::FamilyPolicy};
 
 /// The transport used to reach a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,11 +66,19 @@ pub struct ProviderEntry {
 }
 
 impl ProviderEntry {
-    /// The request-time header set: the table row's, else the family's.
+    /// The request-time header set: the table row's while the entry keeps the
+    /// row's family, else the family's.
+    ///
+    /// A compatible preset pointed at another family sends that family's
+    /// headers, exactly as the named-provider path did before the row
+    /// existed. At rest every row's own shape already matches its family, so
+    /// the vendor rows and untouched presets are unchanged.
     #[must_use]
     pub fn shape(&self) -> Shape {
-        self.def
-            .map_or_else(|| Shape::of_family(self.family), |def| def.shape)
+        match self.def {
+            Some(def) if def.family == self.family => def.shape,
+            _ => Shape::of_family(self.family),
+        }
     }
 }
 
@@ -367,9 +375,17 @@ fn decode_builtin(
         reject_unknown_keys(table, &path, PROVIDER_KEYS)?;
     }
 
-    let family = match string_field(table, "api", &path)? {
-        None => def.family,
-        Some(value) if def.family == Family::Responses => {
+    let family = match (def.family_policy, string_field(table, "api", &path)?) {
+        // A generic compatibility preset takes an explicit `api` the way the
+        // named-provider path did before the row existed: any supported key
+        // family wins. `openai_codex` stays rejected by `parse_api`, so a
+        // preset can never claim the OAuth-only Codex family.
+        (FamilyPolicy::Compatible, Some(value)) => parse_api(name, value)?,
+        // The native rows keep their pre-preset contract: `openai` takes its
+        // documented Chat alternate, every other `api` is refused. Either
+        // policy without an explicit `api` keeps the row default.
+        (FamilyPolicy::Compatible | FamilyPolicy::Native, None) => def.family,
+        (FamilyPolicy::Native, Some(value)) if def.family == Family::Responses => {
             let family = parse_api(name, value)?;
             if matches!(family, Family::Responses | Family::Chat) {
                 family
@@ -379,8 +395,8 @@ fn decode_builtin(
                 )));
             }
         }
-        Some(value) if value == api_name(def.family) => def.family,
-        Some(_) => {
+        (FamilyPolicy::Native, Some(value)) if value == api_name(def.family) => def.family,
+        (FamilyPolicy::Native, Some(_)) => {
             return Err(invalid(format!(
                 "{path}.api conflicts with its fixed family"
             )));
@@ -396,7 +412,17 @@ fn decode_builtin(
         def.transport,
         name,
     )?;
-    let default_auth = def.key.map_or(AuthStyle::Bearer, |key| key.style);
+    // At rest the row names its own header. When the user points a preset at
+    // another family, the new family's header is the default, exactly as the
+    // named-provider path defaulted it before the row existed; an explicit
+    // `auth` still wins either way.
+    let default_auth = if family == def.family {
+        def.key.map_or(AuthStyle::Bearer, |key| key.style)
+    } else if family == Family::Anthropic {
+        AuthStyle::XApiKey
+    } else {
+        AuthStyle::Bearer
+    };
     let auth = parse_auth(string_field(table, "auth", &path)?, default_auth, name)?;
     let key_env =
         string_field(table, "key_env", &path)?.map(|value| value.to_owned().into_boxed_str());

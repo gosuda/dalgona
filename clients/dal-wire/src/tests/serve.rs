@@ -512,3 +512,332 @@ async fn an_a2a_session_defaults_an_extension_question_at_once() {
     })
     .await;
 }
+
+/// WebSocket keepalive: ping cadence, the pong deadline, and the lifetime of
+/// the task that owns the socket. Every test drives a real tungstenite peer.
+mod heartbeat {
+    use std::time::Duration;
+
+    use dal_agent::SessionRef;
+    use dal_core::{ClientId, Command, Expect, Part, Stop, UpdateKind};
+    use futures::{SinkExt, StreamExt};
+    use sonic_rs::{JsonValueTrait, Value};
+    use tokio::io::DuplexStream;
+    use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::{Bytes, Message};
+
+    use super::super::support::{Rig, WAIT, gate_step, result, rig, text_step};
+    use crate::transport::{ReadFrameError, Transport, WebSocketTransport};
+
+    type Client = WebSocketStream<DuplexStream>;
+
+    /// A server transport over a duplex pipe, paired with a raw tungstenite client.
+    async fn pair() -> (WebSocketTransport, Client) {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let server = WebSocketTransport::server(server_io).await;
+        let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        (server, client)
+    }
+
+    /// Reads the next frame the server sent, failing when none arrives within `limit`.
+    async fn next_frame(client: &mut Client, limit: Duration) -> Message {
+        tokio::time::timeout(limit, client.next())
+            .await
+            .expect("a frame arrives within the limit")
+            .expect("the socket stays open")
+            .expect("the frame is well formed")
+    }
+
+    /// Sends one request and returns its reply, skipping everything else.
+    async fn call(client: &mut Client, id: i64, method: &str, params: Value) -> Value {
+        let request =
+            sonic_rs::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let text = sonic_rs::to_string(&request).expect("request json");
+        client
+            .send(Message::Text(text.into()))
+            .await
+            .expect("the request sends");
+        loop {
+            if let Message::Text(text) = next_frame(client, WAIT).await {
+                let frame: Value = sonic_rs::from_str(text.as_str()).expect("reply json");
+                if frame["id"].as_i64() == Some(id) {
+                    return frame;
+                }
+            }
+        }
+    }
+
+    /// Waits until the session's turn runs, through a short-lived second client.
+    async fn await_running(rig: &Rig, session: &str) {
+        let agent = rig
+            .host
+            .open(
+                SessionRef::Resume {
+                    key: session.into(),
+                    workspace: rig.core_workspace(),
+                },
+                ClientId::new("observer"),
+            )
+            .await
+            .expect("the session opens for observation");
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let head = agent.view(dal_core::PageReq::default()).expect("view");
+            if matches!(head.turn, dal_core::TurnState::Running { .. }) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the turn never started: {:?}",
+                head.turn
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_pings_every_fifteen_seconds_while_pongs_keep_it_open() {
+        let (mut server, mut client) = pair().await;
+        let start = tokio::time::Instant::now();
+        // Eight rounds span 120 s, far past the 45 s pong timeout, so only the
+        // answered pings keep the connection open. The server never reads a
+        // frame: the keepalive must not depend on the serve loop polling it.
+        for round in 1..=8_u32 {
+            let ping = next_frame(&mut client, Duration::from_secs(20)).await;
+            assert!(matches!(ping, Message::Ping(_)), "round {round}: {ping:?}");
+            let elapsed = start.elapsed();
+            let due = Duration::from_secs(15) * round;
+            assert!(
+                elapsed >= due && elapsed < due + Duration::from_millis(500),
+                "round {round}: ping after {elapsed:?}, due at {due:?}"
+            );
+            client.flush().await.expect("the pong flushes");
+            let reply = format!("reply {round}");
+            server
+                .write_frame(&reply)
+                .await
+                .expect("a reply writes between pings");
+            let frame = next_frame(&mut client, Duration::from_secs(1)).await;
+            assert_eq!(frame, Message::Text(reply.into()));
+        }
+        server.close().await;
+        match next_frame(&mut client, Duration::from_secs(1)).await {
+            Message::Close(Some(frame)) => assert_eq!(frame.code, CloseCode::Normal),
+            other => panic!("a local close sends a normal close frame, got {other:?}"),
+        }
+        loop {
+            match client.next().await {
+                None | Some(Err(_)) => break,
+                Some(Ok(Message::Ping(_))) => panic!("the keepalive outlived the close"),
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+
+    /// Serves a peer that answers only its first `answered` pings and sends a
+    /// text message every five seconds the whole time, which the server echoes.
+    /// Returns the echo count and when the server saw the connection close.
+    async fn silent_peer_close(answered: usize) -> (u32, Duration) {
+        let (mut server, mut client) = pair().await;
+        let start = tokio::time::Instant::now();
+        let serving = async {
+            let mut echoed = 0_u32;
+            loop {
+                match server.read_frame().await {
+                    Ok(frame) => {
+                        server.write_frame(&frame).await.expect("the echo writes");
+                        echoed += 1;
+                    }
+                    Err(error) => {
+                        assert_eq!(error, ReadFrameError::Closed);
+                        return (echoed, start.elapsed());
+                    }
+                }
+            }
+        };
+        let chatting = async {
+            for _ in 0..answered {
+                // Reading is what makes the client pong; skip everything but the ping.
+                while !matches!(
+                    next_frame(&mut client, Duration::from_secs(20)).await,
+                    Message::Ping(_)
+                ) {}
+                client.flush().await.expect("the pong flushes");
+            }
+            loop {
+                let _ = client.send(Message::Text("tick".into())).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(300), async {
+            tokio::select! {
+                outcome = serving => outcome,
+                _ = chatting => panic!("the silent peer only ends with the connection"),
+            }
+        })
+        .await
+        .expect("the silent peer is closed within 300 s")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_without_pongs_closes_at_forty_five_seconds_despite_traffic() {
+        let (echoed, elapsed) = silent_peer_close(0).await;
+        assert!(
+            elapsed >= Duration::from_secs(45) && elapsed < Duration::from_millis(45_500),
+            "closed after {elapsed:?}"
+        );
+        assert!(
+            echoed >= 8,
+            "messages kept flowing both ways until the close: {echoed}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_pong_moves_the_deadline_one_full_window() {
+        let (echoed, elapsed) = silent_peer_close(1).await;
+        assert!(
+            elapsed >= Duration::from_secs(60) && elapsed < Duration::from_millis(60_500),
+            "closed after {elapsed:?}"
+        );
+        assert!(
+            echoed >= 8,
+            "messages kept flowing both ways until the close: {echoed}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_drop_stops_the_keepalive_task() {
+        let (server, mut client) = pair().await;
+        drop(server);
+        // A detached driver would keep pinging until its own deadline.
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match client.next().await {
+                    None | Some(Err(_)) => break,
+                    Some(Ok(Message::Ping(_))) => panic!("a dropped transport kept pinging"),
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the socket ends once the transport is dropped");
+    }
+
+    #[tokio::test]
+    async fn websocket_answers_client_pings_without_a_reader() {
+        let (_server, mut client) = pair().await;
+        client
+            .send(Message::Ping(Bytes::from_static(b"alive")))
+            .await
+            .expect("the ping sends");
+        assert_eq!(
+            next_frame(&mut client, WAIT).await,
+            Message::Pong(Bytes::from_static(b"alive"))
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_close_leaves_the_session_turn_running() {
+        let rig = rig(&[gate_step("c1"), text_step(&["after"], 1, 1)]).await;
+        let (server, mut client) = pair().await;
+        let serving = crate::serve_rpc(rig.host.clone(), Transport::websocket(server));
+        let script = async {
+            let init = call(
+                &mut client,
+                0,
+                "initialize",
+                sonic_rs::json!({
+                    "protocolVersion": 1,
+                    "clientInfo": {"name": "test", "version": "1"},
+                    "capabilities": ["sessions"],
+                }),
+            )
+            .await;
+            result(&init);
+            let opened = call(
+                &mut client,
+                1,
+                "session/open",
+                sonic_rs::json!({"ref": {"type": "new", "workspace": rig.ws()}}),
+            )
+            .await;
+            let session = result(&opened)["sessionId"]
+                .as_str()
+                .expect("session id")
+                .to_owned();
+            let command = sonic_rs::to_value(&Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "wait".into(),
+                }],
+            })
+            .expect("command json");
+            let accepted = call(
+                &mut client,
+                2,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": command}),
+            )
+            .await;
+            assert_eq!(result(&accepted)["type"].as_str(), Some("accepted"));
+            await_running(&rig, &session).await;
+            // The peer goes silent: it reads nothing and answers no ping.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(46)).await;
+            tokio::time::resume();
+            session
+        };
+        let (outcome, session) = Box::pin(tokio::time::timeout(Duration::from_secs(120), async {
+            tokio::join!(serving, script)
+        }))
+        .await
+        .expect("the heartbeat closes the connection within the test deadline");
+        outcome.expect("the heartbeat close ends the connection cleanly");
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match client.next().await {
+                    None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the socket ends after the heartbeat close");
+
+        let agent = rig
+            .host
+            .open(
+                SessionRef::Resume {
+                    key: session.as_str().into(),
+                    workspace: rig.core_workspace(),
+                },
+                ClientId::new("observer"),
+            )
+            .await
+            .expect("the session stays open after the heartbeat close");
+        let head = agent.view(dal_core::PageReq::default()).expect("view");
+        assert!(
+            matches!(head.turn, dal_core::TurnState::Running { .. }),
+            "the heartbeat close cancelled the turn: {:?}",
+            head.turn
+        );
+        let mut subscription = agent
+            .subscribe(Some((head.r#gen, head.seq)))
+            .expect("subscribe");
+        rig.gate.add_permits(1);
+        let stop = loop {
+            let delivery = tokio::time::timeout(WAIT, subscription.next())
+                .await
+                .expect("update in time")
+                .expect("subscription open");
+            if let dal_agent::Delivery::Update(update) = delivery
+                && let UpdateKind::TurnEnded { stop, .. } = update.kind
+            {
+                break stop;
+            }
+        };
+        assert!(matches!(stop, Stop::EndTurn), "{stop:?}");
+    }
+}

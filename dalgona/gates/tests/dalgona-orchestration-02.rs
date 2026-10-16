@@ -75,7 +75,7 @@ async fn grant_bundled_extensions(
         dal_agent::ext::grants::GrantStore::new(data.to_path_buf())
             .grant(
                 dal_agent::ext::grants::GrantKey::for_extension(extension, workspace)
-                        .expect("registered extension has a code identity"),
+                    .ok_or("registered extension has no code identity")?,
                 dal_core::ClientId::new("once-gate"),
                 dal_core::Timestamp::now(),
             )

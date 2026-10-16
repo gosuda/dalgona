@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use futures::stream;
 
-use dal_core::RawJson;
+use dal_core::{RawJson, ReplayCapture};
 
 use crate::{
     error::ProviderError,
     scripted::{Script, ScriptError},
-    stream::{EventStream, StopReason, StreamEvent, ToolArgs},
+    stream::{EventStream, StopReason, StreamEvent, ToolArgs, ToolCall},
 };
 
 /// Streams captured from provider streams, grouped per stream step.
@@ -332,7 +332,9 @@ pub enum ReplayError {
 ///
 /// `ToolArgsDelta` fragments may split a UTF-8 sequence, so they re-encode
 /// as the `fragment` string only when the bytes are valid UTF-8; otherwise
-/// they carry the lossless `fragment_bytes` array.
+/// they carry the lossless `fragment_bytes` array. A `MessageReplay`
+/// capture serializes with the core serde spelling and refuses export when
+/// its payload carries credential-shaped bytes.
 ///
 /// # Errors
 /// Returns `Err` when the event cannot encode into the replay grammar or the
@@ -403,25 +405,19 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
         StreamEvent::ToolCallsDone { calls } => {
             let calls = calls
                 .iter()
-                .map(|call| {
-                    let args = match &call.args {
-                        ToolArgs::Parsed(value) => {
-                            format!("{{\"kind\":\"parsed\",\"value\":{}}}", value.as_str())
-                        }
-                        ToolArgs::Invalid { message } => {
-                            format!("{{\"kind\":\"invalid\",\"message\":{}}}", json_str(message))
-                        }
-                        ToolArgs::Truncated => "{\"kind\":\"truncated\"}".to_owned(),
-                    };
-                    format!(
-                        "{{\"id\":{},\"name\":{},\"args\":{args}}}",
-                        json_str(&call.id),
-                        json_str(&call.name)
-                    )
-                })
+                .map(encode_tool_call)
                 .collect::<Vec<_>>()
                 .join(",");
             format!("{{\"type\":\"tool_calls_done\",\"calls\":[{calls}]}}")
+        }
+        StreamEvent::MessageReplay { capture } => {
+            // The capture keeps the core serde spelling verbatim, including
+            // raw captured payloads, so a replayed fixture decodes to the
+            // identical value.
+            reject_credential_capture(capture)?;
+            let capture =
+                sonic_rs::to_string(capture).map_err(|_| encode_err("capture not serializable"))?;
+            format!("{{\"type\":\"message_replay\",\"capture\":{capture}}}")
         }
         StreamEvent::Usage { usage } => {
             let usage =
@@ -429,15 +425,10 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
             format!("{{\"type\":\"usage\",\"usage\":{usage}}}")
         }
         StreamEvent::Stop { reason } => {
-            let reason = match reason {
-                StopReason::EndTurn => "end_turn".to_owned(),
-                StopReason::ToolUse => "tool_use".to_owned(),
-                StopReason::MaxTokens => "max_tokens".to_owned(),
-                StopReason::Refusal => "refusal".to_owned(),
-                StopReason::Paused => "paused".to_owned(),
-                StopReason::Other(reason) => reason.clone(),
-            };
-            format!("{{\"type\":\"stop\",\"reason\":{}}}", json_str(&reason))
+            format!(
+                "{{\"type\":\"stop\",\"reason\":{}}}",
+                json_str(&stop_reason_text(reason))
+            )
         }
     };
     // The exported fixture is meant to be committed, so encode scrubs
@@ -458,6 +449,28 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
 fn scrub(text: &str) -> String {
     String::from_utf8(scrub_bytes(text.as_bytes()))
         .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+/// A `MessageReplay` capture must reach a replayed fixture verbatim: the
+/// outer scrub pass would rewrite credential-shaped payload bytes, so the
+/// capture refuses export instead, exactly like a `Replay` payload.
+fn reject_credential_capture(capture: &ReplayCapture) -> Result<(), ReplayError> {
+    let ReplayCapture::Captured { payload } = capture else {
+        return Ok(());
+    };
+    if scrub(payload.as_str()) != payload.as_str() {
+        return Err(encode_err(
+            "captured replay payload carries credential-shaped bytes; redact the capture first",
+        ));
+    }
+    if let Ok(item) = sonic_rs::from_str::<sonic_rs::Value>(payload.as_str())
+        && decoded_secret(&item)
+    {
+        return Err(encode_err(
+            "captured replay payload decodes to credential-shaped text; redact the capture first",
+        ));
+    }
+    Ok(())
 }
 
 /// True when any decoded string leaf of `item` — keys included — carries
@@ -701,6 +714,40 @@ fn refill_bytes(fields: Vec<&mut Vec<u8>>) -> bool {
     }
     debug_assert!(cursor.is_empty(), "refill dropped scrubbed bytes");
     true
+}
+
+/// Encodes one complete tool call into its replay wire shape.
+///
+/// Keeps the core byte contract: a parsed value stays verbatim, an invalid
+/// call keeps its message, and a truncated call keeps its kind.
+fn encode_tool_call(call: &ToolCall) -> String {
+    let args = match &call.args {
+        ToolArgs::Parsed(value) => {
+            format!("{{\"kind\":\"parsed\",\"value\":{}}}", value.as_str())
+        }
+        ToolArgs::Invalid { message } => {
+            format!("{{\"kind\":\"invalid\",\"message\":{}}}", json_str(message))
+        }
+        ToolArgs::Truncated => "{\"kind\":\"truncated\"}".to_owned(),
+    };
+    format!(
+        "{{\"id\":{},\"name\":{},\"args\":{args}}}",
+        json_str(&call.id),
+        json_str(&call.name)
+    )
+}
+
+/// Renders a stop reason in its replay wire spelling: the five known
+/// reasons as their snake-case names, any other reason verbatim.
+fn stop_reason_text(reason: &StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".to_owned(),
+        StopReason::ToolUse => "tool_use".to_owned(),
+        StopReason::MaxTokens => "max_tokens".to_owned(),
+        StopReason::Refusal => "refusal".to_owned(),
+        StopReason::Paused => "paused".to_owned(),
+        StopReason::Other(reason) => reason.clone(),
+    }
 }
 
 fn encode_err(detail: &'static str) -> ReplayError {
@@ -1043,6 +1090,57 @@ mod tests {
         assert_eq!(capture.failures(), ["stream dropped mid-step"]);
     }
 
+    /// The full capture grammar: a recorded step with the capture event in
+    /// place validates through `Capture::replay`, proving the encoder and
+    /// the scripted decoder agree on the same line.
+    #[tokio::test]
+    async fn record_captures_the_message_replay_event_into_a_valid_fixture() {
+        let capture = Capture::default();
+        let source = stream::iter(vec![
+            Ok(StreamEvent::TextDelta {
+                text: "closing".into(),
+            }),
+            Ok(StreamEvent::ToolCallsDone { calls: Vec::new() }),
+            Ok(StreamEvent::MessageReplay {
+                capture: ReplayCapture::Refused {
+                    reason: dal_core::ReplayRefusal::UserRecordNotFound,
+                },
+            }),
+            Ok(StreamEvent::Usage {
+                usage: dal_core::Usage {
+                    input_tokens: 3,
+                    cached_input_tokens: 0,
+                    output_tokens: 2,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+            }),
+            Ok(StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            }),
+        ]);
+        let mut stream = record(EventStream::new(source, || {}), capture.clone());
+        let items = drain(&mut stream).await;
+        assert!(items.iter().all(Result::is_ok), "{items:?}");
+        let lines = capture
+            .replay()
+            .expect("capture with replay event validates");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("message_replay"), "{}", lines[0]);
+        assert!(lines[0].contains("user_record_not_found"), "{}", lines[0]);
+        // The emitted fixture replays to a scripted provider that serves
+        // the identical capture.
+        let script =
+            Script::from_replay(lines.join("\n").as_bytes()).expect("emitted fixture parses");
+        let mut replayed = script.open().expect("script opens");
+        let replayed_items = drain(&mut replayed).await;
+        assert_eq!(items.len(), replayed_items.len());
+        for (original, roundtripped) in items.iter().zip(replayed_items.iter()) {
+            assert_eq!(original.as_ref().ok(), roundtripped.as_ref().ok());
+        }
+    }
+
     /// A partial events step plus its `fail` step validate together: the
     /// replay grammar counts the pair as one step, so encoding them per line
     /// rejects a prefix the joined fixture accepts.
@@ -1143,5 +1241,96 @@ mod dev_review_tests {
         let text = fixture.join("\n");
         assert!(!text.contains("sk-live-abcdefghij1234"), "{text}");
         assert!(text.contains("[redacted]"), "{text}");
+    }
+
+    /// A `MessageReplay` capture recorded from a stream re-encodes to the
+    /// same JSONL grammar it decoded from, with the raw payload verbatim,
+    /// and the emitted fixture replays to the identical capture value.
+    #[tokio::test]
+    async fn encode_event_roundtrips_a_message_replay_capture() {
+        let event = StreamEvent::MessageReplay {
+            capture: ReplayCapture::Captured {
+                payload: RawJson::parse(r#"{"cursor_history":{"records":["a", 1, null]}}"#)
+                    .expect("payload json"),
+            },
+        };
+        let encoded = encode_event(&event).expect("capture encodes");
+        let expected = r#"{"type":"message_replay","capture":{"status":"captured","payload":{"cursor_history":{"records":["a", 1, null]}}}}"#;
+        assert_eq!(encoded.as_str(), expected, "payload lost its raw spelling");
+        let replayed = replay_turn_capture(&encoded).await;
+        assert_eq!(replayed, event);
+    }
+
+    /// A refused capture encodes with its typed reason token and roundtrips.
+    #[tokio::test]
+    async fn encode_event_roundtrips_a_refused_capture() {
+        let event = StreamEvent::MessageReplay {
+            capture: ReplayCapture::Refused {
+                reason: dal_core::ReplayRefusal::CheckpointNotCoveringTurn,
+            },
+        };
+        let encoded = encode_event(&event).expect("refusal encodes");
+        assert_eq!(
+            encoded.as_str(),
+            r#"{"type":"message_replay","capture":{"status":"refused","reason":"checkpoint_not_covering_turn"}}"#,
+            "refusal token changed"
+        );
+        let replayed = replay_turn_capture(&encoded).await;
+        assert_eq!(replayed, event);
+    }
+
+    /// Builds a complete grammatical turn around one pre-encoded capture
+    /// event line: `tool_calls_done` first, then the capture, then usage and
+    /// stop. Replays it and returns the decoded capture event.
+    async fn replay_turn_capture(encoded: &RawJson) -> StreamEvent {
+        const HEAD: &str = r#"{"kind":"events","events":[{"type":"tool_calls_done","calls":[]},"#;
+        const TAIL: &str = concat!(
+            r#"{"type":"usage","usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+            r#"{"type":"stop","reason":"end_turn"}]}"#,
+        );
+        let turn = format!("{HEAD}{},{TAIL}", encoded.as_str());
+        let script =
+            Script::from_replay(turn.as_bytes()).expect("the encoded event is a valid fixture");
+        let mut stream = script.open().expect("script opens");
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+            .into_iter()
+            .find_map(|item| match item {
+                Ok(event @ StreamEvent::MessageReplay { .. }) => Some(event),
+                _ => None,
+            })
+            .expect("the replayed turn carries the capture")
+    }
+
+    /// A credential-shaped captured payload must refuse export, both as
+    /// raw text and after JSON escaping, instead of being scrubbed into a
+    /// lie about what the server sent.
+    #[test]
+    fn encode_event_refuses_a_credential_shaped_capture() {
+        for payload in [
+            r#"{"text":"Bearer abc1234567890def"}"#,
+            r#"{"token":"sk-abc123456789012"}"#,
+        ] {
+            let event = StreamEvent::MessageReplay {
+                capture: ReplayCapture::Captured {
+                    payload: RawJson::parse(payload).expect("payload json"),
+                },
+            };
+            let error = encode_event(&event).expect_err("credential capture must refuse");
+            assert!(
+                error.to_string().contains("credential-shaped"),
+                "unexpected refusal: {error}"
+            );
+        }
+        // A refusal without a payload always exports.
+        let refused = StreamEvent::MessageReplay {
+            capture: ReplayCapture::Refused {
+                reason: dal_core::ReplayRefusal::NoRecords,
+            },
+        };
+        assert!(encode_event(&refused).is_ok());
     }
 }

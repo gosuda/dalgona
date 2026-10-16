@@ -542,7 +542,7 @@ fn assistant_section(content: &[Block]) -> Option<String> {
     let mut section = None;
     for block in content {
         match block {
-            Block::Text { text } => {
+            Block::Text { text, .. } => {
                 let section = section.get_or_insert_with(|| String::from("## dalgon"));
                 section.push_str("\n\n");
                 section.push_str(text);

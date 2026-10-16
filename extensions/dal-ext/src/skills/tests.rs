@@ -652,3 +652,36 @@ fn command_summary_is_cut_to_a_valid_short_line() {
     assert!(summary.len() < 80, "{summary}");
     assert_eq!(&**summary, format!("{}…", "a".repeat(76)).as_str());
 }
+
+#[test]
+fn skill_uri_reads() {
+    // Registered across two plugins out of byte order: plugin-b's alpha
+    // claims before plugin-a's beta, and the registry still reports both in
+    // its byte-sorted name order.
+    let alpha = skill("plugin-b", "alpha", "alpha description", false);
+    let beta = skill("plugin-a", "beta", "beta description", false);
+    let registry =
+        SkillRegistry::merge(&[("plugin-b", vec![alpha]), ("plugin-a", vec![beta])]).unwrap();
+    let names: Vec<String> = registry.names().iter().map(ToString::to_string).collect();
+    let resolver = SkillResolver::new(Arc::new(registry));
+
+    // A hit serves the exact loaded body under its canonical URI.
+    for name in &names {
+        let doc = resolver.lookup(name).unwrap();
+        assert_eq!(&*doc.uri, format!("skill://{name}").as_str());
+        assert_eq!(&*doc.text, format!("body of {name}").as_str());
+    }
+
+    // A miss is the typed refusal that names the missing skill. The
+    // alternatives listing is checked once, with live product records,
+    // in the skills-defaults gate.
+    let err = resolver.lookup("gamma").unwrap_err();
+    assert!(matches!(&err, SchemeError::Failed { .. }));
+    let text = err.to_string();
+    assert!(text.contains("gamma"), "{text}");
+
+    // An empty registry refuses through the same typed error variant.
+    let empty = SkillResolver::new(Arc::new(SkillRegistry::empty()));
+    let empty_err = empty.lookup("gamma").unwrap_err();
+    assert!(matches!(empty_err, SchemeError::Failed { .. }));
+}

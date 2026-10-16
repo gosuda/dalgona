@@ -150,7 +150,7 @@ fn assistant_text(view: &View) -> String {
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        Block::Text { text } => Some(text.as_ref()),
+                        Block::Text { text, .. } => Some(text.as_ref()),
                         _ => None,
                     })
                     .collect::<String>(),

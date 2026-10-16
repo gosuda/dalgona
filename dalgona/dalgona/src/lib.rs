@@ -100,6 +100,7 @@ fn compose(
     sections: Sections,
     parts: &mut dalgon::Parts,
 ) -> Result<Vec<Extension>, dalgon::BuildError> {
+    parts.ttsr_lane = true;
     let Sections {
         history: history_config,
         judged: judged_config,

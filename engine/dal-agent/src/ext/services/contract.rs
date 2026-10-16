@@ -282,10 +282,6 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
     fn turn(&self, op: TurnOp) -> ServiceFuture<'_, TurnOpReply>;
     /// Routes an opened request through the session actor's fold.
     fn request_opened(&self, request: Request) -> ServiceFuture<'_, ()>;
-    /// Hands one broker resolution to the session actor, which journals it
-    /// before any waiter sees the answer. Sync like [`SessionBackend::publish_update`]:
-    /// the actor owns the awaiting.
-    fn request_resolved(&self, resolved: crate::broker::Resolved);
     /// Journals one extension record on the current leaf and returns its
     /// journal position after the receipt.
     fn append_record(&self, ext: &Name, kind: &str, body: RawValue) -> ServiceFuture<'_, EntryId>;
@@ -369,8 +365,9 @@ pub(crate) struct SessionServicesDeps {
     /// Resolves a live turn's cancellation token inside this session.
     pub(crate) turn_cancel:
         Arc<dyn Fn(dal_core::TurnId) -> Option<CancellationToken> + Send + Sync>,
-    /// The actor-owned durable resolution inbox shared with the session
-    /// handle, for settle-gated ask-slot reuse.
+    /// The actor-owned resolution inbox the session handle also holds: the
+    /// service guards claim their withdrawal and expiry requests through it
+    /// under its lock, and its settled marks gate slot reuse.
     pub(crate) resolutions: Arc<crate::session::ResolutionInbox>,
     /// How long one `ask` question may stay open.
     pub(crate) ask_timeout: Duration,

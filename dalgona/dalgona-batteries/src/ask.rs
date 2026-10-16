@@ -86,14 +86,17 @@ struct OptionArgs {
     description: Option<String>,
 }
 
-/// The strict `select` answer payload: `{"selected": [<label>, ...]}`.
+/// The strict `select` answer object: `{"selected": [<label>, ...]}`. The
+/// terminal dialog sends it; the bare string and array spellings are the
+/// other accepted form.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectedAnswer {
     selected: Vec<String>,
 }
 
-/// The strict `text` answer payload: `{"text": <trimmed non-empty>}`.
+/// The strict `text` answer object: `{"text": <answer>}`. The terminal dialog
+/// sends it; the bare string is the other accepted form.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TextAnswer {
@@ -304,38 +307,66 @@ enum Decoded {
     Malformed,
 }
 
-/// Decodes one strict answer payload. Text trims to its answer; blank text
-/// and an empty selection dismiss. Anything of the wrong shape is malformed.
+/// Decodes one strict answer payload in one of its two accepted spellings:
+/// the bare value (a string for `single` and `text`, an array of strings for
+/// `multi`) or the strict object (`{"text": ...}`, `{"selected": [...]}`).
+///
+/// The opening byte picks the spelling, so an object that fails its strict
+/// decode (an unknown member, a wrong member) is malformed and never falls
+/// through to a bare-value decode. Text trims to its answer; blank text and
+/// an empty selection dismiss. Anything of the wrong shape is malformed.
 fn decode_answer(kind: &str, answer: &Answer) -> Decoded {
     let Answer::Value(value) = answer else {
         return Decoded::Blank;
     };
-    if kind == "text" {
-        let Ok(payload) = sonic_rs::from_str::<TextAnswer>(value.as_str()) else {
-            return Decoded::Malformed;
-        };
-        let trimmed = payload.text.trim();
-        if trimmed.is_empty() {
-            Decoded::Blank
-        } else {
-            Decoded::Answered(trimmed.to_owned())
+    let raw = value.as_str();
+    let Some(opening) = raw.trim_start().bytes().next() else {
+        return Decoded::Malformed;
+    };
+    match (kind, opening) {
+        ("text", b'{') => sonic_rs::from_str::<TextAnswer>(raw)
+            .map_or(Decoded::Malformed, |payload| decode_text(&payload.text)),
+        ("text", b'"') => {
+            sonic_rs::from_str::<String>(raw).map_or(Decoded::Malformed, |text| decode_text(&text))
         }
+        ("single" | "multi", b'{') => sonic_rs::from_str::<SelectedAnswer>(raw)
+            .map_or(Decoded::Malformed, |payload| {
+                decode_selection(kind, payload.selected)
+            }),
+        ("single", b'"') => match sonic_rs::from_str::<String>(raw) {
+            Ok(label) if label.trim().is_empty() => Decoded::Blank,
+            Ok(label) => Decoded::Answered(label),
+            Err(_) => Decoded::Malformed,
+        },
+        ("multi", b'[') => sonic_rs::from_str::<Vec<String>>(raw)
+            .map_or(Decoded::Malformed, |labels| decode_selection(kind, labels)),
+        _ => Decoded::Malformed,
+    }
+}
+
+/// A text answer trims to its answer; blank text dismisses.
+fn decode_text(text: &str) -> Decoded {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        Decoded::Blank
     } else {
-        let Ok(payload) = sonic_rs::from_str::<SelectedAnswer>(value.as_str()) else {
-            return Decoded::Malformed;
-        };
-        match (kind, payload.selected.as_slice()) {
-            ("single", [label]) if !label.trim().is_empty() => Decoded::Answered(label.clone()),
-            ("multi", labels)
-                if (1..=4).contains(&labels.len())
-                    && !labels.is_empty()
-                    && labels.iter().all(|label| !label.trim().is_empty()) =>
-            {
-                Decoded::Answered(labels.join(", "))
-            }
-            ("single" | "multi", []) => Decoded::Blank,
-            _ => Decoded::Malformed,
+        Decoded::Answered(trimmed.to_owned())
+    }
+}
+
+/// A selection holds exactly one non-blank label for `single` and one to
+/// four for `multi`; an empty selection dismisses.
+fn decode_selection(kind: &str, mut labels: Vec<String>) -> Decoded {
+    match (kind, labels.as_mut_slice()) {
+        ("single", [one]) if !one.trim().is_empty() => Decoded::Answered(std::mem::take(one)),
+        ("multi", selected)
+            if (1..=4).contains(&selected.len())
+                && selected.iter().all(|label| !label.trim().is_empty()) =>
+        {
+            Decoded::Answered(selected.join(", "))
         }
+        ("single" | "multi", []) => Decoded::Blank,
+        _ => Decoded::Malformed,
     }
 }
 

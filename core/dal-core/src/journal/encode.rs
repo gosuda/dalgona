@@ -6,9 +6,9 @@ use super::wire_entries::{
     AllowAlwaysWire, ApprovalWire, ArchiveWire, AssistantWire, BeforeRequestMutWire, BootWire,
     BranchSummaryWire, CompactionWire, ExtWire, GrantGivenWire, InferredWire, JobWire, LabelWire,
     LeafWire, MailRecordWire, ModeValueWire, ModeWire, ModelRouteWire, ModelWire, NameWire,
-    ReminderWire, ResolvedWire, RouteWire, RuleFiredWire, ScopedGrantEndedWire, ScopedGrantWire,
-    SessionWire, SourceWire, ThinkingWire, ToolPromotedWire, ToolResultWire, ToolStartWire,
-    TurnEndWire, TurnStartWire, UserWire, WakeAttemptWire,
+    ReminderWire, ResolutionCauseWire, ResolvedWire, RouteWire, RuleFiredWire,
+    ScopedGrantEndedWire, ScopedGrantWire, SessionWire, SourceWire, ThinkingWire, ToolPromotedWire,
+    ToolResultWire, ToolStartWire, TurnEndWire, TurnStartWire, UserWire, WakeAttemptWire,
 };
 use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteError};
 
@@ -20,7 +20,9 @@ use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteEr
 /// [`EncodeError::InvalidCost`] when a usage member carries a reported
 /// cost no integer micro-dollar count can hold,
 /// [`EncodeError::InvalidRoute`] when a model record's or an assistant
-/// route's synthetic or harness id breaks its grammar, and
+/// route's synthetic or harness id breaks its grammar,
+/// [`EncodeError::NullReplay`] when an assistant entry replay holds an
+/// explicit JSON null the decoder rejects, and
 /// [`EncodeError::MismatchedKind`] when a tree record's variant does not
 /// match its entry kind.
 pub fn encode(record: &Record) -> Result<Vec<u8>, EncodeError> {
@@ -98,6 +100,7 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 usage,
                 stop,
                 route,
+                replay,
             } = &entry.kind
             else {
                 return Err(EncodeError::MismatchedKind);
@@ -107,6 +110,9 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
             }
             if let Some(route) = route {
                 route.check_id(model).map_err(EncodeError::InvalidRoute)?;
+            }
+            if replay.as_ref().is_some_and(|raw| raw.as_str() == "null") {
+                return Err(EncodeError::NullReplay);
             }
             encode_json(&AssistantWire {
                 r#type: "assistant",
@@ -119,6 +125,7 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 usage: UsageWire::new(usage)?,
                 stop: AssistantStopWire(stop),
                 route: *route,
+                replay: replay.as_ref(),
             })
         }
         Record::ToolResult(entry) => {
@@ -304,6 +311,30 @@ fn encode_meta(record: &Record) -> Result<Vec<u8>, EncodeError> {
     }
 }
 
+/// Writes a turn-end record. Validates the summed usage before encoding so
+/// an unrepresentable cost reports [`EncodeError::InvalidCost`] in field
+/// order rather than emitting a rounded line.
+fn encode_turn_end(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    let Record::TurnEnd {
+        at,
+        turn,
+        stop,
+        usage,
+        changes,
+    } = record
+    else {
+        unreachable!("encode_turn_end handles only turn-end records")
+    };
+    encode_json(&TurnEndWire {
+        r#type: "turn_end",
+        at: TsWire(at),
+        turn: *turn,
+        stop: TurnEndStopWire(stop),
+        usage: usage.as_ref().map(UsageWire::new).transpose()?,
+        changes,
+    })
+}
+
 /// Turn control records.
 fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
     match record {
@@ -323,20 +354,7 @@ fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
             turn: *turn,
             call,
         }),
-        Record::TurnEnd {
-            at,
-            turn,
-            stop,
-            usage,
-            changes,
-        } => encode_json(&TurnEndWire {
-            r#type: "turn_end",
-            at: TsWire(at),
-            turn: *turn,
-            stop: TurnEndStopWire(stop),
-            usage: usage.as_ref().map(UsageWire::new).transpose()?,
-            changes,
-        }),
+        Record::TurnEnd { .. } => encode_turn_end(record),
         Record::RuleFired {
             at,
             turn,
@@ -355,6 +373,7 @@ fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
             answer,
             by,
             was_default,
+            cause,
         } => encode_json(&ResolvedWire {
             r#type: "resolved",
             at: TsWire(at),
@@ -362,6 +381,7 @@ fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
             answer: AnswerWire(answer),
             by,
             was_default: *was_default,
+            cause: cause.map(ResolutionCauseWire),
         }),
         Record::BeforeRequestMut {
             at,

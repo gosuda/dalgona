@@ -291,7 +291,10 @@ fn assistant_line_of(line_len: usize) -> Record {
                 api: dal_core::Family::Chat,
                 model: "test-model".into(),
                 route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
-                content: vec![dal_core::Block::Text { text: text.into() }],
+                content: vec![dal_core::Block::Text {
+                    text: text.into(),
+                    replay: None,
+                }],
                 usage: dal_core::Usage {
                     input_tokens: 0,
                     cached_input_tokens: 0,
@@ -301,6 +304,7 @@ fn assistant_line_of(line_len: usize) -> Record {
                     cost_usd: None,
                 },
                 stop: dal_core::AssistantStop::Done,
+                replay: None,
             },
         })
     };

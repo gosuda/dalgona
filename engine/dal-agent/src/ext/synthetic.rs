@@ -811,6 +811,7 @@ impl Loop {
         if !self.round.text.is_empty() {
             parts.push(dal_core::AssistantPart::Text {
                 text: std::mem::take(&mut self.round.text).into(),
+                replay: None,
             });
         }
         for replay in std::mem::take(&mut self.round.replays) {
@@ -829,6 +830,7 @@ impl Loop {
                 call: CallId::new(call.id.as_str()),
                 name: call.name.as_str().into(),
                 args: args.clone(),
+                replay: None,
             });
             let (is_error, text) =
                 call_private(&self.tools, &self.private_cx, &self.workspace, &call, &args).await;
@@ -840,7 +842,11 @@ impl Loop {
             });
         }
         let mut context: Vec<ContextItem> = self.request.context.iter().cloned().collect();
-        context.push(ContextItem::Assistant { source, parts });
+        context.push(ContextItem::Assistant {
+            source,
+            parts,
+            replay: None,
+        });
         context.extend(results);
         self.request.context = context.into();
     }
