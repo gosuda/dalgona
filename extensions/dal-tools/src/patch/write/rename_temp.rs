@@ -82,6 +82,27 @@ mod platform {
         Ok(dir)
     }
 
+    /// Maps saved permission bits onto an `openat` create mode; `None` is a
+    /// new file's 0644. Built flag by flag because `RawMode` is not `u32` on
+    /// every Unix.
+    fn create_mode(saved: Option<u32>) -> Mode {
+        const BITS: [(u32, Mode); 9] = [
+            (0o400, Mode::RUSR),
+            (0o200, Mode::WUSR),
+            (0o100, Mode::XUSR),
+            (0o040, Mode::RGRP),
+            (0o020, Mode::WGRP),
+            (0o010, Mode::XGRP),
+            (0o004, Mode::ROTH),
+            (0o002, Mode::WOTH),
+            (0o001, Mode::XOTH),
+        ];
+        let bits = saved.unwrap_or(0o644);
+        BITS.iter()
+            .filter(|(bit, _)| bits & bit != 0)
+            .fold(Mode::empty(), |mode, (_, flag)| mode | *flag)
+    }
+
     pub(crate) struct RenameTemp {
         target: PathBuf,
         relative: PathBuf,
@@ -94,10 +115,13 @@ mod platform {
 
     impl RenameTemp {
         /// Open each parent below the workspace without following symlinks.
-        /// Keep the final directory handle through publication.
+        /// Keep the final directory handle through publication. The temp is
+        /// born with `saved_mode`, the permission bits it will publish with,
+        /// or 0644 for `None`; the umask only narrows that.
         pub(crate) fn create(
             workspace: &Path,
             relative: &Path,
+            saved_mode: Option<u32>,
         ) -> io::Result<(Self, std::fs::File)> {
             if !relative
                 .components()
@@ -129,6 +153,10 @@ mod platform {
                 Err(Errno::NOENT) => {}
                 Err(error) => return Err(io::Error::from(error)),
             }
+            // Born with the mode it will publish with: a descriptor opened
+            // while the temp was wider would survive the exact stamp that
+            // commit.rs applies to the handle afterwards.
+            let mode = create_mode(saved_mode);
             let mut staged = None;
             for _ in 0..16 {
                 let temp = OsString::from(format!(
@@ -141,9 +169,6 @@ mod platform {
                     | OFlags::EXCL
                     | OFlags::NOFOLLOW
                     | OFlags::CLOEXEC;
-                // Match the existing patch writer's default mode (0666 & umask).
-                let mode =
-                    Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH;
                 match rustix::fs::openat(&parent, temp.as_os_str(), flags, mode) {
                     Ok(handle) => {
                         staged = Some((temp, handle));
@@ -317,7 +342,13 @@ mod platform {
     }
 
     impl RenameTemp {
-        pub(crate) fn create(workspace: &Path, relative: &Path) -> io::Result<(Self, File)> {
+        /// Windows destinations inherit their ACLs from the parent directory,
+        /// so the saved POSIX bits have nothing to apply to.
+        pub(crate) fn create(
+            workspace: &Path,
+            relative: &Path,
+            _saved_mode: Option<u32>,
+        ) -> io::Result<(Self, File)> {
             if !relative
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
@@ -436,8 +467,12 @@ mod platform {
     }
 
     impl RenameTemp {
-        pub(crate) fn create(workspace: &Path, relative: &Path) -> io::Result<(Self, File)> {
-            let _ = (workspace, relative);
+        pub(crate) fn create(
+            workspace: &Path,
+            relative: &Path,
+            saved_mode: Option<u32>,
+        ) -> io::Result<(Self, File)> {
+            let _ = (workspace, relative, saved_mode);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "secure rename is unsupported on this platform",
@@ -480,7 +515,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let destination = Path::new("nested/target.txt");
         let (pending, mut temp) =
-            RenameTemp::create(workspace.path(), destination).expect("stage rename");
+            RenameTemp::create(workspace.path(), destination, None).expect("stage rename");
         temp.write_all(b"edited").expect("write staged bytes");
         temp.sync_all().expect("sync staged bytes");
         drop(temp);
@@ -505,8 +540,8 @@ mod tests {
         std::fs::create_dir(&outside).expect("outside");
         let original_parent = workspace.join("sub");
         std::fs::create_dir(&original_parent).expect("destination parent");
-        let (pending, mut temp) =
-            RenameTemp::create(&workspace, Path::new("sub/result.txt")).expect("staged rename");
+        let (pending, mut temp) = RenameTemp::create(&workspace, Path::new("sub/result.txt"), None)
+            .expect("staged rename");
         temp.write_all(b"inside").expect("write");
         temp.sync_all().expect("sync");
         drop(temp);
@@ -540,8 +575,8 @@ mod tests {
         std::fs::create_dir(&outside).expect("outside");
         let original_parent = workspace.join("sub");
         std::fs::create_dir(&original_parent).expect("destination parent");
-        let (pending, mut temp) =
-            RenameTemp::create(&workspace, Path::new("sub/result.txt")).expect("staged rename");
+        let (pending, mut temp) = RenameTemp::create(&workspace, Path::new("sub/result.txt"), None)
+            .expect("staged rename");
         temp.write_all(b"inside").expect("write");
         temp.sync_all().expect("sync");
         drop(temp);
@@ -569,7 +604,7 @@ mod tests {
         std::fs::create_dir(&real).expect("real workspace");
         let link = root.path().join("link");
         std::os::unix::fs::symlink(&real, &link).expect("link workspace root");
-        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"))
+        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"), None)
             .expect("a linked workspace root must stage");
         temp.write_all(b"inside").expect("write");
         temp.sync_all().expect("sync");
@@ -592,7 +627,7 @@ mod tests {
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300))
             .expect("write-and-search-only parent");
         let (pending, mut temp) =
-            RenameTemp::create(workspace.path(), Path::new("private/result.txt"))
+            RenameTemp::create(workspace.path(), Path::new("private/result.txt"), None)
                 .expect("a write-and-search-only parent must stage");
         temp.write_all(b"inside").expect("write");
         temp.sync_all().expect("sync");
@@ -622,7 +657,7 @@ mod tests {
             .status()
             .expect("mklink junction");
         assert!(status.success());
-        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"))
+        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"), None)
             .expect("a linked workspace root must stage");
         temp.write_all(b"inside").expect("write");
         temp.sync_all().expect("sync");
@@ -640,7 +675,7 @@ mod tests {
     fn dangling_destination_symlink_is_not_replaced() {
         let workspace = tempfile::tempdir().expect("workspace");
         let (pending, mut temp) =
-            RenameTemp::create(workspace.path(), Path::new("target.txt")).expect("stage");
+            RenameTemp::create(workspace.path(), Path::new("target.txt"), None).expect("stage");
         temp.write_all(b"inside").expect("write");
         drop(temp);
         std::os::unix::fs::symlink("missing.txt", workspace.path().join("target.txt"))
@@ -662,7 +697,28 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let outside = tempfile::tempdir().expect("outside");
         std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).expect("symlink");
-        assert!(RenameTemp::create(workspace.path(), Path::new("link/target.txt")).is_err());
+        assert!(RenameTemp::create(workspace.path(), Path::new("link/target.txt"), None).is_err());
         assert!(!outside.path().join("target.txt").exists());
+    }
+
+    /// A private destination must never sit in a wider temp, even briefly: a
+    /// descriptor opened in that gap survives the later exact stamp. The
+    /// umask only removes bits at creation, so no bit outside the saved mode
+    /// may appear on the freshly created handle.
+    #[cfg(unix)]
+    #[test]
+    fn temp_is_born_with_the_saved_mode() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let destination = Path::new("out.txt");
+        for (saved, ceiling) in [(Some(0o600), 0o600), (Some(0o400), 0o400), (None, 0o644)] {
+            let (pending, temp) =
+                RenameTemp::create(workspace.path(), destination, saved).expect("stage rename");
+            let born = temp.metadata().expect("temp metadata").mode() & 0o777;
+            assert_eq!(born & !ceiling, 0, "{saved:?} born as {born:o}");
+            drop(temp);
+            pending.cleanup();
+        }
     }
 }

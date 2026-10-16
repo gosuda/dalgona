@@ -848,7 +848,11 @@ pub(crate) mod tests {
 
         let escaped = [
             workspace.join("inside.txt").to_string_lossy().into_owned(),
-            parent.path().join("secret.txt").to_string_lossy().into_owned(),
+            parent
+                .path()
+                .join("secret.txt")
+                .to_string_lossy()
+                .into_owned(),
             "../secret.txt".to_owned(),
             "nested/../inside.txt".to_owned(),
         ];
@@ -882,7 +886,11 @@ pub(crate) mod tests {
         {
             use std::os::unix::fs::symlink;
 
-            symlink(parent.path().join("secret.txt"), workspace.join("outside-file")).unwrap();
+            symlink(
+                parent.path().join("secret.txt"),
+                workspace.join("outside-file"),
+            )
+            .unwrap();
             symlink(parent.path(), workspace.join("outside-dir")).unwrap();
             symlink(workspace.join("inside.txt"), workspace.join("inside-link")).unwrap();
 

@@ -58,7 +58,10 @@ mod tests {
         fs::write(nested.join("file.txt"), "inside").unwrap();
 
         let found = resolve(root.path(), Path::new("nested/./file.txt")).unwrap();
-        assert_eq!(found.absolute, fs::canonicalize(nested.join("file.txt")).unwrap());
+        assert_eq!(
+            found.absolute,
+            fs::canonicalize(nested.join("file.txt")).unwrap()
+        );
         assert_eq!(found.relative, Path::new("nested/file.txt"));
 
         for path in [
