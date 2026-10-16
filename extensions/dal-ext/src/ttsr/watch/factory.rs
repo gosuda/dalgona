@@ -21,12 +21,15 @@ use dal_agent::ext::{
     BoxFuture, HookError, StreamFire, StreamFireAction, StreamWatch, StreamWatchRecord, TurnInfo,
     WatchFactory,
 };
-use dal_core::{Channel, EntryId, ModelRoute, Notice, RawJson, RulesConfig, StreamVerdict, TurnId};
+use dal_core::{
+    Channel, EntryId, ModelRoute, Notice, RawJson, RulesConfig, SessionId, StreamVerdict, TurnId,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::super::build::RuleSet;
-use super::super::gate::Gate;
+use super::super::gate::{Gate, resolve_cfg};
 use super::super::judged::{JudgedLane, MatchDecision};
+use super::super::lane::{LANE_RULE, Lanes, lane_rule};
 use super::super::readers::EditStyle;
 use super::super::texts::{RuleSubject, judge_failure_note, judge_pass_note};
 use super::super::value::RuleAction;
@@ -53,6 +56,9 @@ pub struct TtsrWatchFactory {
     judge: Option<crate::judge::Judge>,
     budget: Arc<Mutex<TurnBudget>>,
     judged: Arc<Mutex<JudgedLane>>,
+    /// The session-keyed lane store, present only when the product composes
+    /// the repetitive-turns lane.
+    lanes: Option<Arc<Lanes>>,
 }
 
 impl TtsrWatchFactory {
@@ -77,7 +83,16 @@ impl TtsrWatchFactory {
                 interrupts: 0,
             })),
             judged: Arc::new(Mutex::new(JudgedLane::new())),
+            lanes: None,
         }
+    }
+
+    /// Composes the repetitive-turns lane: each request's watch delivers the
+    /// session's parked lane fire, if any, before its first feed.
+    #[must_use]
+    pub fn with_lane(mut self, lanes: Arc<Lanes>) -> Self {
+        self.lanes = Some(lanes);
+        self
     }
 }
 
@@ -102,7 +117,7 @@ impl WatchFactory for TtsrWatchFactory {
         let edit_style = turn
             .model
             .map_or(EditStyle::Replace, |route| (self.pick_edit_style)(route));
-        let watch = create(
+        let mut watch = create(
             &self.set,
             &gate,
             turn.turn,
@@ -111,6 +126,18 @@ impl WatchFactory for TtsrWatchFactory {
             &self.ws_root,
             edit_style,
         );
+        // The parked lane fire rides this request's watch as fire index 0,
+        // ahead of any feed, and stays parked until its reminder record is
+        // durable: a cancelled or shed batch resurfaces it on the next
+        // request.
+        if let Some(lanes) = &self.lanes
+            && let Some(excerpt) = lanes.pending(turn.session)
+        {
+            let repeat = resolve_cfg(lane_rule(), &self.cfg);
+            if gate.eligible(lane_rule(), turn.turn, &repeat) {
+                watch.push_lane_fire(&excerpt);
+            }
+        }
         Some(Box::new(TtsrWatchAdapter {
             watch,
             gate: Arc::clone(&self.gate),
@@ -119,6 +146,10 @@ impl WatchFactory for TtsrWatchFactory {
             budget: Arc::clone(&self.budget),
             judge: self.judge.clone(),
             judged: Arc::clone(&self.judged),
+            lanes: self
+                .lanes
+                .as_ref()
+                .map(|lanes| (Arc::clone(lanes), turn.session)),
             stopped: false,
             reported_fires: 0,
             notices: Vec::new(),
@@ -135,6 +166,9 @@ pub struct TtsrWatchAdapter {
     budget: Arc<Mutex<TurnBudget>>,
     judge: Option<crate::judge::Judge>,
     judged: Arc<Mutex<JudgedLane>>,
+    /// The lane store and this session's id, present only when the product
+    /// composes the repetitive-turns lane.
+    lanes: Option<(Arc<Lanes>, SessionId)>,
     stopped: bool,
     reported_fires: usize,
     notices: Vec<Notice>,
@@ -165,10 +199,23 @@ impl TtsrWatchAdapter {
     }
 
     /// Latches one delivered fire in the shared repeat gate; see
-    /// [`Watch::gate_record`]. A poisoned gate skips the latch.
+    /// [`Watch::gate_record`]. A poisoned gate skips the latch. A durable
+    /// lane reminder also clears the session's parked fire, so it is not
+    /// resurfaced; a batch that never becomes durable skips this call and
+    /// the fire rides the next request instead.
     pub fn gate_record(&self, fire: usize, entry: Option<EntryId>) {
         if let Ok(mut gate) = self.gate.lock() {
             self.watch.gate_record(&mut gate, fire, entry);
+        }
+        if let Some((lanes, session)) = &self.lanes
+            && entry.is_some()
+            && self
+                .watch
+                .fires()
+                .get(fire)
+                .is_some_and(|fire| fire.rule.as_str() == LANE_RULE)
+        {
+            lanes.delivered(*session);
         }
     }
 

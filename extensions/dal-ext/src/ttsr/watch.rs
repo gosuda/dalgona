@@ -29,10 +29,11 @@ mod record;
 mod tool;
 
 use super::gate::{Gate, resolve_cfg};
+use super::lane::{LANE_RULE, lane_rule};
 use super::matcher::{Compiled, StreamState};
 use super::readers::EditStyle;
 use super::texts::{
-    fire_description, render_interrupt_text, render_reminder_text, retry_limit_note,
+    RuleSubject, fire_description, render_interrupt_text, render_reminder_text, retry_limit_note,
 };
 use super::value::{InterruptMode, Name, Origin, Rule, RuleAction};
 
@@ -260,6 +261,32 @@ pub fn create(
 }
 
 impl Watch {
+    /// Parks the repetitive-turns lane fire as fire index 0 on this watch,
+    /// before any feed, so `take_fires` surfaces it through the same
+    /// reminder path a stream fire uses.
+    ///
+    /// Valid only while the watch is fresh with no fires; any other state
+    /// leaves the watch unchanged and answers `false`.
+    pub fn push_lane_fire(&mut self, excerpt: &str) -> bool {
+        if !matches!(self.state, State::Fresh) || !self.fires.is_empty() {
+            return false;
+        }
+        let rule = lane_rule();
+        self.fires.push(Fire {
+            rule: rule.name.clone(),
+            action: RuleAction::Remind,
+            source: SourceKind::Text,
+            path: None,
+            pattern: LANE_RULE.into(),
+            excerpt: excerpt.to_owned().into_boxed_str(),
+            subject: RuleSubject::Reply.render().into_boxed_str(),
+            description: fire_description(rule).to_owned().into_boxed_str(),
+            inject: Some(render_reminder_text(rule, RuleSubject::Reply).into_boxed_str()),
+            judged: false,
+        });
+        true
+    }
+
     /// The turn this watch observes.
     #[must_use]
     pub fn turn(&self) -> TurnId {
@@ -502,6 +529,11 @@ impl Watch {
     /// name their file in the record's own provenance and carry none here.
     fn origin_label(&self, fire: usize) -> Option<String> {
         let fired = self.fires.get(fire)?;
+        // The lane fire rides no admitted slot: its built-in rule carries the
+        // provenance itself.
+        if fired.rule.as_str() == LANE_RULE {
+            return Some(lane_rule().origin.source_label());
+        }
         let admitted = self
             .admitted
             .iter()

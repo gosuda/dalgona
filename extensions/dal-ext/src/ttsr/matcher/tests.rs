@@ -415,9 +415,12 @@ proptest! {
         ) {
             let (pattern, compiled) = &LAZY_PATTERNS[which];
             let deltas = split(text.as_bytes(), &cuts);
-            let expected = oracle(pattern)
-                .shortest_match(text.as_bytes())
-                .map(|end| delta_containing(&deltas, end - 1));
+            let re = oracle(pattern);
+            let mut end = 0;
+            let expected = deltas.iter().position(|delta| {
+                end += delta.len();
+                re.is_match(&text.as_bytes()[..end])
+            });
             prop_assert_eq!(fire_delta_compiled(compiled, &deltas), expected);
         }
 
