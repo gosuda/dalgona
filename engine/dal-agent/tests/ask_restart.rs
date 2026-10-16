@@ -54,15 +54,18 @@ fn dangling_journal(workspace: Workspace) -> Vec<Record> {
                     id: ask.clone(),
                     name: "ask".into(),
                     input: RawJson::parse("{}").expect("args"),
+                    replay: None,
                 },
                 Block::ToolCall {
                     id: read.clone(),
                     name: "read".into(),
                     input: RawJson::parse("{}").expect("args"),
+                    replay: None,
                 },
             ],
             usage: usage(),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     };
     vec![

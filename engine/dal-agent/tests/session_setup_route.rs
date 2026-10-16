@@ -50,6 +50,7 @@ fn assistant(id: u64, route: Option<AssistantRoute>) -> Record {
                 cost_usd: None,
             },
             stop: AssistantStop::Done,
+            replay: None,
         },
     })
 }

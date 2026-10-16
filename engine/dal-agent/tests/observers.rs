@@ -278,7 +278,7 @@ async fn a_same_feed_reminder_precedes_the_interrupt_reminder_and_retry_answer()
                 Some((source.as_ref(), text.as_ref()))
             }
             dal_core::EntryKind::Assistant { content, .. } => content.iter().find_map(|block| {
-                if let dal_core::Block::Text { text } = block {
+                if let dal_core::Block::Text { text, .. } = block {
                     Some(("assistant", text.as_ref()))
                 } else {
                     None
@@ -704,7 +704,7 @@ async fn legacy_interrupt_cap_continues_the_stream_and_resets_next_turn() {
                 content
                     .iter()
                     .filter_map(|block| {
-                        if let dal_core::Block::Text { text } = block {
+                        if let dal_core::Block::Text { text, .. } = block {
                             Some(text.as_ref())
                         } else {
                             None

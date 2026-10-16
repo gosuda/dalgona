@@ -295,7 +295,7 @@ fn journaled_texts(view: &View) -> (Reminders, String) {
             }
             EntryKind::Assistant { content, .. } => {
                 for block in content {
-                    if let Block::Text { text } = block {
+                    if let Block::Text { text, .. } = block {
                         assistant.push_str(text);
                     }
                 }
