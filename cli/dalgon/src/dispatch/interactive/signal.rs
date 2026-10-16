@@ -2,16 +2,19 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
-use dal_tui::term::{CrosstermTermIo, TermIo};
+use dal_tui::term::{CrosstermTermIo, CursorReport, TermIo};
 use tokio::task::JoinHandle;
 
 /// Signal subscriptions owned by one interactive invocation.
 pub(super) struct Signals {
     stop: Arc<AtomicU8>,
     resize: Arc<AtomicBool>,
+    /// Counts every resize notification; coalesced and net-zero resizes move
+    /// the screen even when the size flag reads the same twice.
+    epoch: Arc<AtomicU64>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -20,10 +23,12 @@ impl Signals {
     pub(super) fn start() -> io::Result<Self> {
         let stop = Arc::new(AtomicU8::new(0));
         let resize = Arc::new(AtomicBool::new(false));
-        let tasks = start_tasks(Arc::clone(&stop), Arc::clone(&resize))?;
+        let epoch = Arc::new(AtomicU64::new(0));
+        let tasks = start_tasks(Arc::clone(&stop), Arc::clone(&resize), Arc::clone(&epoch))?;
         Ok(Self {
             stop,
             resize,
+            epoch,
             tasks,
         })
     }
@@ -34,6 +39,7 @@ impl Signals {
             inner: CrosstermTermIo::new(stdin),
             stop: Arc::clone(&self.stop),
             resize: Arc::clone(&self.resize),
+            epoch: Arc::clone(&self.epoch),
         }
     }
 
@@ -53,7 +59,11 @@ impl Drop for Signals {
 }
 
 #[cfg(unix)]
-fn start_tasks(stop: Arc<AtomicU8>, resize: Arc<AtomicBool>) -> io::Result<Vec<JoinHandle<()>>> {
+fn start_tasks(
+    stop: Arc<AtomicU8>,
+    resize: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
+) -> io::Result<Vec<JoinHandle<()>>> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -78,6 +88,7 @@ fn start_tasks(stop: Arc<AtomicU8>, resize: Arc<AtomicBool>) -> io::Result<Vec<J
     )]
     let resize_task = tokio::spawn(async move {
         while window_change.recv().await.is_some() {
+            epoch.fetch_add(1, Ordering::SeqCst);
             resize.store(true, Ordering::SeqCst);
         }
     });
@@ -93,7 +104,11 @@ fn start_tasks(stop: Arc<AtomicU8>, resize: Arc<AtomicBool>) -> io::Result<Vec<J
     clippy::unnecessary_wraps,
     reason = "the unix variant fails on signal-driver setup; this variant cannot fail"
 )]
-fn start_tasks(stop: Arc<AtomicU8>, _resize: Arc<AtomicBool>) -> io::Result<Vec<JoinHandle<()>>> {
+fn start_tasks(
+    stop: Arc<AtomicU8>,
+    _resize: Arc<AtomicBool>,
+    _epoch: Arc<AtomicU64>,
+) -> io::Result<Vec<JoinHandle<()>>> {
     Ok(vec![tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             stop.store(130, Ordering::SeqCst);
@@ -106,6 +121,7 @@ pub(super) struct SignalTermIo {
     inner: CrosstermTermIo,
     stop: Arc<AtomicU8>,
     resize: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
 }
 
 impl TermIo for SignalTermIo {
@@ -143,6 +159,21 @@ impl TermIo for SignalTermIo {
 
     fn take_resize(&self) -> bool {
         self.resize.swap(false, Ordering::SeqCst)
+    }
+
+    /// SIGWINCH count plus any inner resize events (Windows `Event::Resize`).
+    fn resize_epoch(&self) -> u64 {
+        self.epoch
+            .load(Ordering::SeqCst)
+            .saturating_add(self.inner.resize_epoch())
+    }
+
+    /// Caret queries hold during shutdown; otherwise the adapter measures.
+    fn cursor_position(&self, timeout: Duration) -> io::Result<CursorReport> {
+        if self.shutdown_code().is_some() {
+            return Ok(CursorReport::Silent);
+        }
+        self.inner.cursor_position(timeout)
     }
 
     fn open_url(&self, url: &str) -> io::Result<()> {
