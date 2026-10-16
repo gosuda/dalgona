@@ -5,6 +5,9 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
+use std::{os::unix::fs::PermissionsExt as _, path::Path};
+
+#[cfg(unix)]
 use super::{COMPLETION_TAIL_BYTES, PREVIEW_BYTES, tail_preview};
 use super::{Launcher, SpawnOpts, spawn_process};
 use super::{MAX_STDOUT_PREFIX_BYTES, ProcStatus, StopReason};
@@ -108,7 +111,6 @@ async fn spawn_approved(
 #[tokio::test]
 async fn proc_spawns_captures_output_and_reports_bounded_env() {
     let temp = tempfile::tempdir().expect("temp workspace");
-    let log_path = temp.path().join("jobs").join("test-call-lifetime.log");
     let mut proc = spawn_approved(
         &temp,
         "test-call-lifetime",
@@ -122,7 +124,11 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     let result = proc.wait(&cancel).await.expect("wait test shell");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
     assert_eq!(result.outcome, dal_core::JobOutcome::Exited { code: 0 });
-    assert_eq!(result.log_path, log_path);
+    assert!(
+        result.log_path.starts_with(temp.path().join("jobs")),
+        "the durable log lives in the jobs directory: {:?}",
+        result.log_path
+    );
     assert!(result.log_path.exists());
     let preview = String::from_utf8_lossy(&result.preview);
     assert!(
@@ -146,7 +152,7 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     assert!(!result.denial_seen);
     let tail = proc.tail(64);
     assert!(!tail.is_empty());
-    let preview_from_file = tail_preview(&log_path, PREVIEW_BYTES).expect("tail preview");
+    let preview_from_file = tail_preview(&result.log_path, PREVIEW_BYTES).expect("tail preview");
     assert_eq!(preview_from_file.as_ref(), result.preview.as_ref());
 }
 
@@ -211,6 +217,164 @@ async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
         .expect("wait settles despite surviving grandchild")
         .expect("wait test shell");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+}
+
+/// Asserts `path` is the jobs directory itself holding a host-minted
+/// `UUIDv7` log name, proving call text never became the filename.
+#[cfg(unix)]
+fn assert_job_owned_log(jobs: &Path, path: &Path) {
+    assert_eq!(
+        path.parent(),
+        Some(jobs),
+        "the durable log lives in the jobs directory: {path:?}"
+    );
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("uuid log name");
+    dal_core::JobId::parse(stem).expect("log name is a host-minted uuid");
+}
+
+/// Runs one child with the given call identity through the checked door and
+/// returns its settled result.
+#[cfg(unix)]
+async fn run_with_call_id(
+    temp: &tempfile::TempDir,
+    call: &CallId,
+    script: &str,
+) -> Result<super::ProcResult, ToolError> {
+    let digest = Some([9_u8; 32]);
+    let approved = approved_for(call, digest, vec![temp.path().to_path_buf()]);
+    let opts = SpawnOpts {
+        cwd: temp.path().to_path_buf(),
+        timeout: None,
+        env: Vec::new(),
+        stdout_prefix_limit: 0,
+    };
+    let mut proc = spawn_process(
+        &shell_argv(script),
+        call.clone(),
+        opts,
+        &approved,
+        digest,
+        &temp.path().join("jobs"),
+        &child_env(),
+        &Launcher::Direct,
+        test_permit().await,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("call id still spawns: {error}"));
+    proc.wait(&CancellationToken::new()).await
+}
+
+/// Every path a provider call may carry — relative traversal, absolute
+/// targets, 8 KiB of text — must stay data: the log lands only under the
+/// minted UUID name inside the jobs directory and nothing appears outside.
+#[cfg(unix)]
+#[tokio::test]
+async fn path_shaped_call_ids_cannot_escape_the_jobs_dir() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let outside = tempfile::tempdir().expect("outside store");
+    std::fs::write(outside.path().join("sentinel"), b"guard").expect("sentinel");
+
+    let jobs = temp.path().join("jobs");
+    for (label, call) in [
+        ("traversal", CallId::new("../../sentinel")),
+        (
+            "absolute",
+            CallId::new(format!("{}/abs-target", outside.path().display())),
+        ),
+        ("oversized", CallId::new("x".repeat(8192))),
+    ] {
+        let result = run_with_call_id(&temp, &call, "printf 'out'")
+            .await
+            .unwrap_or_else(|error| panic!("{label} call id does not run: {error}"));
+        assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+        assert_job_owned_log(&jobs, &result.log_path);
+        assert_eq!(
+            std::fs::read(&result.log_path).expect("log bytes"),
+            b"out",
+            "{label} call id captured into the owned log"
+        );
+    }
+
+    let sentinel = outside.path().join("sentinel");
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel bytes"),
+        b"guard",
+        "the sentinel content is untouched"
+    );
+    let outside_entries: Vec<_> = std::fs::read_dir(outside.path())
+        .expect("outside store")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(outside_entries.len(), 1, "no log escaped the jobs dir");
+    assert_eq!(outside_entries[0], "sentinel");
+}
+
+/// Repeating one provider call identity must open a second distinct owned
+/// log and leave the first run's durable output intact.
+#[cfg(unix)]
+#[tokio::test]
+async fn repeated_call_id_writes_distinct_logs_without_truncation() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let call = CallId::new("test-repeat");
+
+    let first = run_with_call_id(&temp, &call, "printf 'first'")
+        .await
+        .expect("first repeat runs");
+    let second = run_with_call_id(&temp, &call, "printf 'second'")
+        .await
+        .expect("second repeat runs");
+
+    assert_ne!(first.log_path, second.log_path, "runs get distinct logs");
+    assert_eq!(
+        std::fs::read(&first.log_path).expect("first log bytes"),
+        b"first",
+        "the first run's output survives the second run"
+    );
+    assert_eq!(
+        std::fs::read(&second.log_path).expect("second log bytes"),
+        b"second"
+    );
+}
+
+/// The capture log is created owner-private and never follows a planted
+/// symlink or truncates a preexisting file at its own name.
+#[cfg(unix)]
+#[test]
+fn capture_log_open_refuses_existing_and_symlinked_paths() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+
+    let existing = temp.path().join("existing.log");
+    std::fs::write(&existing, b"keep").expect("preexisting file");
+    let error = super::open_capture_log(&existing).expect_err("preexisting name refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&existing).expect("preexisting bytes"),
+        b"keep",
+        "the preexisting file is not truncated"
+    );
+
+    let sentinel = temp.path().join("sentinel");
+    std::fs::write(&sentinel, b"guard").expect("sentinel file");
+    let link = temp.path().join("link.log");
+    std::os::unix::fs::symlink(&sentinel, &link).expect("planted symlink");
+    let error = super::open_capture_log(&link).expect_err("symlinked name refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel bytes"),
+        b"guard",
+        "the symlink target is never written through"
+    );
+
+    let fresh = temp.path().join("fresh.log");
+    super::open_capture_log(&fresh).expect("fresh name opens");
+    let mode = std::fs::metadata(&fresh)
+        .expect("fresh log metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "the log is owner-private");
 }
 
 // The escape probe must reach setsid(), setpgid(), and posix_spawn's
@@ -397,9 +561,10 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
     let cancel = CancellationToken::new();
     let result = proc.wait(&cancel).await.expect("wait in-scope child");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
-    assert_eq!(
-        result.log_path,
-        temp.path().join("jobs").join("test-approved-allow.log")
+    assert!(
+        result.log_path.starts_with(temp.path().join("jobs")),
+        "the durable log lives in the jobs directory: {:?}",
+        result.log_path
     );
 }
 
@@ -444,7 +609,6 @@ async fn approved_scope_denies_digest_mismatch_without_spawning() {
     let temp = tempfile::tempdir().expect("temp workspace");
     let call = CallId::new("test-approved-digest");
     let approved = approved_for(&call, Some([7_u8; 32]), vec![temp.path().to_path_buf()]);
-    let log_path = temp.path().join("jobs").join("test-approved-digest.log");
     let opts = SpawnOpts {
         cwd: temp.path().to_path_buf(),
         timeout: None,
@@ -464,7 +628,10 @@ async fn approved_scope_denies_digest_mismatch_without_spawning() {
         None,
     );
     assert!(denied_out_of_scope(&result));
-    assert!(!log_path.exists());
+    assert!(
+        !temp.path().join("jobs").exists(),
+        "the digest refusal created no jobs directory"
+    );
 }
 
 #[tokio::test]
@@ -475,7 +642,6 @@ async fn approved_scope_denies_foreign_call_without_spawning() {
         Some([7_u8; 32]),
         vec![temp.path().to_path_buf()],
     );
-    let log_path = temp.path().join("jobs").join("test-approved-call.log");
     let opts = SpawnOpts {
         cwd: temp.path().to_path_buf(),
         timeout: None,
@@ -495,7 +661,10 @@ async fn approved_scope_denies_foreign_call_without_spawning() {
         None,
     );
     assert!(denied_out_of_scope(&result));
-    assert!(!log_path.exists());
+    assert!(
+        !temp.path().join("jobs").exists(),
+        "the foreign-call refusal created no jobs directory"
+    );
 }
 
 #[tokio::test]
@@ -505,7 +674,6 @@ async fn approved_scope_denies_cwd_outside_roots_without_spawning() {
     let call = CallId::new("test-approved-roots");
     let digest = Some([7_u8; 32]);
     let approved = approved_for(&call, digest, vec![elsewhere.path().to_path_buf()]);
-    let log_path = temp.path().join("jobs").join("test-approved-roots.log");
     let opts = SpawnOpts {
         cwd: temp.path().to_path_buf(),
         timeout: None,
@@ -525,7 +693,10 @@ async fn approved_scope_denies_cwd_outside_roots_without_spawning() {
         None,
     );
     assert!(denied_out_of_scope(&result));
-    assert!(!log_path.exists());
+    assert!(
+        !temp.path().join("jobs").exists(),
+        "the out-of-roots refusal created no jobs directory"
+    );
 }
 
 #[tokio::test]
@@ -557,8 +728,14 @@ async fn spawn_refuses_stdout_prefix_limits_above_the_maximum_before_launching()
         ("protocol-max", protocol_max),
     ] {
         let temp = tempfile::tempdir().expect("temp workspace");
-        let call = format!("test-prefix-{name}");
-        let result = spawn_approved(&temp, &call, &echo_argv("ok"), None, limit).await;
+        let result = spawn_approved(
+            &temp,
+            &format!("test-prefix-{name}"),
+            &echo_argv("ok"),
+            None,
+            limit,
+        )
+        .await;
         let Err(ToolError::Failed(error)) = result else {
             panic!("limit {limit} must fail as a tool failure, got {result:?}");
         };
@@ -572,7 +749,6 @@ async fn spawn_refuses_stdout_prefix_limits_above_the_maximum_before_launching()
         );
         let jobs = temp.path().join("jobs");
         assert!(!jobs.exists(), "limit {limit} created a jobs directory");
-        assert!(!jobs.join(format!("{call}.log")).exists());
     }
 }
 

@@ -4,6 +4,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -63,6 +64,45 @@ pub(crate) const PROCESS_FD_COST: usize = 4;
 pub const FULL_OUTPUT_PREFIX: &str = "Full output: ";
 /// Marker written as the final bytes of a capped output file.
 pub const TRUNCATION_MARKER: &str = "[dalgon: output truncated at 16777216 bytes]";
+
+/// Publishes one keyed process-progress row while a child runs.
+///
+/// The owning session implements this with the keyed update port that
+/// replaces the unsent `UpdateKind::ToolProgress` row for the call.
+/// `Proc` only renders the tail and never touches the journal.
+pub(crate) trait ProgressPort: Send + Sync + 'static {
+    /// Publishes `tail` as the current progress text of `call`.
+    fn publish_progress(&self, call: &CallId, tail: Box<str>);
+}
+
+/// The last `n` lines of a tail snapshot, lossily decoded for display only.
+///
+/// The durable log keeps the raw bytes; this rendering never feeds back
+/// into capture. It is the exec-owned rendering rule the door renders for
+/// each 250 ms progress row.
+fn last_lines(bytes: &[u8], n: usize) -> String {
+    // `n == 0` keeps the old slice semantics: an empty render, not the
+    // whole tail.
+    if n == 0 {
+        return String::new();
+    }
+    // The suffix starts after the `n`-th newline from the end: a `\n` byte
+    // can never sit inside a multi-byte UTF-8 sequence, so one lossy
+    // conversion over the borrowed suffix equals per-line lossy decoding
+    // joined on the same separators, trailing empty segment included.
+    let mut newlines = 0;
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate().rev() {
+        if *byte == b'\n' {
+            newlines += 1;
+            if newlines == n {
+                start = index + 1;
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
 
 /// How a running process was stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +198,8 @@ pub struct Proc {
     fd_permit: Option<FdPermit>,
     capture: Option<CaptureSet>,
     live_tail: tokio::sync::watch::Receiver<VecDeque<u8>>,
+    progress: Option<Arc<dyn ProgressPort>>,
+    progress_last: String,
     leader_pid: Option<u32>,
     timeout: Option<Duration>,
     started_at: Instant,
@@ -177,44 +219,123 @@ impl std::fmt::Debug for Proc {
 }
 
 impl Proc {
+    /// Attaches the keyed progress port published while the child runs.
+    ///
+    /// The caller that owns the session update port calls this at spawn;
+    /// detached parks clear it again with [`Proc::without_progress`].
+    pub(crate) fn with_progress(mut self, port: Arc<dyn ProgressPort>) -> Self {
+        self.progress = Some(port);
+        self
+    }
+
+    /// Clears the progress port before a detached park.
+    ///
+    /// Reaping a detached child must not publish for a call the loop
+    /// already settled; detached output stays on the job table instead.
+    pub(crate) fn without_progress(mut self) -> Self {
+        self.progress = None;
+        self
+    }
+
     /// Waits for the child or applies its timeout/cancellation stop ladder.
+    ///
+    /// When a [`ProgressPort`] is attached, every [`PROGRESS_PERIOD`] tick
+    /// that finds new capture bytes publishes the last [`PROGRESS_LINES`]
+    /// output lines as `UpdateKind::ToolProgress` under this call's
+    /// identity. A tick that finds no new bytes emits nothing, and ticks
+    /// stop with the terminal outcome or cancellation: the wait loop owns
+    /// the only ticker, so no detached task can outlive it.
     ///
     /// # Errors
     /// Returns an error if waiting for the child or draining captured output fails.
     pub async fn wait(&mut self, cancel: &CancellationToken) -> Result<ProcResult, ToolError> {
+        /// One settled wait step: either the leader exited, or the stop ladder runs.
+        enum Step {
+            Exited(std::process::ExitStatus),
+            Stop(StopReason),
+        }
+
         if let Some(result) = &self.result {
             return Ok(result.clone());
         }
 
-        let status = if let Some(timeout) = self.timeout {
-            let deadline = TokioInstant::from_std(self.started_at + timeout);
-            tokio::select! {
-                biased;
-                status = await_leader(&mut self.child) => {
-                    process_exit_status(status?)
+        let step = {
+            let leader = await_leader(&mut self.child);
+            tokio::pin!(leader);
+            let deadline = async {
+                if let Some(timeout) = self.timeout {
+                    time::sleep_until(TokioInstant::from_std(self.started_at + timeout)).await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
-                () = time::sleep_until(deadline) => {
-                    return self.stop(StopReason::Timeout).await;
-                }
-                () = cancel.cancelled() => {
-                    return self.stop(StopReason::Cancelled).await;
-                }
-            }
-        } else {
-            tokio::select! {
-                biased;
-                status = await_leader(&mut self.child) => {
-                    process_exit_status(status?)
-                }
-                () = cancel.cancelled() => {
-                    return self.stop(StopReason::Cancelled).await;
+            };
+            tokio::pin!(deadline);
+            let mut ticker = self.progress.as_ref().map(|_| {
+                let mut ticker =
+                    time::interval_at(TokioInstant::now() + PROGRESS_PERIOD, PROGRESS_PERIOD);
+                ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+                ticker
+            });
+            loop {
+                tokio::select! {
+                    biased;
+                    status = &mut leader => break Step::Exited(status?),
+                    () = &mut deadline => break Step::Stop(StopReason::Timeout),
+                    () = cancel.cancelled() => break Step::Stop(StopReason::Cancelled),
+                    rendered = Self::tick_progress(
+                        &mut ticker,
+                        &mut self.live_tail,
+                        &mut self.progress_last,
+                    ) => {
+                        if let (Some(text), Some(port)) = (rendered, &self.progress) {
+                            port.publish_progress(&self.call, text);
+                        }
+                    }
                 }
             }
         };
-        // A surviving descendant holding a pipe write end would stall
-        // capture at EOF below; stop what the command left running first.
-        self.sweep_after_exit().await;
-        self.finish(status).await
+        match step {
+            Step::Exited(status) => {
+                // A surviving descendant holding a pipe write end would stall
+                // capture at EOF below; stop what the command left running first.
+                self.sweep_after_exit().await;
+                self.finish(process_exit_status(status)).await
+            }
+            Step::Stop(reason) => self.stop(reason).await,
+        }
+    }
+
+    /// Renders one progress snapshot when the ticker fires and new capture
+    /// bytes arrived since the previous tick.
+    ///
+    /// Returns `None` when no port is attached (the arm then pends forever
+    /// instead of spinning), when capture produced no new bytes, when
+    /// capture already ended, or when the rendered tail repeats the
+    /// previous row. The tick future is cancel-safe: dropping it between
+    /// ticks only delays the next render.
+    async fn tick_progress(
+        ticker: &mut Option<time::Interval>,
+        tail: &mut tokio::sync::watch::Receiver<VecDeque<u8>>,
+        last: &mut String,
+    ) -> Option<Box<str>> {
+        let Some(ticker) = ticker.as_mut() else {
+            return std::future::pending().await;
+        };
+        ticker.tick().await;
+        // No new capture bytes since the last tick, or capture already
+        // ended while the leader wait still resolves: emit nothing.
+        if !tail.has_changed().unwrap_or(false) {
+            return None;
+        }
+        // VecDeque storage is split and never contiguous: copy the bounded
+        // ring snapshot before rendering.
+        let snapshot: Vec<u8> = tail.borrow_and_update().iter().copied().collect();
+        let rendered = last_lines(&snapshot, PROGRESS_LINES);
+        if rendered == *last {
+            return None;
+        }
+        last.clone_from(&rendered);
+        Some(rendered.into_boxed_str())
     }
 
     /// Stops a live child using the platform group/job-object ladder.
@@ -383,9 +504,48 @@ impl Drop for Proc {
     }
 }
 
+/// Checks argv, the prefix limit, and approval, in order.
+///
+/// Runs before any job identity is minted or log is created, so rejection
+/// releases the caller's permits without side effects.
+fn check_spawn_request(
+    argv: &[OsString],
+    opts: &SpawnOpts,
+    approved: &Approved,
+    call: &CallId,
+    preview_digest: Option<[u8; 32]>,
+) -> Result<(), ToolError> {
+    if argv.is_empty() {
+        return Err(ToolError::Spawn {
+            path: PathBuf::new(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "empty argv"),
+        });
+    }
+    if opts.stdout_prefix_limit > MAX_STDOUT_PREFIX_BYTES {
+        return Err(ToolError::Failed(Box::new(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stdout prefix limit exceeds 262145 bytes",
+        ))));
+    }
+    if approved.call() != call
+        || approved.digest() != preview_digest
+        || !cwd_in_roots(&opts.cwd, approved.roots())
+    {
+        return Err(ToolError::Denied(DenyReason::out_of_scope(format!(
+            "call {}",
+            call.as_str()
+        ))));
+    }
+    Ok(())
+}
+
 /// Starts a process after checking argv, the prefix limit, and approval, in order.
 ///
-/// Rejection releases the permits without creating a job or log.
+/// Rejection releases the permits without creating a job or log. After
+/// approval the door creates the jobs directory and opens the durable log
+/// under the minted job identity with `create_new` and a private mode, so
+/// provider call text can never steer where output lands. A failed spawn
+/// closes and removes that empty log before returning.
 /// The returned [`Proc`] owns the permits, capture task, and session log path.
 pub(crate) fn spawn_process(
     argv: &[OsString],
@@ -399,31 +559,28 @@ pub(crate) fn spawn_process(
     process_permit: Permit,
     fd_permit: Option<FdPermit>,
 ) -> Result<Proc, ToolError> {
-    if argv.is_empty() {
-        return Err(ToolError::Spawn {
-            path: PathBuf::new(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "empty argv"),
-        });
-    }
-    if opts.stdout_prefix_limit > MAX_STDOUT_PREFIX_BYTES {
-        return Err(ToolError::Failed(Box::new(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "stdout prefix limit exceeds 262145 bytes",
-        ))));
-    }
-    if approved.call() != &call
-        || approved.digest() != preview_digest
-        || !cwd_in_roots(&opts.cwd, approved.roots())
-    {
-        return Err(ToolError::Denied(DenyReason::out_of_scope(format!(
-            "call {}",
-            call.as_str()
-        ))));
-    }
+    check_spawn_request(argv, &opts, approved, &call, preview_digest)?;
     let stdout_prefix_limit = opts.stdout_prefix_limit;
-    let log_path = jobs_dir.join(format!("{}.log", call.as_str()));
     let job = JobId::new_v7();
+    // The provider call identity stays data: it keys progress and results
+    // but never becomes a filesystem path. The durable log lives only under
+    // the host-minted job identity inside the jobs directory.
+    let log_path = jobs_dir.join(format!("{job}.log"));
     let (program, command_args, launcher_profile) = launcher_argv(argv, &job, launcher)?;
+    if let Err(source) = fs::create_dir_all(jobs_dir) {
+        return Err(ToolError::Failed(Box::new(io::Error::new(
+            source.kind(),
+            format!("process log dir {}: {source}", jobs_dir.display()),
+        ))));
+    }
+    // Opened before the child exists: capture writes the same handle the
+    // spawn door created, so no window lets output land on another name.
+    let log_file = open_capture_log(&log_path).map_err(|source| {
+        ToolError::Failed(Box::new(io::Error::new(
+            source.kind(),
+            format!("process log {}: {source}", log_path.display()),
+        )))
+    })?;
     let cwd = opts.cwd;
     let timeout = opts.timeout;
     let env_overrides = opts.env;
@@ -448,10 +605,19 @@ pub(crate) fn spawn_process(
     }
     #[cfg(windows)]
     windows::wrap(&mut command);
-    let mut child = command.spawn().map_err(|source| ToolError::Spawn {
-        path: PathBuf::from(&program),
-        source,
-    })?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(source) => {
+            // The exclusive log has no reader yet: a failed spawn must not
+            // leave empty residue at the job-owned name.
+            drop(log_file);
+            let _ = fs::remove_file(&log_path);
+            return Err(ToolError::Spawn {
+                path: PathBuf::from(&program),
+                source,
+            });
+        }
+    };
     let leader_pid = child.id();
     let stdout = child.stdout().take().ok_or_else(|| {
         ToolError::Failed(Box::new(io::Error::other(
@@ -469,7 +635,7 @@ pub(crate) fn spawn_process(
     capture.spawn(run_capture(
         stdout,
         stderr,
-        log_path.clone(),
+        tokio::fs::File::from(log_file),
         stdout_prefix_limit,
         tail_tx,
     ));
@@ -486,12 +652,32 @@ pub(crate) fn spawn_process(
         fd_permit,
         capture: Some(capture),
         live_tail: tail_rx,
+        progress: None,
+        progress_last: String::new(),
         leader_pid,
         timeout,
         started_at: Instant::now(),
         result: None,
     })
 }
+
+/// Opens the durable capture log as a brand-new owner-private file.
+///
+/// `create_new` refuses every existing directory entry, regular file or
+/// symlink alike, so a preplanted name can neither be truncated nor
+/// followed outside the jobs directory; Unix also pins mode 0600.
+/// Fails closed: there is no fallback name.
+fn open_capture_log(path: &Path) -> Result<fs::File, io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Reports whether the canonical `cwd` sits below one canonical root.
 ///
 /// Both sides canonicalize; a missing path fails closed. Shared with the

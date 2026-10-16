@@ -1209,10 +1209,18 @@ impl ToolCxRuntime for CallRuntime {
             permit,
             Some(fd_permit),
         )
+        .map(|proc| {
+            let progress = Arc::clone(&self.shared);
+            proc.with_progress(progress)
+        })
     }
 
     fn detach(&self, proc: Proc) -> JobId {
         let job = proc.job_id();
+        // A parked child never publishes again: the dispatch loop settles
+        // this call without the child, and detached output belongs to the
+        // job table, not to a live progress card.
+        let proc = proc.without_progress();
         let park = ParkDetached {
             jobs: Arc::clone(&self.jobs),
             ledger: Arc::clone(&self.ledger),
@@ -2514,6 +2522,10 @@ impl ParkDetached {
             tool,
             proc,
         } = self;
+        // Every park entry arrives stripped: a parked child never publishes
+        // again, even if a future caller forgets `without_progress` before
+        // constructing the park. Clearing an already-clear port is a no-op.
+        let proc = proc.without_progress();
         let job = proc.job_id();
         let log_path = proc.log_path().to_path_buf();
         let mut ledger = ledger.lock().await;
