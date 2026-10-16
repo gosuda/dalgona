@@ -308,3 +308,4 @@
 - Remove the `notify` example plugin; its behavior cannot run under the v1 hook limits.
 - Fix extension records: `append_record` now writes a journal record before it returns, `records` reads only the calling extension's rows on the current leaf path, and a tool call runs as the extension that registered it, with that extension's `inject` set. Records survive resume and follow `/tree` leaf moves.
 - Move `dal-agent` diagnostics from standard error to `tracing` events on the `dalgon.agent` target: stuck driver batches, turn openings, journal append failures, idle provider streams, slow infer steps, and file-descriptor limit changes no longer write to the terminal. `DAL_DEBUG` process-edge timing stays on standard error.
+- Breaking Rust API: remove the exported `BUILTINS` and `MODE` command records. Iterate `dal_ext::commands::specs()` for the ordered metadata (with `mode` last), or call `spec("mode")` for that record.
