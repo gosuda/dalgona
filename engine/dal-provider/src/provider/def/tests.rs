@@ -1,4 +1,16 @@
+use std::{collections::BTreeMap, path::Path};
+
+use dal_core::{Config, ConfigProduct};
+use url::Url;
+
 use super::*;
+use crate::ProviderConfig;
+
+const VENDOR_IDS: [&str; 3] = ["openai", "openai-codex", "anthropic"];
+
+fn presets() -> &'static [ProviderDef] {
+    &PROVIDERS[VENDOR_IDS.len()..]
+}
 
 #[test]
 fn ids_are_unique_and_match_the_grammar() {
@@ -73,4 +85,115 @@ fn methods_follow_the_row() {
         Some(vec![Method::Browser, Method::Device])
     );
     assert_eq!(methods("nobody"), None);
+}
+
+#[test]
+fn presets_follow_the_vendor_rows_in_id_order() {
+    let ids: Vec<_> = PROVIDERS.iter().map(|def| def.id).collect();
+    assert_eq!(ids[..VENDOR_IDS.len()], VENDOR_IDS);
+    assert!(
+        ids[VENDOR_IDS.len()..]
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "presets must be listed once each, by id: {ids:?}"
+    );
+}
+
+#[test]
+fn a_vendor_family_is_named_by_its_first_row() {
+    // The catalog names the provider of a route that carries only its family
+    // by the first row of that family, so a preset must never precede the
+    // vendor row of the Anthropic or Codex family.
+    for (family, vendor) in [
+        (Family::Codex, "openai-codex"),
+        (Family::Anthropic, "anthropic"),
+    ] {
+        let first = PROVIDERS.iter().find(|def| def.family == family);
+        assert_eq!(first.map(|def| def.id), Some(vendor), "{family:?}");
+    }
+}
+
+#[test]
+fn presets_are_https_key_rows_with_their_family_header_set() {
+    for def in presets() {
+        let id = def.id;
+        assert!(def.oauth.is_none(), "{id} has an OAuth sign-in");
+        assert_eq!(def.methods().collect::<Vec<_>>(), [Method::ApiKey], "{id}");
+        assert_eq!(def.transport, Transport::Https, "{id}");
+        assert_eq!(def.shape, Shape::of_family(def.family), "{id}");
+        assert!(
+            def.base_url.starts_with("https://") && !def.base_url.ends_with('/'),
+            "{id}: {} is not a bare https base",
+            def.base_url
+        );
+        assert!(
+            crate::http::check_base_url(def.family, def.base_url).is_ok(),
+            "{id}: {} is not an admitted base URL",
+            def.base_url
+        );
+        let key = def.key.expect("a preset takes an API key");
+        if matches!(def.family, Family::Chat | Family::Responses) {
+            assert_eq!(key.style, AuthStyle::Bearer, "{id}");
+        }
+        for name in key.env {
+            assert!(
+                name.starts_with(|first: char| first.is_ascii_uppercase())
+                    && name
+                        .bytes()
+                        .all(|byte| matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_')),
+                "{id}: {name} is not an environment variable name"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_key_variable_is_shared_only_within_one_origin() {
+    let origin = |def: &ProviderDef| {
+        Url::parse(def.base_url)
+            .expect("a table base URL parses")
+            .origin()
+    };
+    let mut owners: BTreeMap<&str, Vec<&ProviderDef>> = BTreeMap::new();
+    for def in PROVIDERS {
+        for name in def.key.map_or(&[][..], |key| key.env) {
+            owners.entry(*name).or_default().push(def);
+        }
+    }
+    for (name, rows) in &owners {
+        let origins: Vec<_> = rows.iter().map(|def| origin(def)).collect();
+        assert!(
+            origins.windows(2).all(|pair| pair[0] == pair[1]),
+            "{name} would send one vendor's key to another host: {:?}",
+            rows.iter().map(|def| def.id).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn every_row_decodes_to_the_entry_it_describes() {
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new("/tmp/dal-provider-def-test"),
+        "",
+        Some(""),
+    )
+    .expect("an empty dal.toml loads");
+    let decoded = ProviderConfig::from_config(&config).expect("an empty config decodes");
+    assert_eq!(decoded.providers.len(), PROVIDERS.len());
+    for (entry, def) in decoded.providers.iter().zip(PROVIDERS) {
+        let id = def.id;
+        assert_eq!(&*entry.id, id);
+        assert_eq!(entry.def.map(|row| row.id), Some(id), "{id}");
+        assert_eq!(entry.family, def.family, "{id}");
+        assert_eq!(&*entry.base_url, def.base_url, "{id}");
+        assert_eq!(entry.transport, def.transport, "{id}");
+        assert_eq!(
+            entry.auth,
+            def.key.map_or(AuthStyle::Bearer, |key| key.style),
+            "{id}"
+        );
+        assert!(entry.key_env.is_none(), "{id}");
+        assert_eq!(entry.shape(), def.shape, "{id}");
+    }
 }
