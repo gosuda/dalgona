@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use super::*;
-use crate::usage::LUNA_RESERVE_MODEL;
+use crate::{run::RunLostReason, usage::LUNA_RESERVE_MODEL};
 use dal_core::InferFailure;
 
 #[expect(
@@ -123,6 +123,11 @@ fn error_display_texts() {
         (
             ProviderError::Limit(LimitError::Body),
             "response body exceeds 16 MiB.",
+            Some("Retry the request, or ask for a smaller reply."),
+        ),
+        (
+            ProviderError::Limit(LimitError::Payload { limit: 1024 }),
+            "response body exceeds its 1024 byte limit.",
             Some("Retry the request, or ask for a smaller reply."),
         ),
         (
@@ -319,6 +324,54 @@ fn error_display_texts() {
             "openai context window exceeded (context_length_exceeded): input exceeds the window",
             None,
         ),
+        (
+            ProviderError::RunLost {
+                family: Family::Chat,
+                reason: RunLostReason::ServerClosed,
+            },
+            "openai run lost: the server ended the run before its final response",
+            None,
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Chat,
+                reason: RunLostReason::Transport(String::from("reset")),
+            },
+            "openai run lost: transport failure: reset",
+            None,
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Chat,
+                reason: RunLostReason::ResultsMismatch,
+            },
+            "openai run lost: the tool results are not exactly the pending tool calls",
+            None,
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Anthropic,
+                reason: RunLostReason::Protocol(String::from("bad frame")),
+            },
+            "anthropic run lost: invalid stream: bad frame",
+            None,
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Codex,
+                reason: RunLostReason::BufferExceeded,
+            },
+            "codex run lost: a buffer bound was exceeded",
+            None,
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Chat,
+                reason: RunLostReason::Authority("web_fetch".into()),
+            },
+            "openai run lost: the server acted beyond the host's authority: web_fetch",
+            None,
+        ),
     ];
     for (error, display, fix) in cases {
         assert_eq!(error.to_string(), *display);
@@ -482,6 +535,51 @@ fn retryable_by_loop_names_only_the_four_replayable_failures() {
     ];
     for error in terminal {
         assert!(!error.retryable_by_loop(), "{error}");
+    }
+}
+
+#[test]
+fn a_lost_run_is_fatal_and_never_replayable_whatever_its_reason() {
+    let reasons = [
+        RunLostReason::ServerClosed,
+        RunLostReason::Transport(String::from("reset")),
+        RunLostReason::ResultsMismatch,
+        RunLostReason::Protocol(String::from("bad frame")),
+        RunLostReason::BufferExceeded,
+        RunLostReason::Authority("web_fetch".into()),
+    ];
+    for reason in reasons {
+        let error = ProviderError::RunLost {
+            family: Family::Chat,
+            reason,
+        };
+        assert!(!error.retryable_by_loop(), "{error}");
+        let text = error.to_string();
+        let failure = InferFailure::from(error);
+        assert!(
+            matches!(&failure, InferFailure::Fatal { message, fix: None } if **message == *text),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn run_loss_text_keeps_only_the_first_bounded_line_of_server_text() {
+    let long = format!("{}\nsecond line", "w".repeat(400));
+    let reasons = [
+        RunLostReason::Transport(long.clone()),
+        RunLostReason::Protocol(long.clone()),
+        RunLostReason::Authority(long.into()),
+    ];
+    for reason in reasons {
+        let text = ProviderError::RunLost {
+            family: Family::Chat,
+            reason,
+        }
+        .to_string();
+        assert!(!text.contains("second line"), "{text}");
+        assert!(text.ends_with(&"w".repeat(300)), "{text}");
+        assert!(!text.ends_with(&"w".repeat(301)), "{text}");
     }
 }
 

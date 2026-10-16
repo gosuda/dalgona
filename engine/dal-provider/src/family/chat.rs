@@ -260,7 +260,9 @@ fn messages(request: &ModelRequest) -> Result<Vec<Message<'_>>, ChatBodyError> {
             ContextItem::User { parts } => messages.push(Message::User {
                 content: parts.iter().map(content_part).collect::<Result<_, _>>()?,
             }),
-            ContextItem::Assistant { source: _, parts } => {
+            ContextItem::Assistant {
+                source: _, parts, ..
+            } => {
                 if let Some(message) = assistant(parts) {
                     messages.push(message);
                 }
@@ -324,9 +326,11 @@ fn assistant(parts: &[AssistantPart]) -> Option<Message<'_>> {
     let mut tool_calls = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text { text } => texts.push(text),
+            AssistantPart::Text { text, .. } => texts.push(text),
             AssistantPart::Thinking { .. } => {}
-            AssistantPart::ToolCall { call, name, args } => tool_calls.push(WireCall {
+            AssistantPart::ToolCall {
+                call, name, args, ..
+            } => tool_calls.push(WireCall {
                 id: call.as_str(),
                 kind: "function",
                 function: WireCallFunction {

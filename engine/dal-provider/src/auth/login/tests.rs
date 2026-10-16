@@ -52,8 +52,28 @@ fn the_provider_list_names_the_sign_in_providers_in_display_order() {
     // provider offers at least one method — is owned by
     // provider/def/tests.rs::methods_follow_the_row. This test owns only the
     // login surface: which providers are listed, in display order for front ends.
-    let ids: Vec<_> = login_providers().iter().map(|def| def.id).collect();
-    assert_eq!(ids, ["anthropic", "openai", "openai-codex"]);
+    // No count and no literal roster: the table grows with each preset. The
+    // login surface owns only that every listed row offers a sign-in method,
+    // that the list stays in display order, and that the vendor rows are kept.
+    let listed = login_providers();
+    for def in &listed {
+        assert!(
+            def.methods().next().is_some(),
+            "{} is listed but offers no sign-in method",
+            def.id
+        );
+    }
+    let ids: Vec<_> = listed.iter().map(|def| def.id).collect();
+    assert!(
+        ids.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the sign-in list stays in display order: {ids:?}"
+    );
+    for vendor in ["anthropic", "openai", "openai-codex"] {
+        assert!(
+            ids.contains(&vendor),
+            "the sign-in list keeps its {vendor} row"
+        );
+    }
 }
 
 #[tokio::test]

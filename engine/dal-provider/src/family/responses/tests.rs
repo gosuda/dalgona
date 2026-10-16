@@ -399,6 +399,7 @@ fn request() -> Result<ModelRequest, Box<dyn Error>> {
                     family: Family::Responses,
                     model: "gpt-5".into(),
                 },
+                replay: None,
                 parts: vec![
                     AssistantPart::Thinking {
                         text: "t".into(),
@@ -408,11 +409,13 @@ fn request() -> Result<ModelRequest, Box<dyn Error>> {
                     },
                     AssistantPart::Text {
                         text: "Reading.".into(),
+                        replay: None,
                     },
                     AssistantPart::ToolCall {
                         call: CallId::new("call_1"),
                         name: "read".into(),
                         args: RawJson::parse(r#"{"path": "a.rs"}"#)?,
+                        replay: None,
                     },
                 ],
             },
@@ -475,10 +478,12 @@ fn responses_and_codex_bodies_map_mapped_tool_names_for_advertisements_and_histo
             family: Family::Responses,
             model: "gpt-5".into(),
         },
+        replay: None,
         parts: vec![AssistantPart::ToolCall {
             call: CallId::new("call-1"),
             name: "deploy.web-x.list".into(),
             args: RawJson::parse("{}")?,
+            replay: None,
         }],
     }]);
     for family in [Family::Responses, Family::Codex] {
@@ -530,6 +535,31 @@ fn body_is_byte_exact_and_replays_only_to_the_bound_route() -> TestResult {
         );
         assert!(body.contains(r#"},{"type":"message","role":"assistant""#));
     }
+    Ok(())
+}
+
+#[test]
+fn body_ignores_text_tool_and_message_replay() -> TestResult {
+    let high = WireThinking::OpenAi {
+        effort: Some("high"),
+    };
+    let mut laden = request()?;
+    let plain = request_body(&laden, high, true)?;
+    let mut context = laden.context.to_vec();
+    let ContextItem::Assistant { parts, replay, .. } = &mut context[1] else {
+        return Err("fixture assistant item is missing".into());
+    };
+    *replay = Some(RawJson::parse(r#"{"foreign":"payload"}"#)?);
+    let AssistantPart::Text { replay, .. } = &mut parts[1] else {
+        return Err("fixture text part is missing".into());
+    };
+    *replay = Some(RawJson::parse(r#"{"foreign":"payload"}"#)?);
+    let AssistantPart::ToolCall { replay, .. } = &mut parts[2] else {
+        return Err("fixture tool call is missing".into());
+    };
+    *replay = Some(RawJson::parse(r#"{"foreign":"payload"}"#)?);
+    laden.context = Arc::from(context);
+    assert_eq!(request_body(&laden, high, true)?, plain);
     Ok(())
 }
 
@@ -651,7 +681,7 @@ fn done_markers_stay_ignored_but_still_charge_the_event_budget() {
         decoder.feed("[DONE]", &mut out),
         Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
     ));
-    assert!(out.is_empty());
+    assert_eq!(out, [] as [StreamEvent; 0]);
 }
 
 #[test]

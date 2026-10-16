@@ -208,7 +208,9 @@ fn assistant_items<'a>(parts: &'a [AssistantPart], replay: bool, items: &mut Vec
     let mut text = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text { text: slice } => text.push(Content::OutputText { text: slice }),
+            AssistantPart::Text { text: slice, .. } => {
+                text.push(Content::OutputText { text: slice });
+            }
             AssistantPart::Thinking {
                 replay: Some(item), ..
             } if replay => {
@@ -216,7 +218,9 @@ fn assistant_items<'a>(parts: &'a [AssistantPart], replay: bool, items: &mut Vec
                 items.push(Input::Reasoning(item));
             }
             AssistantPart::Thinking { .. } => {}
-            AssistantPart::ToolCall { call, name, args } => {
+            AssistantPart::ToolCall {
+                call, name, args, ..
+            } => {
                 flush_text(&mut text, items);
                 items.push(Input::FunctionCall(FunctionCall {
                     kind: "function_call",
@@ -293,7 +297,7 @@ fn input_items<'a>(
                     .collect::<Result<Vec<_>, _>>()?;
                 items.push(message("user", blocks));
             }
-            ContextItem::Assistant { source, parts } => {
+            ContextItem::Assistant { source, parts, .. } => {
                 let replay = source.family == family && source.model.as_ref() == model;
                 assistant_items(parts, replay, &mut items);
             }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::find;
 use dal_core::{Config, ConfigProduct};
 use std::path::Path;
 
@@ -17,23 +18,53 @@ fn parse(input: &str) -> Result<ProviderConfig, ProviderConfigError> {
     ProviderConfig::from_config(&config)
 }
 
+fn entry<'a>(config: &'a ProviderConfig, id: &str) -> &'a ProviderEntry {
+    config
+        .providers
+        .iter()
+        .find(|provider| &*provider.id == id)
+        .unwrap_or_else(|| panic!("{id} decoded"))
+}
+
 #[test]
 fn defaults_return_builtin_providers_in_fixed_order() {
     let config = parse("").expect("empty config uses defaults");
-    let ids: Vec<&str> = config
-        .providers
-        .iter()
-        .map(|provider| &*provider.id)
-        .collect();
-    assert_eq!(ids, ["openai", "openai-codex", "anthropic"]);
+    // No count and no indices: the defaults are exactly the table rows, and
+    // the native vendor rows keep their relative order.
+    for provider in &config.providers {
+        assert!(
+            find(&provider.id).is_some(),
+            "{} is a default but not a built-in row",
+            &*provider.id
+        );
+    }
+    for def in PROVIDERS {
+        assert!(
+            config
+                .providers
+                .iter()
+                .any(|provider| &*provider.id == def.id),
+            "{} has no default entry",
+            def.id
+        );
+    }
+    let position = |id: &str| {
+        config
+            .providers
+            .iter()
+            .position(|provider| &*provider.id == id)
+            .unwrap_or_else(|| panic!("{id} has no default entry"))
+    };
+    assert!(position("openai") < position("openai-codex"));
+    assert!(position("openai-codex") < position("anthropic"));
 }
 
 #[test]
 fn builtin_endpoints_and_family_defaults_are_stable() {
     let config = parse("").expect("empty config uses defaults");
-    let openai = &config.providers[0];
-    let codex = &config.providers[1];
-    let anthropic = &config.providers[2];
+    let openai = entry(&config, "openai");
+    let codex = entry(&config, "openai-codex");
+    let anthropic = entry(&config, "anthropic");
     assert_eq!(
         (&*openai.base_url, openai.family, openai.transport),
         (OPENAI_URL, Family::Responses, Transport::Https)
@@ -60,18 +91,84 @@ fn aliases_keep_toml_insertion_order() {
 fn openai_builtin_can_select_the_chat_family() {
     let config = parse("[providers.openai]\napi = 'openai_chat'\n")
         .expect("OpenAI Chat is a supported built-in family");
-    assert_eq!(config.providers[0].family, Family::Chat);
+    assert_eq!(entry(&config, "openai").family, Family::Chat);
 }
 #[test]
 fn configured_codex_api_must_match_its_builtin_family() {
     let config = parse("[providers.openai-codex]\napi = 'openai_codex'\n")
         .expect("the explicit fixed Codex family is accepted");
-    assert_eq!(config.providers[1].family, Family::Codex);
+    assert_eq!(entry(&config, "openai-codex").family, Family::Codex);
 
     let error = parse("[providers.openai-codex]\napi = 'openai_responses'\n").unwrap_err();
     assert_eq!(
         error.to_string(),
         "providers.openai-codex.api conflicts with its fixed family"
+    );
+}
+
+#[test]
+fn a_compatible_preset_keeps_an_explicit_api_override_from_before_its_row() {
+    // Before `synthetic` became a built-in preset, its table decoded through
+    // the named-provider path. The new row must accept that same table and
+    // build the same route: the Anthropic family, its `x-api-key` default,
+    // and the family's header set. The `legacy-shim` control proves the two
+    // paths agree field for field.
+    let config = parse(concat!(
+        "[providers.synthetic]\napi = 'anthropic'\nbase_url = 'https://example.test'\nkey_env = 'SYNTHETIC_API_KEY'\n",
+        "[providers.legacy-shim]\napi = 'anthropic'\nbase_url = 'https://example.test'\nkey_env = 'SYNTHETIC_API_KEY'\n",
+    ))
+    .expect("a preset keeps an explicit api override");
+    let preset = entry(&config, "synthetic");
+    let named = entry(&config, "legacy-shim");
+    for route in [preset, named] {
+        assert_eq!(route.family, Family::Anthropic);
+        assert_eq!(route.auth, AuthStyle::XApiKey);
+        assert_eq!(&*route.base_url, "https://example.test");
+        assert_eq!(route.key_env.as_deref(), Some("SYNTHETIC_API_KEY"));
+        assert_eq!(route.shape(), Shape::Claude);
+    }
+    // The preset keeps its row (endpoint default, key material, key-only
+    // sign-in); the named route carries none.
+    assert_eq!(preset.def.map(|row| row.id), Some("synthetic"));
+    assert!(named.def.is_none());
+}
+
+#[test]
+fn a_compatible_preset_cannot_claim_the_oauth_only_codex_family() {
+    let error = parse("[providers.synthetic]\napi = 'openai_codex'\n").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "providers.synthetic: unknown api \"openai_codex\"; use openai_chat, openai_responses, or anthropic."
+    );
+}
+
+#[test]
+fn a_compatible_preset_keeps_its_row_header_when_the_api_names_its_own_family() {
+    // An explicit `api` that names the row's own family changes nothing: the
+    // grounded bearer default of the `minimax` row still wins.
+    let config = parse("[providers.minimax]\napi = 'anthropic'\n")
+        .expect("the row's own family is accepted");
+    let minimax = entry(&config, "minimax");
+    assert_eq!(minimax.family, Family::Anthropic);
+    assert_eq!(minimax.auth, AuthStyle::Bearer);
+    assert_eq!(minimax.shape(), Shape::Claude);
+}
+
+#[test]
+fn a_native_anthropic_api_mismatch_is_still_refused() {
+    let error = parse("[providers.anthropic]\napi = 'openai_chat'\n").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "providers.anthropic.api conflicts with its fixed family"
+    );
+}
+
+#[test]
+fn a_native_openai_api_outside_its_documented_pair_is_still_refused() {
+    let error = parse("[providers.openai]\napi = 'anthropic'\n").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "providers.openai.api must be openai_responses or openai_chat"
     );
 }
 
@@ -207,7 +304,7 @@ fn named_anthropic_defaults_to_x_api_key_auth() {
             "[providers.zenmux-anthropic]\napi = 'anthropic'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
         )
         .expect("named Anthropic config is valid");
-    assert_eq!(config.providers[3].auth, AuthStyle::XApiKey);
+    assert_eq!(entry(&config, "zenmux-anthropic").auth, AuthStyle::XApiKey);
 }
 #[test]
 fn openai_chat_websocket_reports_the_exact_transport_error() {
@@ -225,11 +322,15 @@ fn named_providers_keep_toml_insertion_order() {
             "[providers.zeta]\napi = 'openai_chat'\nbase_url = 'https://zeta.test'\nkey_env = 'ZETA_KEY'\n\n[providers.alpha]\napi = 'anthropic'\nbase_url = 'https://alpha.test'\nkey_env = 'ALPHA_KEY'\n",
         )
         .expect("named providers are valid");
-    let ids: Vec<&str> = config.providers[3..]
+    // The built-ins come first; only the named providers after them must keep
+    // TOML insertion order, located by name rather than by index.
+    let named: Vec<&str> = config
+        .providers
         .iter()
+        .filter(|provider| find(&provider.id).is_none())
         .map(|provider| &*provider.id)
         .collect();
-    assert_eq!(ids, ["zeta", "alpha"]);
+    assert_eq!(named, ["zeta", "alpha"]);
 }
 
 #[test]
