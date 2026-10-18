@@ -891,7 +891,7 @@ async fn devin_attempt(
                 &wire_key,
                 &router_uid,
                 &cascade_id,
-                router_prompt(&context.request),
+                router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
             ),
             &context.user_agent,
             cancel,
