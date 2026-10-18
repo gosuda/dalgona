@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use dal_core::ext::{BeforeRequest, Channel, TurnEnd};
 use dal_core::{
-    CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryKind, EntryView, Family, Gen,
-    InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq, Part,
-    Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
+    BlobId, CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryKind, EntryView, Family,
+    Gen, InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq,
+    Part, Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
     StreamChannel, StreamEvent, ToolResultEvent, TurnId, Usage, Visibility, Workspace,
 };
 use tokio::sync::{Mutex, oneshot};
@@ -812,16 +812,17 @@ impl Driver {
         let params = self
             .hook_params(turn, &generation, &info, params, mur)
             .await;
-        let system = self.system(turn, &generation, &turn_tools, mode, &info);
+        let entries = self.deps.shared.leaf_entries();
+        let context: Arc<[ContextItem]> = context_items(recent_leaf(&entries)).into();
+        let delivered = context_image_digests(&context);
+        let system = self.system(turn, &generation, &turn_tools, mode, &info, &delivered);
         let surface = search_surface(&resolved.provider, &resolved.route);
         let (model_tools, deferred_search) =
             tool_list(&generation, &turn_tools, &info, &model_id, mode, surface);
         self.turn(turn).deferred_search = deferred_search;
         let tools: Arc<[dal_core::ModelToolSpec]> = model_tools.into();
         let visibility = self.tool_boundaries.observe(&tools);
-        let entries = self.deps.shared.leaf_entries();
         let cache_key = cache_key(self.deps.session, compaction_count(&entries), visibility);
-        let context: Arc<[ContextItem]> = context_items(recent_leaf(&entries)).into();
         ModelRequest {
             purpose: Purpose::Turn,
             model: resolved.route.clone(),
@@ -894,6 +895,7 @@ impl Driver {
         turn_tools: &TurnTools,
         mode: dal_core::Mode,
         info: &ModelInfo,
+        delivered: &[BlobId],
     ) -> String {
         let policy = self.deps.shared.child_prompt_policy();
         let tools = descriptions(generation, turn_tools, info);
@@ -905,6 +907,8 @@ impl Driver {
                 section,
                 turn,
                 &tools,
+                info,
+                delivered,
             )
         };
         match policy {
@@ -1909,6 +1913,31 @@ fn section_reaches_model(visibility: Visibility, mode: dal_core::Mode) -> bool {
     )
 }
 
+/// Digests of the image parts in the request context, history and current
+/// input alike. Sections hide a description behind a name-only line only for
+/// digests among these. Text spills stay out: only `image/` mimes count.
+fn context_image_digests(context: &[ContextItem]) -> Vec<BlobId> {
+    let mut digests = Vec::new();
+    for item in context {
+        let ContextItem::User { parts } = item else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                Part::Image { bytes, mime } if mime.starts_with("image/") => {
+                    let bytes: &[u8] = bytes;
+                    digests.push(BlobId::from_bytes(bytes));
+                }
+                Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => {
+                    digests.push(*blob_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    digests
+}
+
 /// Renders one prompt section through its registered body.
 fn render_section(
     deps: &DriverDeps,
@@ -1916,6 +1945,8 @@ fn render_section(
     section: &PromptSection,
     turn: TurnId,
     tools: &[ToolDescription],
+    model: &ModelInfo,
+    delivered: &[BlobId],
 ) -> Option<String> {
     let PromptSection::Session { section, .. } = section else {
         return None;
@@ -1939,6 +1970,8 @@ fn render_section(
         turn: Some(turn),
         snapshot: deps.generation,
         tools,
+        model: Some(model),
+        delivered_images: delivered,
         instructions: None,
         system_md: None,
     };
