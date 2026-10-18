@@ -320,6 +320,7 @@ impl ModelHandler for Recorder {
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
                     cost_usd: None,
+                    premium_requests: None,
                 },
             }),
             Ok(StreamEvent::Stop {
@@ -548,4 +549,179 @@ async fn absent_tools_and_instructions_leave_no_section_or_separator() {
     let docs = format!("{DEFAULT_DOCS_LINE}\n");
     let expected = [head.as_str(), PLUGINS_SECTION, docs.as_str()].join(SECTION_SEPARATOR);
     assert_eq!(system, expected);
+}
+
+#[tokio::test]
+async fn prompt_sections_under_single_owner_render_in_deterministic_order() {
+    let reverse_owner = ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY)
+        .expect("fixture builder")
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::DocsLine,
+            "SECTION-DOCS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Fallback,
+            "SECTION-FALLBACK\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Environment,
+            "SECTION-ENVIRONMENT\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Plugins,
+            "SECTION-PLUGINS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Rulebook,
+            "SECTION-RULEBOOK\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Rules,
+            "SECTION-RULES\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Skills,
+            "SECTION-SKILLS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Tools,
+            "SECTION-TOOLS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::D2,
+            "SECTION-D2\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Identity,
+            "SECTION-IDENTITY\n".into(),
+        ))
+        .build()
+        .expect("reverse fixture extension");
+
+    let forward_owner = ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY)
+        .expect("fixture builder")
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Identity,
+            "SECTION-IDENTITY\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::D2,
+            "SECTION-D2\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Tools,
+            "SECTION-TOOLS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Skills,
+            "SECTION-SKILLS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Rules,
+            "SECTION-RULES\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Rulebook,
+            "SECTION-RULEBOOK\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Plugins,
+            "SECTION-PLUGINS\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Environment,
+            "SECTION-ENVIRONMENT\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::Fallback,
+            "SECTION-FALLBACK\n".into(),
+        ))
+        .prompt_section(PromptSection::static_text(
+            PromptOrder::DocsLine,
+            "SECTION-DOCS\n".into(),
+        ))
+        .build()
+        .expect("forward fixture extension");
+
+    let reverse_system = assembled(vec![reverse_owner]).await;
+    let forward_system = assembled(vec![forward_owner]).await;
+
+    let markers = [
+        "SECTION-IDENTITY",
+        "SECTION-D2",
+        "SECTION-TOOLS",
+        "SECTION-SKILLS",
+        "SECTION-RULES",
+        "SECTION-RULEBOOK",
+        "SECTION-PLUGINS",
+        "SECTION-ENVIRONMENT",
+        "SECTION-FALLBACK",
+        "SECTION-DOCS",
+    ];
+
+    let mut previous = 0;
+    for marker in markers {
+        let pos = reverse_system[previous..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} missing from {reverse_system:?}"))
+            + previous;
+        assert!(
+            pos >= previous,
+            "{marker} out of order in {reverse_system:?}"
+        );
+        previous = pos + marker.len();
+    }
+
+    assert_eq!(
+        reverse_system, forward_system,
+        "single-owner sections registered in reverse order render byte-identical to forward order"
+    );
+}
+
+#[tokio::test]
+async fn prompt_extension_sections_render_deterministically_when_registered_in_reverse() {
+    let reverse_prompt = ExtensionBuilder::new("prompt", "0.1.0", ServiceSet::EMPTY)
+        .expect("builder")
+        .prompt_section(PromptSection::session(
+            PromptOrder::DocsLine,
+            Arc::new(DocsSection),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::Instructions,
+            Arc::new(InstructionsSection),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::Tools,
+            Arc::new(ToolsSection),
+        ))
+        .prompt_section(PromptSection::session(
+            PromptOrder::Identity,
+            Arc::new(HeadSection {
+                product_name: "dal".into(),
+                product_version: env!("CARGO_PKG_VERSION").into(),
+            }),
+        ))
+        .build()
+        .expect("reverse prompt extension");
+
+    let forward_prompt = extension().expect("canonical prompt extension");
+
+    let reverse_system = assembled(vec![tool_probe(), reverse_prompt]).await;
+    let forward_system = assembled(vec![tool_probe(), forward_prompt]).await;
+
+    assert_eq!(
+        reverse_system, forward_system,
+        "reverse registration of prompt session sections produces byte-identical assembled prompt"
+    );
+
+    let head = composed(&[]);
+    let tool_line: Box<str> = Box::from("probe_tool: Probe tool.");
+    let with_tools = composed(&[tool_line]);
+    let tools = with_tools
+        .strip_prefix(head.as_str())
+        .expect("tools follows head");
+    let docs = format!("{DEFAULT_DOCS_LINE}\n");
+    let expected = [head.as_str(), tools, docs.as_str()].join(SECTION_SEPARATOR);
+
+    assert_eq!(reverse_system, expected);
 }
