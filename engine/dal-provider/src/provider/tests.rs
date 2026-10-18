@@ -342,6 +342,12 @@ fn mistral_reply() -> String {
     )
 }
 
+fn ollama_reply() -> String {
+    String::from(
+        "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n{\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":10,\"eval_count\":5}\n",
+    )
+}
+
 fn devin_jwt_reply(token: &str) -> Vec<u8> {
     GetUserJwtResponse {
         user_jwt: token.to_owned(),
@@ -2094,6 +2100,242 @@ fn decode_chat_body(captured: &[u8]) -> Result<GetChatMessageRequest, Box<dyn Er
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut gz, &mut raw)?;
     Ok(GetChatMessageRequest::decode(raw.as_slice())?)
+}
+
+#[tokio::test]
+async fn ollama_ndjson_completes_keyless_and_releases_admission() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/loop", vec![stream_reply(ollama_reply())]).await?;
+    let mut ollama_entry = entry(
+        "local-ollama",
+        Family::Ollama,
+        format!("{base}/api"),
+        None,
+        1,
+        Transport::Https,
+    );
+    ollama_entry.auth = AuthStyle::None;
+    let set = ProviderSet::new(
+        &config(vec![ollama_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("local-ollama", Family::Ollama, "llama-test"))?;
+    let request = request(Family::Ollama, "llama-test", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(
+        events.iter().find_map(|event| match event {
+            StreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        }),
+        Some(usage) if usage.input_tokens == 10 && usage.output_tokens == 5
+    ));
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    // The configured `/api` suffix is trimmed before joining, never doubled.
+    assert!(head.starts_with("post /loop/api/chat "), "{head}");
+    assert!(!head.contains("authorization:"), "{head}");
+    assert!(
+        String::from_utf8_lossy(request_body(&captured[0])).contains("\"model\":\"llama-test\"")
+    );
+    assert_eq!(
+        set.inner
+            .providers
+            .get("local-ollama")
+            .map(|slot| slot.permits.available_permits()),
+        Some(1)
+    );
+    Ok(())
+}
+
+fn ollama_reasoning_history() -> ContextItem {
+    ContextItem::Assistant {
+        source: dal_core::ReplaySource {
+            family: Family::Ollama,
+            model: "gpt-oss:120b".into(),
+        },
+        replay: None,
+        parts: vec![
+            dal_core::AssistantPart::Thinking {
+                text: "hidden".into(),
+                replay: None,
+            },
+            dal_core::AssistantPart::Text {
+                text: "Checking.".into(),
+                replay: None,
+            },
+        ],
+    }
+}
+
+/// Sends one Ollama request with a 70,000-token limit and a reasoning-bearing
+/// history through a loopback row, and returns the head and body that crossed
+/// the wire.
+async fn ollama_row_wire(
+    id: &str,
+    key_env: Option<&str>,
+) -> Result<(String, String), Box<dyn Error>> {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/loop", vec![stream_reply(ollama_reply())]).await?;
+    let mut row = entry(id, Family::Ollama, base, key_env, 1, Transport::Https);
+    if key_env.is_none() {
+        row.auth = AuthStyle::None;
+    }
+    let set = ProviderSet::new(
+        &config(vec![row], 0),
+        identity(),
+        EnvSnapshot::test(&[("OLLAMA_ROW_KEY", "row-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(id, Family::Ollama, "gpt-oss:120b"))?;
+    let mut ask = request(
+        Family::Ollama,
+        "gpt-oss:120b",
+        vec![ollama_reasoning_history(), user_text("Say hello.")],
+    );
+    ask.params.max_output_tokens = Some(70_000);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &ask,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    let body = String::from_utf8_lossy(request_body(&captured[0])).into_owned();
+    Ok((head, body))
+}
+
+#[tokio::test]
+async fn the_cloud_row_holds_num_predict_to_its_ceiling_and_drops_reasoning_history() -> TestResult {
+    let (head, body) = ollama_row_wire("ollama-cloud", Some("OLLAMA_ROW_KEY")).await?;
+    assert!(head.starts_with("post /loop/api/chat "), "{head}");
+    assert!(head.contains("authorization: bearer row-secret"), "{head}");
+    assert!(body.contains(r#""options":{"num_predict":65536}"#), "{body}");
+    assert!(!body.contains(r#""thinking""#), "{body}");
+    assert!(body.contains(r#""content":"Checking.""#), "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_self_hosted_row_sends_the_caller_limit_and_replays_reasoning() -> TestResult {
+    let (head, body) = ollama_row_wire("local-ollama", None).await?;
+    assert!(!head.contains("authorization:"), "{head}");
+    assert!(body.contains(r#""options":{"num_predict":70000}"#), "{body}");
+    assert!(
+        body.contains(r#""content":"Checking.","thinking":"hidden""#),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ollama_native_reasoning_and_tool_call_events_stream_through_the_provider() -> TestResult {
+    let dir = TestDir::new()?;
+    let wire = [
+        r#"{"message":{"role":"assistant","thinking":"Let me "},"done":false}"#,
+        r#"{"message":{"role":"assistant","thinking":"think."},"done":false}"#,
+        r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read","arguments":{"path":  "a.txt"}}}]},"done":false}"#,
+        r#"{"done":true,"done_reason":"stop","prompt_eval_count":12,"prompt_eval_cached_count":4,"eval_count":7}"#,
+    ]
+    .join("\n")
+        + "\n";
+    let (base, mut server_task) = server("/loop", vec![stream_reply(wire)]).await?;
+    let mut row = entry(
+        "local-ollama",
+        Family::Ollama,
+        base,
+        None,
+        1,
+        Transport::Https,
+    );
+    row.auth = AuthStyle::None;
+    let set = ProviderSet::new(
+        &config(vec![row], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("local-ollama", Family::Ollama, "gpt-oss:20b"))?;
+    let ask = request(Family::Ollama, "gpt-oss:20b", vec![user_text("Read it.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &ask,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    server_task.join_next().await.expect("server completes")??;
+    let reasoning: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ReasoningDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "Let me think.");
+    let calls = events.iter().find_map(|event| match event {
+        StreamEvent::ToolCallsDone { calls } => Some(calls),
+        _ => None,
+    });
+    let [call] = calls.map(Vec::as_slice).unwrap_or_default() else {
+        return Err(io::Error::other(format!("expected one call: {events:?}")).into());
+    };
+    // Ollama provides no call id; the arguments keep their raw bytes.
+    assert_eq!((call.id.as_str(), call.name.as_str()), ("ollama:0:read", "read"));
+    assert!(
+        matches!(&call.args, crate::stream::ToolArgs::Parsed(raw) if raw.as_str() == r#"{"path":  "a.txt"}"#),
+        "{:?}",
+        call.args
+    );
+    let usage = events.iter().find_map(|event| match event {
+        StreamEvent::Usage { usage } => Some(usage),
+        _ => None,
+    });
+    assert!(matches!(
+        usage,
+        Some(usage) if usage.input_tokens == 12 && usage.cached_input_tokens == 4 && usage.output_tokens == 7
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Stop {
+            reason: crate::stream::StopReason::ToolUse
+        })
+    ));
+    Ok(())
 }
 
 #[tokio::test]

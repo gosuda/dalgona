@@ -259,6 +259,27 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "https://integrate.api.nvidia.com/v1",
         &["NVIDIA_API_KEY"],
     ),
+    // Native Ollama (`POST <base>/api/chat`, NDJSON), not its OpenAI-compatible
+    // `/v1` surface. A local server takes no key: set `providers.ollama.auth`
+    // to `none`; a host behind a bearer token reads `OLLAMA_API_KEY`.
+    key_row(
+        "ollama",
+        "Ollama",
+        Family::Ollama,
+        "http://127.0.0.1:11434",
+        AuthStyle::Bearer,
+        &["OLLAMA_API_KEY"],
+    ),
+    // The cloud host of the same native wire; its output ceiling and
+    // reasoning-history rules key on this id (`family::ollama::Deployment`).
+    key_row(
+        "ollama-cloud",
+        "Ollama Cloud",
+        Family::Ollama,
+        "https://ollama.com",
+        AuthStyle::Bearer,
+        &["OLLAMA_CLOUD_API_KEY"],
+    ),
     chat(
         "opengateway",
         "OpenGateway",
