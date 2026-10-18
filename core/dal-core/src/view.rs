@@ -112,14 +112,35 @@ pub enum TurnState {
 }
 
 /// A bounded request for one page of session entries.
+///
+/// Decoding enforces the same [`PageReq::MAX_LIMIT`] bound as
+/// [`PageReq::new`]: JSON carrying a larger limit is rejected instead of
+/// bypassing the constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "PageReqWire")]
 pub struct PageReq {
     /// The maximum number of entries requested.
     pub limit: NonZeroU32,
     /// The exclusive entry cursor for the preceding page.
     pub before: Option<EntryId>,
+}
+
+/// The unchecked wire shape behind [`PageReq`]; only [`PageReq::new`] admits it.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+struct PageReqWire {
+    limit: NonZeroU32,
+    before: Option<EntryId>,
+}
+
+impl TryFrom<PageReqWire> for PageReq {
+    type Error = PageReqError;
+
+    fn try_from(wire: PageReqWire) -> Result<Self, Self::Error> {
+        Self::new(wire.limit, wire.before)
+    }
 }
 
 impl PageReq {
