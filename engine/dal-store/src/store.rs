@@ -1,7 +1,7 @@
 //! Logical session journals: lazy creation, ephemeral storage, recovery, and lifecycle operations.
 //!
 //! File journals have one actor owner. A journal enters Lazy without creating paths.
-//! Its first turn reservation or user entry makes it durable.
+//! Its first turn reservation, user entry, or private-effect receipt makes it durable.
 
 use std::{
     collections::HashMap,
@@ -126,7 +126,8 @@ impl Store {
         }
     }
 
-    /// Creates a session buffered until its first turn reservation or user entry.
+    /// Creates a session buffered until its first turn reservation, user entry,
+    /// or private-effect receipt.
     pub fn create_session(&self, id: SessionId) -> Journal {
         Journal::lazy(Arc::clone(&self.inner), id, None)
     }
@@ -1100,11 +1101,17 @@ impl Journal {
         let generation = generation_after(self.generation, &records);
 
         if matches!(&self.state, State::Lazy { .. }) {
-            if !has_user_in_batch
-                && !records
-                    .iter()
-                    .any(|record| matches!(record, Record::TurnReserved { .. }))
-            {
+            let requires_receipt = has_user_in_batch
+                || records.iter().any(|record| {
+                    matches!(
+                        record,
+                        Record::TurnReserved { .. }
+                            | Record::PrivateLoop { .. }
+                            | Record::PrivateStart { .. }
+                            | Record::PrivateEnd { .. }
+                    )
+                });
+            if !requires_receipt {
                 encode_records(&records)?;
                 let State::Lazy { blobs } = &mut self.state else {
                     unreachable!("lazy state was checked above");
