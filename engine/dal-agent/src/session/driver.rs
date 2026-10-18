@@ -813,7 +813,16 @@ impl Driver {
             .hook_params(turn, &generation, &info, params, mur)
             .await;
         let entries = self.deps.shared.leaf_entries();
-        let context: Arc<[ContextItem]> = context_items(recent_leaf(&entries)).into();
+        let context = context_items(recent_leaf(&entries));
+        // Replayed history can carry letter images admitted for an earlier
+        // image-capable turn; a model that cannot read images must never
+        // receive those bytes, so the context degrades to words first.
+        let context = if resolved.entry.image_input {
+            context
+        } else {
+            strip_images_for_text_model(context)
+        };
+        let context: Arc<[ContextItem]> = context.into();
         let delivered = context_image_digests(&context);
         let system = self.system(turn, &generation, &turn_tools, mode, &info, &delivered);
         let surface = search_surface(&resolved.provider, &resolved.route);
@@ -1911,6 +1920,49 @@ fn section_reaches_model(visibility: Visibility, mode: dal_core::Mode) -> bool {
                 dal_core::Mode::EvalFirst | dal_core::Mode::EvalOnly
             )
     )
+}
+
+/// Drops every image part from one request context for a model that cannot
+/// read images.
+///
+/// Letters degrade to the text descriptions the prompt already shows such a
+/// model (their source stays readable at `letter://`), so the turn proceeds
+/// on words instead of failing at the provider. Only `image/` mimes go, in
+/// both user messages and tool results; text and text blobs stay, and
+/// messages left with no parts stay in place for the adapters' existing
+/// empty-message handling.
+fn strip_images_for_text_model(context: Vec<ContextItem>) -> Vec<ContextItem> {
+    context
+        .into_iter()
+        .map(|item| match item {
+            ContextItem::User { parts } => ContextItem::User {
+                parts: without_images(parts),
+            },
+            ContextItem::ToolResult {
+                call,
+                name,
+                is_error,
+                parts,
+            } => ContextItem::ToolResult {
+                call,
+                name,
+                is_error,
+                parts: without_images(parts),
+            },
+            item => item,
+        })
+        .collect()
+}
+
+/// Drops the image parts of one message, keeping text and text blobs.
+fn without_images(parts: Vec<Part>) -> Vec<Part> {
+    parts
+        .into_iter()
+        .filter(|part| match part {
+            Part::Image { mime, .. } | Part::Blob { mime, .. } => !mime.starts_with("image/"),
+            Part::Text { .. } => true,
+        })
+        .collect()
 }
 
 /// Digests of the image parts in the request context, history and current
