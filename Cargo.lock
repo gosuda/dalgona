@@ -1011,6 +1011,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
+ "process-wrap",
  "proptest",
  "prost",
  "quick-xml",
