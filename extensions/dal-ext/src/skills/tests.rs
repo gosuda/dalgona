@@ -673,9 +673,7 @@ fn skill_uri_reads() {
         assert_eq!(&*doc.text, format!("body of {name}").as_str());
     }
 
-    // A miss is the typed refusal that names the missing skill. The
-    // alternatives listing is checked once, with live product records,
-    // in the skills-defaults gate.
+    // A miss is the typed refusal naming the exact request and sorted alternatives.
     let err = resolver.lookup("gamma").unwrap_err();
     assert!(matches!(&err, SchemeError::Failed { .. }));
     let text = err.to_string();
@@ -685,6 +683,78 @@ fn skill_uri_reads() {
     let empty = SkillResolver::new(Arc::new(SkillRegistry::empty()));
     let empty_err = empty.lookup("gamma").unwrap_err();
     assert!(matches!(empty_err, SchemeError::Failed { .. }));
+}
+
+#[test]
+fn missing_skill_names_sorted_available_list() {
+    let alpha = skill("plugin-b", "alpha", "alpha description", false);
+    let beta = skill("plugin-a", "beta", "beta description", false);
+    let registry =
+        SkillRegistry::merge(&[("plugin-b", vec![alpha]), ("plugin-a", vec![beta])]).unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("gamma").unwrap_err().to_string();
+    assert!(text.contains("gamma"), "{text}");
+    assert!(text.contains("available: alpha, beta"), "{text}");
+}
+
+#[test]
+fn missing_skill_never_falls_back_to_a_near_name() {
+    let registry =
+        SkillRegistry::merge(&[("p", vec![skill("p", "alpha", "alpha description", false)])])
+            .unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    for near in ["ALPHA", "alph", "alpha ", " alpha", "beta"] {
+        let text = resolver.lookup(near).unwrap_err().to_string();
+        assert_eq!(text, format!("skill {near} does not exist; available: alpha"));
+    }
+    let doc = resolver.lookup("alpha").unwrap();
+    assert_eq!(&*doc.text, "body of alpha");
+}
+
+#[test]
+fn missing_skill_bounds_a_large_registry() {
+    let mut all = Vec::new();
+    for index in 0..25 {
+        let name = format!("skill-{index:02}");
+        all.push(skill("p", &name, "d", false));
+    }
+    let registry = SkillRegistry::merge(&[("p", all)]).unwrap();
+    assert_eq!(registry.names().len(), 25);
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("nope").unwrap_err().to_string();
+    assert!(text.contains("nope"), "{text}");
+    assert!(text.contains("available: "), "{text}");
+    let shown: Vec<String> = (0..20).map(|index| format!("skill-{index:02}")).collect();
+    let expected = format!("available: {}", shown.join(", "));
+    assert!(text.contains(&expected), "{text}");
+    assert!(text.contains("…and 5 more"), "{text}");
+    for hidden in ["skill-20", "skill-24"] {
+        assert!(!text.contains(hidden), "{text}");
+    }
+}
+
+#[test]
+fn missing_skill_empty_registry_names_the_request() {
+    let resolver = SkillResolver::new(Arc::new(SkillRegistry::empty()));
+    let text = resolver.lookup("gamma").unwrap_err().to_string();
+    assert!(text.contains("gamma"), "{text}");
+    assert!(text.contains("no skills are loaded"), "{text}");
+}
+
+#[test]
+fn missing_skill_lists_all_twenty_names_without_a_tail_count() {
+    let mut all = Vec::new();
+    for index in 0..20 {
+        let name = format!("skill-{index:02}");
+        all.push(skill("p", &name, "d", false));
+    }
+    let registry = SkillRegistry::merge(&[("p", all)]).unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("nope").unwrap_err().to_string();
+    let shown: Vec<String> = (0..20).map(|index| format!("skill-{index:02}")).collect();
+    let expected = format!("available: {}", shown.join(", "));
+    assert!(text.contains(&expected), "{text}");
+    assert!(!text.contains("…and"), "{text}");
 }
 
 fn letter_section() -> SkillsSectionFn {

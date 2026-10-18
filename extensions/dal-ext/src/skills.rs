@@ -41,6 +41,13 @@ const MAX_NAME_BYTES: usize = 64;
 const SECTION_HEAD: &str =
     "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.";
 
+/// Most skill names named in a missing-skill refusal.
+///
+/// [`SkillRegistry::names`] is already sorted bytewise, so the refusal lists
+/// the first page in that order and counts the rest instead of pasting an
+/// unbounded inventory into the error.
+const MAX_AVAILABLE_SKILL_NAMES: usize = 20;
+
 /// One skill as a plugin declared it, before validation.
 #[derive(Clone, Copy, Debug)]
 pub struct SkillRegistration<'a> {
@@ -520,6 +527,10 @@ impl SkillResolver {
 
 impl SkillResolver {
     /// Resolves one `skill://` body or reports the unknown skill.
+    ///
+    /// A miss never falls back to a near name and never picks a skill: it
+    /// names the requested path and the bounded `available:` list so the
+    /// caller can retry with an exact name.
     fn lookup(&self, path: &str) -> Result<Doc, SchemeError> {
         if let Some(body) = self.registry.body(path) {
             return Ok(Doc::new(format!("skill://{path}"), body.to_string()));
@@ -529,14 +540,29 @@ impl SkillResolver {
             format!("skill {path} does not exist; no skills are loaded")
         } else {
             format!(
-                "skill {path} does not exist; known skills: {}",
-                names.join(", ")
+                "skill {path} does not exist; available: {}",
+                available_list(names)
             )
         };
         Err(SchemeError::Failed {
             message: message.into(),
         })
     }
+}
+
+/// The bounded `available:` list for a missing-skill refusal.
+///
+/// `names` arrives in the registry's bytewise order and keeps it; only the
+/// tail is cut, with the hidden count after `…and N more`.
+fn available_list(names: &[Box<str>]) -> String {
+    if names.len() <= MAX_AVAILABLE_SKILL_NAMES {
+        return names.join(", ");
+    }
+    let shown = names[..MAX_AVAILABLE_SKILL_NAMES].join(", ");
+    format!(
+        "{shown}, …and {} more",
+        names.len() - MAX_AVAILABLE_SKILL_NAMES
+    )
 }
 
 impl SchemeResolver for SkillResolver {
