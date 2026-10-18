@@ -1806,8 +1806,18 @@ impl Actor {
             return None;
         }
         self.control().end_opening(turn);
+        // Digests first: `guard_input` takes `content`, and the marker below
+        // must name exactly what the admitted entry carries.
+        let admitted = Self::admitted_digests(&content);
         let mut effects = Vec::new();
-        if run_input && !cancel.is_cancelled() && !self.guard_input(turn, content, &mut effects) {
+        // Only a guard-admitted transform counts as delivered. Cancelled
+        // turns still fall through below so their plain user entry lands
+        // (pinned), but they must leave no marker, or every later input
+        // would freeze on images no request ever carried. The refuse
+        // condition is unchanged: guard refusal still ends the opening here.
+        let guard_ok =
+            run_input && !cancel.is_cancelled() && self.guard_input(turn, content, &mut effects);
+        if run_input && !cancel.is_cancelled() && !guard_ok {
             self.control().cancel_opening();
             return None;
         }
@@ -1830,10 +1840,87 @@ impl Actor {
             )
             .is_ok()
         {
+            if guard_ok {
+                self.mark_admitted_images(&admitted, &mut effects);
+            }
             return Some(effects);
         }
         self.control().cancel_opening();
         None
+    }
+
+    /// Digests of the image parts in folded input content. Text-only input
+    /// yields none, so callers pay nothing unless images are actually
+    /// admitted.
+    fn admitted_digests(content: &[Part]) -> Vec<BlobId> {
+        let mut digests = Vec::new();
+        for part in content {
+            match part {
+                Part::Image { bytes, mime } if mime.starts_with("image/") => {
+                    let bytes: &[u8] = bytes;
+                    digests.push(BlobId::from_bytes(bytes));
+                }
+                Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => {
+                    digests.push(*blob_id);
+                }
+                _ => {}
+            }
+        }
+        digests
+    }
+
+    /// Journals a `letter_delivered` marker in the same batch as the admitted
+    /// user entry, so the two land atomically: the marker names every image
+    /// digest the entry carries, letter or otherwise, and later inputs tell
+    /// delivered letters from records that never reached a request.
+    ///
+    /// The marker is best-effort and purely additive. Cancellations,
+    /// shutdowns, and refusals return before this point, so a dropped
+    /// transform leaves no marker. When the batch holds no user entry there
+    /// is nothing to mark. Body shape contract, mirrored by the strict
+    /// reader in extensions/dal-ext/src/letter.rs and pinned by its
+    /// `letter_first_prompt` tests: `{"v":1,"digests":[<64-hex>...]}`.
+    fn mark_admitted_images(&mut self, digests: &[BlobId], effects: &mut [Effect]) {
+        if digests.is_empty() {
+            return;
+        }
+        let Some(body) = Self::delivered_body(digests) else {
+            return;
+        };
+        let Some(emit) = effects.iter_mut().find_map(|effect| match effect {
+            Effect::Emit(emit)
+                if emit
+                    .records
+                    .iter()
+                    .any(|record| matches!(record, Record::User(_))) =>
+            {
+                Some(emit)
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.fold.fold_ext("letter", "letter_delivered", &body);
+        emit.records.push(Record::Ext {
+            at: Timestamp::now(),
+            ext: "letter".into(),
+            kind: "letter_delivered".into(),
+            body,
+        });
+        self.shared.sync_ext(&self.fold);
+    }
+
+    /// Renders one `letter_delivered` body for `digests`. Hex strings keep
+    /// the shape valid JSON without an engine-side JSON dependency; the
+    /// strict reader side parses each back through `BlobId`.
+    fn delivered_body(digests: &[BlobId]) -> Option<dal_core::RawJson> {
+        let list = digests
+            .iter()
+            .map(|digest| format!("\"{digest}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("{{\"v\":1,\"digests\":[{list}]}}");
+        dal_core::RawJson::parse(&text).ok()
     }
 
     /// Folds every extension's `input` hooks over `content` in canonical
