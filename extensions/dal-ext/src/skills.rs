@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dal_agent::error::SchemeError;
 use dal_agent::ext::{
@@ -24,7 +24,7 @@ use dal_agent::ext::{
     SchemeResolver, SectionCx, SectionFn,
 };
 use dal_core::ext::{McpBlock, SkillFrontError, SkillRecord, decode_skill_mcp};
-use dal_core::{RegistrationError, ServiceSet};
+use dal_core::{BlobId, ModelInfo, RegistrationError, ServiceSet};
 
 use crate::letter::{Font, LetterAssembly};
 
@@ -554,23 +554,89 @@ impl SchemeResolver for SkillResolver {
     }
 }
 
+/// One memoized draw plus its PNG digests in chunk order.
+#[derive(Clone, Debug, Default)]
+struct Memo {
+    assembly: LetterAssembly,
+    digests: Vec<BlobId>,
+}
+
 /// Dynamic `skills` prompt section over one generation's immutable registry.
 ///
 /// Renders [`section`] against the letter assembly drawn from the captured
-/// font; returns `None` when no skill is loaded or the font fails to parse.
-/// The host composes the first prompt through the same pure seams with its
-/// loaded registry.
+/// font; returns `None` when no skill is loaded. A skill's letter replaces
+/// its description only for a model known to read images whose image the
+/// request already carries, in history or current input: an
+/// `image_input = false` model, a route that did not resolve, and any letter
+/// the session never delivered all keep every description as text, so a
+/// name-only line never hides a description the model never receives. A font
+/// failure renders every description as text through an empty assembly, so
+/// source delivery never depends on the bitmap table. The host composes the
+/// first prompt through the same pure seams with its loaded registry.
 #[derive(Debug, Clone)]
 struct SkillsSectionFn {
     registry: Arc<SkillRegistry>,
     font: Arc<Font>,
+    memo: Arc<OnceLock<Memo>>,
+}
+
+impl SkillsSectionFn {
+    /// The drawn letters, computed once: the draw is a pure function of the
+    /// immutable registry and font. Test-only handle; product paths go
+    /// through [`SkillsSectionFn::assembly`].
+    #[cfg(test)]
+    pub(crate) fn drawn(&self) -> LetterAssembly {
+        self.memoized().assembly.clone()
+    }
+
+    fn memoized(&self) -> &Memo {
+        self.memo.get_or_init(|| {
+            let assembly = crate::letter::letters(&self.registry, &self.font).unwrap_or_default();
+            let digests = chunk_digests(&assembly);
+            Memo { assembly, digests }
+        })
+    }
+
+    /// The letter assembly this render shows: drawn letters whose images the
+    /// request already carries. Delivery is read off the request being
+    /// assembled, so a cancelled opening, a frozen mismatch, or a hook
+    /// failure all fall back to text on the same request that lacks them.
+    fn assembly(&self, model: Option<&ModelInfo>, delivered: &[BlobId]) -> LetterAssembly {
+        if !model.is_some_and(|model| model.caps.image_input) {
+            return LetterAssembly::default();
+        }
+        let memo = self.memoized();
+        let chunks = memo
+            .assembly
+            .chunks
+            .iter()
+            .zip(&memo.digests)
+            .filter(|(_, digest)| delivered.contains(digest))
+            .map(|(chunk, _)| chunk.clone())
+            .collect();
+        LetterAssembly {
+            chunks,
+            fallbacks: memo.assembly.fallbacks.clone(),
+        }
+    }
+}
+
+/// PNG digests of one drawn assembly, in chunk order.
+pub(crate) fn chunk_digests(assembly: &LetterAssembly) -> Vec<BlobId> {
+    assembly
+        .chunks
+        .iter()
+        .map(|chunk| BlobId::from_bytes(chunk.png.as_ref()))
+        .collect()
 }
 
 impl SectionFn for SkillsSectionFn {
-    fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
-        let registry = &*self.registry;
-        let assembly = crate::letter::letters(registry, &self.font).ok()?;
-        section(registry, &assembly).map(str::into_string)
+    fn render(&self, cx: &SectionCx<'_>) -> Option<String> {
+        section(
+            &self.registry,
+            &self.assembly(cx.model, cx.delivered_images),
+        )
+        .map(str::into_string)
     }
 }
 
@@ -595,6 +661,7 @@ pub fn extension(registry: Arc<SkillRegistry>) -> Result<Extension, Registration
         Arc::new(SkillsSectionFn {
             registry: Arc::clone(&registry),
             font: Arc::new(Font::embedded()),
+            memo: Arc::new(OnceLock::new()),
         }),
     );
     invoke::register(builder.prompt_section(section), registry)?.build()

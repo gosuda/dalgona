@@ -1,6 +1,7 @@
 use super::invoke::{listing, reminder};
 use super::*;
 use crate::letter::{FallbackReason, LetterChunk, LetterFallback};
+use dal_core::{Caps, ModelRoute, ThinkingLevel};
 
 const HEAD: &str =
     "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.";
@@ -684,4 +685,83 @@ fn skill_uri_reads() {
     let empty = SkillResolver::new(Arc::new(SkillRegistry::empty()));
     let empty_err = empty.lookup("gamma").unwrap_err();
     assert!(matches!(empty_err, SchemeError::Failed { .. }));
+}
+
+fn letter_section() -> SkillsSectionFn {
+    let registry = SkillRegistry::merge(&[(
+        "p",
+        vec![
+            skill("p", "alpha", "Review the diff carefully.", true),
+            skill("p", "beta", "Write a changelog entry.", true),
+        ],
+    )])
+    .unwrap();
+    SkillsSectionFn {
+        registry: Arc::new(registry),
+        font: Arc::new(Font::embedded()),
+        memo: Arc::new(OnceLock::new()),
+    }
+}
+
+const TEXT_SECTION: &str = "# Skills\n\
+    Load a skill body before you follow it with the read tool at skill://NAME.\n\
+    - alpha: Review the diff carefully.\n\
+    - beta: Write a changelog entry.";
+const IMAGE_SECTION: &str = "# Skills\n\
+    Load a skill body before you follow it with the read tool at skill://NAME.\n\
+    - alpha\n\
+    - beta";
+
+fn modelinfo(image_input: bool) -> ModelInfo {
+    ModelInfo {
+        route: ModelRoute::Synthetic {
+            id: "p/model".into(),
+        },
+        name: "p/model".into(),
+        caps: Caps {
+            context_window: None,
+            thinking: Box::new([ThinkingLevel::Off]),
+            tool_use: false,
+            image_input,
+            custom_grammar: false,
+        },
+    }
+}
+
+/// The section lines for one model and one delivered set: the same pure
+/// composition `render` applies, without a host services handle.
+fn section_text(
+    section_fn: &SkillsSectionFn,
+    model: Option<&ModelInfo>,
+    delivered: &[BlobId],
+) -> Option<String> {
+    section(&section_fn.registry, &section_fn.assembly(model, delivered)).map(str::into_string)
+}
+
+#[test]
+fn letter_section_shows_text_unless_the_model_reads_images() {
+    let section_fn = letter_section();
+    let image = modelinfo(true);
+    let text = modelinfo(false);
+    let all = chunk_digests(&section_fn.drawn());
+    assert_eq!(
+        section_text(&section_fn, Some(&image), &all).as_deref(),
+        Some(IMAGE_SECTION),
+        "delivered letters render as name-only lines"
+    );
+    assert_eq!(
+        section_text(&section_fn, Some(&image), &[]).as_deref(),
+        Some(TEXT_SECTION),
+        "an image model with nothing delivered yet keeps every description as text"
+    );
+    assert_eq!(
+        section_text(&section_fn, Some(&text), &all).as_deref(),
+        Some(TEXT_SECTION),
+        "a text-only model keeps every description as text"
+    );
+    assert_eq!(
+        section_text(&section_fn, None, &all).as_deref(),
+        Some(TEXT_SECTION),
+        "an unresolved model keeps text too, like the input hook gate"
+    );
 }
