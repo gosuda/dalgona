@@ -52,8 +52,9 @@ pub use http::{
 };
 pub use provider::{
     AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,
-    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity, ProviderSet,
-    ProviderSettings, QueryValue, Redirect, ScriptedSelection, Shape, Transport, find,
+    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity,
+    ProviderReadiness, ProviderSet, ProviderSettings, QueryValue, Redirect, ScriptedSelection,
+    Shape, Transport, find,
 };
 pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, record};
 pub use retry::{

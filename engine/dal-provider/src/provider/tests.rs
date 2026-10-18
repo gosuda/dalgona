@@ -5465,6 +5465,67 @@ async fn google_vertex_binds_without_a_key_and_reads_the_captured_bearer_token()
 }
 
 #[tokio::test]
+async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> TestResult {
+    // These adapters refuse an API key, so a key from the store or the
+    // captured environment must not read as a usable credential source.
+    // `auth.json` only holds members for built-in rows: the OAuth login sits
+    // under an OAuth row, the keys under a key row.
+    let cases = [
+        (
+            "factory-droid",
+            Family::GoogleAntigravity,
+            Some(stored_login("ya29-test")),
+            true,
+        ),
+        (
+            "factory-droid",
+            Family::Droid,
+            Some(stored_login("workos-test")),
+            true,
+        ),
+        ("factory-droid", Family::Droid, None, false),
+        (
+            "groq",
+            Family::GoogleAntigravity,
+            Some(api_key_credential("stored-key")),
+            false,
+        ),
+        ("groq", Family::GoogleAntigravity, None, false),
+    ];
+    let cancel = CancellationToken::new();
+    for (id, family, stored, ready) in cases {
+        let dir = TestDir::new()?;
+        if let Some(credential) = stored {
+            let mut store =
+                crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+            store.set(id, credential)?;
+            store.store()?;
+        }
+        let oauth_only = entry(
+            id,
+            family,
+            String::from("https://api.example.com"),
+            Some("AG_KEY"),
+            1,
+            Transport::Https,
+        );
+        let set = ProviderSet::new(
+            &config(vec![oauth_only], 0),
+            identity(),
+            EnvSnapshot::test(&[("AG_KEY", "env-key")]),
+            dir.path(),
+            dir.path(),
+        )?;
+        assert_eq!(
+            set.credential_source_available(id, &cancel).await?,
+            ready,
+            "{id} as {family:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult {
     use crate::family::gitlab::workflow::support::{
         RestCounts, action_frame, rest_router, test_timeouts,
@@ -5641,6 +5702,133 @@ async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult 
     );
     assert_eq!(counts.lock().unwrap().creates, 2);
     servers.abort_all();
+    Ok(())
+}
+
+/// A Compatible-preset `groq` row overridden to the Bedrock family: the
+/// stored `auth.json` key counts as a bearer source without any ambient
+/// AWS material, so the row is ready while the ambient probe is empty.
+fn bedrock_override_set(
+    dir: &TestDir,
+    providers: Vec<ProviderEntry>,
+    env: EnvSnapshot,
+) -> Result<ProviderSet, Box<dyn Error>> {
+    Ok(ProviderSet::new(
+        &config(providers, 0),
+        identity(),
+        env,
+        dir.path(),
+        dir.path(),
+    )?)
+}
+
+fn bedrock_override_entry() -> ProviderEntry {
+    entry(
+        "groq",
+        Family::Bedrock,
+        String::from("https://api.groq.com/openai/v1"),
+        None,
+        2,
+        Transport::Https,
+    )
+}
+
+fn store_groq_key(dir: &TestDir) -> Result<(), Box<dyn Error>> {
+    let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+    store.set("groq", api_key_credential("groq-stored"))?;
+    store.store()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_stored_key_counts_without_ambient_sources() -> TestResult {
+    let dir = TestDir::new()?;
+    store_groq_key(&dir)?;
+    // Inserted out of order on purpose: the batch must still report stable
+    // id order. `openai` holds no credential and reads as not ready.
+    let set = bedrock_override_set(
+        &dir,
+        vec![
+            entry(
+                "openai",
+                Family::Responses,
+                String::from("https://api.openai.com/v1"),
+                None,
+                2,
+                Transport::Https,
+            ),
+            bedrock_override_entry(),
+        ],
+        bedrock_env(&[]),
+    )?;
+    let cancel = CancellationToken::new();
+    assert!(
+        set.credential_source_available("groq", &cancel).await?,
+        "stored bearer must win with no ambient source"
+    );
+    assert!(
+        !set.credential_source_available("openai", &cancel).await?,
+        "a keyless row is a clean miss, not an error"
+    );
+    let rows = set.provider_readiness(&cancel).await?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(&*rows[0].provider, "groq");
+    assert_eq!(rows[0].family, Family::Bedrock);
+    assert!(rows[0].ready);
+    assert_eq!(&*rows[1].provider, "openai");
+    assert!(!rows[1].ready);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_without_any_source_is_a_clean_miss() -> TestResult {
+    let dir = TestDir::new()?;
+    let set = bedrock_override_set(&dir, vec![bedrock_override_entry()], bedrock_env(&[]))?;
+    let cancel = CancellationToken::new();
+    assert!(
+        !set.credential_source_available("groq", &cancel).await?,
+        "no bearer and no ambient source reads as false, not an error"
+    );
+    let rows = set.provider_readiness(&cancel).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].family, Family::Bedrock);
+    assert!(!rows[0].ready);
+    Ok(())
+}
+
+#[tokio::test]
+async fn precancelled_readiness_is_cancelled_never_false() -> TestResult {
+    let dir = TestDir::new()?;
+    let set = bedrock_override_set(&dir, vec![bedrock_override_entry()], bedrock_env(&[]))?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = set
+        .credential_source_available("groq", &cancel)
+        .await
+        .expect_err("pre-cancelled check must fail loud");
+    assert!(
+        matches!(error, ProviderError::Cancelled),
+        "pre-cancelled check must not read as false: {error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_empty_batch_is_cancelled_never_empty() -> TestResult {
+    let dir = TestDir::new()?;
+    let set = bedrock_override_set(&dir, Vec::new(), bedrock_env(&[]))?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = set
+        .provider_readiness(&cancel)
+        .await
+        .expect_err("cancelled empty batch must fail loud");
+    assert!(
+        matches!(error, ProviderError::Cancelled),
+        "cancelled empty batch must not read as ready-less success: {error:?}"
+    );
+    let rows = set.provider_readiness(&CancellationToken::new()).await?;
+    assert_eq!(rows, [] as [crate::provider::set::ProviderReadiness; 0]);
     Ok(())
 }
 

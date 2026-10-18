@@ -19,7 +19,7 @@ pub use def::{
     find,
 };
 pub(crate) use def::{GITHUB_COPILOT, OPENAI, OPENAI_CODEX};
-pub use set::{ProviderIdentity, ProviderSet};
+pub use set::{ProviderIdentity, ProviderReadiness, ProviderSet};
 pub use shape::Shape;
 
 #[cfg(test)]

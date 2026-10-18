@@ -8,6 +8,7 @@ use std::{
 
 use dal_core::{Family, SessionId};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     auth::{
@@ -18,7 +19,7 @@ use crate::{
     error::ProviderError,
     family::{
         azure,
-        bedrock::auth::AwsCredentialResolver,
+        bedrock::auth::{AwsCredentialResolver, SHARED_RESOLVE_TIMEOUT, expired},
         copilot::IdentityCache,
         gitlab::{DirectAccessCache, workflow::WorkflowSessions},
         google::{antigravity::AntigravitySession, shared::ResponseIdSlot},
@@ -112,6 +113,23 @@ pub(super) struct ProviderSlot {
     pub(super) entry: ProviderEntry,
     pub(super) client: http::LazyClient,
     pub(super) permits: Arc<Semaphore>,
+}
+/// Whether one configured provider currently holds a credential source.
+///
+/// The row reports the effective configured family of the entry, never a
+/// built-in default: a Compatible-preset row overridden to another `api`
+/// reports the override. Readiness performs no request, refresh, model
+/// fetch, or cache write: a stored or captured bearer counts before the
+/// ambient AWS source probe runs, and a provider with no source reports
+/// `ready: false` instead of an error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderReadiness {
+    /// The configured provider id.
+    pub provider: Box<str>,
+    /// The effective configured family of the row.
+    pub family: Family,
+    /// Whether the provider holds a credential source.
+    pub ready: bool,
 }
 
 impl ProviderSet {
@@ -309,6 +327,192 @@ impl ProviderSet {
                 })?;
         let store = credential::AuthStore::load(self.inner.data_dir.join("auth.json"))?;
         credential::resolve(&slot.entry, &store, &self.inner.env)
+    }
+
+    /// Reports whether `provider_id` currently holds a credential source,
+    /// without sending any request.
+    ///
+    /// Non-Bedrock rows reuse the credential-resolution presence rule: any
+    /// resolved credential (including an explicit credential-less row) is
+    /// ready, and only [`ProviderError::NoCredentials`] reads as `false`.
+    /// Vertex rows also count a captured pre-minted bearer token, and Droid
+    /// and Antigravity rows count only a stored OAuth login, because those
+    /// adapters refuse an API key.
+    /// Bedrock rows count the stored `auth.json` key and the captured
+    /// `AWS_BEARER_TOKEN_BEDROCK` bearer first, then consult the set-owned
+    /// ambient AWS credential-source probe. Nothing refreshes, spawns a
+    /// credential helper, fetches models, writes a cache, or touches the
+    /// network; the profile probe's unreadable-file `false` is the observed
+    /// legacy behavior it keeps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRequest` when `provider_id` names no configured
+    /// provider, [`ProviderError::Cancelled`] when `cancel` fires before or
+    /// during the check (never `false` for cancellation), the existing AWS
+    /// timeout transport error when the Bedrock probe deadline expires, and
+    /// auth-store errors otherwise.
+    pub async fn credential_source_available(
+        &self,
+        provider_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<bool, ProviderError> {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        let slot =
+            self.inner
+                .providers
+                .get(provider_id)
+                .ok_or_else(|| ProviderError::InvalidRequest {
+                    message: format!("provider {provider_id} is not configured"),
+                })?;
+        let entry = &slot.entry;
+        let store = self.load_auth_store(cancel, entry.family).await?;
+        let deadline = tokio::time::Instant::now() + SHARED_RESOLVE_TIMEOUT;
+        self.readiness_for(entry, &store, cancel, deadline).await
+    }
+
+    /// Reports one readiness row per configured provider, in stable
+    /// provider-id order, loading `auth.json` once for the batch.
+    ///
+    /// Each row follows [`Self::credential_source_available`]; the single
+    /// caller-minted deadline binds every Bedrock probe instead of a fresh
+    /// envelope per row. A cancelled batch reports
+    /// [`ProviderError::Cancelled`], including a cancelled empty batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Cancelled`] when `cancel` fires, the Bedrock
+    /// timeout transport error when a probe deadline expires, and auth-store
+    /// errors otherwise. No row reports `false` for cancellation.
+    pub async fn provider_readiness(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ProviderReadiness>, ProviderError> {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        let mut slots: Vec<&ProviderEntry> = self
+            .inner
+            .providers
+            .values()
+            .map(|slot| &slot.entry)
+            .collect();
+        slots.sort_by(|left, right| left.id.cmp(&right.id));
+        let Some(&first) = slots.first() else {
+            return Ok(Vec::new());
+        };
+        let store = self.load_auth_store(cancel, first.family).await?;
+        let deadline = tokio::time::Instant::now() + SHARED_RESOLVE_TIMEOUT;
+        let mut rows = Vec::with_capacity(slots.len());
+        for entry in slots {
+            let ready = self.readiness_for(entry, &store, cancel, deadline).await?;
+            rows.push(ProviderReadiness {
+                provider: entry.id.clone(),
+                family: entry.family,
+                ready,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Loads the decoded `auth.json` off the async runtime, with
+    /// cancellation racing the blocking read: winning cancellation reports
+    /// [`ProviderError::Cancelled`] and the late result is dropped, the way
+    /// the AWS file boundary abandons a blocked read past its wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed auth-store error when `auth.json` cannot be read,
+    /// [`ProviderError::Cancelled`] when `cancel` fires first, and a
+    /// family-attributed transport error when the blocking join itself fails
+    /// outside cancellation.
+    async fn load_auth_store(
+        &self,
+        cancel: &CancellationToken,
+        family: Family,
+    ) -> Result<credential::AuthStore, ProviderError> {
+        let path = self.inner.data_dir.join("auth.json");
+        let load = tokio::task::spawn_blocking(move || credential::AuthStore::load(path));
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(ProviderError::Cancelled),
+            result = load => match result {
+                Ok(store) => store,
+                Err(_) if cancel.is_cancelled() => Err(ProviderError::Cancelled),
+                Err(_) => Err(ProviderError::Transport {
+                    family,
+                    reason: String::from("auth store read failed"),
+                }),
+            },
+        }
+    }
+
+    /// The shared single-row check behind [`Self::credential_source_available`]
+    /// and [`Self::provider_readiness`], so one row can never drift from the
+    /// batch: the caller threads the batch deadline in, never a fresh
+    /// envelope per row.
+    ///
+    /// Cancellation and the shared deadline bind the Bedrock probe wait, but
+    /// the probe itself reports plain availability: a `false` that arrives
+    /// alongside a fired `cancel` or an elapsed `deadline` is re-raised as
+    /// [`ProviderError::Cancelled`] or the existing AWS timeout, never
+    /// returned as unavailable.
+    async fn readiness_for(
+        &self,
+        entry: &ProviderEntry,
+        store: &credential::AuthStore,
+        cancel: &CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, ProviderError> {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        if entry.family == Family::GoogleVertex {
+            // A Vertex row is ready when it holds a stored/env credential of
+            // the usual kind, or a pre-minted bearer token in the captured
+            // environment (gcloud's `print-access-token` workflow).
+            let keyed = credential::resolve(entry, store, &self.inner.env).is_ok();
+            return Ok(keyed || super::request::vertex_env_token(&self.inner.env).is_some());
+        }
+        if accepts_only_oauth(entry.family) {
+            // The request adapter signs in with a stored OAuth login and
+            // refuses an API key, so a key alone is not a usable source.
+            return match credential::resolve(entry, store, &self.inner.env) {
+                Ok(Credential::OAuth(_)) => Ok(true),
+                Ok(Credential::ApiKey { .. } | Credential::None)
+                | Err(ProviderError::NoCredentials { .. }) => Ok(false),
+                Err(error) => Err(error),
+            };
+        }
+        if entry.family != Family::Bedrock {
+            return match credential::resolve(entry, store, &self.inner.env) {
+                Ok(_) => Ok(true),
+                Err(ProviderError::NoCredentials { .. }) => Ok(false),
+                Err(error) => Err(error),
+            };
+        }
+        if self
+            .inner
+            .aws_resolver
+            .resolve_bearer_token(entry, store)
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let present = self
+            .inner
+            .aws_resolver
+            .has_credential_source(None, cancel, deadline)
+            .await;
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(expired());
+        }
+        Ok(present)
     }
 
     /// Binds one resolved model to its configured provider and resolved
@@ -577,6 +781,12 @@ fn ensure_gemini_cli_policy(data_dir: &Path) -> Result<PathBuf, ProviderError> {
 /// and [`Provider::new`] share this one rule.
 pub(super) const fn authenticates_ambiently(family: Family) -> bool {
     matches!(family, Family::Bedrock | Family::GoogleVertex)
+}
+
+/// Whether a family's adapter accepts only a stored OAuth login and refuses
+/// an API key: Droid (`droid::require_bearer`) and Antigravity.
+const fn accepts_only_oauth(family: Family) -> bool {
+    matches!(family, Family::Droid | Family::GoogleAntigravity)
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
