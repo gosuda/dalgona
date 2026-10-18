@@ -41,8 +41,8 @@ use dal_core::{
 use dal_provider::{
     AuthStyle, CatalogEntry, CompactOutcome, Effort, EnvSnapshot, EventStream, Listing, NoticeSink,
     Provider, ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet,
-    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
-    Transport,
+    ProviderSettings, ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall,
+    ToolSupport, Transport,
 };
 use hyper::{
     Request, Response,
@@ -104,6 +104,8 @@ fn entry(provider: &str, model: &str) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: true,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -246,6 +248,7 @@ fn build_set(
             key_env: key_env.map(Into::into),
             auth,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     };
@@ -385,6 +388,7 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         },
     }
 }

@@ -71,6 +71,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: dal_core::AssistantStop::ToolUse,
             replay: None,

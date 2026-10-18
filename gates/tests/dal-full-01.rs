@@ -623,6 +623,7 @@ fn usage() -> Usage {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: Some(0.001),
+        premium_requests: None,
     }
 }
 

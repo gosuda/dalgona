@@ -1116,6 +1116,7 @@ impl UsageState {
                 .saturating_sub(self.thinking.unwrap_or(0)),
             reasoning_tokens: self.thinking,
             cache_write_tokens: cache_write,
+            premium_requests: None,
             cost_usd: None,
         }
     }

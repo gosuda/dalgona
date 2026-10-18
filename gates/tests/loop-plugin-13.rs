@@ -356,6 +356,7 @@ fn zero_usage() -> Usage {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: None,
+        premium_requests: None,
     }
 }
 

@@ -86,6 +86,7 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         },
     }
 }
@@ -418,6 +419,7 @@ fn usage_is_start_overwritten_by_each_delta_member() {
                 reasoning_tokens: None,
                 cache_write_tokens: 50,
                 cost_usd: None,
+                premium_requests: None,
             }
         }
     );

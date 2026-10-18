@@ -37,6 +37,7 @@ fn usage() -> Usage {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: None,
+        premium_requests: None,
     }
 }
 
@@ -272,6 +273,7 @@ async fn model_commands_match_fold_after_every_command() {
                         reasoning_tokens: None,
                         cache_write_tokens: 0,
                         cost_usd: None,
+                        premium_requests: None,
                     });
                     journal
                         .append(vec![Record::TurnEnd {
@@ -328,6 +330,7 @@ async fn model_commands_match_fold_after_every_command() {
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
                     cost_usd: None,
+                    premium_requests: None,
                 });
                 journal
                     .append(vec![Record::TurnEnd {
@@ -367,6 +370,7 @@ async fn model_commands_match_fold_after_every_command() {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         });
         journal
             .append(vec![Record::TurnEnd {

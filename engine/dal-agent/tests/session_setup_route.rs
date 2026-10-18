@@ -48,6 +48,7 @@ fn assistant(id: u64, route: Option<AssistantRoute>) -> Record {
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
             replay: None,

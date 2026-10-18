@@ -116,6 +116,7 @@ impl DropProbe {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         };
         let events = if attempt == 0 {
             vec![

@@ -116,6 +116,7 @@ fn canonical_turn_decodes_in_causal_order_and_ignores_a_trailing_done() -> TestR
                 output_tokens: 30,
                 reasoning_tokens: Some(20),
                 cache_write_tokens: 0,
+                premium_requests: None,
                 cost_usd: None,
             },
         },

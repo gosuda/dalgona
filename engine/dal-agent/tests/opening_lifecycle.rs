@@ -180,6 +180,7 @@ impl ModelHandler for EntryCounter {
                         reasoning_tokens: None,
                         cache_write_tokens: 0,
                         cost_usd: None,
+                        premium_requests: None,
                     },
                 }),
                 Ok(StreamEvent::Stop {

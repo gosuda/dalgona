@@ -28,8 +28,9 @@ use dal_core::{
 };
 use dal_provider::{
     AuthStyle, CatalogEntry, CompactOutcome, EnvSnapshot, EventStream, Listing, NoticeSink,
-    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ResolvedModel,
-    StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport, Transport,
+    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings,
+    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
+    Transport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +63,8 @@ fn base_entry(model: &str, remote_compact: bool) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -251,6 +254,7 @@ fn zero_usage() -> Usage {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: None,
+        premium_requests: None,
     }
 }
 
@@ -291,6 +295,7 @@ impl Harness {
                 key_env: Some("RESP_TEST_KEY".into()),
                 auth: AuthStyle::Bearer,
                 max_concurrent_requests: 4,
+                settings: ProviderSettings::default(),
             }],
             scripted: None,
         };
@@ -406,6 +411,7 @@ async fn responses_turn_canonical_order() {
                 reasoning_tokens: Some(20),
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
         },
         StreamEvent::Stop {

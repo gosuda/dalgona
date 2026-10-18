@@ -22,6 +22,7 @@ fn zero_usage() -> StreamEvent {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         },
     }
