@@ -1618,6 +1618,231 @@ fn tool_call_without_replay_writes_no_replay_member() -> Result<(), Box<dyn std:
     );
     Ok(())
 }
+/// The fold writes `Block::Reasoning { replay: RawJson::null() }` for reasoning
+/// text a provider streamed without a replay event, and the encoder spells it
+/// `"replay":null`. The reader accepts every line the writer emits: the
+/// placeholder survives line decode, re-encodes byte for byte, and the entry
+/// level replay stays absent.
+#[test]
+fn reasoning_block_with_null_placeholder_replay_round_trips()
+-> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(
+        vec![Block::Reasoning {
+            text: "weighing the options".into(),
+            replay: RawJson::null(),
+        }],
+        None,
+    );
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(
+        line.contains(r#"{"type":"reasoning","text":"weighing the options","replay":null}"#),
+        "{line}"
+    );
+    let decoded = decode(line.as_bytes())?;
+    assert_eq!(decoded.record, record);
+    assert_eq!(encode(&decoded.record)?, line.as_bytes());
+    Ok(())
+}
+
+/// A reasoning block keeps requiring its `replay` member: only an explicit
+/// `null` reads as the placeholder, an absent member is still malformed.
+/// Block-level `null` on text and tool calls still collapses to absent, and
+/// the entry-level `null` stays an error beside a null reasoning block.
+#[test]
+fn reasoning_replay_null_is_accepted_but_absent_is_not() -> Result<(), Box<dyn std::error::Error>> {
+    let with_content = |content: &str| {
+        assistant_line("m", None).replace("\"content\":[]", &format!("\"content\":[{content}]"))
+    };
+
+    let null = with_content(r#"{"type":"reasoning","text":"t","replay":null}"#);
+    let Record::Assistant(Entry {
+        kind: EntryKind::Assistant {
+            content, replay, ..
+        },
+        ..
+    }) = decode(null.as_bytes())?.record
+    else {
+        return Err("expected an assistant record".into());
+    };
+    assert_eq!(replay, None);
+    assert_eq!(
+        content,
+        vec![Block::Reasoning {
+            text: "t".into(),
+            replay: RawJson::null(),
+        }]
+    );
+
+    let spaced = with_content(r#"{"type":"reasoning","text":"t","replay": null }"#);
+    assert!(decode(spaced.as_bytes()).is_ok(), "{spaced}");
+
+    let absent = with_content(r#"{"type":"reasoning","text":"t"}"#);
+    assert!(
+        matches!(decode(absent.as_bytes()), Err(DecodeError::Invalid { .. })),
+        "{absent}"
+    );
+
+    let entry_null = null.replace("\"stop\":\"done\"}", "\"stop\":\"done\",\"replay\":null}");
+    assert!(
+        matches!(
+            decode(entry_null.as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ),
+        "{entry_null}"
+    );
+
+    let collapsed = with_content(
+        r#"{"type":"text","text":"a","replay":null},{"type":"tool_call","id":"c","name":"read","input":{},"replay":null}"#,
+    );
+    let Record::Assistant(Entry {
+        kind: EntryKind::Assistant { content, .. },
+        ..
+    }) = decode(collapsed.as_bytes())?.record
+    else {
+        return Err("expected an assistant record".into());
+    };
+    assert!(matches!(
+        content.as_slice(),
+        [
+            Block::Text { replay: None, .. },
+            Block::ToolCall { replay: None, .. }
+        ]
+    ));
+    Ok(())
+}
+
+/// The direct `Block` serde path is the twin of the line decoder: a reasoning
+/// block's `replay: null` is the placeholder, an absent `replay` is an error.
+#[test]
+fn direct_block_decode_accepts_reasoning_replay_null() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Block::Reasoning {
+        text: "t".into(),
+        replay: RawJson::null(),
+    };
+    let serde_text = sonic_rs::to_string(&block)?;
+    assert_eq!(
+        serde_text,
+        r#"{"type":"reasoning","text":"t","replay":null}"#
+    );
+    assert_eq!(sonic_rs::from_str::<Block>(&serde_text)?, block);
+    assert!(sonic_rs::from_str::<Block>(r#"{"type":"reasoning","text":"t"}"#).is_err());
+    Ok(())
+}
+
+/// End to end inside the core: a turn whose provider streamed reasoning text
+/// and no replay event journals the null placeholder, and the lines the fold
+/// emitted re-open as a session. Every record the writer produced must read
+/// back through the journal decoder.
+#[test]
+fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        ClientId, Command, Effect, Event, Expect, HookEvent, HookOutcome, HookVerdict, Inference,
+        ModelRoute, Part, Phase, Session, Stop, StreamChannel, StreamEvent,
+    };
+
+    let stamp = crate::Timestamp::UNIX_EPOCH;
+    let mut session = Session::replay([], stamp)?.0;
+    let mut effects = Vec::new();
+    session.step(
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "question".into(),
+                }],
+            },
+            by: ClientId::new("test"),
+        },
+        stamp,
+        &mut effects,
+    )?;
+    let Phase::Opening { turn, .. } = session.phase() else {
+        return Err("the prompt did not open a turn".into());
+    };
+    let turn = *turn;
+    session.step(
+        Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))?,
+        },
+        stamp,
+        &mut effects,
+    )?;
+    session.step(
+        Event::StreamEnded {
+            turn,
+            model: ModelRoute::Api {
+                family: Family::Chat,
+                model: "test-model".into(),
+            },
+            family: Family::Chat,
+            result: Ok(Inference {
+                events: vec![
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Thinking,
+                        text: "weighing ".into(),
+                    },
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Thinking,
+                        text: "it".into(),
+                    },
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Text,
+                        text: "done".into(),
+                    },
+                    StreamEvent::Usage(Usage {
+                        input_tokens: 10,
+                        cached_input_tokens: 0,
+                        output_tokens: 1,
+                        reasoning_tokens: None,
+                        cache_write_tokens: 0,
+                        premium_requests: None,
+                        cost_usd: None,
+                    }),
+                    StreamEvent::Stop(Stop::EndTurn),
+                ],
+            }),
+            partial: None,
+        },
+        stamp,
+        &mut effects,
+    )?;
+
+    let mut records = Vec::new();
+    for effect in &effects {
+        if let Effect::Emit(emit) = effect {
+            records.extend(emit.records.iter().cloned());
+        }
+    }
+    let content = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Assistant(Entry {
+                kind: EntryKind::Assistant { content, .. },
+                ..
+            }) => Some(content.clone()),
+            _ => None,
+        })
+        .ok_or("the stream journaled no assistant entry")?;
+    assert!(
+        matches!(
+            content.as_slice(),
+            [Block::Reasoning { text, replay }, Block::Text { .. }]
+            if text.as_ref() == "weighing it" && replay.as_str() == "null"
+        ),
+        "{content:?}"
+    );
+
+    let lines = records.iter().map(encode).collect::<Result<Vec<_>, _>>()?;
+    for (record, line) in records.iter().zip(&lines) {
+        assert_eq!(&decode(line)?.record, record);
+    }
+    Session::replay_lines(lines.iter().map(Vec::as_slice), stamp)?;
+    Ok(())
+}
+
 fn usage_with_premium(premium_requests: Option<f64>) -> Usage {
     Usage {
         input_tokens: 1,

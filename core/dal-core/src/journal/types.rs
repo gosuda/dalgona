@@ -102,8 +102,10 @@ pub enum JournalPart {
 /// One assistant text, reasoning, or tool-call block in a record.
 ///
 /// A `text` block without a replay payload still writes `"replay":null`, as
-/// in format 1; a `reasoning` block writes its provider replay payload. A
-/// `tool_call` block omits an absent replay member.
+/// in format 1; a `reasoning` block writes its provider replay payload, or
+/// `"replay":null` when the provider streamed none. Only on a `reasoning`
+/// block does the reader keep that `null`; a `text` or `tool_call` block reads
+/// it as absent. A `tool_call` block omits an absent replay member.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -119,7 +121,8 @@ pub enum Block {
     Reasoning {
         /// The reasoning text.
         text: Box<str>,
-        /// The opaque provider replay payload.
+        /// The opaque provider replay payload; `RawJson::null()` when the
+        /// provider streamed reasoning text without one.
         replay: RawJson,
     },
     /// A request to execute a tool.

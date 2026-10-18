@@ -250,13 +250,17 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
         .map(|member| text_member(&member, "text"))
         .transpose()?;
     let replay = want(&mut members, "replay")
-        .map(|member| opt_raw_json_member(&member, "replay"))
-        .transpose()?
-        .flatten();
+        .map(|member| raw_json_member(&member, "replay"))
+        .transpose()?;
+    // A text or tool_call block reads `"replay":null` as no payload. A
+    // reasoning block always carries one, and the fold writes
+    // `RawJson::null()` as the empty placeholder, so only there is `null` a
+    // value and only an absent member is malformed.
+    let null_is_absent = |raw: Option<RawJson>| raw.filter(|raw| raw.as_str() != "null");
     match ty.as_ref() {
         "text" => Ok(Block::Text {
             text: text.ok_or_else(|| invalid(offset, "a text block needs `text`"))?,
-            replay,
+            replay: null_is_absent(replay),
         }),
         "reasoning" => Ok(Block::Reasoning {
             text: text.ok_or_else(|| invalid(offset, "a reasoning block needs `text`"))?,
@@ -282,7 +286,7 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
                 id,
                 name,
                 input,
-                replay,
+                replay: null_is_absent(replay),
             })
         }
         kind => Err(invalid(
