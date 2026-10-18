@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-use super::{Check, CheckInput, Exit, LoadError, Scoring, ToolCall, Usage, load};
+use super::{Check, CheckError, CheckInput, Exit, LoadError, Scoring, ToolCall, Usage, load};
+use tokio_util::sync::CancellationToken;
 
 const SMOKE: &str = r##"def has_shebang(result, workspace):
     return result["exit"] == "ok" and workspace.read("scripts/run.sh").startswith("#!/bin/sh")
@@ -26,6 +27,13 @@ fn input<'a>(exit: Exit, text: &'a str, calls: &'a [ToolCall]) -> CheckInput<'a>
             cost_usd: Some(0.5),
         },
     }
+}
+
+fn unexpired() -> (CancellationToken, std::time::Instant) {
+    (
+        CancellationToken::new(),
+        std::time::Instant::now() + std::time::Duration::from_secs(3_600),
+    )
 }
 
 fn error_text(source: &str) -> String {
@@ -204,10 +212,11 @@ fn a_check_passes_and_fails_on_the_workspace() {
     let dir = std::env::temp_dir().join(format!("wf-eval-pack-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(dir.join("scripts/run.sh"), "#!/bin/sh\nset -e\n").unwrap();
-    assert!(check.run(&input(Exit::Ok, "done", &[]), &dir).unwrap());
-    assert!(!check.run(&input(Exit::Failed, "done", &[]), &dir).unwrap());
+    let (cancel, deadline) = unexpired();
+    assert!(check.run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline).unwrap());
+    assert!(!check.run(&input(Exit::Failed, "done", &[]), &dir, &cancel, deadline).unwrap());
     std::fs::write(dir.join("scripts/run.sh"), "set -e\n").unwrap();
-    assert!(!check.run(&input(Exit::Ok, "done", &[]), &dir).unwrap());
+    assert!(!check.run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline).unwrap());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -221,8 +230,9 @@ fn a_check_sees_text_tool_calls_and_usage() {
         args: "{\"path\":\"a.txt\"}".to_owned(),
     }];
     let dir = std::env::temp_dir();
-    assert!(check.run(&input(Exit::Ok, "hi", &calls), &dir).unwrap());
-    assert!(!check.run(&input(Exit::Ok, "no", &calls), &dir).unwrap());
+    let (cancel, deadline) = unexpired();
+    assert!(check.run(&input(Exit::Ok, "hi", &calls), &dir, &cancel, deadline).unwrap());
+    assert!(!check.run(&input(Exit::Ok, "no", &calls), &dir, &cancel, deadline).unwrap());
 }
 
 #[test]
@@ -230,9 +240,13 @@ fn a_check_that_raises_names_its_line() {
     let check = only_check(
         "def c(r, w):\n    x = 1\n    fail(\"boom\")\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c)])\n",
     );
-    let error = check
-        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir())
-        .unwrap_err();
+    let (cancel, deadline) = unexpired();
+    let CheckError::Script(error) = check
+        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir(), &cancel, deadline)
+        .unwrap_err()
+    else {
+        panic!("expected a script failure");
+    };
     assert_eq!(error.line, 3);
     assert!(error.message.contains("boom"), "{}", error.message);
 }
@@ -244,7 +258,13 @@ fn reading_a_file_the_run_never_wrote_raises() {
     );
     let dir = std::env::temp_dir().join(format!("wf-eval-missing-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let error = check.run(&input(Exit::Ok, "", &[]), &dir).unwrap_err();
+    let (cancel, deadline) = unexpired();
+    let CheckError::Script(error) = check
+        .run(&input(Exit::Ok, "", &[]), &dir, &cancel, deadline)
+        .unwrap_err()
+    else {
+        panic!("expected a script failure");
+    };
     assert_eq!(error.line, 2);
     assert!(
         error.message.contains("no such file: missing.txt"),
@@ -261,8 +281,14 @@ fn workspace_read_refuses_paths_that_leave_the_workspace() {
     );
     let dir = std::env::temp_dir().join(format!("wf-eval-escape-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    let (cancel, deadline) = unexpired();
     for path in ["../secret", "/etc/hostname"] {
-        let error = check.run(&input(Exit::Ok, path, &[]), &dir).unwrap_err();
+        let CheckError::Script(error) = check
+            .run(&input(Exit::Ok, path, &[]), &dir, &cancel, deadline)
+            .unwrap_err()
+        else {
+            panic!("expected a script failure");
+        };
         assert!(
             error
                 .message
@@ -277,7 +303,12 @@ fn workspace_read_refuses_paths_that_leave_the_workspace() {
             std::env::temp_dir().join(format!("wf-eval-outside-{}.txt", std::process::id()));
         std::fs::write(&outside, "secret").unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
-        let error = check.run(&input(Exit::Ok, "link", &[]), &dir).unwrap_err();
+        let CheckError::Script(error) = check
+            .run(&input(Exit::Ok, "link", &[]), &dir, &cancel, deadline)
+            .unwrap_err()
+        else {
+            panic!("expected a script failure");
+        };
         assert!(
             error.message.contains("resolves outside the workspace"),
             "{}",
@@ -293,9 +324,13 @@ fn a_runaway_check_stops_at_its_tick_budget() {
     let check = only_check(
         "def c(r, w):\n    for i in range(100000000):\n        pass\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c)])\n",
     );
-    let error = check
-        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir())
-        .unwrap_err();
+    let (cancel, deadline) = unexpired();
+    let CheckError::Script(error) = check
+        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir(), &cancel, deadline)
+        .unwrap_err()
+    else {
+        panic!("expected a script failure");
+    };
     assert_ne!(error.message, "");
 }
 
@@ -316,9 +351,13 @@ fn a_check_that_returns_a_non_bool_is_an_error_not_a_coercion() {
         let check = only_check(&format!(
             "def c(r, w):\n    return {value}\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c)])\n"
         ));
-        let error = check
-            .run(&input(Exit::Ok, "done", &[]), &std::env::temp_dir())
-            .unwrap_err();
+        let (cancel, deadline) = unexpired();
+        let CheckError::Script(error) = check
+            .run(&input(Exit::Ok, "done", &[]), &std::env::temp_dir(), &cancel, deadline)
+            .unwrap_err()
+        else {
+            panic!("expected a script failure");
+        };
         assert!(
             error.message.contains("not a boolean"),
             "{value}: {}",

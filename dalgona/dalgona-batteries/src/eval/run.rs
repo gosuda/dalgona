@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::pack::{Case, CheckInput, Exit, Pack, Scoring, ToolCall, Usage};
+use super::pack::{Case, CheckError, CheckInput, Exit, Pack, Scoring, ToolCall, Usage};
 use super::report::{
     ArmName, CasePlan, FORMAT_VERSION, JudgeGate, JudgeLine, Report, ReportInput, RunLine, Status,
 };
@@ -262,13 +262,14 @@ async fn timed(
     executor: &dyn Executor,
     request: RunRequest<'_>,
     cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
 ) -> Result<Outcome, Ended> {
     let run_cancel = cancel.child_token();
     let mut future = executor.run(request, run_cancel.clone());
     let ended = tokio::select! {
         outcome = &mut future => return outcome.map_err(Ended::Executor),
         () = cancel.cancelled() => Ended::Executor(ExecError::Interrupted),
-        () = tokio::time::sleep(CASE_TIMEOUT) => Ended::TimedOut,
+        () = tokio::time::sleep_until(deadline) => Ended::TimedOut,
     };
     run_cancel.cancel();
     // The executor owns its session's wind-down; the run grants it a bounded
@@ -289,13 +290,18 @@ fn starlark_failure(pack: &str, case: &str, error: &impl std::fmt::Display) -> S
 }
 
 /// Scores a finished session with the case's check or its judge verdict.
+///
+/// The check shares the run's one `deadline` with the session. The flag is
+/// `true` when an interrupt cut the check short.
 async fn score(
     pack: &Arc<Pack>,
     index: usize,
     slot: &Slot<'_>,
     output: RunOutput,
-    workspace: &Path,
-) -> RunLine {
+    workspace: &RunWorkspace,
+    deadline: tokio::time::Instant,
+    cancel: &CancellationToken,
+) -> (RunLine, bool) {
     let mut line = slot.line(Status::Passed, None);
     line.tokens_in = Some(output.usage.input_tokens);
     line.tokens_out = Some(output.usage.output_tokens);
@@ -328,13 +334,14 @@ async fn score(
             }
         }
         Scoring::Check(_) => {
-            let checked = run_check(pack, index, output, workspace).await;
+            let checked = run_check(pack, index, output, workspace, deadline, cancel).await;
             match checked {
                 Ok(true) => {}
                 Ok(false) => {
                     line.status = Status::Failed;
                     line.reason = Some("the check returned false".to_owned());
                 }
+                Err(CheckFailure::Interrupted) => return (slot.skipped(INTERRUPTED), true),
                 Err(error) => {
                     line.status = Status::Failed;
                     line.reason = Some(starlark_failure(slot.pack, &slot.case.id, &error));
@@ -342,27 +349,46 @@ async fn score(
             }
         }
     }
-    line
+    (line, false)
 }
 
-/// The failure of one check: its Starlark error, or the blocking task's.
+/// The failure of one check: its Starlark error, the blocking task's, the run
+/// budget's end, or an interrupt.
 #[derive(Debug, thiserror::Error)]
 enum CheckFailure {
     #[error(transparent)]
     Script(#[from] super::pack::ScriptError),
     #[error("starlark error at line 1: the check task failed: {0}")]
     Task(String),
+    /// The check was still running when the run's [`CASE_TIMEOUT`] budget ended.
+    #[error("the check exceeded the run time budget")]
+    Timeout,
+    /// An interrupt arrived while the check was running.
+    #[error("interrupted")]
+    Interrupted,
 }
 
 async fn run_check(
     pack: &Arc<Pack>,
     index: usize,
     output: RunOutput,
-    workspace: &Path,
+    workspace: &RunWorkspace,
+    deadline: tokio::time::Instant,
+    cancel: &CancellationToken,
 ) -> Result<bool, CheckFailure> {
     let pack = Arc::clone(pack);
-    let workspace = workspace.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    let stop = cancel.clone();
+    let lease = workspace.clone();
+    let root = workspace.path().to_path_buf();
+    // Convert once where the deadline crosses into synchronous code; every
+    // async wait above stays on the Tokio clock.
+    let wall = deadline.into_std();
+    let check = tokio::task::spawn_blocking(move || {
+        // The lease keeps the case directory alive for the check's reads. The
+        // evaluator observes the shared stop signal, so the thread always
+        // finishes promptly and the run below always consumes it: no detached
+        // check outlives the workspace release.
+        let _lease = lease;
         let Scoring::Check(check) = &pack.cases[index].scoring else {
             return Ok(false);
         };
@@ -372,10 +398,24 @@ async fn run_check(
             tool_calls: &output.tool_calls,
             usage: output.usage,
         };
-        check.run(&input, &workspace).map_err(CheckFailure::Script)
-    })
-    .await
-    .map_err(|error| CheckFailure::Task(error.to_string()))?
+        check
+            .run(&input, &root, &stop, wall)
+            .map_err(|error| match error {
+                CheckError::Interrupted => CheckFailure::Interrupted,
+                CheckError::Timeout => CheckFailure::Timeout,
+                CheckError::Script(error) => CheckFailure::Script(error),
+            })
+    });
+    // Every arm consumes the join, so the outcome is the thread's whatever
+    // fired first: the evaluator already classified a stop through the shared
+    // signal, and a finished check keeps its verdict.
+    let mut check = std::pin::pin!(check);
+    let joined = tokio::select! {
+        result = &mut check => result,
+        () = cancel.cancelled() => check.await,
+        () = tokio::time::sleep_until(deadline) => check.await,
+    };
+    joined.map_err(|error| CheckFailure::Task(error.to_string()))?
 }
 
 /// Runs one case once under one arm. The flag is `true` when an interrupt
@@ -387,6 +427,11 @@ async fn run_once(
     arm: &Arm,
     cancel: &CancellationToken,
 ) -> (RunLine, bool) {
+    // One deadline on the async clock for setup, session, and check: under a
+    // paused test runtime it advances with the mock wheel, unlike the wall
+    // clock. The worker thread converts it once for its synchronous hook.
+    let started = tokio::time::Instant::now();
+    let deadline = started + CASE_TIMEOUT;
     let executor = match &arm.executor {
         Ok(executor) => executor,
         Err(error) => return (slot.failed(error.to_string()), false),
@@ -409,11 +454,10 @@ async fn run_once(
         tools: case.tools.as_deref(),
         judge,
     };
-    match timed(executor.as_ref(), request, cancel).await {
-        Ok(Outcome::Ran(output)) => (
-            score(pack, index, slot, output, workspace.path()).await,
-            false,
-        ),
+    match timed(executor.as_ref(), request, cancel, deadline).await {
+        Ok(Outcome::Ran(output)) => {
+            score(pack, index, slot, output, &workspace, deadline, cancel).await
+        }
         Ok(Outcome::JudgeSkipped(skip)) => {
             let (gate, reason) = judge_gate(skip);
             let mut line = slot.skipped(reason);
