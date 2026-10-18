@@ -99,6 +99,14 @@ macro_rules! uuid_id {
 uuid_id!(SessionId, "The identity of a persisted session.");
 uuid_id!(RequestId, "The identity of a pending request.");
 uuid_id!(JobId, "The identity of an owned background job.");
+uuid_id!(
+    PrivateLoopId,
+    "The journal-stable identity of one synthetic private loop invocation."
+);
+uuid_id!(
+    PrivateEffectId,
+    "The journal-stable identity of one private tool effect within its loop."
+);
 
 macro_rules! counter_id {
     ($name:ident, $description:literal) => {

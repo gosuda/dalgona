@@ -58,8 +58,8 @@ pub use fold::{
     TurnStage,
 };
 pub use id::{
-    BlobId, CallId, ClientId, EntryId, Gen, GenerationId, IdError, JobId, RequestId, Seq,
-    SessionId, TurnId, resume_token,
+    BlobId, CallId, ClientId, EntryId, Gen, GenerationId, IdError, JobId, PrivateEffectId,
+    PrivateLoopId, RequestId, Seq, SessionId, TurnId, resume_token,
 };
 pub use jiff::Timestamp;
 pub use journal::{
