@@ -360,7 +360,7 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
         return Ok(binary);
     }
     Err(format!(
-        "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
+        "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bins` before this gate",
         binary.display()
     )
     .into())
