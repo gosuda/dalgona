@@ -16,6 +16,7 @@ dalgon = { workspace = true, features = ["tui"] }
 dalgona = { path = "../dalgona" }
 dal-agent.workspace = true
 dal-core.workspace = true
+sonic-rs.workspace = true
 uuid = { version = "=1.28.0", features = ["v7"] }
 
 [dev-dependencies]
@@ -26,7 +27,6 @@ dal-wire.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = "=1.12.0"
-sonic-rs.workspace = true
 toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]

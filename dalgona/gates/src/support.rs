@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use sonic_rs::JsonValueTrait;
+
 /// The gate-wide result type: any error fails the criterion.
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -330,32 +332,84 @@ pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet
         .collect()
 }
 
-/// The compiled `dalgona` binary: beside the test binary's profile directory,
-/// or under `CARGO_TARGET_DIR` when `build.build-dir` splits intermediate
-/// artifacts from final binaries.
+/// The compiled `dalgona` binary under Cargo's target directory.
+///
+/// The test executable lives under the build directory, so its profile
+/// directory is not where `dalgona` lands. Canonical directories come from
+/// `cargo metadata`: the profile path relative to the build directory joins
+/// onto the target directory. One intended binary, no fallback.
 ///
 /// # Errors
-/// Returns an error when the binary is not built or the target directory is missing.
+/// Returns metadata, layout, or missing-binary failures.
 pub fn dalgona_binary() -> TestResult<PathBuf> {
-    let file = format!("dalgona{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
-    let profile = exe
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("the test binary has no target directory")?;
-    let mut candidates = vec![profile.join(&file)];
-    if let (Some(target), Some(name)) = (std::env::var_os("CARGO_TARGET_DIR"), profile.file_name())
-    {
-        candidates.push(Path::new(&target).join(name).join(&file));
-    }
-    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
-        return Ok(found.clone());
+    let profile_dir = test_profile_dir(&exe)?;
+    let (target_dir, build_dir) = cargo_directories()?;
+    let profile_dir = std::fs::canonicalize(profile_dir)?;
+    let build_dir = std::fs::canonicalize(&build_dir)?;
+    let relative = profile_dir.strip_prefix(&build_dir).map_err(|_| {
+        format!(
+            "the test binary is not under Cargo's build directory {}",
+            build_dir.display()
+        )
+    })?;
+    let binary = target_dir
+        .join(relative)
+        .join(format!("dalgona{}", std::env::consts::EXE_SUFFIX));
+    if binary.is_file() {
+        return Ok(binary);
     }
     Err(format!(
         "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
-        candidates[0].display()
+        binary.display()
     )
     .into())
+}
+
+/// Cargo's canonical `target_directory` and `build_directory` from
+/// `cargo metadata`, so configured target directories and directory splits
+/// resolve without guessing.
+fn cargo_directories() -> TestResult<(PathBuf, PathBuf)> {
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command
+        .args(["metadata", "--no-deps", "--format-version=1", "--locked"])
+        .current_dir(repo_root());
+    let output = run_command(&mut command)?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let metadata: sonic_rs::Value = sonic_rs::from_slice(&output.stdout)?;
+    let directory = |field: &str| {
+        metadata
+            .get(field)
+            .and_then(sonic_rs::Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("cargo metadata omitted {field}"))
+    };
+    Ok((
+        directory("target_directory")?,
+        directory("build_directory")?,
+    ))
+}
+
+/// The profile directory holding the running test executable: `<profile>` in
+/// `<root>/<profile>/deps/<test>`, tolerating a test binary placed directly
+/// in the profile directory.
+fn test_profile_dir(exe: &Path) -> TestResult<&Path> {
+    let exe_dir = exe
+        .parent()
+        .ok_or("the test binary has no parent directory")?;
+    if exe_dir.file_name().is_some_and(|name| name == "deps") {
+        exe_dir
+            .parent()
+            .ok_or_else(|| "the test binary has no profile directory".into())
+    } else {
+        Ok(exe_dir)
+    }
 }
 
 /// Loads the layered config a host start needs, from the same data root and
