@@ -55,8 +55,8 @@ pub use ext::{
 pub use fold::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, DeclaredFold, Effect,
     Emit, Event, LeafExt, Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase,
-    ReplayError, ResolveError, ResolvedCall, Session, Settings, SettledOutcome, Step, TurnSource,
-    TurnStage,
+    PrivateConflict, PrivateFact, PrivateTerminal, ReplayError, ResolveError, ResolvedCall,
+    Session, Settings, SettledOutcome, Step, TurnSource, TurnStage,
 };
 pub use id::{
     BlobId, CallId, ClientId, EntryId, Gen, GenerationId, IdError, JobId, PrivateEffectId,

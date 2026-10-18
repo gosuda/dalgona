@@ -32,6 +32,7 @@ mod cancel;
 mod ext;
 mod helpers;
 mod preflight;
+mod private;
 mod replay;
 mod round;
 mod session;
@@ -41,6 +42,7 @@ mod types;
 mod views;
 
 pub use ext::LeafExt;
+pub use private::{PrivateConflict, PrivateFact, PrivateTerminal};
 pub use session::{DeclaredFold, Session};
 pub use types::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, Effect, Emit, Event,

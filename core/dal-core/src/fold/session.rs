@@ -50,6 +50,17 @@ pub struct Session {
     pub(super) compaction_none_notified: bool,
     pub(super) manual_completion: ManualCompletion,
     pub(super) ext_rows: Vec<super::ext::ExtRow>,
+    /// Every born private loop in journal order, including childless loops.
+    pub(super) private_loops: Vec<super::private::PrivateLoopBirth>,
+    /// Birth position by loop id; O(1) lookup with no history scan.
+    pub(super) private_loop_index: super::private::PrivateLoopIndex,
+    /// Started private effects in journal order; never published wholesale.
+    pub(super) private_rows: Vec<super::private::PrivateRow>,
+    /// Row position by (loop, token); O(1) lookup with no history scan.
+    pub(super) private_row_index: super::private::PrivateRowIndex,
+    /// Terminal private outcomes in end journal order; a row's
+    /// source-order identity is its index here.
+    pub(super) private_terminals: Vec<super::private::PrivateTerminal>,
 }
 
 fn response_model(route: Option<AssistantRoute>, model: &str) -> Option<ModelRoute> {

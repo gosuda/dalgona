@@ -5306,6 +5306,379 @@ mod threshold_estimate_fallback {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Private-effect fold: births, pairing, terminals, repair.
+//
+// Private turns are attribution only: no test below reserves or opens a
+// turn, pinning that private records never consult the turn sequence.
+// ---------------------------------------------------------------------------
+
+fn private_owner(name: &str) -> crate::Owner {
+    crate::Owner::Extension {
+        name: name.into(),
+        origin: "user".into(),
+    }
+}
+
+fn private_birth(id: crate::PrivateLoopId, who: crate::Owner, turn: Option<TurnId>) -> Record {
+    Record::PrivateLoop {
+        at: stamp(),
+        r#loop: id,
+        who,
+        turn,
+    }
+}
+
+fn private_begin(
+    id: crate::PrivateLoopId,
+    token: crate::PrivateEffectId,
+    who: crate::Owner,
+    turn: Option<TurnId>,
+    round: u32,
+    call: &str,
+    tool: &str,
+) -> Record {
+    Record::PrivateStart {
+        at: stamp(),
+        r#loop: id,
+        token,
+        who,
+        turn,
+        round,
+        call: CallId::new(call),
+        name: tool.into(),
+        args: RawJson::parse(r#"{"x":1}"#).unwrap(),
+    }
+}
+
+fn private_close(
+    id: crate::PrivateLoopId,
+    token: crate::PrivateEffectId,
+    outcome: crate::PrivateOutcome,
+) -> Record {
+    Record::PrivateEnd {
+        at: stamp(),
+        r#loop: id,
+        token,
+        outcome,
+    }
+}
+
+fn settled_outcome() -> crate::PrivateOutcome {
+    crate::PrivateOutcome::Settled {
+        is_error: false,
+        parts: vec![JournalPart::Text { text: "ok".into() }],
+    }
+}
+
+fn private_ends(records: &[Record]) -> Vec<(crate::PrivateLoopId, crate::PrivateEffectId)> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::PrivateEnd { r#loop, token, .. } => Some((*r#loop, *token)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn private_transitions_contradict_exactly_once_per_shape() {
+    let owner_a = private_owner("a");
+    let owner_b = private_owner("b");
+    let born = crate::PrivateLoopId::new_v7();
+    let other = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+
+    // UnbornLoop: a start or an end with no prior birth, even childless.
+    assert!(contradicts(vec![private_begin(
+        born,
+        token,
+        owner_a.clone(),
+        None,
+        0,
+        "c",
+        "tool"
+    )]));
+    assert!(contradicts(vec![private_close(
+        born,
+        token,
+        settled_outcome()
+    )]));
+
+    // LoopBornTwice: a childless duplicate birth contradicts ...
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_birth(born, owner_a.clone(), None),
+    ]));
+    // ... and so does a re-birth after the loop settled.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_birth(born, owner_a.clone(), None),
+    ]));
+
+    // EffectStartedTwice: one (loop, token) starts once.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_begin(born, token, owner_a.clone(), None, 1, "c", "tool"),
+    ]));
+
+    // LoopMismatch: the start must repeat the birth's owner and turn.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_b.clone(), None, 0, "c", "tool"),
+    ]));
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), Some(id(1))),
+        private_begin(born, token, owner_a.clone(), Some(id(2)), 0, "c", "tool"),
+    ]));
+
+    // EndWithoutStart: the birth exists but no start does; the cross-loop
+    // end (same token, other loop) finds no row either.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_close(born, token, settled_outcome()),
+    ]));
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_birth(other, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(other, token, settled_outcome()),
+    ]));
+
+    // EndedTwice: one (loop, token) ends once.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_close(born, token, settled_outcome()),
+    ]));
+
+    // Control: the same wire call id under two loops settles disjointly.
+    let second = crate::PrivateEffectId::new_v7();
+    assert!(!contradicts(vec![
+        private_birth(born, owner_a.clone(), Some(id(1))),
+        private_birth(other, owner_a.clone(), Some(id(1))),
+        private_begin(born, token, owner_a.clone(), Some(id(1)), 0, "c", "tool"),
+        private_begin(other, second, owner_a.clone(), Some(id(1)), 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_close(other, second, settled_outcome()),
+    ]));
+}
+
+#[test]
+fn private_same_wire_call_across_loops_settles_in_end_order() {
+    let owner = private_owner("a");
+    let first = crate::PrivateLoopId::new_v7();
+    let second_loop = crate::PrivateLoopId::new_v7();
+    let first_token = crate::PrivateEffectId::new_v7();
+    let second_token = crate::PrivateEffectId::new_v7();
+    let journal = vec![
+        private_birth(first, owner.clone(), Some(id(1))),
+        private_birth(second_loop, owner.clone(), Some(id(1))),
+        private_begin(
+            first,
+            first_token,
+            owner.clone(),
+            Some(id(1)),
+            0,
+            "c",
+            "tool",
+        ),
+        private_begin(
+            second_loop,
+            second_token,
+            owner.clone(),
+            Some(id(1)),
+            0,
+            "c",
+            "tool",
+        ),
+        // Ends arrive latest-loop-first; terminals follow end order.
+        private_close(second_loop, second_token, settled_outcome()),
+        private_close(first, first_token, settled_outcome()),
+    ];
+    let (session, _) = Session::replay(journal, stamp()).unwrap();
+    assert_eq!(session.private_terminal_len(), 2);
+    let terminals = session.private_terminals_since(0);
+    assert_eq!(terminals[0].token, second_token);
+    assert_eq!(terminals[1].token, first_token);
+    assert_eq!(terminals[0].r#loop, second_loop);
+    let facts: Vec<_> = session.private_facts().collect();
+    assert!(facts.iter().all(|fact| fact.outcome.is_some()));
+}
+
+#[test]
+fn private_repair_marks_each_unresolved_start_exactly_once() {
+    let owner = private_owner("a");
+    let first = crate::PrivateLoopId::new_v7();
+    let second_loop = crate::PrivateLoopId::new_v7();
+    let first_token = crate::PrivateEffectId::new_v7();
+    let second_token = crate::PrivateEffectId::new_v7();
+    let mut journal = vec![
+        private_birth(first, owner.clone(), None),
+        private_birth(second_loop, owner.clone(), None),
+        private_begin(first, first_token, owner.clone(), None, 0, "c", "tool"),
+        private_begin(
+            second_loop,
+            second_token,
+            owner.clone(),
+            None,
+            3,
+            "c",
+            "tool",
+        ),
+        private_close(first, first_token, settled_outcome()),
+    ];
+    let (session, effects) = Session::replay(journal.clone(), stamp()).unwrap();
+    // Exactly one repair end, in row order, for the unresolved start.
+    let [Effect::Emit(repair)] = effects.as_slice() else {
+        panic!("replay must return one repair batch")
+    };
+    let ends = private_ends(&repair.records);
+    assert_eq!(ends, [(second_loop, second_token)]);
+    assert!(matches!(
+        &repair.records[0],
+        Record::PrivateEnd {
+            outcome: crate::PrivateOutcome::Indeterminate,
+            ..
+        }
+    ));
+    // The repair end is terminal like any other: the settled row first,
+    // then the indeterminate repair, both in end journal order.
+    let terminals = session.private_terminals_since(0);
+    assert_eq!(terminals.len(), 2);
+    assert!(matches!(
+        terminals[0].outcome,
+        crate::PrivateOutcome::Settled { .. }
+    ));
+    assert!(matches!(
+        terminals[1].outcome,
+        crate::PrivateOutcome::Indeterminate
+    ));
+    assert_eq!(
+        (terminals[1].r#loop, terminals[1].token),
+        (second_loop, second_token)
+    );
+
+    // A second open over the persisted repair mints nothing new.
+    journal.extend(repair.records.iter().cloned());
+    let (reopened, again) = Session::replay(journal, stamp()).unwrap();
+    let [Effect::Emit(second)] = again.as_slice() else {
+        panic!("replay must return one repair batch")
+    };
+    assert_eq!(private_ends(&second.records), []);
+    assert_eq!(reopened.private_terminal_len(), 2);
+}
+
+#[test]
+fn private_declared_replay_never_repairs() {
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+    let session = Session::replay_declared(vec![
+        private_birth(id, owner.clone(), None),
+        private_begin(id, token, owner.clone(), None, 0, "c", "tool"),
+    ])
+    .unwrap();
+    // Inspection sees the started row but no terminal and no repair.
+    assert_eq!(session.private_terminal_len(), 0);
+    assert_eq!(session.private_terminals_since(0), []);
+    let facts: Vec<_> = session.private_facts().collect();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].outcome, None);
+    assert_eq!((facts[0].r#loop, facts[0].token), (id, token));
+}
+
+#[test]
+fn private_absent_records_leave_no_terminals() {
+    // A journal that predates private records replays with an empty
+    // terminal log ...
+    let journal = vec![Record::Ext {
+        at: stamp(),
+        ext: "a".into(),
+        kind: "k".into(),
+        body: RawJson::parse(r"{}").unwrap(),
+    }];
+    let (session, _) = Session::replay(journal, stamp()).unwrap();
+    assert_eq!(session.private_terminal_len(), 0);
+    assert_eq!(session.private_terminals_since(0), []);
+
+    // ... and so does a fork view, which carries entry-path records only:
+    // branch() drops non-entry private records, so the clone starts empty
+    // while the source keeps its audit.
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+    let source = vec![
+        private_birth(id, owner.clone(), None),
+        private_begin(id, token, owner.clone(), None, 0, "c", "tool"),
+        private_close(id, token, settled_outcome()),
+    ];
+    let (before, _) = Session::replay(source.clone(), stamp()).unwrap();
+    assert_eq!(before.private_terminal_len(), 1);
+    let fork_view: Vec<Record> = source
+        .into_iter()
+        .filter(|record| record.entry().is_some())
+        .collect();
+    let (forked, _) = Session::replay(fork_view, stamp()).unwrap();
+    assert_eq!(forked.private_terminal_len(), 0);
+}
+
+#[test]
+fn private_live_check_then_fold_publishes_once() {
+    let mut live = session();
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+
+    assert!(live.check_private_loop(id).is_ok());
+    live.fold_private_loop(id, owner.clone(), None);
+    assert!(live.check_private_start(id, token, &owner, None).is_ok());
+    live.fold_private_start(id, token, &owner, None, 2, "tool");
+    // The started row is in flight: invisible to publication.
+    assert_eq!(live.private_terminal_len(), 0);
+    assert_eq!(live.private_terminals_since(0), []);
+    assert!(live.check_private_end(id, token).is_ok());
+    live.fold_private_end(id, token, settled_outcome());
+    assert_eq!(live.private_terminal_len(), 1);
+    assert_eq!(live.private_terminals_since(0).len(), 1);
+    assert_eq!(live.private_terminals_since(1), []);
+
+    // A rejected write changes nothing.
+    assert_eq!(
+        live.check_private_loop(id),
+        Err(crate::PrivateConflict::LoopBornTwice)
+    );
+    assert_eq!(live.private_terminal_len(), 1);
+}
+
+#[test]
+#[should_panic(expected = "private publication cursor")]
+fn private_terminal_cursor_beyond_len_fails_closed() {
+    let live = session();
+    let _ = live.private_terminals_since(1);
+}
+
+#[test]
+fn types_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    assert_send_sync::<Session>();
+    assert_send_sync::<Event>();
+    assert_send_sync::<Effect>();
+    assert_send_sync::<ReplayError>();
+    assert_send_sync::<ResolveError>();
+    assert_send_sync::<PrivateConflict>();
+    assert_send_sync::<crate::DenyReason>();
+    assert_send_sync::<crate::ConfigError>();
+    assert_send_sync::<crate::DecodeError>();
+    assert_send_sync::<crate::EncodeError>();
+    assert_send_sync::<crate::Rejection>();
+}
+
 /// Provider replay capture policy, driven through `Session::step`.
 ///
 /// The fold decides once per completed response whether a provider capture

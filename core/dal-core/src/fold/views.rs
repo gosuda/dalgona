@@ -306,6 +306,11 @@ impl Session {
             compaction_none_notified: false,
             manual_completion: ManualCompletion::default(),
             ext_rows: Vec::new(),
+            private_loops: Vec::new(),
+            private_loop_index: super::private::PrivateLoopIndex::new(),
+            private_rows: Vec::new(),
+            private_row_index: super::private::PrivateRowIndex::new(),
+            private_terminals: Vec::new(),
         }
     }
 }
