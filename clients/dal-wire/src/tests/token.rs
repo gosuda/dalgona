@@ -152,6 +152,99 @@ fn group_or_other_read_permission_is_rejected() {
     ));
 }
 
+#[test]
+fn debug_output_never_contains_token_bytes() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("serve.token");
+    let token = create(&path, false).expect("create token");
+    let loaded = load(&path).expect("load created token");
+    let rendered = format!("{loaded:?}");
+    assert!(!rendered.contains(&token));
+}
+
+#[test]
+fn matches_rejects_anything_but_the_exact_token() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("serve.token");
+    let token = create(&path, false).expect("create token");
+    let loaded = load(&path).expect("load created token");
+    assert!(loaded.matches(&token));
+    assert!(!loaded.matches(""));
+    assert!(!loaded.matches("dal_short"));
+    let mut wrong = token.clone();
+    let last = wrong.pop().expect("token is non-empty");
+    wrong.push(if last == 'a' { 'b' } else { 'a' });
+    assert!(!loaded.matches(&wrong));
+    assert!(!loaded.matches(&token.to_uppercase()));
+}
+
+#[test]
+fn malformed_first_lines_fail_closed() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let cases = [
+        "dal_0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        "dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n",
+        "dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0\n",
+        "dal-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        "dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg\n",
+    ];
+    for (index, contents) in cases.iter().enumerate() {
+        let path = directory.path().join(format!("bad-{index}.token"));
+        std::fs::write(&path, contents).expect("write malformed token file");
+        set_private_mode(&path);
+        assert!(
+            matches!(load(&path), Err(TokenError::Invalid { .. })),
+            "load accepts case {index}"
+        );
+        assert!(
+            matches!(read_connect_token(&path), Err(TokenError::Invalid { .. })),
+            "connect reader accepts case {index}"
+        );
+    }
+}
+
+#[test]
+fn missing_and_non_regular_paths_fail_closed() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let missing = directory.path().join("absent.token");
+    assert!(matches!(load(&missing), Err(TokenError::Missing { .. })));
+    assert!(matches!(
+        read_connect_token(&missing),
+        Err(TokenError::Missing { .. })
+    ));
+    assert!(matches!(
+        load(directory.path()),
+        Err(TokenError::NotRegularFile { .. })
+    ));
+    assert!(matches!(
+        read_connect_token(directory.path()),
+        Err(TokenError::NotRegularFile { .. })
+    ));
+    assert!(matches!(
+        load(std::path::Path::new("relative/serve.token")),
+        Err(TokenError::RelativePath { .. })
+    ));
+    assert!(matches!(
+        create(std::path::Path::new("relative/serve.token"), true),
+        Err(TokenError::RelativePath { .. })
+    ));
+}
+
+#[test]
+fn oversized_first_line_is_invalid_not_truncated_to_valid() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("serve.token");
+    let token = create(&path, false).expect("create valid token prefix");
+    std::fs::write(&path, format!("{token}{}", "a".repeat(5000)))
+        .expect("write oversized token file");
+    set_private_mode(&path);
+    assert!(matches!(load(&path), Err(TokenError::Invalid { .. })));
+    assert!(matches!(
+        read_connect_token(&path),
+        Err(TokenError::Invalid { .. })
+    ));
+}
+
 fn is_token(token: &str) -> bool {
     token.len() == 68
         && token.starts_with("dal_")
