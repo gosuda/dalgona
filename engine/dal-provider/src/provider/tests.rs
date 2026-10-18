@@ -2006,6 +2006,278 @@ async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -
     Ok(())
 }
 
+fn pi_messages_reply() -> String {
+    String::from(
+        "data: {\"type\":\"start\"}\n\ndata: {\"type\":\"text_start\",\"contentIndex\":0}\n\ndata: {\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"Hello\"}\n\ndata: {\"type\":\"text_end\",\"contentIndex\":0,\"content\":\"Hello\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"usage\":{\"input\":7,\"output\":3,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":10,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n",
+    )
+}
+
+fn pi_messages_set(dir: &TestDir, base: String) -> Result<ProviderSet, Box<dyn Error>> {
+    Ok(ProviderSet::new(
+        &config(
+            vec![entry(
+                "pi-test",
+                Family::PiMessages,
+                base,
+                Some("PI_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("PI_TEST_KEY", "pi-secret")]),
+        dir.path(),
+        dir.path(),
+    )?)
+}
+
+#[tokio::test]
+async fn pi_messages_stream_over_sse_with_a_bearer_key() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(pi_messages_reply())]).await?;
+    let set = pi_messages_set(&dir, base)?;
+    let provider = set.provider(resolved("pi-test", Family::PiMessages, "balanced"))?;
+    let request = request(
+        Family::PiMessages,
+        "balanced",
+        vec![user_text("Say hello.")],
+    );
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(
+        events.iter().find_map(|event| match event {
+            StreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        }),
+        Some(usage) if usage.input_tokens == 7 && usage.output_tokens == 3
+    ));
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /v1/messages "), "{head}");
+    assert!(head.contains("authorization: bearer pi-secret"), "{head}");
+    assert!(head.contains("accept: text/event-stream"), "{head}");
+    assert!(head.contains("content-type: application/json"), "{head}");
+    let body = String::from_utf8_lossy(request_body(&captured[0])).into_owned();
+    assert!(
+        body.starts_with(r#"{"model":"balanced","context":{"messages":["#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""role":"system","content":"Follow the request.""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""role":"user","content":[{"type":"text","text":"Say hello."}]"#),
+        "{body}"
+    );
+    assert!(body.contains(r#""sessionId":"session-cache:1""#), "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pi_messages_tool_turn_restores_internal_tool_names() -> TestResult {
+    let dir = TestDir::new()?;
+    let reply = concat!(
+        "data: {\"type\":\"toolcall_start\",\"contentIndex\":0,\"id\":\"call_1\",\"toolName\":\"mcp_search\"}\n\n",
+        "data: {\"type\":\"toolcall_delta\",\"contentIndex\":0,\"delta\":\"{\\\"q\\\":\"}\n\n",
+        "data: {\"type\":\"toolcall_delta\",\"contentIndex\":0,\"delta\":\"\\\"cats\\\"}\"}\n\n",
+        "data: {\"type\":\"toolcall_end\",\"contentIndex\":0,\"toolCall\":{\"type\":\"toolCall\",\"id\":\"call_1\",\"name\":\"mcp_search\",\"arguments\":{\"q\":\"cats\"}}}\n\n",
+        "data: {\"type\":\"done\",\"reason\":\"toolUse\",\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":2,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n",
+    );
+    // The internal name holds a dot, which the wire alphabet refuses; the
+    // gateway echoes the wire name, and the stream restores the internal one.
+    let wire =
+        crate::tool_names::wire_name("mcp.search", crate::tool_names::WIRE_NAME_MAX).into_owned();
+    assert_ne!(wire, "mcp.search");
+    let (base, mut server_task) = server(
+        "/v1",
+        vec![stream_reply(reply.replace("mcp_search", &wire))],
+    )
+    .await?;
+    let set = pi_messages_set(&dir, base)?;
+    let provider = set.provider(resolved("pi-test", Family::PiMessages, "balanced"))?;
+    let mut request = request(
+        Family::PiMessages,
+        "balanced",
+        vec![user_text("Find cats.")],
+    );
+    request.tools = Arc::<[ModelToolSpec]>::from(vec![ModelToolSpec {
+        name: "mcp.search".into(),
+        description: "Search.".into(),
+        parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+        grammar: None,
+        defer_loading: false,
+    }]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolCallStarted { id, name } if id == "call_1" && name == "mcp.search"
+        )),
+        "{events:?}"
+    );
+    let calls = events.iter().find_map(|event| match event {
+        StreamEvent::ToolCallsDone { calls } => Some(calls),
+        _ => None,
+    });
+    assert!(
+        matches!(calls, Some(calls) if calls.len() == 1 && calls[0].name == "mcp.search"),
+        "{calls:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Stop {
+            reason: crate::stream::StopReason::ToolUse
+        })
+    ));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let body = String::from_utf8_lossy(request_body(&captured[0])).into_owned();
+    assert!(
+        body.contains(&format!(r#""toolsAdded":[{{"name":"{wire}""#)),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pi_messages_http_error_reports_the_gateway_message() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, _server) = server(
+        "/v1",
+        vec![Reply {
+            status: 400,
+            content_type: "application/json",
+            body: String::from(
+                r#"{"error":{"message":"unknown model","code":"model_not_found","details":{"x":1}}}"#,
+            )
+            .into_bytes(),
+        }],
+    )
+    .await?;
+    let set = pi_messages_set(&dir, base)?;
+    let text = open_error_text(
+        &set,
+        "pi-test",
+        Family::PiMessages,
+        "balanced",
+        vec![user_text("Say hello.")],
+    )
+    .await;
+    assert_eq!(text, "invalid request: unknown model");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pi_messages_error_event_ends_the_stream_with_its_message() -> TestResult {
+    let dir = TestDir::new()?;
+    let reply = "data: {\"type\":\"text_start\",\"contentIndex\":0}\n\ndata: {\"type\":\"error\",\"reason\":\"error\",\"errorMessage\":\"upstream failed\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n";
+    let (base, _server) = server("/v1", vec![stream_reply(String::from(reply))]).await?;
+    let set = pi_messages_set(&dir, base)?;
+    let text = open_error_text(
+        &set,
+        "pi-test",
+        Family::PiMessages,
+        "balanced",
+        vec![user_text("Say hello.")],
+    )
+    .await;
+    assert_eq!(text, "pi-messages error 200: upstream failed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pi_messages_cancelled_before_start_sends_nothing() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(pi_messages_reply())]).await?;
+    let set = pi_messages_set(&dir, base)?;
+    let provider = set.provider(resolved("pi-test", Family::PiMessages, "balanced"))?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = provider
+        .open(
+            SessionId::new_v7(),
+            &request(
+                Family::PiMessages,
+                "balanced",
+                vec![user_text("Say hello.")],
+            ),
+            &[],
+            notice_sink(),
+            &cancel,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ProviderError::Transport { .. })),
+        "{result:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
+    Ok(())
+}
+
+/// The surfaced text of a turn the loopback server rejects: either `open`
+/// refuses or the event stream carries the failure.
+async fn open_error_text(
+    set: &ProviderSet,
+    id: &str,
+    family: Family,
+    model: &str,
+    context: Vec<ContextItem>,
+) -> String {
+    let provider = set
+        .provider(resolved(id, family, model))
+        .expect("provider resolves");
+    let request = request(family, model, context);
+    match provider
+        .open(
+            SessionId::new_v7(),
+            &request,
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await
+    {
+        Err(error) => error.to_string(),
+        Ok(stream) => match collect(stream).await {
+            Err(error) => error.to_string(),
+            Ok(events) => panic!("expected an error, got success: {events:?}"),
+        },
+    }
+}
+
 #[tokio::test]
 async fn copilot_chat_denial_resends_with_the_fallback_identity() -> TestResult {
     let dir = TestDir::new()?;

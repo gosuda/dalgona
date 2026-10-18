@@ -322,6 +322,34 @@ pub(crate) const GITHUB_COPILOT: ProviderDef = ProviderDef {
     shape: Shape::Plain,
 };
 
+/// The Radius gateway, which speaks the pi-messages wire.
+///
+/// Key sign-in only. The reference also signs in through the gateway's own
+/// OAuth (`/v1/oauth` discovery of a per-gateway authorize endpoint, a
+/// loopback callback on port 1456, and an RFC 8628 device flow), and keeps
+/// the gateway config on the credential. The table's `OAuthSpec` fixes the
+/// authorize URL and has no hook for either step, so the OAuth flow is not
+/// offered.
+///
+/// The base URL is the one every Radius model carries in the reference
+/// (`https://radius.pi.dev/v1`): the request goes to `<base>/messages`, while
+/// the reference's `DEFAULT_RADIUS_GATEWAY` (`https://radius.pi.dev`) is the
+/// origin of the `/v1/config` model list and the OAuth endpoints.
+pub(crate) const RADIUS: ProviderDef = ProviderDef {
+    id: "radius",
+    name: "Radius",
+    family: Family::PiMessages,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://radius.pi.dev/v1",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::Bearer,
+        env: &["RADIUS_API_KEY"],
+    }),
+    oauth: None,
+    shape: Shape::Plain,
+};
+
 /// The OpenRouter gateway, which serves one OpenAI-style endpoint for every
 /// upstream model.
 ///
@@ -358,6 +386,7 @@ const VENDOR_ROWS: &[ProviderDef] = &[
     OPENAI_CODEX,
     ANTHROPIC,
     GITHUB_COPILOT,
+    RADIUS,
     OPENROUTER,
 ];
 const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
