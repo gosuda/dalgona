@@ -29,7 +29,7 @@ pub(crate) enum Placement {
 /// caret's offset below the block top at the last paint, plus any extra
 /// wrapped rows the width change added at or above the caret (`piece` and
 /// `reflow_extra` are zero on a height-only resize). A block whose top
-/// scrolled off the screen starts at row 1.
+/// scrolled off the screen starts at the second row.
 #[must_use]
 pub(crate) fn located_top(reported_row: u16, offset: u16, piece: u16, extra: u16) -> u16 {
     reported_row

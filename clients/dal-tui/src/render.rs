@@ -1855,7 +1855,7 @@ mod tests {
             on_transcript
                 .row_data(0)
                 .is_some_and(|(_, spans)| !spans.is_empty()),
-            "a user card is not Ctrl+O-eligible, so no header shifts the art to row 1"
+            "a user card is not Ctrl+O-eligible, so no header pushes the art to the second row"
         );
         assert_eq!(on_cache.renders(), 1);
     }
