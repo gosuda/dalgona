@@ -176,6 +176,7 @@ pub(crate) fn decode_codex_models(
         })
         .collect()
 }
+
 pub(crate) fn decode_anthropic_page(
     provider: &ProviderEntry,
     bytes: &[u8],

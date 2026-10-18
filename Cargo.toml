@@ -54,6 +54,11 @@ hyper = "=1.12.0"
 hyper-util = "=0.1.21"
 bytes = "=1.12.1"
 sha2 = "=0.11.1"
+crc32fast = "=1.5.2"
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend", "runtime_detection"] }
+hmac = "=0.13.0"
+prost = { version = "=0.14.4", default-features = false, features = ["derive", "std"] }
+quick-xml = { version = "=0.42.0", default-features = false }
 regex = "=1.13.1"
 process-wrap = { version = "=10.0.1", features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 rustix = { version = "=1.1.5", features = ["process"] }
