@@ -2246,11 +2246,15 @@ async fn ollama_row_wire(
 }
 
 #[tokio::test]
-async fn the_cloud_row_holds_num_predict_to_its_ceiling_and_drops_reasoning_history() -> TestResult {
+async fn the_cloud_row_holds_num_predict_to_its_ceiling_and_drops_reasoning_history() -> TestResult
+{
     let (head, body) = ollama_row_wire("ollama-cloud", Some("OLLAMA_ROW_KEY")).await?;
     assert!(head.starts_with("post /loop/api/chat "), "{head}");
     assert!(head.contains("authorization: bearer row-secret"), "{head}");
-    assert!(body.contains(r#""options":{"num_predict":65536}"#), "{body}");
+    assert!(
+        body.contains(r#""options":{"num_predict":65536}"#),
+        "{body}"
+    );
     assert!(!body.contains(r#""thinking""#), "{body}");
     assert!(body.contains(r#""content":"Checking.""#), "{body}");
     Ok(())
@@ -2260,7 +2264,10 @@ async fn the_cloud_row_holds_num_predict_to_its_ceiling_and_drops_reasoning_hist
 async fn a_self_hosted_row_sends_the_caller_limit_and_replays_reasoning() -> TestResult {
     let (head, body) = ollama_row_wire("local-ollama", None).await?;
     assert!(!head.contains("authorization:"), "{head}");
-    assert!(body.contains(r#""options":{"num_predict":70000}"#), "{body}");
+    assert!(
+        body.contains(r#""options":{"num_predict":70000}"#),
+        "{body}"
+    );
     assert!(
         body.contains(r#""content":"Checking.","thinking":"hidden""#),
         "{body}"
@@ -2327,7 +2334,10 @@ async fn ollama_native_reasoning_and_tool_call_events_stream_through_the_provide
         return Err(io::Error::other(format!("expected one call: {events:?}")).into());
     };
     // Ollama provides no call id; the arguments keep their raw bytes.
-    assert_eq!((call.id.as_str(), call.name.as_str()), ("ollama:0:read", "read"));
+    assert_eq!(
+        (call.id.as_str(), call.name.as_str()),
+        ("ollama:0:read", "read")
+    );
     assert!(
         matches!(&call.args, crate::stream::ToolArgs::Parsed(raw) if raw.as_str() == r#"{"path":  "a.txt"}"#),
         "{:?}",
@@ -2917,7 +2927,11 @@ fn antigravity_failover_context() -> super::request::StreamContext {
         auth: AuthStyle::None,
         model: model.into(),
         entry: resolved("google-antigravity", Family::GoogleAntigravity, model).entry,
-        request: request(Family::GoogleAntigravity, model, vec![user_text("Say hello.")]),
+        request: request(
+            Family::GoogleAntigravity,
+            model,
+            vec![user_text("Say hello.")],
+        ),
         thinking: crate::thinking::ThinkingPlan {
             level: ThinkingLevel::Off,
             wire: crate::thinking::WireThinking::OpenAi { effort: None },
@@ -2989,8 +3003,7 @@ async fn antigravity_fails_over_on_a_transient_status_before_any_stream_byte() -
     ] {
         let (first, mut first_task) = server("", vec![json_reply(status, body)]).await?;
         let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
-        let result =
-            run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
         let Ok(Some(stream)) = result else {
             return Err(io::Error::other(format!(
                 "{status} did not fail over: {}",
@@ -3056,8 +3069,7 @@ async fn antigravity_client_errors_never_fail_over() -> TestResult {
     for status in [400, 401, 403, 404] {
         let (first, mut first_task) = server("", vec![json_reply(status, "{}")]).await?;
         let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
-        let result =
-            run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
         match result {
             Err(crate::lifecycle::AttemptFailure::Response { status: seen, .. }) => {
                 assert_eq!(seen, status);
@@ -3087,7 +3099,10 @@ async fn antigravity_still_fails_over_on_a_transport_error() -> TestResult {
     };
     let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
     let result = run_antigravity_failover(&[closed, second], &CancellationToken::new()).await;
-    assert!(matches!(result, Ok(Some(_))), "transport failover regressed");
+    assert!(
+        matches!(result, Ok(Some(_))),
+        "transport failover regressed"
+    );
     second_task.join_next().await.expect("second answered")??;
     Ok(())
 }
@@ -5456,7 +5471,10 @@ async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
     let captured = server_task.join_next().await.expect("server completes")??;
     let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
     assert!(head.starts_with("post /v1/responses/compact "), "{head}");
-    assert!(head.contains("authorization: bearer plain-secret"), "{head}");
+    assert!(
+        head.contains("authorization: bearer plain-secret"),
+        "{head}"
+    );
     Ok(())
 }
 
@@ -5561,8 +5579,7 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
     for (id, family, stored, ready) in cases {
         let dir = TestDir::new()?;
         if let Some(credential) = stored {
-            let mut store =
-                crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+            let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
             store.set(id, credential)?;
             store.store()?;
         }
@@ -6012,7 +6029,6 @@ async fn openrouter_streams_responses_by_default_and_chat_only_when_the_env_name
     Ok(())
 }
 
-
 #[tokio::test]
 async fn dispatch_verify_oauth_only_none_refuses_before_network() -> TestResult {
     // Adapted from the supplied Droid bind/turn smoke: admission now refuses
@@ -6039,7 +6055,10 @@ async fn dispatch_verify_oauth_only_none_refuses_before_network() -> TestResult 
                 dir.path(),
             )?;
             let cancel = CancellationToken::new();
-            assert!(!set.credential_source_available("factory-droid", &cancel).await?);
+            assert!(
+                !set.credential_source_available("factory-droid", &cancel)
+                    .await?
+            );
             assert!(!set.provider_readiness(&cancel).await?[0].ready);
             assert!(matches!(
                 set.provider(resolved("factory-droid", family, "model")),
@@ -6085,35 +6104,65 @@ async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResul
         );
         row.auth = AuthStyle::Bearer;
         let set = ProviderSet::new(
-            &config(vec![row.clone()], 0), identity(), EnvSnapshot::test(&[]),
-            dir.path(), dir.path(),
+            &config(vec![row.clone()], 0),
+            identity(),
+            EnvSnapshot::test(&[]),
+            dir.path(),
+            dir.path(),
         )?;
-        assert!(set.credential_source_available("factory-droid", &CancellationToken::new()).await?);
-        assert!(set.provider(resolved("factory-droid", family, "model")).is_ok());
+        assert!(
+            set.credential_source_available("factory-droid", &CancellationToken::new())
+                .await?
+        );
+        assert!(
+            set.provider(resolved("factory-droid", family, "model"))
+                .is_ok()
+        );
         // Explicit none still disables the stored login; do not silently
         // recover it as a new credential source to admit an unusable row.
         row.auth = AuthStyle::None;
         let disabled = ProviderSet::new(
-            &config(vec![row], 0), identity(), EnvSnapshot::test(&[]),
-            dir.path(), dir.path(),
+            &config(vec![row], 0),
+            identity(),
+            EnvSnapshot::test(&[]),
+            dir.path(),
+            dir.path(),
         )?;
-        assert!(matches!(disabled.credential("factory-droid")?, Credential::None));
-        assert!(matches!(disabled.provider(resolved("factory-droid", family, "model")),
-            Err(ProviderError::NoCredentials { .. })));
+        assert!(matches!(
+            disabled.credential("factory-droid")?,
+            Credential::None
+        ));
+        assert!(matches!(
+            disabled.provider(resolved("factory-droid", family, "model")),
+            Err(ProviderError::NoCredentials { .. })
+        ));
     }
     for family in [Family::Chat, Family::Ollama, Family::GoogleGeminiCli] {
         let dir = TestDir::new()?;
         let mut row = entry(
-            "local-admission", family, String::from("http://127.0.0.1:1"),
-            None, 1, Transport::Https,
+            "local-admission",
+            family,
+            String::from("http://127.0.0.1:1"),
+            None,
+            1,
+            Transport::Https,
         );
         row.auth = AuthStyle::None;
         let set = ProviderSet::new(
-            &config(vec![row], 0), identity(), EnvSnapshot::test(&[]),
-            dir.path(), dir.path(),
+            &config(vec![row], 0),
+            identity(),
+            EnvSnapshot::test(&[]),
+            dir.path(),
+            dir.path(),
         )?;
-        assert!(set.credential_source_available("local-admission", &CancellationToken::new()).await?);
-        assert!(set.provider(resolved("local-admission", family, "model")).is_ok());
+        assert!(
+            set.credential_source_available("local-admission", &CancellationToken::new())
+                .await?
+        );
+        assert!(
+            set.provider(resolved("local-admission", family, "model"))
+                .is_ok()
+        );
     }
     Ok(())
 }

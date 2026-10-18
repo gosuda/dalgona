@@ -189,23 +189,33 @@ fn turn_end_stops_round_trip_with_distinct_literals() {
         let record = turn_end_with_stop(stop.clone());
         let encoded = encode(&record).expect("turn_end encodes");
         let back = decode(&encoded).expect("turn_end decodes").record;
-        let Record::TurnEnd { stop: back_stop, .. } = back else {
+        let Record::TurnEnd {
+            stop: back_stop, ..
+        } = back
+        else {
             panic!("expected turn_end");
         };
         assert_eq!(back_stop, stop);
     }
 
-    let failed = turn_end_with_stop(TurnEndStop::Failed { message: "boom".into() });
+    let failed = turn_end_with_stop(TurnEndStop::Failed {
+        message: "boom".into(),
+    });
     let encoded = encode(&failed).expect("failed encodes");
     let back = decode(&encoded).expect("failed decodes").record;
-    let Record::TurnEnd { stop: back_stop, .. } = back else {
+    let Record::TurnEnd {
+        stop: back_stop, ..
+    } = back
+    else {
         panic!("expected turn_end");
     };
     assert_eq!(back_stop, failed_stop());
 }
 
 fn failed_stop() -> TurnEndStop {
-    TurnEndStop::Failed { message: "boom".into() }
+    TurnEndStop::Failed {
+        message: "boom".into(),
+    }
 }
 
 #[test]
@@ -223,12 +233,17 @@ fn assistant_stops_round_trip() {
         let Record::Assistant(entry) = back else {
             panic!("expected assistant");
         };
-        let EntryKind::Assistant { stop: back_stop, .. } = entry.kind else {
+        let EntryKind::Assistant {
+            stop: back_stop, ..
+        } = entry.kind
+        else {
             panic!("expected assistant kind");
         };
         assert_eq!(back_stop, stop);
     }
-    let failed = assistant_with_stop(AssistantStop::Failed { message: "nope".into() });
+    let failed = assistant_with_stop(AssistantStop::Failed {
+        message: "nope".into(),
+    });
     let encoded = encode(&failed).expect("failed encodes");
     let text = std::str::from_utf8(&encoded).expect("utf8").to_owned();
     assert!(text.contains("\"stop\""));
@@ -236,12 +251,17 @@ fn assistant_stops_round_trip() {
     let Record::Assistant(entry) = back else {
         panic!("expected assistant");
     };
-    let EntryKind::Assistant { stop: back_stop, .. } = entry.kind else {
+    let EntryKind::Assistant {
+        stop: back_stop, ..
+    } = entry.kind
+    else {
         panic!("expected assistant kind");
     };
     assert_eq!(
         back_stop,
-        AssistantStop::Failed { message: "nope".into() }
+        AssistantStop::Failed {
+            message: "nope".into()
+        }
     );
 }
 
@@ -250,14 +270,21 @@ fn job_outcomes_are_terminal_and_distinct() {
     check_job_outcome(&JobOutcome::Exited { code: 0 }, "\"exited\"");
     check_job_outcome(&JobOutcome::Cancelled, "\"cancelled\"");
     check_job_outcome(&JobOutcome::Lost, "\"lost\"");
-    check_job_outcome(&JobOutcome::Failed { message: "x".into() }, "\"failed\"");
+    check_job_outcome(
+        &JobOutcome::Failed {
+            message: "x".into(),
+        },
+        "\"failed\"",
+    );
 }
 
 fn check_job_outcome(outcome: &JobOutcome, fragment: &str) {
     let record = Record::Job {
         at: at(),
         job: dal_core::JobId::new_v7(),
-        event: JobEvent::Settled { outcome: Some(outcome.clone()) },
+        event: JobEvent::Settled {
+            outcome: Some(outcome.clone()),
+        },
     };
     let encoded = encode(&record).expect("job encodes");
     let text = std::str::from_utf8(&encoded).expect("utf8").to_owned();
@@ -266,7 +293,10 @@ fn check_job_outcome(outcome: &JobOutcome, fragment: &str) {
     let Record::Job { event, .. } = back else {
         panic!("expected job");
     };
-    let JobEvent::Settled { outcome: Some(back_outcome) } = event else {
+    let JobEvent::Settled {
+        outcome: Some(back_outcome),
+    } = event
+    else {
         panic!("expected settled outcome");
     };
     assert_eq!(&back_outcome, outcome);
@@ -292,7 +322,10 @@ fn cancelled_and_aborted_never_alias() {
 fn owner_core_and_extension_never_alias_across_the_codec() {
     assert_ne!(
         Owner::Core,
-        Owner::Extension { name: "web".into(), origin: "bundled".into() }
+        Owner::Extension {
+            name: "web".into(),
+            origin: "bundled".into()
+        }
     );
     check_owner_round_trip(&Owner::Core);
     check_owner_round_trip(&Owner::Extension {

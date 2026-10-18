@@ -196,8 +196,8 @@ fn sparse_usage_snapshot_never_regresses_earlier_totals() {
     // fields as zero). The fold keeps the per-counter maximum — latest total
     // without double-counting — instead of overwriting the earlier totals
     // with the sparse zeros.
-    let usage = |input: u64, output: u64, cache_write: u64, cache_read: u64| {
-        GetChatMessageResponse {
+    let usage =
+        |input: u64, output: u64, cache_write: u64, cache_read: u64| GetChatMessageResponse {
             usage: Some(ModelUsageStats {
                 input_tokens: input,
                 output_tokens: output,
@@ -206,8 +206,7 @@ fn sparse_usage_snapshot_never_regresses_earlier_totals() {
                 ..Default::default()
             }),
             ..Default::default()
-        }
-    };
+        };
     // Input and cache totals as in `text_response` with output 10, then a
     // cumulative input update that omits every other counter.
     let mut growing = usage(150, 0, 0, 0);
@@ -948,10 +947,7 @@ fn bare_gemini_mention_is_not_a_gemini_route() {
     };
     let message = chat_message(&input).unwrap();
     let schema = message.tools[0].json_schema_string.as_str();
-    assert!(
-        schema.contains(r#""type":["number","null"]"#),
-        "{schema}"
-    );
+    assert!(schema.contains(r#""type":["number","null"]"#), "{schema}");
 }
 
 #[test]

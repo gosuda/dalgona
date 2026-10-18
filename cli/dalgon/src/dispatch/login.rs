@@ -156,7 +156,9 @@ pub(super) async fn start_auth_host(
 /// shutdown ladder. An auth command holds no busy extension status, so it
 /// has no quiet wait to spend.
 pub(super) async fn shutdown_auth_host(host: Host) {
-    let _closed = exit::Ladder::begin().close_host_after_quiet_wait(host).await;
+    let _closed = exit::Ladder::begin()
+        .close_host_after_quiet_wait(host)
+        .await;
 }
 
 /// Maps a host auth failure to its exit code, keeping the provider error

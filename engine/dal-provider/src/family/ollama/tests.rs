@@ -81,7 +81,11 @@ fn tool(name: &str, description: &str, parameters: &str) -> ModelToolSpec {
 /// A named-level ladder, the shape every string-valued model carries.
 fn levels() -> ThinkingSupport {
     ThinkingSupport::OpenAi {
-        accepted: vec![ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High],
+        accepted: vec![
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ],
         none_supported: true,
     }
 }
@@ -418,10 +422,18 @@ fn a_provider_row_is_cloud_by_id_or_by_host() {
         ("mine", "https://eu.OLLAMA.com", Deployment::Cloud),
         ("ollama", "http://127.0.0.1:11434", Deployment::SelfHosted),
         ("mine", "https://notollama.com", Deployment::SelfHosted),
-        ("mine", "https://ollama.com.evil.test", Deployment::SelfHosted),
+        (
+            "mine",
+            "https://ollama.com.evil.test",
+            Deployment::SelfHosted,
+        ),
         ("mine", "not a url", Deployment::SelfHosted),
     ] {
-        assert_eq!(Deployment::of(provider, base), expected, "{provider} {base}");
+        assert_eq!(
+            Deployment::of(provider, base),
+            expected,
+            "{provider} {base}"
+        );
     }
 }
 

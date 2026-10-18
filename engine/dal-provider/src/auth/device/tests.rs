@@ -540,10 +540,7 @@ async fn codex_poll_failure_redacts_the_device_auth_id_and_user_code() {
             200,
             r#"{"device_auth_id":"codex-auth-id-77","user_code":"QQQQ-1111","interval":1}"#,
         ),
-        (
-            500,
-            r#"{"error":"boom for codex-auth-id-77 / QQQQ-1111"}"#,
-        ),
+        (500, r#"{"error":"boom for codex-auth-id-77 / QQQQ-1111"}"#),
     ])
     .await;
     let urls = device_urls(&base);

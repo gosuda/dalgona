@@ -521,10 +521,7 @@ fn non_vision_models_get_one_placeholder_in_place_of_images() {
     // An image-only user turn degrades to the placeholder alone, not to an
     // empty (dropped) turn.
     let only = ModelRequest {
-        context: vec![ContextItem::User {
-            parts: vec![png()],
-        }]
-        .into(),
+        context: vec![ContextItem::User { parts: vec![png()] }].into(),
         ..request
     };
     let input = GoogleRequest {
@@ -624,7 +621,10 @@ fn empty_stop_is_a_transport_error_before_any_terminal_event() {
             ),
             "{error:?}"
         );
-        assert!(out.is_empty(), "nothing was emitted before the error: {out:?}");
+        assert!(
+            out.is_empty(),
+            "nothing was emitted before the error: {out:?}"
+        );
     }
 }
 
@@ -721,7 +721,10 @@ fn in_band_daily_quota_frames_are_terminal_quota() {
     let wording = in_band(
         r#"{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 3h15m38s.","status":"RESOURCE_EXHAUSTED"}}"#,
     );
-    assert!(matches!(wording, ProviderError::Quota { .. }), "{wording:?}");
+    assert!(
+        matches!(wording, ProviderError::Quota { .. }),
+        "{wording:?}"
+    );
     // The `google.rpc.ErrorInfo` reason, inside the CCA envelope.
     let info = in_band(
         r#"{"response":{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}}"#,
@@ -749,7 +752,10 @@ fn in_band_quota_details_only_upgrade_throttles() {
     let credits = in_band(
         r#"{"error":{"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"INSUFFICIENT_G1_CREDITS_BALANCE"}]}}"#,
     );
-    assert!(matches!(credits, ProviderError::Quota { .. }), "{credits:?}");
+    assert!(
+        matches!(credits, ProviderError::Quota { .. }),
+        "{credits:?}"
+    );
     // A frame that is not a throttle keeps the error the table gives it.
     let outage = in_band(
         r#"{"error":{"code":503,"message":"Service unavailable","status":"UNAVAILABLE","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}"#,
@@ -762,7 +768,10 @@ fn in_band_short_retry_hints_stay_rate_limited() {
     let short = in_band(
         r#"{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"30s"}]}}"#,
     );
-    assert!(matches!(short, ProviderError::RateLimited { .. }), "{short:?}");
+    assert!(
+        matches!(short, ProviderError::RateLimited { .. }),
+        "{short:?}"
+    );
 }
 
 #[test]
@@ -1054,7 +1063,13 @@ fn a_signature_only_part_after_a_call_signs_nothing() {
 
 #[test]
 fn flat_bodies_refuse_model_ids_that_leave_the_request_path() {
-    for model in ["", "gemini-3-pro?alt=json", "gemini/../x", "tunedModels/m", "a b"] {
+    for model in [
+        "",
+        "gemini-3-pro?alt=json",
+        "gemini/../x",
+        "tunedModels/m",
+        "a b",
+    ] {
         let request = ModelRequest {
             model: ModelRoute::Api {
                 family: Family::GoogleGenerativeAi,
@@ -1064,7 +1079,12 @@ fn flat_bodies_refuse_model_ids_that_leave_the_request_path() {
         };
         let thinking = plan(Some("high"));
         let error = request_body(&google_request(&request, &thinking)).unwrap_err();
-        assert_eq!(error, GoogleBodyError::ModelId { model: model.into() });
+        assert_eq!(
+            error,
+            GoogleBodyError::ModelId {
+                model: model.into()
+            }
+        );
     }
 }
 
@@ -1849,7 +1869,8 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
     // answer. The decoder errors before delivering anything, so the
     // lifecycle's pre-delivery retry re-requests and the consumer only ever
     // sees the second response.
-    let empty = sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]);
+    let empty =
+        sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]);
     let answer = sse(&[
         r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
     ]);
@@ -1867,8 +1888,12 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
     let thinking = plan(Some("high"));
     let client = crate::http::build_client();
     let attempt = move |_: &Credential, _: &CancellationToken| {
-        let (request, thinking, client, base) =
-            (request.clone(), thinking.clone(), client.clone(), base.clone());
+        let (request, thinking, client, base) = (
+            request.clone(),
+            thinking.clone(),
+            client.clone(),
+            base.clone(),
+        );
         async move {
             let wire = gemini::build(&gemini::GeminiRequest {
                 request: &request,
@@ -1925,7 +1950,11 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
         .expect("serve ok")
         .unwrap();
 
-    assert_eq!(seen.lock().unwrap().len(), 2, "the empty response was re-requested");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        2,
+        "the empty response was re-requested"
+    );
     assert_eq!(
         events[0],
         StreamEvent::TextDelta {

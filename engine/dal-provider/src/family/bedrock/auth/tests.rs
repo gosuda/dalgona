@@ -15,10 +15,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
+use super::super::AwsCredential;
 use super::metadata;
 use super::profile;
 use super::sso;
-use super::super::AwsCredential;
 use super::{AwsCredentialResolver, AwsResolveOptions, BedrockAuth};
 use crate::{
     AuthStore, AuthStyle, EnvSnapshot, ProviderEntry, ProviderError, ProviderSettings, Transport,
@@ -768,7 +768,10 @@ async fn a_malformed_process_expiration_reads_like_a_missing_one() {
             r#"{"Version":1,"AccessKeyId":"K","SecretAccessKey":"S","Expiration":"soon"}"#,
             false,
         ),
-        (r#"{"Version":1,"AccessKeyId":"K","SecretAccessKey":"S"}"#, false),
+        (
+            r#"{"Version":1,"AccessKeyId":"K","SecretAccessKey":"S"}"#,
+            false,
+        ),
     ];
     for (index, (envelope, has_token)) in cases.into_iter().enumerate() {
         let dir = TestDir::new(&format!("process-bad-expiration-{index}"));
@@ -1222,12 +1225,20 @@ async fn a_signed_converse_request_covers_what_the_loopback_server_received() {
         .headers
         .insert(String::from("host"), String::from("127.0.0.1"));
     assert!(!matches_what_was_sent(
-        &hostless, &credential, "us-east-1", "bedrock", &signed
+        &hostless,
+        &credential,
+        "us-east-1",
+        "bedrock",
+        &signed
     ));
     let mut tampered = hit.clone();
     tampered.body.push(b' ');
     assert!(!matches_what_was_sent(
-        &tampered, &credential, "us-east-1", "bedrock", &signed
+        &tampered,
+        &credential,
+        "us-east-1",
+        "bedrock",
+        &signed
     ));
 }
 
@@ -1709,7 +1720,12 @@ async fn sso_the_freshest_matching_cache_token_wins() {
     // Sorted first, expired: a leftover of an earlier login.
     dir.write(
         ".aws/sso/cache/a.json",
-        &sso_token_file(start_url, "CANARY-stale-sso-token-0021", "2000-01-01T00:00:00Z", ""),
+        &sso_token_file(
+            start_url,
+            "CANARY-stale-sso-token-0021",
+            "2000-01-01T00:00:00Z",
+            "",
+        ),
     );
     // Another portal's token that outlives every other file.
     dir.write(
@@ -1724,7 +1740,12 @@ async fn sso_the_freshest_matching_cache_token_wins() {
     // The token the CLI keeps refreshed.
     dir.write(
         ".aws/sso/cache/c.json",
-        &sso_token_file(start_url, "CANARY-fresh-sso-token-0020", "2031-01-01T00:00:00Z", ""),
+        &sso_token_file(
+            start_url,
+            "CANARY-fresh-sso-token-0020",
+            "2031-01-01T00:00:00Z",
+            "",
+        ),
     );
     // A matching token with no parseable expiry ranks below any dated one.
     dir.write(

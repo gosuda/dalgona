@@ -479,11 +479,9 @@ fn collapse_null_branch(obj: &Fields) -> Option<Fields> {
 /// Whether every branch of a combiner is a `const` schema.
 fn is_const_union(variants: &[Node]) -> bool {
     !variants.is_empty()
-        && variants.iter().all(|variant| {
-            variant
-                .object()
-                .is_some_and(|fields| fields.has("const"))
-        })
+        && variants
+            .iter()
+            .all(|variant| variant.object().is_some_and(|fields| fields.has("const")))
 }
 
 /// The one type every entry names, when they agree.
@@ -527,11 +525,9 @@ fn unrepresentable_enum(value: &Node, slot: ChildKind, depth: usize) -> bool {
             .iter()
             .any(|(_, member)| unrepresentable_enum(member, ChildKind::Schema, depth + 1)),
         Node::Object(fields) => {
-            let bad_enum = fields
-                .array("enum")
-                .is_some_and(|members| {
-                    members.is_empty() || members.iter().any(|member| member.text().is_none())
-                });
+            let bad_enum = fields.array("enum").is_some_and(|members| {
+                members.is_empty() || members.iter().any(|member| member.text().is_none())
+            });
             let bad_const =
                 fields.has("const") && fields.get("const").and_then(Node::text).is_none();
             bad_enum
@@ -661,7 +657,11 @@ fn extract_nullable_union(fields: &Fields) -> Option<Fields> {
 
 /// `{type: ["T", "null"]}` as `{type: "T"}`; `None` for any other `type`.
 fn scalar_without_null(fields: &Fields) -> Option<Fields> {
-    let names: Vec<&str> = fields.array("type")?.iter().filter_map(Node::text).collect();
+    let names: Vec<&str> = fields
+        .array("type")?
+        .iter()
+        .filter_map(Node::text)
+        .collect();
     let mut others = names.iter().filter(|name| **name != "null");
     let only = others.next()?;
     if others.next().is_some() || !names.contains(&"null") {

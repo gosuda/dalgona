@@ -67,7 +67,8 @@ impl Fields {
     /// The value under `key`; an absent key and an `undefined` value both
     /// read as `None`, like a JavaScript property read.
     pub(super) fn get(&self, key: &str) -> Option<&Node> {
-        self.raw(key).filter(|node| !matches!(node, Node::Undefined))
+        self.raw(key)
+            .filter(|node| !matches!(node, Node::Undefined))
     }
 
     /// The slot under `key` including an `undefined` value, like the `in`

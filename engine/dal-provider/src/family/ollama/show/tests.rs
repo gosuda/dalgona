@@ -92,7 +92,11 @@ fn only_a_positive_u32_counts_as_a_context_window() {
 
 #[test]
 fn a_body_without_capabilities_leaves_every_capability_unknown() {
-    for body in [r"{}", r#"{"capabilities":null}"#, r#"{"capabilities":"tools"}"#] {
+    for body in [
+        r"{}",
+        r#"{"capabilities":null}"#,
+        r#"{"capabilities":"tools"}"#,
+    ] {
         let probe = show(body);
         assert_eq!(probe.capabilities, None, "{body}");
         assert_eq!(probe.reports("tools"), None, "{body}");
@@ -143,7 +147,10 @@ fn ladders_follow_the_model_and_the_deployment() {
     assert_eq!(thinking_ladder(cloud, "glm-5.2"), [High, Max]);
     assert_eq!(thinking_ladder(cloud, "glm-5.2:cloud"), [High, Max]);
     assert_eq!(thinking_ladder(cloud, "glm-5.3"), [Low, High, Max]);
-    assert_eq!(thinking_ladder(cloud, "glm-5.1"), [Minimal, Low, Medium, High]);
+    assert_eq!(
+        thinking_ladder(cloud, "glm-5.1"),
+        [Minimal, Low, Medium, High]
+    );
     assert_eq!(
         thinking_ladder(cloud, "qwen3:32b"),
         [Minimal, Low, Medium, High]
@@ -162,7 +169,12 @@ fn the_output_cap_names_exactly_the_two_deepseek_v4_deployments() {
     ] {
         assert!(cloud_output_capped(id), "{id}");
     }
-    for id in ["deepseek-v4.1-flash", "deepseek-v3.1:671b", "gpt-oss:120b", ""] {
+    for id in [
+        "deepseek-v4.1-flash",
+        "deepseek-v3.1:671b",
+        "gpt-oss:120b",
+        "",
+    ] {
         assert!(!cloud_output_capped(id), "{id}");
     }
 }
@@ -228,6 +240,8 @@ fn a_thinking_object_without_usable_values_reports_nothing() {
     assert_eq!(values.levels, [High, Low]);
     assert!(values.off && !values.on);
     // `values: []` is a report of nothing acceptable.
-    let empty = show(r#"{"thinking":{"values":[]}}"#).thinking.expect("values report");
+    let empty = show(r#"{"thinking":{"values":[]}}"#)
+        .thinking
+        .expect("values report");
     assert_eq!(empty.ladder(), (Vec::new(), false));
 }

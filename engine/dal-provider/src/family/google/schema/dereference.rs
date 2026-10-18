@@ -96,7 +96,12 @@ impl Inliner<'_> {
                 Node::Object(result)
             }
             Node::Array(items) if SCHEMA_ARRAY_KEYS.contains(&key) || key == "items" => {
-                Node::Array(items.iter().map(|item| self.node(item, depth + 2)).collect())
+                Node::Array(
+                    items
+                        .iter()
+                        .map(|item| self.node(item, depth + 2))
+                        .collect(),
+                )
             }
             _ if SCHEMA_VALUE_KEYS.contains(&key) => self.node(value, depth + 1),
             _ => value.clone(),

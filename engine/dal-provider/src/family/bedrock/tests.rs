@@ -1085,10 +1085,7 @@ fn an_aws_regional_host_names_its_own_region_and_other_hosts_use_the_configured_
     // endpoint, so the ambient region the caller resolved never overrides
     // the region the host names.
     assert_eq!(
-        region_for(
-            "bedrock-runtime.eu-west-1.amazonaws.com",
-            Some("us-east-1")
-        ),
+        region_for("bedrock-runtime.eu-west-1.amazonaws.com", Some("us-east-1")),
         "eu-west-1"
     );
     // Hosts that are not exactly an AWS regional runtime host name no
@@ -1102,12 +1099,12 @@ fn an_aws_regional_host_names_its_own_region_and_other_hosts_use_the_configured_
         "bedrock-runtime.eu_west.amazonaws.com",
         "gateway.example",
     ] {
+        assert_eq!(region_for(host, Some("ap-south-1")), "ap-south-1", "{host}");
         assert_eq!(
-            region_for(host, Some("ap-south-1")),
+            region_for(host, Some("  ap-south-1 ")),
             "ap-south-1",
             "{host}"
         );
-        assert_eq!(region_for(host, Some("  ap-south-1 ")), "ap-south-1", "{host}");
         assert_eq!(region_for(host, None), "us-east-1", "{host}");
         assert_eq!(region_for(host, Some("  ")), "us-east-1", "{host}");
     }

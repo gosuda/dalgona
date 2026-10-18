@@ -66,9 +66,9 @@ use crate::{
 };
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 pub(crate) mod support;
+#[cfg(test)]
+mod tests;
 
 /// The workflow definition every dal run uses.
 const DEFINITION: &str = "ambient";

@@ -179,13 +179,7 @@ fn suite_shaped_requests_match_an_independent_computation() {
         "get-vanilla"
     );
     assert_eq!(
-        suite_signature(
-            "GET",
-            "/",
-            Some("Param2=value2&Param1=value1"),
-            &plain,
-            b""
-        ),
+        suite_signature("GET", "/", Some("Param2=value2&Param1=value1"), &plain, b""),
         "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500",
         "get-vanilla-query-order-key-case"
     );
@@ -231,10 +225,7 @@ fn the_iam_list_users_example_matches_an_independent_computation_at_every_stage(
             String::from("application/x-www-form-urlencoded; charset=utf-8"),
         ),
         (String::from("host"), String::from("iam.amazonaws.com")),
-        (
-            String::from("x-amz-date"),
-            String::from("20150830T123600Z"),
-        ),
+        (String::from("x-amz-date"), String::from("20150830T123600Z")),
     ];
     let (request, signed_names) = canonical_request(
         "GET",
@@ -516,7 +507,9 @@ fn a_signed_header_set_never_prints_its_token_or_authorization() {
 
 #[test]
 fn a_credential_that_would_sign_differently_than_it_travels_is_refused() {
-    for token in ["abc def", " abc", "abc ", "abc\tdef", "abc\ndef", "tökén", ""] {
+    for token in [
+        "abc def", " abc", "abc ", "abc\tdef", "abc\ndef", "tökén", "",
+    ] {
         let mut hostile = credential();
         hostile.session_token = Some(token.into());
         assert_eq!(

@@ -460,9 +460,10 @@ where
 /// the other Google surfaces and is refused as the adapter refuses it.
 fn gemini_headers(fetch: &ModelFetch<'_>) -> Result<Vec<(String, String)>, ProviderError> {
     match fetch.credential {
-        Credential::ApiKey { key } if !key.expose().trim().is_empty() => {
-            Ok(vec![(String::from(API_KEY_HEADER), key.expose().to_owned())])
-        }
+        Credential::ApiKey { key } if !key.expose().trim().is_empty() => Ok(vec![(
+            String::from(API_KEY_HEADER),
+            key.expose().to_owned(),
+        )]),
         Credential::ApiKey { .. } | Credential::None => Err(ProviderError::NoCredentials {
             provider: fetch.provider.id.to_string(),
         }),
@@ -568,7 +569,14 @@ where
         request = request.header(name, value);
     }
     let family = fetch.provider.family;
-    let response = http::send(family, request.body(body), fetch.user_agent, exchange, sleep).await?;
+    let response = http::send(
+        family,
+        request.body(body),
+        fetch.user_agent,
+        exchange,
+        sleep,
+    )
+    .await?;
     let status = response.status();
     if !status.is_success() {
         return Err(ProviderError::Status {

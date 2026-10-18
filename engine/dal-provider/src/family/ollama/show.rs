@@ -174,7 +174,10 @@ impl ThinkValues {
 /// verified to take it.
 #[must_use]
 pub(crate) fn cloud_replays_thinking(model: &str) -> bool {
-    matches!(model.to_ascii_lowercase().as_str(), "glm-5.2" | "glm-5.2:cloud")
+    matches!(
+        model.to_ascii_lowercase().as_str(),
+        "glm-5.2" | "glm-5.2:cloud"
+    )
 }
 
 #[derive(Serialize)]
@@ -265,7 +268,11 @@ fn think_values(thinking: &sonic_rs::Value) -> Option<ThinkValues> {
     let mut values = ThinkValues::default();
     for item in items {
         if let Some(flag) = item.as_bool() {
-            *(if flag { &mut values.on } else { &mut values.off }) = true;
+            *(if flag {
+                &mut values.on
+            } else {
+                &mut values.off
+            }) = true;
             continue;
         }
         let level = match item.as_str() {

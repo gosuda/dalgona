@@ -158,17 +158,9 @@ fn route_resolution_retries_an_unlisted_id_under_its_family_provider() {
 fn route_retry_serves_every_family_through_its_single_owner() {
     let cases = [
         (Family::Chat, "my-chat", "https://example.test/v1"),
-        (
-            Family::Responses,
-            "my-responses",
-            "https://example.test/v1",
-        ),
+        (Family::Responses, "my-responses", "https://example.test/v1"),
         (Family::Codex, "my-codex", "https://example.test/codex"),
-        (
-            Family::Anthropic,
-            "my-anthropic",
-            "https://example.test",
-        ),
+        (Family::Anthropic, "my-anthropic", "https://example.test"),
         (
             Family::Bedrock,
             "my-bedrock",
@@ -176,11 +168,7 @@ fn route_retry_serves_every_family_through_its_single_owner() {
         ),
         (Family::Cursor, "my-cursor", "https://api.cursor.com"),
         (Family::Devin, "my-devin", "https://server.codeium.com"),
-        (
-            Family::Droid,
-            "factory-droid",
-            "https://api.factory.ai",
-        ),
+        (Family::Droid, "factory-droid", "https://api.factory.ai"),
         (Family::GitLab, "gitlab-duo", "https://gitlab.com"),
         (
             Family::GoogleGenerativeAi,
@@ -207,7 +195,10 @@ fn route_retry_serves_every_family_through_its_single_owner() {
         ),
     ];
     for (family, id, base) in cases {
-        let typed = Catalog::with_sources(vec![(provider(id, family, base), CatalogSource::Typed)], Vec::new());
+        let typed = Catalog::with_sources(
+            vec![(provider(id, family, base), CatalogSource::Typed)],
+            Vec::new(),
+        );
         let route = ModelRoute::Api {
             family,
             model: "some-new-id".into(),
@@ -256,7 +247,9 @@ fn route_retry_never_guesses_among_same_family_providers() {
         "qualified cloud id resolves",
     );
     assert_eq!(
-        resolve_route(&catalog, &[], &route).unwrap_err().to_string(),
+        resolve_route(&catalog, &[], &route)
+            .unwrap_err()
+            .to_string(),
         "unknown model gpt-oss:120b",
         "two same-family owners mean no family-prefix guess",
     );
@@ -268,8 +261,10 @@ fn route_retry_uses_the_catalogs_only_owner_including_custom_ids() {
         ("ollama", "http://127.0.0.1:11434"),
         ("my-ollama", "http://10.0.0.9:11434"),
     ] {
-        let typed =
-            Catalog::with_sources(vec![(provider(id, Family::Ollama, base), CatalogSource::Typed)], Vec::new());
+        let typed = Catalog::with_sources(
+            vec![(provider(id, Family::Ollama, base), CatalogSource::Typed)],
+            Vec::new(),
+        );
         let route = ModelRoute::Api {
             family: Family::Ollama,
             model: "some-new-id".into(),
@@ -300,8 +295,9 @@ fn route_retry_serves_single_vendor_chat_and_responses_owners() {
             model: "some-new-id".into(),
         };
         assert!(resolve(&typed, &[], "some-new-id").is_err());
-        let resolved = resolve_route(&typed, &[], &route)
-            .unwrap_or_else(|error| panic!("{id:?}/{family:?}: vendor single serves typed id: {error:?}"));
+        let resolved = resolve_route(&typed, &[], &route).unwrap_or_else(|error| {
+            panic!("{id:?}/{family:?}: vendor single serves typed id: {error:?}")
+        });
         assert_eq!(resolved.provider.as_ref(), id);
         assert_eq!(resolved.route, route);
     }
@@ -421,7 +417,9 @@ fn route_retry_keeps_ambiguous_bare_error() {
         family: Family::Ollama,
         model: "shared-id".into(),
     };
-    let error = resolve_route(&catalog, &[], &route).unwrap_err().to_string();
+    let error = resolve_route(&catalog, &[], &route)
+        .unwrap_err()
+        .to_string();
     assert!(
         error.starts_with("model id shared-id matches several providers: "),
         "dual listed owners keep the ambiguous error, got: {error}",
@@ -452,7 +450,9 @@ fn route_retry_keeps_explicit_provider_identity() {
         .unwrap_or_else(|error| panic!("qualified local keeps identity: {error:?}"));
     assert_eq!(local.provider.as_ref(), "ollama");
     assert_eq!(
-        resolve(&catalog, &[], "openai/gpt-oss:120b").unwrap_err().to_string(),
+        resolve(&catalog, &[], "openai/gpt-oss:120b")
+            .unwrap_err()
+            .to_string(),
         "unknown model openai/gpt-oss:120b",
         "an unconfigured provider id stays unknown",
     );
@@ -467,7 +467,6 @@ fn route_retry_keeps_explicit_provider_identity() {
         .unwrap_or_else(|error| panic!("explicit openai-chat keeps identity: {error:?}"));
     assert_eq!(explicit.provider.as_ref(), "openai");
 }
-
 
 #[test]
 fn route_resolution_prefers_the_listed_bare_id() {
@@ -2624,14 +2623,29 @@ async fn gemini_fetch_pages_with_the_key_header_and_never_a_key_in_the_url() {
     let first = gemini_page(
         &[
             gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, 65_536),
-            gemini_card("models/gemini-2.5-flash", "Gemini 2.5 Flash", 1_048_576, 65_536),
+            gemini_card(
+                "models/gemini-2.5-flash",
+                "Gemini 2.5 Flash",
+                1_048_576,
+                65_536,
+            ),
         ],
         Some("page-2"),
     );
     let second = gemini_page(
         &[
-            gemini_card("models/gemini-1.5-flash", "Gemini 1.5 Flash", 1_000_000, 8_192),
-            gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro again", 1_048_576, 65_536),
+            gemini_card(
+                "models/gemini-1.5-flash",
+                "Gemini 1.5 Flash",
+                1_000_000,
+                8_192,
+            ),
+            gemini_card(
+                "models/gemini-2.5-pro",
+                "Gemini 2.5 Pro again",
+                1_048_576,
+                65_536,
+            ),
         ],
         None,
     );
@@ -2651,10 +2665,7 @@ async fn gemini_fetch_pages_with_the_key_header_and_never_a_key_in_the_url() {
         assert_eq!(entry.provider.as_ref(), "google");
     }
     assert_eq!(seen.len(), 2);
-    assert_eq!(
-        seen[0].0,
-        "GET /v1beta/models?pageSize=100 HTTP/1.1\r\n"
-    );
+    assert_eq!(seen[0].0, "GET /v1beta/models?pageSize=100 HTTP/1.1\r\n");
     assert_eq!(
         seen[1].0,
         "GET /v1beta/models?pageSize=100&pageToken=page-2 HTTP/1.1\r\n"
@@ -2698,11 +2709,8 @@ async fn gemini_fetch_keeps_generate_content_rows_and_maps_limits() {
         "7".to_owned(),
         "null".to_owned(),
     ];
-    let (fetched, seen) = gemini_refresh(
-        &gemini_key("test-key"),
-        vec![gemini_page(&cards, None)],
-    )
-    .await;
+    let (fetched, seen) =
+        gemini_refresh(&gemini_key("test-key"), vec![gemini_page(&cards, None)]).await;
     assert_eq!(
         fetched.source,
         CatalogSource::Live,
@@ -2755,7 +2763,12 @@ async fn gemini_discovered_rows_agree_with_typed_rows_on_thinking_and_tools() {
     let (fetched, _) = gemini_refresh(
         &gemini_key("test-key"),
         vec![gemini_page(
-            &[gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, 65_536)],
+            &[gemini_card(
+                "models/gemini-2.5-pro",
+                "Gemini 2.5 Pro",
+                1_048_576,
+                65_536,
+            )],
             None,
         )],
     )
@@ -2788,14 +2801,8 @@ async fn gemini_discovered_rows_agree_with_typed_rows_on_thinking_and_tools() {
 
 #[tokio::test]
 async fn gemini_fetch_stops_on_a_repeated_page_token() {
-    let first = gemini_page(
-        &[gemini_card("models/gemini-a", "A", 10, 5)],
-        Some("again"),
-    );
-    let second = gemini_page(
-        &[gemini_card("models/gemini-b", "B", 10, 5)],
-        Some("again"),
-    );
+    let first = gemini_page(&[gemini_card("models/gemini-a", "A", 10, 5)], Some("again"));
+    let second = gemini_page(&[gemini_card("models/gemini-b", "B", 10, 5)], Some("again"));
     let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![first, second]).await;
     assert_eq!(
         fetched.source,
@@ -2836,7 +2843,12 @@ async fn gemini_fetch_reads_at_most_twenty_five_pages() {
     let replies: Vec<(u16, Vec<u8>)> = (0..25)
         .map(|page| {
             gemini_page(
-                &[gemini_card(&format!("models/gemini-{page:02}"), "Page", 10, 5)],
+                &[gemini_card(
+                    &format!("models/gemini-{page:02}"),
+                    "Page",
+                    10,
+                    5,
+                )],
                 Some(&format!("t{page}")),
             )
         })
@@ -2866,7 +2878,8 @@ async fn gemini_fetch_with_a_malformed_body_falls_back_typed() {
         br#"{"models":null}"#,
     ];
     for body in bodies {
-        let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![(200, body.to_vec())]).await;
+        let (fetched, seen) =
+            gemini_refresh(&gemini_key("test-key"), vec![(200, body.to_vec())]).await;
         assert_eq!(fetched.source, CatalogSource::Typed, "{body:?}");
         assert!(fetched.entries.is_empty());
         assert!(

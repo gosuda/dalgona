@@ -392,11 +392,7 @@ impl Harness {
     }
 
     fn antigravity_provider(&self) -> Provider {
-        self.provider(
-            Family::GoogleAntigravity,
-            OAUTH_CARRIER,
-            ANTIGRAVITY_MODEL,
-        )
+        self.provider(Family::GoogleAntigravity, OAUTH_CARRIER, ANTIGRAVITY_MODEL)
     }
 
     /// The replay verdict: no mismatch, exactly `exchanges` consumed, and
@@ -726,7 +722,10 @@ async fn google_direct_cancel_mid_stream_closes_the_transfer() {
         }
     })
     .await;
-    assert!(closed.is_ok(), "cancellation must close the stalled request");
+    assert!(
+        closed.is_ok(),
+        "cancellation must close the stalled request"
+    );
     drop(stream);
     harness.finish(1).await;
 }

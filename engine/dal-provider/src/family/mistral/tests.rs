@@ -325,7 +325,9 @@ fn prior_reasoning_replays_only_while_reasoning_is_on() {
     for effort in ["low", "medium", "high", "max"] {
         let body = body_text(&history(), &plan(Some(effort), None));
         assert!(
-            body.contains(r#"{"type":"thinking","thinking":[{"type":"text","text":"prior reasoning"}]}"#),
+            body.contains(
+                r#"{"type":"thinking","thinking":[{"type":"text","text":"prior reasoning"}]}"#
+            ),
             "{effort}: {body}"
         );
     }

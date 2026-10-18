@@ -343,17 +343,15 @@ fn decode_error_details(details: &[ConnectDetail]) -> Option<(i32, String, Optio
         };
         let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
         let trimmed = cleaned.trim_end_matches('=');
-        let raw = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD_NO_PAD,
-            trimmed,
-        )
-        .or_else(|_| {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                trimmed,
-            )
-        })
-        .ok();
+        let raw =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, trimmed)
+                .or_else(|_| {
+                    base64::Engine::decode(
+                        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                        trimmed,
+                    )
+                })
+                .ok();
         let Some(raw) = raw else {
             continue;
         };

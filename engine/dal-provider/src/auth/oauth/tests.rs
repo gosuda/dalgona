@@ -2031,7 +2031,8 @@ async fn a_first_login_creates_the_missing_data_directory() {
     let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
     let run = paste_login(&mut flow, "code123").await;
     drop(flow);
-    run.result.expect("a login into a missing data directory completes");
+    run.result
+        .expect("a login into a missing data directory completes");
     let stored = AuthStore::load(&auth_path).expect("the stored file loads");
     assert!(
         matches!(stored.credential("gitlab-duo"), Some(Credential::OAuth(_))),

@@ -11,8 +11,8 @@ use futures::{SinkExt, StreamExt};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tokio::net::TcpListener;
 
-use super::*;
 use super::support::{RestCounts, action_frame, rest_router, test_timeouts};
+use super::*;
 use crate::{
     error::ProviderError,
     http,
@@ -909,10 +909,7 @@ async fn loopback_restart_open_failure_stops_the_created_workflow() {
     assert_eq!(events, [] as [StreamEvent; 0]);
     let counts = lock(&counts);
     assert_eq!(counts.creates, 2);
-    assert_eq!(
-        counts.stops,
-        vec![String::from("w-1"), String::from("w-2")]
-    );
+    assert_eq!(counts.stops, vec![String::from("w-1"), String::from("w-2")]);
     drop(counts);
     servers.abort_all();
 }
@@ -1051,23 +1048,18 @@ async fn loopback_end_session_drops_only_its_parked_workflows() {
         replay: None,
     };
     // Two sessions park one workflow each.
-    for (session, id, go) in [
-        (session_a, "r-a", "go A"),
-        (session_b, "r-b", "go B"),
-    ] {
+    for (session, id, go) in [(session_a, "r-a", "go A"), (session_b, "r-b", "go B")] {
         let model_request = request(vec![user(go), tool_call(id)]);
         let turn = test_turn(&model_request, &scope, &cancel, &rest_base, session);
         let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
         let (events, error) = drain(stream).await;
         assert!(error.is_none());
-        assert!(
-            matches!(
-                events.last(),
-                Some(StreamEvent::Stop {
-                    reason: StopReason::ToolUse
-                })
-            )
-        );
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Stop {
+                reason: StopReason::ToolUse
+            })
+        ));
     }
     assert_eq!(lock(&sessions.inner).len(), 2);
     // Ending session A removes only its rows and terminates its socket.

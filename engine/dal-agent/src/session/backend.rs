@@ -2850,7 +2850,6 @@ mod tests {
         host.close(child).await.expect("close child");
         host.close(root).await.expect("close session");
     }
-
 }
 
 #[cfg(test)]

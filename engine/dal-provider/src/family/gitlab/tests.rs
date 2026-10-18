@@ -900,16 +900,16 @@ async fn entry_prune_collects_dead_slots_left_by_failed_fetches() {
 
 #[test]
 fn grant_fresh_splits_on_the_ttl_edge() {
-    let grant = |expires: Instant| {
-        CachedGrant {
-            grant: DirectAccess {
-                token: "t".into(),
-                headers: Vec::new(),
-            },
-            expires,
-        }
+    let grant = |expires: Instant| CachedGrant {
+        grant: DirectAccess {
+            token: "t".into(),
+            headers: Vec::new(),
+        },
+        expires,
     };
-    assert!(grant_fresh(&grant(Instant::now() + Duration::from_secs(60))));
+    assert!(grant_fresh(&grant(
+        Instant::now() + Duration::from_secs(60)
+    )));
     assert!(!grant_fresh(&grant(
         Instant::now().checked_sub(Duration::from_secs(1)).unwrap()
     )));

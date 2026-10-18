@@ -104,7 +104,10 @@ where
     listener
         .set_nonblocking(true)
         .expect("make the scripted listener nonblocking");
-    let port = listener.local_addr().expect("read the listener port").port();
+    let port = listener
+        .local_addr()
+        .expect("read the listener port")
+        .port();
     let route = Arc::new(route);
     let log = Arc::new(Mutex::new(Vec::new()));
     let in_flight = Arc::new(AtomicUsize::new(0));
@@ -175,16 +178,21 @@ fn ollama_route(
             return shows
                 .iter()
                 .find(|(id, ..)| Some(*id) == model.as_deref())
-                .map_or((404, String::from(r#"{"error":"model not found"}"#)), |(_, status, body)| {
-                    (*status, (*body).to_owned())
-                });
+                .map_or(
+                    (404, String::from(r#"{"error":"model not found"}"#)),
+                    |(_, status, body)| (*status, (*body).to_owned()),
+                );
         }
         (404, String::from("{}"))
     }
 }
 
 fn ollama_provider(id: &str, port: u16, path: &str, auth: AuthStyle) -> ProviderEntry {
-    let mut entry = provider(id, Family::Ollama, &format!("http://127.0.0.1:{port}{path}"));
+    let mut entry = provider(
+        id,
+        Family::Ollama,
+        &format!("http://127.0.0.1:{port}{path}"),
+    );
     entry.auth = auth;
     entry
 }
@@ -251,7 +259,12 @@ async fn local_discovery_joins_tags_to_the_show_probe_without_credentials() {
     let provider = ollama_provider("ollama", script.port, "/api/", AuthStyle::None);
     let fetched = refresh(&provider, &Credential::None, directory.path()).await;
     let seen = script.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
 
     let thinker = row_of(&fetched, "gpt-oss:20b");
     assert_eq!(thinker.context_window, Some(131_072));
@@ -354,7 +367,12 @@ async fn cloud_discovery_authenticates_every_probe_and_pins_the_output_cap() {
     };
     let fetched = refresh(&provider, &credential, directory.path()).await;
     let seen = script.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
 
     // The rows keep the server's order and every probe carried the key.
     assert_eq!(
@@ -452,7 +470,12 @@ async fn a_failed_probe_keeps_the_last_good_row_and_a_new_model_stays_tag_only()
     let provider_second = ollama_provider("ollama", second.port, "", AuthStyle::None);
     let fetched = refresh(&provider_second, &Credential::None, directory.path()).await;
     second.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
     assert_eq!(
         fetched
             .entries
@@ -465,10 +488,7 @@ async fn a_failed_probe_keeps_the_last_good_row_and_a_new_model_stays_tag_only()
     let seer = row_of(&fetched, "seer");
     assert_eq!(seer.context_window, Some(4_096));
     assert!(seer.image_input);
-    assert_eq!(
-        openai_ladder(seer),
-        (vec![Low, Medium, High, Max], true)
-    );
+    assert_eq!(openai_ladder(seer), (vec![Low, Medium, High, Max], true));
     // `fresh` has no history: exactly what `api/tags` alone says.
     let fresh = row_of(&fetched, "fresh");
     assert_eq!(fresh.context_window, None);
@@ -487,7 +507,12 @@ async fn a_server_without_a_show_endpoint_still_lists_its_models() {
     let provider = ollama_provider("ollama", script.port, "", AuthStyle::None);
     let fetched = refresh(&provider, &Credential::None, directory.path()).await;
     script.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
     assert_eq!(fetched.entries.len(), 2);
     for entry in &fetched.entries {
         assert_eq!(entry.context_window, None);
@@ -558,7 +583,9 @@ fn recorded_route(
         shows
             .iter()
             .find(|(id, _)| Some(*id) == model.as_deref())
-            .map_or((404, String::from("{}")), |(_, body)| (200, (*body).to_owned()))
+            .map_or((404, String::from("{}")), |(_, body)| {
+                (200, (*body).to_owned())
+            })
     }
 }
 
@@ -594,7 +621,12 @@ async fn recorded_cloud_replies_map_to_the_rows_the_server_describes() {
     let provider = ollama_provider("ollama-cloud", script.port, "", AuthStyle::None);
     let fetched = refresh(&provider, &Credential::None, directory.path()).await;
     script.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
 
     // The server's own `thinking.values` decide the ladder.
     let ladder = |id: &str| openai_ladder(row_of(&fetched, id));
@@ -614,7 +646,10 @@ async fn recorded_cloud_replies_map_to_the_rows_the_server_describes() {
     );
 
     assert_eq!(row_of(&fetched, "glm-5.2").context_window, Some(1_048_576));
-    assert_eq!(row_of(&fetched, "gpt-oss:120b").context_window, Some(131_072));
+    assert_eq!(
+        row_of(&fetched, "gpt-oss:120b").context_window,
+        Some(131_072)
+    );
     assert!(row_of(&fetched, "gemma4:31b").image_input);
     assert!(row_of(&fetched, "deepseek-v4.1-flash").image_input);
     assert!(!row_of(&fetched, "gpt-oss:120b").image_input);
@@ -637,7 +672,12 @@ async fn recorded_local_replies_map_a_thinking_model_and_a_plain_one() {
     let provider = ollama_provider("ollama", script.port, "", AuthStyle::None);
     let fetched = refresh(&provider, &Credential::None, directory.path()).await;
     script.finish();
-    assert_eq!(fetched.source, CatalogSource::Live, "{:?}", fetched.live_error);
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
 
     let qwen = row_of(&fetched, "qwen3:0.6b");
     assert_eq!(openai_ladder(qwen), (vec![BOOLEAN_ON], true));

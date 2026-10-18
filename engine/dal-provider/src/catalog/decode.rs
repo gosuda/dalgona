@@ -479,11 +479,11 @@ fn gemini_entry(provider: &ProviderEntry, raw: &RawJson) -> Option<CatalogEntry>
         return None;
     }
     let card: GeminiCard = raw.decode_as().ok()?;
-    if !card
-        .methods
-        .as_deref()
-        .is_some_and(|methods| methods.iter().any(|method| method == GEMINI_GENERATE_CONTENT))
-    {
+    if !card.methods.as_deref().is_some_and(|methods| {
+        methods
+            .iter()
+            .any(|method| method == GEMINI_GENERATE_CONTENT)
+    }) {
         return None;
     }
     let name = card.name.as_ref().and_then(JsonValueTrait::as_str)?.trim();

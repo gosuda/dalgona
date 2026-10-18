@@ -760,14 +760,9 @@ async fn dropped_stream_terminates_the_whole_group() {
 fn invalid_result_status_is_protocol() {
     // A `result` with an unknown status is a grammar violation, not a silent
     // ignore: the terminal must stay a protocol error.
-    let (_, end) = feed(&[
-        r#"{"type":"result","timestamp":"t","status":"bogus"}"#,
-    ]);
+    let (_, end) = feed(&[r#"{"type":"result","timestamp":"t","status":"bogus"}"#]);
     let error = end.unwrap_err();
-    assert!(
-        matches!(error, ProviderError::Protocol { .. }),
-        "{error:?}"
-    );
+    assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
     assert!(error.to_string().contains("not valid"), "{error}");
 }
 
@@ -848,10 +843,7 @@ async fn over_limit_line_ends_the_stream() {
         .into_iter()
         .find_map(Result::err)
         .expect("an over-long line ends in one error");
-    assert!(
-        matches!(error, ProviderError::Protocol { .. }),
-        "{error:?}"
-    );
+    assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
     assert!(error.to_string().contains("exceeds"), "{error}");
 }
 
@@ -895,10 +887,7 @@ async fn nonzero_exit_preserves_the_stdin_writer_cause() {
     );
     let text = error.to_string();
     assert!(text.contains('3'), "{text}");
-    assert!(
-        text.contains("writing the gemini prompt failed"),
-        "{text}"
-    );
+    assert!(text.contains("writing the gemini prompt failed"), "{text}");
     assert!(text.contains("Broken pipe"), "{text}");
 }
 
@@ -941,10 +930,7 @@ async fn auth_exit_preserves_the_stdin_writer_cause() {
     let text = error.to_string();
     assert!(text.contains("not authenticated"), "{text}");
     assert!(text.contains("41"), "{text}");
-    assert!(
-        text.contains("writing the gemini prompt failed"),
-        "{text}"
-    );
+    assert!(text.contains("writing the gemini prompt failed"), "{text}");
 }
 
 #[cfg(unix)]
@@ -974,10 +960,7 @@ async fn non_utf8_stdout_ends_the_stream() {
         .into_iter()
         .find_map(Result::err)
         .expect("non-UTF8 stdout ends in one error");
-    assert!(
-        matches!(error, ProviderError::Protocol { .. }),
-        "{error:?}"
-    );
+    assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
     assert!(error.to_string().contains("UTF-8"), "{error}");
 }
 
@@ -995,7 +978,8 @@ fn writer_cause_preserves_the_process_failure_kind() {
     );
     assert!(auth.to_string().contains("41"), "{auth}");
     assert!(
-        auth.to_string().contains("writing the gemini prompt failed"),
+        auth.to_string()
+            .contains("writing the gemini prompt failed"),
         "{auth}"
     );
 

@@ -491,13 +491,8 @@ impl SignedRequest<'_> {
             signed.push((name.to_ascii_lowercase(), fold(value)));
         }
         signed.sort_by(|left, right| left.0.cmp(&right.0));
-        let (canonical_request, signed_names) = canonical_request(
-            self.method,
-            self.path,
-            self.query,
-            &signed,
-            &payload_hash,
-        );
+        let (canonical_request, signed_names) =
+            canonical_request(self.method, self.path, self.query, &signed, &payload_hash);
 
         let scope = format!(
             "{}/{}/{}/{KEY_TYPE}",

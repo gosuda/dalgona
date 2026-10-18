@@ -14,4 +14,3 @@ pub(crate) const NEMOTRON_ULTRA: &str = r#"{"capabilities":["completion","thinki
 // A local v0.40.6 server, `qwen3:0.6b` and `gemma3:270m`.
 pub(crate) const LOCAL_QWEN3: &str = r#"{"capabilities":["completion","tools","thinking"],"model_info":{"general.architecture":"qwen3","qwen3.context_length":40960},"thinking":{"values":[false,true],"default":true}}"#;
 pub(crate) const LOCAL_GEMMA3: &str = r#"{"capabilities":["completion"],"model_info":{"general.architecture":"gemma3","gemma3.context_length":32768}}"#;
-

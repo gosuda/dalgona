@@ -569,7 +569,9 @@ fn a_length_pair_the_framing_cannot_produce_is_refused_once_the_prelude_checks_o
     let sealed = |total: u32, headers: u32| {
         let mut wire = event_frame("metadata", "{}");
         reseal(&mut wire, total, headers);
-        decode_all(vec![wire]).err().unwrap_or_else(|| panic!("{total}/{headers} refuses"))
+        decode_all(vec![wire])
+            .err()
+            .unwrap_or_else(|| panic!("{total}/{headers} refuses"))
     };
     // A total below the fixed overhead of every frame.
     assert_eq!(

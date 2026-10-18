@@ -48,7 +48,10 @@ pub(super) fn push_unique(values: &mut Vec<Node>, value: Node) {
 
 /// oh-my-pi `mergeCompatibleEnumSchemas`: unions the `enum` members of two
 /// schemas that agree on `type` and on every other member; `None` otherwise.
-pub(super) fn merge_compatible_enum_schemas(existing: &Fields, incoming: &Fields) -> Option<Fields> {
+pub(super) fn merge_compatible_enum_schemas(
+    existing: &Fields,
+    incoming: &Fields,
+) -> Option<Fields> {
     let (existing_enum, incoming_enum) = (existing.array("enum")?, incoming.array("enum")?);
     if !json_equal_opt(existing.get("type"), incoming.get("type")) {
         return None;
@@ -58,7 +61,11 @@ pub(super) fn merge_compatible_enum_schemas(existing: &Fields, incoming: &Fields
         && existing
             .iter()
             .filter(|(key, _)| *key != "enum")
-            .all(|(key, value)| incoming.raw(key).is_some_and(|other| json_equal(value, other)));
+            .all(|(key, value)| {
+                incoming
+                    .raw(key)
+                    .is_some_and(|other| json_equal(value, other))
+            });
     if !others_match {
         return None;
     }

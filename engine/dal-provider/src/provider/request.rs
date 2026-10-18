@@ -433,8 +433,10 @@ fn sigv4_secrets(
     wire: &bedrock::BedrockWire,
 ) -> Vec<Box<str>> {
     let mut secrets: Vec<Box<str>> = Vec::with_capacity(5);
-    if let Some((_, authorization)) =
-        wire.headers.iter().find(|(name, _)| name == "authorization")
+    if let Some((_, authorization)) = wire
+        .headers
+        .iter()
+        .find(|(name, _)| name == "authorization")
     {
         secrets.push(authorization.as_str().into());
         secrets.extend(
@@ -1218,9 +1220,7 @@ async fn google_attempt(
             )
             .await
         }
-        Family::GoogleVertex => {
-            vertex_attempt(context, credential, cancel, owner, entry).await
-        }
+        Family::GoogleVertex => vertex_attempt(context, credential, cancel, owner, entry).await,
         Family::GoogleAntigravity => {
             google_antigravity_attempt(context, credential, cancel, owner, entry).await
         }
@@ -1236,8 +1236,11 @@ const VERTEX_PROJECT_ENV: &[&str] = &["GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "GC
 
 /// Environment variables that may carry the Vertex location, in resolve
 /// order.
-const VERTEX_LOCATION_ENV: &[&str] =
-    &["GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"];
+const VERTEX_LOCATION_ENV: &[&str] = &[
+    "GOOGLE_VERTEX_LOCATION",
+    "GOOGLE_CLOUD_LOCATION",
+    "VERTEX_LOCATION",
+];
 
 /// Environment variables that may carry a pre-minted Vertex bearer token,
 /// in resolve order: the `GOOGLE_CLOUD_ACCESS_TOKEN` alias, then gcloud's own
@@ -1538,7 +1541,9 @@ where
 /// second endpoint cannot clear account state.
 fn is_antigravity_status_failover(failure: &AttemptFailure) -> bool {
     match failure {
-        AttemptFailure::Response { status, message, .. } => {
+        AttemptFailure::Response {
+            status, message, ..
+        } => {
             let transient = matches!(*status, 408 | 429 | 500 | 502 | 503 | 504 | 529);
             transient && !message.contains("Account verification required.")
         }

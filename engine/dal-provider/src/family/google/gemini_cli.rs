@@ -247,10 +247,7 @@ const SIGN_IN_REMEDY: &str = "Sign in with the gemini CLI itself, or set GEMINI_
 /// carry no error class, so they always keep the plain rendering.
 fn cli_failure(kind: Option<&str>, message: Option<String>) -> ProviderError {
     let detail = message.unwrap_or_else(|| String::from("unknown error"));
-    let message = if matches!(
-        kind,
-        Some("FatalAuthenticationError" | "UnauthorizedError")
-    ) {
+    let message = if matches!(kind, Some("FatalAuthenticationError" | "UnauthorizedError")) {
         format!("gemini is not authenticated: {detail}. {SIGN_IN_REMEDY}")
     } else {
         format!("gemini-cli error: {detail}")

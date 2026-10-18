@@ -69,8 +69,7 @@ impl Host {
             .collect();
         let (generation_tx, _) = tokio::sync::watch::channel(Arc::new(generation));
         let plugin_base = HostShared::base_names(&generation_tx.borrow());
-        let snapshot =
-            dal_provider::EnvSnapshot::from_vars(&env.vars).with_cwd(env.cwd.clone());
+        let snapshot = dal_provider::EnvSnapshot::from_vars(&env.vars).with_cwd(env.cwd.clone());
         let login_site = dal_provider::LoginSite::new(
             product.data_root.join("auth.json"),
             product.data_root.join("cache"),

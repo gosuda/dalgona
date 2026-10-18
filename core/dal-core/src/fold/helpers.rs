@@ -250,9 +250,9 @@ fn untracked_partial_calls<'a>(
                 return None;
             };
             let tracked = staged.iter().any(|item| item.call == *id)
-                || content[..index].iter().any(
-                    |prior| matches!(prior, Block::ToolCall { id: other, .. } if other == id),
-                );
+                || content[..index]
+                    .iter()
+                    .any(|prior| matches!(prior, Block::ToolCall { id: other, .. } if other == id));
             (!tracked).then_some((id, &**name))
         })
 }

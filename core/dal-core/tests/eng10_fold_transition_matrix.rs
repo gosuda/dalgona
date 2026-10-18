@@ -28,12 +28,11 @@
 use dal_core::{
     Answer, ApprovalMode, Block, CallId, CancelScope, ClientId, Command, CompactLimits,
     CompactOutcome, CompactionSummary, Effect, Event, Expect, Family, HookEvent, HookOutcome,
-    HookVerdict, InferFailure, Inference,
-    InferredPurpose, JobId, JobKind, JobOutcome, Mode, ModelRoute, Name, Output, Owner, Part,
-    PartialResponse, Phase, Question, RawJson, Record, Rejection, ReplayCapture, Reply, Request,
-    RequestId,
-    ResolutionCause, ResolvedCall, Save, Session, SettledOutcome, Stop, StreamChannel,
-    StreamEvent, StreamVerdict, ThinkingLevel, ToolClass, TurnId, Usage, decode, encode,
+    HookVerdict, InferFailure, Inference, InferredPurpose, JobId, JobKind, JobOutcome, Mode,
+    ModelRoute, Name, Output, Owner, Part, PartialResponse, Phase, Question, RawJson, Record,
+    Rejection, ReplayCapture, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Save,
+    Session, SettledOutcome, Stop, StreamChannel, StreamEvent, StreamVerdict, ThinkingLevel,
+    ToolClass, TurnId, Usage, decode, encode,
 };
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -273,7 +272,9 @@ impl Fixture {
 
 fn fixtures() -> Vec<Fixture> {
     let idle = Fixture::fresh("idle");
-    let mut ended = Fixture::fresh("idle_after_cancelled_turn").opening().boundary();
+    let mut ended = Fixture::fresh("idle_after_cancelled_turn")
+        .opening()
+        .boundary();
     let ended_turn = ended.turn;
     ended.drive(Event::Cancel {
         scope: CancelScope::Turn(ended_turn),
@@ -293,7 +294,10 @@ fn fixtures() -> Vec<Fixture> {
         ended,
         Fixture::fresh("opening").opening(),
         Fixture::fresh("running_boundary").opening().boundary(),
-        Fixture::fresh("running_streaming").opening().boundary().streaming(),
+        Fixture::fresh("running_streaming")
+            .opening()
+            .boundary()
+            .streaming(),
         Fixture::fresh("running_resolving")
             .opening()
             .boundary()
@@ -332,60 +336,99 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
     };
     let entry = dal_core::EntryId::new(NonZeroU64::MIN);
     let commands = vec![
-        ("cmd_prompt_idle", Command::Prompt {
-            expect: Expect::Idle,
-            content: vec![Part::Text { text: "x".into() }],
-        }),
-        ("cmd_prompt_after", Command::Prompt {
-            expect: Expect::After(turn),
-            content: vec![Part::Text { text: "x".into() }],
-        }),
-        ("cmd_prompt_empty", Command::Prompt {
-            expect: Expect::Idle,
-            content: Vec::new(),
-        }),
-        ("cmd_steer", Command::Steer {
-            turn,
-            content: vec![Part::Text { text: "x".into() }],
-        }),
-        ("cmd_follow_up", Command::FollowUp {
-            turn,
-            content: vec![Part::Text { text: "x".into() }],
-        }),
+        (
+            "cmd_prompt_idle",
+            Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text { text: "x".into() }],
+            },
+        ),
+        (
+            "cmd_prompt_after",
+            Command::Prompt {
+                expect: Expect::After(turn),
+                content: vec![Part::Text { text: "x".into() }],
+            },
+        ),
+        (
+            "cmd_prompt_empty",
+            Command::Prompt {
+                expect: Expect::Idle,
+                content: Vec::new(),
+            },
+        ),
+        (
+            "cmd_steer",
+            Command::Steer {
+                turn,
+                content: vec![Part::Text { text: "x".into() }],
+            },
+        ),
+        (
+            "cmd_follow_up",
+            Command::FollowUp {
+                turn,
+                content: vec![Part::Text { text: "x".into() }],
+            },
+        ),
         ("cmd_cancel_queued", Command::CancelQueued { turn }),
-        ("cmd_cancel_turn", Command::Cancel {
-            scope: CancelScope::Turn(turn),
-        }),
-        ("cmd_cancel_job", Command::Cancel {
-            scope: CancelScope::Job(job),
-        }),
-        ("cmd_set_model", Command::SetModel {
-            model: route(),
-            save: Save::SessionOnly,
-        }),
-        ("cmd_set_thinking", Command::SetThinking {
-            level: ThinkingLevel::High,
-            save: Save::SessionOnly,
-        }),
-        ("cmd_set_approval", Command::SetApproval {
-            mode: ApprovalMode::All,
-            save: Save::SessionOnly,
-        }),
-        ("cmd_set_mode", Command::SetMode {
-            mode: Mode::EvalOnly,
-            save: Save::SessionOnly,
-        }),
+        (
+            "cmd_cancel_turn",
+            Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            },
+        ),
+        (
+            "cmd_cancel_job",
+            Command::Cancel {
+                scope: CancelScope::Job(job),
+            },
+        ),
+        (
+            "cmd_set_model",
+            Command::SetModel {
+                model: route(),
+                save: Save::SessionOnly,
+            },
+        ),
+        (
+            "cmd_set_thinking",
+            Command::SetThinking {
+                level: ThinkingLevel::High,
+                save: Save::SessionOnly,
+            },
+        ),
+        (
+            "cmd_set_approval",
+            Command::SetApproval {
+                mode: ApprovalMode::All,
+                save: Save::SessionOnly,
+            },
+        ),
+        (
+            "cmd_set_mode",
+            Command::SetMode {
+                mode: Mode::EvalOnly,
+                save: Save::SessionOnly,
+            },
+        ),
         ("cmd_compact", Command::Compact { focus: None }),
         ("cmd_move_leaf", Command::MoveLeaf(entry)),
         ("cmd_fork", Command::Fork(entry)),
         ("cmd_clone", Command::Clone),
         ("cmd_rename", Command::Rename("renamed".into())),
-        ("cmd_run", Command::Run {
-            name: "noop".into(),
-            args: "".into(),
-            expected: None,
-        }),
-        ("cmd_set_scoped_models", Command::SetScopedModels(vec!["a".into()])),
+        (
+            "cmd_run",
+            Command::Run {
+                name: "noop".into(),
+                args: "".into(),
+                expected: None,
+            },
+        ),
+        (
+            "cmd_set_scoped_models",
+            Command::SetScopedModels(vec!["a".into()]),
+        ),
         ("cmd_reload_plugins", Command::ReloadPlugins),
     ];
     let mut events: Vec<(&'static str, Event)> = commands
@@ -431,7 +474,9 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
             Event::Inferred {
                 at: stamp(),
                 who: Owner::Core,
-                purpose: InferredPurpose::Synthetic { id: "ns/name".into() },
+                purpose: InferredPurpose::Synthetic {
+                    id: "ns/name".into(),
+                },
                 usage: usage(1),
             },
         ),
@@ -622,7 +667,10 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 turn,
                 model: route(),
                 family: Family::Chat,
-                result: Ok(inference_with(Stop::EndTurn, hostile(HostileUsage::NegativePremium))),
+                result: Ok(inference_with(
+                    Stop::EndTurn,
+                    hostile(HostileUsage::NegativePremium),
+                )),
                 partial: None,
             },
         ),
@@ -632,7 +680,10 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 turn,
                 model: route(),
                 family: Family::Chat,
-                result: Ok(inference_with(Stop::EndTurn, hostile(HostileUsage::NanCost))),
+                result: Ok(inference_with(
+                    Stop::EndTurn,
+                    hostile(HostileUsage::NanCost),
+                )),
                 partial: None,
             },
         ),
@@ -863,10 +914,12 @@ fn check_cell(fixture: &Fixture, label: &str, event: &Event, tally: &mut Tally) 
             let mut emitted = Vec::new();
             collect(&out, &mut emitted);
             for record in &emitted {
-                let bytes = encode(record)
-                    .unwrap_or_else(|error| panic!("{cell}: emitted record not encodable: {error:?}: {record:?}"));
-                let decoded = decode(&bytes)
-                    .unwrap_or_else(|error| panic!("{cell}: emitted record not decodable: {error:?}: {record:?}"));
+                let bytes = encode(record).unwrap_or_else(|error| {
+                    panic!("{cell}: emitted record not encodable: {error:?}: {record:?}")
+                });
+                let decoded = decode(&bytes).unwrap_or_else(|error| {
+                    panic!("{cell}: emitted record not decodable: {error:?}: {record:?}")
+                });
                 assert_eq!(
                     &decoded.record, record,
                     "{cell}: record changed across the journal codec"
@@ -907,7 +960,11 @@ fn every_event_in_every_phase_is_atomic_deterministic_and_replayable() {
         }
     }
     assert!(tally.cells > 1000, "matrix shrank to {} cells", tally.cells);
-    assert!(tally.accepted > 100, "only {} cells accepted", tally.accepted);
+    assert!(
+        tally.accepted > 100,
+        "only {} cells accepted",
+        tally.accepted
+    );
     assert!(tally.refused > 300, "only {} cells refused", tally.refused);
 }
 
@@ -927,7 +984,10 @@ fn fixtures_reach_every_declared_lifecycle_phase() {
         seen.insert(name);
     }
     for required in ["idle", "opening", "running", "compacting", "closed"] {
-        assert!(seen.contains(required), "no fixture reached {required}: {seen:?}");
+        assert!(
+            seen.contains(required),
+            "no fixture reached {required}: {seen:?}"
+        );
     }
 }
 
@@ -996,7 +1056,9 @@ fn overflowing_turn_usage_is_refused_without_partial_mutation() {
             Event::Inferred {
                 at: stamp(),
                 who: Owner::Core,
-                purpose: InferredPurpose::Synthetic { id: "ns/name".into() },
+                purpose: InferredPurpose::Synthetic {
+                    id: "ns/name".into(),
+                },
                 usage: usage(10),
             },
         ),
@@ -1008,7 +1070,10 @@ fn overflowing_turn_usage_is_refused_without_partial_mutation() {
         let result = session.step(event, stamp(), &mut out);
         match result {
             Err(Rejection::Invalid { .. }) => {
-                assert_eq!(session, before, "{label}: refused overflow mutated the session");
+                assert_eq!(
+                    session, before,
+                    "{label}: refused overflow mutated the session"
+                );
             }
             Err(other) => panic!("{label}: expected Invalid, got {other:?}"),
             Ok(()) => panic!("{label}: overflowing usage total was accepted"),
@@ -1046,7 +1111,9 @@ fn duplicate_call_identities_never_dispatch_twice() {
     let planned: usize = dispatched
         .iter()
         .map(|unit| match unit {
-            dal_core::Unit::Reads { calls } => calls.iter().filter(|call| call.as_str() == "dup").count(),
+            dal_core::Unit::Reads { calls } => {
+                calls.iter().filter(|call| call.as_str() == "dup").count()
+            }
             dal_core::Unit::Serial { call } => usize::from(call.as_str() == "dup"),
             _ => panic!("Unit grew a variant; update this proof"),
         })

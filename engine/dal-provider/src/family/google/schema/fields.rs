@@ -142,7 +142,8 @@ const CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS: &[(&str, &[&str])] = &[
 
 /// Keys allowed on any type when Cloud Code Assist combiners collapse: oh-my-pi
 /// `CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS`.
-const CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS: &[&str] = &["title", "description", "default", "examples"];
+const CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS: &[&str] =
+    &["title", "description", "default", "examples"];
 
 /// The `snake_case` spellings Google's SDK rewrites, with their `camelCase`
 /// form: oh-my-pi `SNAKE_TO_CAMEL_RENAMES`.

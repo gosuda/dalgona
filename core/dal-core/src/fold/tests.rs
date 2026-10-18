@@ -1555,7 +1555,10 @@ fn cancel_reserves_every_failed_call_result_before_changing_anything() {
         let before = session.clone();
         let refused = send(&mut session, cancel(turn, form));
         assert!(matches!(refused, Err(Rejection::Invalid { .. })));
-        assert_eq!(session, before, "refused cancel form {form} journaled a result");
+        assert_eq!(
+            session, before,
+            "refused cancel form {form} journaled a result"
+        );
 
         // One free entry id for one failed result is enough.
         let mut session = self::session();

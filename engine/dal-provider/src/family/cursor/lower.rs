@@ -1071,10 +1071,18 @@ pub(crate) fn lower_root_entries(
                     continue;
                 }
                 emitted.insert(wire);
-                root.push(store.insert(
-                    tool_result_record(call.as_str(), name.as_ref(), *is_error, parts, wire_ids)?
+                root.push(
+                    store.insert(
+                        tool_result_record(
+                            call.as_str(),
+                            name.as_ref(),
+                            *is_error,
+                            parts,
+                            wire_ids,
+                        )?
                         .as_bytes(),
-                ));
+                    ),
+                );
             }
         }
     }
@@ -1152,12 +1160,9 @@ fn split_rounds_impl<'a>(
                 call, name, args, ..
             } => {
                 current.calls.push(call.as_str());
-                current.content.push(tool_call_part(
-                    call.as_str(),
-                    name.as_ref(),
-                    args,
-                    wire_ids,
-                ));
+                current
+                    .content
+                    .push(tool_call_part(call.as_str(), name.as_ref(), args, wire_ids));
             }
         }
     }
@@ -1349,9 +1354,9 @@ pub(crate) fn lower_turns(
                                                             },
                                                         ),
                                                     ),
-                                                    tool_call_id: Some(wire_ids.lookup(
-                                                        call.as_str(),
-                                                    )),
+                                                    tool_call_id: Some(
+                                                        wire_ids.lookup(call.as_str()),
+                                                    ),
                                                 },
                                             )),
                                         }
@@ -1635,10 +1640,7 @@ fn tool_call_part(call: &str, name: &str, args: &RawJson, wire_ids: &WireIds) ->
     Json::Obj(
         [
             (String::from("type"), Json::Str(String::from("tool-call"))),
-            (
-                String::from("toolCallId"),
-                Json::Str(wire_ids.lookup(call)),
-            ),
+            (String::from("toolCallId"), Json::Str(wire_ids.lookup(call))),
             (
                 String::from("toolName"),
                 Json::Str(wire_name(name, WIRE_NAME_MAX).to_string()),
@@ -1666,10 +1668,7 @@ fn tool_result_record(
             String::from("toolName"),
             Json::Str(wire_name(name, WIRE_NAME_MAX).to_string()),
         ),
-        (
-            String::from("toolCallId"),
-            Json::Str(wire_ids.lookup(call)),
-        ),
+        (String::from("toolCallId"), Json::Str(wire_ids.lookup(call))),
         (String::from("result"), Json::Str(result_text(parts)?)),
     ]
     .into_iter()

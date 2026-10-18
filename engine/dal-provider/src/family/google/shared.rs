@@ -1878,7 +1878,10 @@ impl GeminiDecoder {
             }
         };
         let throttled = status == Some(429) || code.as_deref() == Some("RESOURCE_EXHAUSTED");
-        if throttled && matches!(failure, ProviderError::RateLimited { .. }) && is_quota(message, Some(error)) {
+        if throttled
+            && matches!(failure, ProviderError::RateLimited { .. })
+            && is_quota(message, Some(error))
+        {
             return ProviderError::Quota {
                 message: String::from(message),
             };

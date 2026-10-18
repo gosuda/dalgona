@@ -705,7 +705,10 @@ fn missing_skill_never_falls_back_to_a_near_name() {
     let resolver = SkillResolver::new(Arc::new(registry));
     for near in ["ALPHA", "alph", "alpha ", " alpha", "beta"] {
         let text = resolver.lookup(near).unwrap_err().to_string();
-        assert_eq!(text, format!("skill {near} does not exist; available: alpha"));
+        assert_eq!(
+            text,
+            format!("skill {near} does not exist; available: alpha")
+        );
     }
     let doc = resolver.lookup("alpha").unwrap();
     assert_eq!(&*doc.text, "body of alpha");
@@ -787,10 +790,7 @@ fn merge_extensions_settles_claims_across_extension_records() {
         "skill 'focus' is already registered by plugin 'alpha'"
     );
     let registry = conflict.registry;
-    let owners: Vec<(&str, &str)> = registry
-        .iter()
-        .map(|s| (&*s.name, &*s.plugin))
-        .collect();
+    let owners: Vec<(&str, &str)> = registry.iter().map(|s| (&*s.name, &*s.plugin)).collect();
     // The clash rejects all of `zeta`: its uncontested `other` leaks nothing.
     assert_eq!(owners, [("focus", "alpha"), ("solo", "alpha")]);
     assert_eq!(&*registry.body("focus").unwrap(), "alpha body");

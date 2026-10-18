@@ -1876,7 +1876,10 @@ fn paired_results_keep_their_text_and_only_orphans_name_themselves() {
     let failed = tool_record("c_b");
     assert!(failed.contains("\"isError\":true"), "{failed}");
     let image = tool_record("c_i");
-    assert!(image.contains("\"result\":\"[image/png image]\""), "{image}");
+    assert!(
+        image.contains("\"result\":\"[image/png image]\""),
+        "{image}"
+    );
     // Only the orphan result (no call issued it) names itself.
     assert_eq!(count_containing(&texts, "(empty result)"), 1, "{texts:?}");
 }
@@ -1899,10 +1902,12 @@ fn kv_set_message(id: u32, blob_id: &[u8], data: &str) -> AgentServerMessage {
 
 fn checkpoint_message(roots: &[&[u8]]) -> AgentServerMessage {
     AgentServerMessage {
-        message: Some(server_message::Body::Checkpoint(ConversationStateStructure {
-            root_prompt_messages_json: roots.iter().map(|root| root.to_vec()).collect(),
-            turns: Vec::new(),
-        })),
+        message: Some(server_message::Body::Checkpoint(
+            ConversationStateStructure {
+                root_prompt_messages_json: roots.iter().map(|root| root.to_vec()).collect(),
+                turns: Vec::new(),
+            },
+        )),
     }
 }
 
@@ -2227,9 +2232,7 @@ fn normalized_collision_keeps_both_calls_and_results() {
         call: CallId::new(id),
         name: "fetch_data".into(),
         is_error: false,
-        parts: vec![Part::Text {
-            text: text.into(),
-        }],
+        parts: vec![Part::Text { text: text.into() }],
     };
     let context = vec![
         ContextItem::User {
@@ -2278,7 +2281,9 @@ fn normalized_collision_keeps_both_calls_and_results() {
         "{texts:?}"
     );
     assert!(
-        texts.iter().any(|text| text.contains("\"toolCallId\":\"a_b\"")),
+        texts
+            .iter()
+            .any(|text| text.contains("\"toolCallId\":\"a_b\"")),
         "{texts:?}"
     );
     assert!(
@@ -2303,11 +2308,7 @@ fn initial_request_declares_hosted_web_search_off() {
     match action {
         conversation_action::Action::UserMessageAction(action) => {
             assert_eq!(
-                action
-                    .request_context
-                    .as_ref()
-                    .unwrap()
-                    .web_search_enabled,
+                action.request_context.as_ref().unwrap().web_search_enabled,
                 Some(false),
                 "the opener opts out exactly like the handshake"
             );
@@ -2339,15 +2340,18 @@ fn foreign_provider_identifier_is_not_dispatched() {
     // Empty (legacy omission) and the advertised identifier dispatch.
     for provider in ["", "dal-agent"] {
         let mut session = test_session();
-        let (events, writes, failure) = feed(&mut session, &[proto_frame(&mcp_frame(21, provider, ""))]);
+        let (events, writes, failure) =
+            feed(&mut session, &[proto_frame(&mcp_frame(21, provider, ""))]);
         assert!(failure.is_none(), "{provider}: {failure:?}");
         assert_eq!(events.len(), 2, "{provider}: {events:?}");
         assert!(writes.is_empty(), "{provider}: {writes:?}");
     }
     // A non-empty foreign provider is not ours: `ToolNotFound`, no events.
     let mut session = test_session();
-    let (events, writes, failure) =
-        feed(&mut session, &[proto_frame(&mcp_frame(22, "foreign-provider", ""))]);
+    let (events, writes, failure) = feed(
+        &mut session,
+        &[proto_frame(&mcp_frame(22, "foreign-provider", ""))],
+    );
     assert!(failure.is_none(), "{failure:?}");
     assert_eq!(events, []);
     assert_eq!(writes.len(), 1);
@@ -2366,8 +2370,10 @@ fn foreign_provider_identifier_is_not_dispatched() {
     }
     // `server_identifier` carries no declaration and is ignored.
     let mut session = test_session();
-    let (events, _, failure) =
-        feed(&mut session, &[proto_frame(&mcp_frame(23, "", "any-server"))]);
+    let (events, _, failure) = feed(
+        &mut session,
+        &[proto_frame(&mcp_frame(23, "", "any-server"))],
+    );
     assert!(failure.is_none(), "{failure:?}");
     assert_eq!(events.len(), 2, "{events:?}");
 }
@@ -2563,9 +2569,7 @@ fn replay_cover_uses_stored_wire_ids_verbatim() {
         call: CallId::new(id),
         name: "fetch_data".into(),
         is_error: false,
-        parts: vec![Part::Text {
-            text: text.into(),
-        }],
+        parts: vec![Part::Text { text: text.into() }],
     };
     let history = vec![
         ContextItem::User {

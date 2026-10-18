@@ -1139,7 +1139,13 @@ async fn letter_red_f2_failed_hook_keeps_names_only_though_nothing_was_delivered
 /// state of a well-formed row the admitted schema no longer accepts. Returns
 /// the replacement journal line, or `None` for any other line.
 fn rewrite_letter_row_v2(record: Record) -> Outcome<Option<Vec<u8>>> {
-    let Record::Ext { at, ext, kind, body } = record else {
+    let Record::Ext {
+        at,
+        ext,
+        kind,
+        body,
+    } = record
+    else {
         return Ok(None);
     };
     if ext.as_ref() != "letter" || kind.as_ref() != "letter" {
@@ -1154,9 +1160,12 @@ fn rewrite_letter_row_v2(record: Record) -> Outcome<Option<Vec<u8>>> {
     assert_eq!(stored.v, 1, "premise: the persisted row uses version 1");
     stored.v = 2;
     let body = RawJson::parse(&sonic_rs::to_string(&stored)?)?;
-    Ok(Some(dal_core::encode(
-        &Record::Ext { at, ext, kind, body },
-    )?))
+    Ok(Some(dal_core::encode(&Record::Ext {
+        at,
+        ext,
+        kind,
+        body,
+    })?))
 }
 
 /// D1: a well-formed persistent row with an unsupported version fails the
