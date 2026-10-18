@@ -1232,7 +1232,10 @@ impl Surfaces {
                 self.dialog.resync(fresh.open.clone());
                 self.view = fresh;
             }
-            UpdateKind::Settings(settings) => self.view.settings = settings.clone(),
+            UpdateKind::Settings(settings) => {
+                self.view.session.name = settings.name.clone();
+                self.view.settings = settings.clone();
+            }
             UpdateKind::Usage(usage) => self.view.usage = usage.clone(),
             _ => {}
         }
@@ -3878,6 +3881,74 @@ mod loop_tests {
                 auto_compaction: AutoCompaction::Off,
             },
         }
+    }
+
+    /// A `Rename` publishes only `UpdateKind::Settings`, but the exit line
+    /// reads the derived `view.session.name` copy. Folding the update must
+    /// keep that copy in step with the authoritative settings name;
+    /// otherwise `/name demo` replies `demo` while the exit offers the id.
+    #[test]
+    fn settings_update_keeps_the_exit_name_in_step_with_rename() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let opts = TuiOptions {
+            session: SessionRef::Ephemeral { workspace },
+            screen: Screen::Inline,
+            theme_request: ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "true".into(),
+            color: ColorMode::Never,
+            binary: "dalgon",
+            env: EnvFacts::default(),
+            rt: runtime.handle().clone(),
+        };
+        let diagram_cache = crate::diagram::RenderCache::default();
+        let mut surfaces = super::Surfaces {
+            view: idle_view(),
+            session: super::Session::default(),
+            dialog: crate::dialog::DialogUi::default(),
+            live: crate::live::Live::default(),
+            transcript: crate::transcript::Transcript::default(),
+            columns: 80,
+            diagram_settings: crate::diagram::DiagramSettings::default(),
+            diagram_generation: diagram_cache.generation(),
+            diagram_cache,
+            branch: None,
+        };
+        let agent = FakeAgent {
+            log: Log::default(),
+            run_entered: Arc::new(AtomicBool::new(false)),
+        };
+        let mut settings = surfaces.view.settings.clone();
+        settings.name = Some("demo".into());
+        let update = dal_core::Update {
+            r#gen: Gen::new(NonZeroU64::MIN),
+            seq: Seq::new(NonZeroU64::new(2).expect("nonzero seq")),
+            kind: dal_core::UpdateKind::Settings(settings),
+        };
+        surfaces
+            .apply_update(&opts, &agent, &update)
+            .expect("settings fold");
+        assert_eq!(surfaces.view.settings.name.as_deref(), Some("demo"));
+        assert_eq!(
+            surfaces.view.session.name.as_deref(),
+            Some("demo"),
+            "the exit line reads the session copy, so it must track renames"
+        );
+        let (exit, _, _) = surfaces.finish(&opts);
+        assert_eq!(exit.name.as_deref(), Some("demo"));
+        let id = exit.session.expect("persisted session");
+        assert_eq!(
+            dal_core::resume_token(exit.name.as_deref().expect("named"), id),
+            "demo",
+            "exit token must equal the `/name` reply token"
+        );
     }
 
     /// One read's worth of input, optionally held back until a flag is set.
