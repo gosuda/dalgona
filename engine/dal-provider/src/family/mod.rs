@@ -5,4 +5,5 @@ pub(crate) mod bedrock;
 pub(crate) mod chat;
 pub(crate) mod codex;
 pub(crate) mod devin;
+pub(crate) mod google;
 pub(crate) mod responses;
