@@ -339,7 +339,9 @@ impl Connection {
         params: Value,
     ) -> Result<Value, WireError> {
         let Grant {
-            writer, pending, ..
+            epoch,
+            writer,
+            pending,
         } = grant;
         let id = pending.id;
         let frame = encode_jsonrpc(&Message::Request {
@@ -347,7 +349,13 @@ impl Connection {
             method: method.to_owned(),
             params,
         })?;
-        writer.write_frame(&frame).await?;
+        if let Err(error) = writer.write_frame(&frame).await {
+            // A failed send means the transport is dead: retire it so the
+            // next waiter reconnects instead of riding the same dead link.
+            // The call itself still fails and is never re-sent.
+            self.core.retire(epoch);
+            return Err(error);
+        }
         drop(writer);
         let reply = self
             .wait(|state| state.pending.get_mut(&id).and_then(Option::take))
@@ -1174,6 +1182,48 @@ mod tests {
         )
         .await
         .expect("the stale cleanup finishes");
+    }
+
+    /// A write that fails on a dead transport retires it, so the next call
+    /// reconnects instead of writing to the same dead link again.
+    #[tokio::test]
+    async fn a_failed_send_retires_the_transport_so_the_next_call_reconnects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (listener, endpoint) = bind(dir.path()).expect("bind socket");
+        let (gone, closed) = tokio::sync::oneshot::channel::<()>();
+        let server = async {
+            drop(Peer::initialized(&listener).await.expect("accept client"));
+            gone.send(()).expect("the client waits for the close");
+            let mut second = Peer::initialized(&listener).await.expect("accept client");
+            let (id, _) = second.expect("session/list").await.expect("list request");
+            second
+                .reply(id, sonic_rs::json!({"sessions": []}))
+                .await
+                .expect("reply");
+            second
+        };
+        let client = async {
+            let conn = Connection::connect(endpoint, None).await.expect("connect");
+            closed.await.expect("server closed");
+            // Nothing has read from the first transport, so only the write
+            // can notice that it is dead.
+            let lost = conn.call("session/list", sonic_rs::json!({})).await;
+            assert!(
+                matches!(lost, Err(WireError::Transport(_))),
+                "the call on the dead transport fails: {lost:?}"
+            );
+            let reply = conn
+                .call("session/list", sonic_rs::json!({}))
+                .await
+                .expect("the next call reconnects");
+            assert!(reply.get("sessions").is_some());
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async { tokio::join!(server, client) }),
+        )
+        .await
+        .expect("the reconnect finishes");
     }
 
     /// A `401` upgrade denial over real loopback ends `reconnect` with `Auth`
