@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Save private-effect receipts on fresh persistent sessions before acknowledging
+  them, without requiring an earlier user turn or sidecar write. Ephemeral
+  sessions remain memory-only.
 - Repair the guard's warning router for real exec results. The exec tool
   spills a long result to `<session dir>/jobs/<job id>.log` and ends its text
   with a `Full output: <path>` line; the guard now reads that log, takes the

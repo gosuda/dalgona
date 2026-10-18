@@ -17,9 +17,10 @@ use dal_core::ext::{
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, EntryId,
     EntryKind, Event, Family, InferFailure, Inference, MailMode, ModelRoute, Name, Part,
-    PartialResponse, Phase, Policy, Record, Rejection, Reply, Request, RequestId, ResolutionCause,
-    ResolvedCall, Session, SessionId, StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply,
-    TurnSource, TurnState, UpdateKind, Workspace,
+    PartialResponse, Phase, Policy, PrivateConflict, PrivateEffectId, PrivateLoopId, Record,
+    Rejection, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Session, SessionId,
+    StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState, UpdateKind,
+    Workspace,
 };
 use dal_store::Journal;
 use tokio::sync::{mpsc, oneshot};
@@ -1047,6 +1048,15 @@ impl Actor {
             ActorRequest::ExtRecord { req } => {
                 self.on_ext_record(req).await;
             }
+            ActorRequest::PrivateLoop { req } => {
+                self.on_private_loop(req).await;
+            }
+            ActorRequest::PrivateStart { req } => {
+                self.on_private_start(req).await;
+            }
+            ActorRequest::PrivateEnd { req } => {
+                self.on_private_end(req).await;
+            }
             ActorRequest::Inferred {
                 who,
                 purpose,
@@ -2064,6 +2074,146 @@ impl Actor {
         Ok(position)
     }
 
+    /// Journals one private-loop birth after pre-validation, and answers
+    /// only after the journal receipt.
+    ///
+    /// The fold transition is checked BEFORE the durable append: the store
+    /// performs no private validation, so a persisted invalid birth would
+    /// fail the next open at replay. The transition commits only after the
+    /// receipt, then the shared snapshot syncs (which publishes private
+    /// terminals first) before the reply. A rejected birth appends nothing;
+    /// a failed append folds/publishes nothing (irreversible store errors
+    /// may partially write; the next open repairs).
+    async fn on_private_loop(&mut self, req: super::PrivateLoopRequest) {
+        let super::PrivateLoopRequest {
+            r#loop,
+            who,
+            turn,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(AgentError::Invalid(ValidationError::new(
+                broken.clone(),
+            ))));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_loop(r#loop) {
+            let _ = reply.send(Err(private_loop_conflict(conflict, r#loop)));
+            return;
+        }
+        let record = Record::PrivateLoop {
+            at: Timestamp::now(),
+            r#loop,
+            who: who.clone(),
+            turn,
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(AgentError::PersistenceFailed { message }));
+            return;
+        }
+        self.fold.fold_private_loop(r#loop, who, turn);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
+    /// Journals one private-effect start after pre-validation, and answers
+    /// only after the journal receipt.
+    ///
+    /// Same ordering as [`Self::on_private_loop`]. `call` and `args` ride
+    /// the journal record for live-execution correlation; the fold pairing
+    /// row keeps only the attribution subset (`who`, `turn`, `round`,
+    /// `name`). The caller runs the effect only after this replies `Ok`.
+    async fn on_private_start(&mut self, req: super::PrivateStartRequest) {
+        let super::PrivateStartRequest {
+            r#loop,
+            token,
+            who,
+            turn,
+            round,
+            call,
+            name,
+            args,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(ServiceError::failed(None, broken.clone())));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_start(r#loop, token, &who, turn) {
+            let _ = reply.send(Err(private_effect_conflict(conflict, r#loop, token)));
+            return;
+        }
+        let record = Record::PrivateStart {
+            at: Timestamp::now(),
+            r#loop,
+            token,
+            who: who.clone(),
+            turn,
+            round,
+            call,
+            name: name.clone(),
+            args,
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(ServiceError::failed(None, message)));
+            return;
+        }
+        self.fold
+            .fold_private_start(r#loop, token, &who, turn, round, &name);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
+    /// Journals one private-effect terminal outcome after pre-validation,
+    /// and answers only after the journal receipt.
+    ///
+    /// Same ordering as [`Self::on_private_loop`]. On `Ok` the terminal is
+    /// durable, folded, and published. A rejected end appends nothing; a
+    /// failed append folds/publishes nothing and leaves the row Started in
+    /// memory, which the next open repairs to
+    /// [`dal_core::PrivateOutcome::Indeterminate`].
+    async fn on_private_end(&mut self, req: super::PrivateEndRequest) {
+        let super::PrivateEndRequest {
+            r#loop,
+            token,
+            outcome,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(ServiceError::failed(None, broken.clone())));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_end(r#loop, token) {
+            let _ = reply.send(Err(private_effect_conflict(conflict, r#loop, token)));
+            return;
+        }
+        let record = Record::PrivateEnd {
+            at: Timestamp::now(),
+            r#loop,
+            token,
+            outcome: outcome.clone(),
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(ServiceError::failed(None, message)));
+            return;
+        }
+        self.fold.fold_private_end(r#loop, token, outcome);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
     /// Refreshes fold-owned counters in the shared snapshot.
     fn refresh_stats(&self) {
         self.shared.sync_ext(&self.fold);
@@ -2605,6 +2755,41 @@ fn read_views(outcome: &dal_core::SettledOutcome) -> Vec<dal_core::ext::ReadView
         ToolData::Find(_) | ToolData::Symbols(_) => {}
     }
     views
+}
+
+/// Maps a loop-birth validation conflict onto the agent error contract.
+///
+/// The text is the fold-owned shape description plus the rejected loop
+/// identity. No append is attempted on this path, so the journal stays
+/// byte-identical and the reply carries the whole failure.
+fn private_loop_conflict(conflict: PrivateConflict, r#loop: PrivateLoopId) -> AgentError {
+    AgentError::Invalid(ValidationError::new(format!(
+        "private loop {}: {}",
+        r#loop,
+        conflict.detail()
+    )))
+}
+
+/// Maps a private-effect validation conflict onto the service failure
+/// contract.
+///
+/// Shared by the start and end paths: both carry the same (`loop`, `token`)
+/// identity and the same fold-owned shape text, and both reject before any
+/// append, so one mapper covers both without duplicating the text rule.
+fn private_effect_conflict(
+    conflict: PrivateConflict,
+    r#loop: PrivateLoopId,
+    token: PrivateEffectId,
+) -> ServiceError {
+    ServiceError::failed(
+        None,
+        format!(
+            "private effect {} in loop {}: {}",
+            token,
+            r#loop,
+            conflict.detail()
+        ),
+    )
 }
 
 /// Whether a journal failure leaves the session unwritable. Mirrors

@@ -25,7 +25,8 @@ use std::sync::Arc;
 
 use dal_core::ext::{Mail as ExtMail, Receipt, SidecarName};
 use dal_core::{
-    Answer, BlobId, ClientId, Command, EntryId, Name, Reply, RequestId, SessionId, TurnId, TurnOp,
+    Answer, BlobId, CallId, ClientId, Command, EntryId, Name, Owner, PrivateEffectId,
+    PrivateLoopId, PrivateOutcome, RawJson, Reply, RequestId, SessionId, TurnId, TurnOp,
     TurnOpReply,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -33,7 +34,7 @@ use tokio::time::Instant;
 
 use self::subscriber::SubscriberShared;
 use crate::broker::{Broker, Resolved};
-use crate::error::AgentError;
+use crate::error::{AgentError, ServiceError};
 use crate::ext::services::MAX_OPEN_ASKS;
 
 /// Bounded command channel into one session actor.
@@ -313,6 +314,21 @@ pub(crate) enum ActorRequest {
         /// The append request.
         req: ExtRecordRequest,
     },
+    /// Journal one private-loop birth before its first effect.
+    PrivateLoop {
+        /// The birth request.
+        req: PrivateLoopRequest,
+    },
+    /// Journal one private-effect start before the effect runs.
+    PrivateStart {
+        /// The start request.
+        req: PrivateStartRequest,
+    },
+    /// Journal one private-effect terminal outcome.
+    PrivateEnd {
+        /// The end request.
+        req: PrivateEndRequest,
+    },
     /// Attach the capability-scoped services for hook dispatch.
     Services {
         /// The session services.
@@ -362,6 +378,64 @@ pub(crate) struct ExtRecordRequest {
     pub body: dal_core::RawJson,
     /// The journal position after the receipt, or the append failure.
     pub reply: oneshot::Sender<Result<dal_core::EntryId, crate::error::ServiceError>>,
+}
+
+/// One durable private-loop birth with its reply channel.
+///
+/// The reply arrives only after the actor commits the birth; a pre-append
+/// validation conflict answers with the error without appending, while an
+/// append failure answers with the error and folds/publishes nothing.
+pub(crate) struct PrivateLoopRequest {
+    /// The loop identity minted once at Loop construction.
+    pub r#loop: PrivateLoopId,
+    /// The loop owner minted from the registering extension.
+    pub who: Owner,
+    /// The captured turn, when the loop runs inside a session turn.
+    pub turn: Option<TurnId>,
+    /// The birth acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), AgentError>>,
+}
+
+/// One durable private-effect start with its reply channel.
+///
+/// The reply arrives only after the actor commits the start; the caller
+/// must not run the effect until it does. `call` and `args` are
+/// live-execution correlation only: they ride the journal record, never
+/// the fold pairing row.
+pub(crate) struct PrivateStartRequest {
+    /// The loop identity.
+    pub r#loop: PrivateLoopId,
+    /// The effect identity.
+    pub token: PrivateEffectId,
+    /// The effect owner; must match the loop birth.
+    pub who: Owner,
+    /// The captured turn; must match the loop birth.
+    pub turn: Option<TurnId>,
+    /// The private round number.
+    pub round: u32,
+    /// The live-execution call identity; correlation only.
+    pub call: CallId,
+    /// The tool name.
+    pub name: Box<str>,
+    /// The raw tool arguments; journal-only, never published.
+    pub args: RawJson,
+    /// The start acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), ServiceError>>,
+}
+
+/// One durable private-effect terminal outcome with its reply channel.
+///
+/// The reply arrives only after the actor commits the end and publishes
+/// the terminal. Exactly one end exists per (`loop`, `token`).
+pub(crate) struct PrivateEndRequest {
+    /// The loop identity.
+    pub r#loop: PrivateLoopId,
+    /// The effect identity.
+    pub token: PrivateEffectId,
+    /// The terminal outcome.
+    pub outcome: PrivateOutcome,
+    /// The end acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), ServiceError>>,
 }
 
 /// One mailbox delivery to this session.
@@ -649,6 +723,98 @@ impl SessionHandle {
             .await
     }
 
+    /// Journals one private-loop birth and awaits the actor receipt.
+    ///
+    /// Uses the opening-safe lane like every other durable service commit,
+    /// so a birth during opening-hook suspension cannot deadlock. A closed
+    /// lane surfaces as [`AgentError::SessionClosed`]; a pre-append
+    /// validation conflict surfaces as [`AgentError::Invalid`] without
+    /// appending. An append failure surfaces as
+    /// [`AgentError::PersistenceFailed`] instead: validation passed, but
+    /// the birth record did not persist. It folds/publishes nothing
+    /// (irreversible store errors may leave a partial write; the next
+    /// open repairs it).
+    pub(crate) async fn private_loop_born(
+        &self,
+        r#loop: PrivateLoopId,
+        who: Owner,
+        turn: Option<TurnId>,
+    ) -> Result<(), AgentError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateLoop {
+            req: PrivateLoopRequest {
+                r#loop,
+                who,
+                turn,
+                reply,
+            },
+        })
+        .await?
+    }
+
+    /// Journals one private-effect start and awaits the actor receipt.
+    ///
+    /// The caller must not run the effect until this returns `Ok`: the
+    /// start-before-effect order is an order on durable writes, never on
+    /// sends. A closed lane surfaces as a [`ServiceError`] failure with
+    /// the standard closed-record text (same literal as the backend's
+    /// closed-record error). A validation conflict appends nothing; an
+    /// append failure folds/publishes no row or terminal (reopen repairs).
+    pub(crate) async fn private_start(
+        &self,
+        r#loop: PrivateLoopId,
+        token: PrivateEffectId,
+        who: Owner,
+        turn: Option<TurnId>,
+        round: u32,
+        call: CallId,
+        name: Box<str>,
+        args: RawJson,
+    ) -> Result<(), ServiceError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateStart {
+            req: PrivateStartRequest {
+                r#loop,
+                token,
+                who,
+                turn,
+                round,
+                call,
+                name,
+                args,
+                reply,
+            },
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::failed(None, "the session closed before the record was journaled.")
+        })?
+    }
+
+    /// Journals one private-effect terminal outcome and awaits the actor receipt.
+    ///
+    /// On `Ok` the terminal is durable, folded, and published to the shared
+    /// index. A validation rejection appends nothing; an append failure
+    /// folds/publishes nothing and leaves the row Started in memory, which
+    /// the next open repairs to [`PrivateOutcome::Indeterminate`].
+    pub(crate) async fn private_end(
+        &self,
+        r#loop: PrivateLoopId,
+        token: PrivateEffectId,
+        outcome: PrivateOutcome,
+    ) -> Result<(), ServiceError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateEnd {
+            req: PrivateEndRequest {
+                r#loop,
+                token,
+                outcome,
+                reply,
+            },
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::failed(None, "the session closed before the record was journaled.")
+        })?
+    }
+
     /// Runs one turn operation.
     pub(crate) async fn turn(&self, req: TurnRequest) -> Result<(), AgentError> {
         let sender = self.turn_sender(&req);
@@ -882,6 +1048,53 @@ mod tests {
         assert!(
             broker.open_requests().iter().all(|open| open.id != id),
             "the claim left the slot resolved"
+        );
+    }
+
+    /// A dropped actor lane turns a private-loop birth into `SessionClosed`.
+    #[tokio::test]
+    async fn private_loop_birth_reports_a_closed_session() {
+        let (handle, _broker, _inbox) = fixture();
+        let error = handle
+            .private_loop_born(PrivateLoopId::new_v7(), Owner::Core, None)
+            .await
+            .expect_err("a closed lane reports its failure");
+        assert!(
+            matches!(error, AgentError::SessionClosed { .. }),
+            "a closed birth keeps the agent error shape: {error:?}"
+        );
+    }
+
+    /// Dropped actor lanes turn private start/end receipts into failed
+    /// service errors with the standard closed-record text.
+    #[tokio::test]
+    async fn private_start_and_end_report_a_closed_session() {
+        let (handle, _broker, _inbox) = fixture();
+        let r#loop = PrivateLoopId::new_v7();
+        let token = PrivateEffectId::new_v7();
+        let args = RawJson::parse("{}").expect("literal test args parse");
+        let start = handle
+            .private_start(
+                r#loop,
+                token,
+                Owner::Core,
+                None,
+                0,
+                CallId::new("call-1"),
+                "read".into(),
+                args,
+            )
+            .await;
+        assert!(
+            matches!(&start, Err(crate::error::ServiceError::Failed { .. })),
+            "a closed start keeps the service failure shape: {start:?}"
+        );
+        let end = handle
+            .private_end(r#loop, token, PrivateOutcome::Indeterminate)
+            .await;
+        assert!(
+            matches!(&end, Err(crate::error::ServiceError::Failed { .. })),
+            "a closed end keeps the service failure shape: {end:?}"
         );
     }
 }
