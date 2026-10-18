@@ -136,6 +136,11 @@ impl Session {
     }
 
     pub(super) fn request_opened(&mut self, request: &Request) {
+        self.open_questions
+            .push((request.id, Self::question_ref(request)));
+    }
+
+    pub(super) fn question_ref(request: &Request) -> QuestionRef {
         let tool = match &request.question {
             Question::Approval { tool, .. } => Some(tool.clone()),
             Question::Grant { .. }
@@ -143,13 +148,10 @@ impl Session {
             | Question::Confirm { .. }
             | Question::Text { .. } => None,
         };
-        self.open_questions.push((
-            request.id,
-            QuestionRef {
-                tool,
-                turn: request.turn,
-            },
-        ));
+        QuestionRef {
+            tool,
+            turn: request.turn,
+        }
     }
 
     pub(super) fn queue_steer(&mut self, text: Box<str>, effects: &mut Vec<Effect>) {

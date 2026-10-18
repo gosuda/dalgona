@@ -6,8 +6,8 @@ use super::types::{ManualCompletion, QuestionRef, QueuedInput, Tree, TurnFlags, 
 use super::{
     ApprovalMode, BTreeSet, CallId, CompactionReason, DecodeError, Effect, Emit, EntryId,
     EntryKind, Event, Family, GateSeed, Gen, JobId, JobKind, JobOutcome, Limits, ModelRoute, Name,
-    NonZeroU64, Phase, RawJson, Record, Rejection, ReplayError, RequestId, RequestParams, Settings,
-    TurnId,
+    NonZeroU64, Phase, RawJson, Record, Rejection, ReplayError, Request, RequestId, RequestParams,
+    Settings, TurnId,
 };
 
 /// The complete, replayable state of one session.
@@ -243,6 +243,60 @@ impl Session {
             out.insert(0, Effect::Emit(emit));
         }
         Ok(())
+    }
+
+    /// Restores one tracked question whose terminal record never landed, so a
+    /// retry can resolve it exactly once. A no-op when the question is still
+    /// tracked, so a repeated restore never duplicates it.
+    ///
+    /// Call only for a request whose `GrantResolved` step just emitted on
+    /// this fold: restoring a never-opened request would make a ghost
+    /// question resolvable. It restores the question alone; the allowance a
+    /// session approval granted is taken back through
+    /// [`Session::retain_recorded_allowances`].
+    pub fn restore_open_question(&mut self, request: &Request) -> bool {
+        if self.open_questions.iter().any(|(id, _)| *id == request.id) {
+            return false;
+        }
+        self.open_questions
+            .push((request.id, Self::question_ref(request)));
+        true
+    }
+
+    /// Drops every session-wide allowance that `recorded` does not vouch for,
+    /// and reports whether any left.
+    ///
+    /// A resolution step grants its allowance in memory and emits the
+    /// `AllowAlways` record in the same batch, so a batch the journal
+    /// refuses leaves a live allowance with no record: the tool would run
+    /// unasked now and ask again after a reopen. `recorded` answers, for one
+    /// tool name, whether the journal holds its `AllowAlways` record. Names
+    /// the journal already holds, from earlier batches or from replay, stay.
+    ///
+    /// Call after a refused append, once every pending resolution settled,
+    /// and pass the journal's own records, never a guess: the live set must
+    /// stay a subset of what a replay of the journal restores.
+    pub fn retain_recorded_allowances(&mut self, recorded: impl Fn(&str) -> bool) -> bool {
+        let held = self.allow_always.len();
+        self.allow_always.retain(|tool| recorded(tool.as_str()));
+        self.allow_always.len() != held
+    }
+
+    /// Sets the approval mode back to `recorded` and reports whether it moved.
+    ///
+    /// A settings step applies the new mode in memory and emits its
+    /// `Approval` record in the same batch, so a batch the journal refuses
+    /// leaves a live mode no record backs: every later policy snapshot would
+    /// keep granting under it until a reopen. `recorded` is the mode a replay
+    /// of the journal restores: the last `Approval` record, else the mode the
+    /// session started under.
+    ///
+    /// Call after a refused append, and pass the journal's own answer, never
+    /// a guess: the live mode must equal what a replay would restore.
+    pub fn restore_recorded_approval(&mut self, recorded: ApprovalMode) -> bool {
+        let moved = self.settings.approval != recorded;
+        self.settings.approval = recorded;
+        moved
     }
 
     /// Borrows the current lifecycle phase.
