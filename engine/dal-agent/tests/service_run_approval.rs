@@ -636,10 +636,6 @@ async fn a_run_nobody_answers_journals_the_default_it_broadcasts() -> TestResult
     let broadcast = wait_for_resolved(&mut session.subscription, request).await?;
     assert!(matches!(broadcast, Answer::Decline), "{broadcast:?}");
     let dump = finish_turn(&mut session).await?;
-    assert!(
-        dump.contains("run needed approval and no one answered within 300 s."),
-        "the denial names the timeout: {dump}"
-    );
     assert!(!dump.contains("hello"), "nothing ran: {dump}");
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Return an unavailable denial when a run approval expires without an answer.
+  An explicit decline remains distinct. Neither outcome starts the process,
+  and the next run can request approval.
 - Reject inconsistent request-resolution causes before writing a session journal.
   Refused records leave both stored bytes and the live journal unchanged.
   Older records without a cause remain readable.

@@ -501,16 +501,15 @@ impl SessionServices {
                 };
                 self.run_spawned(req, approved, &cancel).await
             }
-            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(
-                match resolution {
-                    Resolution::Unavailable => format!(
-                        "Permission denied: run needed approval and no one answered within {secs} s."
-                    ),
-                    Resolution::Answered | Resolution::Cancelled => {
-                        format!("Permission denied: run was declined by {}.", by.as_str())
-                    }
-                },
-            ))),
+            (Resolution::Unavailable, Answer::Decline) => {
+                Err(ServiceError::Denied(DenyReason::Unavailable {
+                    what: format!("run approval with no answer within {secs} s").into(),
+                }))
+            }
+            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(format!(
+                "Permission denied: run was declined by {}.",
+                by.as_str()
+            )))),
             (_, Answer::Cancel) => Err(ServiceError::Denied(DenyReason::Unavailable {
                 what: "approval cancelled".into(),
             })),

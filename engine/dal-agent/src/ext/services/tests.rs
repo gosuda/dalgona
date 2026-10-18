@@ -257,6 +257,7 @@ struct FakeRt {
     previews: Mutex<Vec<dal_core::Preview>>,
     ladder_asks: Mutex<usize>,
     script: Mutex<VecDeque<AuthorizeScript>>,
+    decisions: Mutex<VecDeque<dal_core::Decision>>,
     spawns: SpawnLog,
     workspace: Workspace,
     cancel: CancellationToken,
@@ -268,6 +269,7 @@ impl Default for FakeRt {
             previews: Mutex::new(Vec::new()),
             ladder_asks: Mutex::new(0),
             script: Mutex::new(VecDeque::new()),
+            decisions: Mutex::new(VecDeque::new()),
             spawns: Mutex::new(Vec::new()),
             workspace: Workspace::new(std::env::temp_dir()).expect("test workspace"),
             cancel: CancellationToken::new(),
@@ -277,7 +279,11 @@ impl Default for FakeRt {
 
 impl ToolCxRuntime for FakeRt {
     fn decide_run(&self) -> dal_core::Decision {
-        dal_core::Decision::Allow
+        self.decisions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(dal_core::Decision::Allow)
     }
 
     fn authorize_approved(
@@ -1869,11 +1875,12 @@ async fn a_raced_run_withdrawal_frees_the_run_slot_without_settlement() {
     let fx = fixture(Duration::from_secs(30));
     let workspace = fx.temp.path().to_path_buf();
     {
-        let mut script = fx.rt.script.lock().unwrap();
-        script.push_back(AuthorizeScript::AskThenApprove {
-            prefix: Vec::new(),
-            roots: Vec::new(),
-        });
+        // Both runs take the broker approval path: without a queued `Ask`
+        // the ladder allows at once and no run approval ever opens.
+        fx.rt.decisions.lock().unwrap().extend([
+            dal_core::Decision::Ask { grant: None },
+            dal_core::Decision::Ask { grant: None },
+        ]);
     }
     let who = caller("focus", &["run"], Some(turn()));
     let services = Arc::clone(&fx.services);
@@ -1882,6 +1889,10 @@ async fn a_raced_run_withdrawal_frees_the_run_slot_without_settlement() {
             .run(&who, run_request(&["git", "status"], workspace))
             .await
     });
+    // The capability grant asks first and persists: approve it so the run
+    // reaches its own approval, the slot under test.
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
     await_open(&fx.broker).await;
 
     let id = fx
