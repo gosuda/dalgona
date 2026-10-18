@@ -189,6 +189,12 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "https://router.huggingface.co/v1",
         &["HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"],
     ),
+    chat(
+        "llamacpp",
+        "llama.cpp",
+        "http://127.0.0.1:8080/v1",
+        &["LLAMA_CPP_API_KEY"],
+    ),
     responses(
         "meta",
         "Meta Model API",

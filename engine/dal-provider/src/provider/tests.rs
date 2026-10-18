@@ -1876,3 +1876,20 @@ fn responses_wire_refuses_secrets_it_cannot_carry_and_keeps_keyless_https() {
         Some(("authorization", String::from("Bearer stored-access")))
     );
 }
+
+#[tokio::test]
+async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -> TestResult {
+    // The documented local setup: the built-in row with `auth = "none"`. The
+    // Chat request builder used to demand a header for every row and refused
+    // this one with "credential-less entries carry no auth header".
+    let dir = TestDir::new()?;
+    let (base, mut captured) = server("/v1", vec![stream_reply(chat_reply())]).await?;
+    let toml = format!("[providers.llamacpp]\nbase_url = '{base}'\nauth = 'none'\n");
+    let set = preset_set(&dir, &toml, &[])?;
+    let head = say_hello(&set, "llamacpp", Family::Chat, &mut captured).await?;
+    assert!(head.starts_with("post /v1/chat/completions "), "{head}");
+    for header in ["authorization:", "x-api-key:", "api-key:"] {
+        assert!(!head.contains(header), "{header} reached the wire: {head}");
+    }
+    Ok(())
+}

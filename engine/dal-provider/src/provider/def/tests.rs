@@ -139,8 +139,12 @@ fn presets_are_https_key_rows_with_their_family_header_set() {
         assert_eq!(def.transport, Transport::Https, "{id}");
         assert_eq!(def.shape, Shape::of_family(def.family), "{id}");
         assert!(
-            def.base_url.starts_with("https://") && !def.base_url.ends_with('/'),
-            "{id}: {} is not a bare https base",
+            (def.base_url.starts_with("https://")
+                || def.base_url.starts_with("http://localhost:")
+                || def.base_url.starts_with("http://127.0.0.1:")
+                || def.base_url.starts_with("http://[::1]:"))
+                && !def.base_url.ends_with('/'),
+            "{id}: {} is not a bare https or loopback-http base",
             def.base_url
         );
         assert!(
