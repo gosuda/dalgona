@@ -40,8 +40,14 @@ const DAL_SIDE: [&str; 11] = [
 ];
 
 const DAL_BINS: [(&str, &str); 3] = [
-    ("cli/dalgon/src/bin/dalgon.rs", "dalgon::run(dalgon::product())"),
-    ("cli/dalgon/src/bin/dal.rs", "dalgon::run(dalgon::product())"),
+    (
+        "cli/dalgon/src/bin/dalgon.rs",
+        "dalgon::run(dalgon::product())",
+    ),
+    (
+        "cli/dalgon/src/bin/dal.rs",
+        "dalgon::run(dalgon::product())",
+    ),
     ("cli/dalgon/src/bin/dl.rs", "dalgon::run(dalgon::product())"),
 ];
 
@@ -89,16 +95,20 @@ fn workspace_keeps_one_root_lockfile() -> support::TestResult<()> {
     for lock in &locks {
         if *lock == "Cargo.lock" {
             root_locks += 1;
-        } else if lock.starts_with("cli/dalgon/tests/fixtures/")
-            || lock.starts_with("dalgona/gates/tests/fixtures/")
+        } else if !(lock.starts_with("cli/dalgon/tests/fixtures/")
+            || lock.starts_with("dalgona/gates/tests/fixtures/"))
         {
-            continue;
-        } else {
             unexpected.push(*lock);
         }
     }
-    assert!(unexpected.is_empty(), "unexpected tracked lockfiles: {unexpected:?}");
-    assert_eq!(root_locks, 1, "the workspace root must track one Cargo.lock");
+    assert!(
+        unexpected.is_empty(),
+        "unexpected tracked lockfiles: {unexpected:?}"
+    );
+    assert_eq!(
+        root_locks, 1,
+        "the workspace root must track one Cargo.lock"
+    );
     Ok(())
 }
 
@@ -119,7 +129,9 @@ fn workspace_lists_fourteen_members_under_resolver_three() -> support::TestResul
         .iter()
         .filter_map(toml::Value::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    let expected = MEMBERS.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let expected = MEMBERS
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(actual, expected, "workspace member inventory drifted");
     for member in MEMBERS {
         assert!(
