@@ -36,6 +36,10 @@ rustix = { workspace = true }
 name = "dalgona-workspace-graph"
 path = "tests/dalgona-workspace-graph.rs"
 
+[[test]]
+name = "dalgona-assembly-01"
+path = "tests/dalgona-assembly-01.rs"
+
 
 [[test]]
 name = "dalgona-release-01"
