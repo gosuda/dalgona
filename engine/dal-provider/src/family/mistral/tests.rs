@@ -3,6 +3,7 @@ use futures::executor::block_on;
 
 use super::*;
 use crate::sse::SseEvent;
+use crate::stream::ReplayPayload;
 
 fn raw(text: &str) -> RawJson {
     RawJson::parse(text).unwrap()
@@ -886,4 +887,566 @@ fn request_body_ignores_text_tool_and_message_replay() {
     );
     assert_eq!(laden, plain);
     assert!(!laden.contains("REPLAY-MARKER"), "{laden}");
+}
+
+// Signed reasoning: the `signature` of a `thinking` chunk, captured by the
+// decoder and sent back by the encoder.
+
+const STARTED: &str = r#"{"type":"conversation.response.started","conversation_id":"conv-1"}"#;
+const DONE: &str =
+    r#"{"type":"conversation.response.done","usage":{"prompt_tokens":5,"completion_tokens":2}}"#;
+/// Three distinct adjacent chunks of one run of reasoning: signed; unsigned
+/// with an explicit `null` and odd spacing; signed with escapes and `closed`.
+const SIGNED_A: &str =
+    r#"{"type":"thinking","thinking":[{"type":"text","text":"alpha "}],"signature":"SIG-A"}"#;
+const UNSIGNED_B: &str =
+    r#"{"type":"thinking", "thinking":[{"type":"text","text":"beta "}],  "signature":null}"#;
+const SIGNED_C: &str = r#"{"type":"thinking","thinking":[{"type":"text","text":"gamma"}],"closed":false,"signature":"SIG-C\/\u00e9\"q"}"#;
+/// The text-only chunk the three chunks above replay as when they may not
+/// go back signed.
+const TEXT_ONLY: &str =
+    r#"{"type":"thinking","thinking":[{"type":"text","text":"alpha beta gamma"}]}"#;
+/// A signed chunk of one word, and a second one for a second run.
+const SIGNED_ONE: &str =
+    r#"{"type":"thinking","thinking":[{"type":"text","text":"one"}],"signature":"SIG-1"}"#;
+const SIGNED_TWO: &str =
+    r#"{"type":"thinking","thinking":[{"type":"text","text":"two"}],"signature":"SIG-2"}"#;
+const CALL_DELTA: &str = r#"{"type":"function.call.delta","output_index":1,"id":"e3","name":"search","tool_call_id":"a1b2c3d4e","arguments":"{}"}"#;
+
+fn delta(content: &str) -> String {
+    format!(
+        r#"{{"type":"message.output.delta","output_index":0,"id":"e1","content_index":0,"role":"assistant","content":{content}}}"#
+    )
+}
+
+fn run_all(datas: &[String]) -> (Vec<StreamEvent>, Option<ProviderError>) {
+    let datas: Vec<&str> = datas.iter().map(String::as_str).collect();
+    run(&datas, false)
+}
+
+/// The stream of one turn: the three chunks above, each in its own event,
+/// then the visible answer.
+fn signed_turn() -> Vec<String> {
+    vec![
+        STARTED.to_owned(),
+        delta(&format!("[{SIGNED_A}]")),
+        delta(&format!("[{UNSIGNED_B}]")),
+        delta(&format!("[{SIGNED_C}]")),
+        delta(r#""Answer.""#),
+        DONE.to_owned(),
+    ]
+}
+
+fn signed_run() -> RawJson {
+    raw(&format!("[{SIGNED_A},{UNSIGNED_B},{SIGNED_C}]"))
+}
+
+fn replay_event(chunks: &str) -> StreamEvent {
+    StreamEvent::Replay {
+        payload: ReplayPayload {
+            family: Family::Mistral,
+            model: "mistral-medium-latest".into(),
+            item: raw(&format!("[{chunks}]")),
+        },
+    }
+}
+
+fn five_two_done(calls: Vec<ToolCall>, reason: StopReason) -> Vec<StreamEvent> {
+    let usage = Usage {
+        input_tokens: 5,
+        output_tokens: 2,
+        ..NO_USAGE
+    };
+    done(calls, usage, reason)
+}
+
+fn reasoning(text: &str) -> StreamEvent {
+    StreamEvent::ReasoningDelta { text: text.into() }
+}
+
+fn visible(text: &str) -> StreamEvent {
+    StreamEvent::TextDelta { text: text.into() }
+}
+
+fn thinking_part(text: &str, replay: Option<RawJson>) -> AssistantPart {
+    AssistantPart::Thinking {
+        text: text.into(),
+        replay,
+    }
+}
+
+fn answer_part(text: &str) -> AssistantPart {
+    AssistantPart::Text {
+        text: text.into(),
+        replay: None,
+    }
+}
+
+/// Folds decoded events into the assistant parts a session persists and
+/// projects back into the next request: the reasoning deltas of one run join
+/// into one part, the run's replay item rides on it (`null` when the run has
+/// none, the way the journal stores an absent one), visible text closes the
+/// run, and the tool calls follow. This restates the session fold of
+/// `dal_core` and the context projection of `dal_agent`, which this crate
+/// does not depend on; the decoder and the encoder around it are the real ones.
+fn persisted_parts(events: &[StreamEvent]) -> Vec<AssistantPart> {
+    fn flush_text(parts: &mut Vec<AssistantPart>, pending: &mut String) {
+        if !pending.is_empty() {
+            parts.push(answer_part(&mem::take(pending)));
+        }
+    }
+    let mut parts = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut pending = String::new();
+    for event in events {
+        match event {
+            StreamEvent::TextDelta { text } => {
+                open = None;
+                pending.push_str(text);
+            }
+            StreamEvent::ReasoningDelta { text } => {
+                flush_text(&mut parts, &mut pending);
+                if let Some(AssistantPart::Thinking { text: so_far, .. }) =
+                    open.and_then(|index| parts.get_mut(index))
+                {
+                    *so_far = format!("{so_far}{text}").into();
+                } else {
+                    parts.push(thinking_part(text, Some(RawJson::null())));
+                    open = Some(parts.len() - 1);
+                }
+            }
+            StreamEvent::Replay { payload } => {
+                flush_text(&mut parts, &mut pending);
+                if let Some(AssistantPart::Thinking { replay, .. }) =
+                    open.and_then(|index| parts.get_mut(index))
+                {
+                    *replay = Some(payload.item.clone());
+                } else {
+                    parts.push(thinking_part("", Some(payload.item.clone())));
+                    open = Some(parts.len() - 1);
+                }
+            }
+            StreamEvent::ToolCallsDone { calls } => {
+                flush_text(&mut parts, &mut pending);
+                open = None;
+                for call in calls {
+                    parts.push(AssistantPart::ToolCall {
+                        call: CallId::new(call.id.as_str()),
+                        name: call.name.as_str().into(),
+                        args: match &call.args {
+                            ToolArgs::Parsed(args) => args.clone(),
+                            _ => RawJson::null(),
+                        },
+                        replay: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_text(&mut parts, &mut pending);
+    parts
+}
+
+/// The next request of a conversation whose last answer is `parts`, recorded
+/// from `source`.
+fn next_turn(source: ReplaySource, parts: Vec<AssistantPart>) -> ModelRequest {
+    request(
+        Vec::new(),
+        vec![
+            ContextItem::User {
+                parts: vec![text("First")],
+            },
+            ContextItem::Assistant {
+                source,
+                replay: None,
+                parts,
+            },
+            ContextItem::User {
+                parts: vec![text("Next")],
+            },
+        ],
+    )
+}
+
+fn replayed_body(request: &ModelRequest) -> String {
+    body_text(request, &plan(Some("high"), None))
+}
+
+#[test]
+fn signed_reasoning_chunks_are_captured_verbatim_and_in_arrival_order() {
+    let (events, error) = run_all(&signed_turn());
+    assert!(error.is_none(), "{error:?}");
+    let expected = [
+        vec![
+            reasoning("alpha "),
+            reasoning("beta "),
+            reasoning("gamma"),
+            StreamEvent::Replay {
+                payload: ReplayPayload {
+                    family: Family::Mistral,
+                    model: "mistral-medium-latest".into(),
+                    item: signed_run(),
+                },
+            },
+            visible("Answer."),
+        ],
+        five_two_done(Vec::new(), StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn signed_reasoning_survives_persistence_into_the_next_request_byte_for_byte() {
+    let (events, error) = run_all(&signed_turn());
+    assert!(error.is_none(), "{error:?}");
+    let parts = persisted_parts(&events);
+    assert_eq!(
+        parts,
+        vec![
+            thinking_part("alpha beta gamma", Some(signed_run())),
+            answer_part("Answer."),
+        ]
+    );
+    // The parts also survive their own JSON form, the way a journal keeps them.
+    let stored = sonic_rs::to_string(&parts).unwrap();
+    let restored: Vec<AssistantPart> = sonic_rs::from_str(&stored).unwrap();
+    assert_eq!(restored, parts);
+    let next = next_turn(replay_source(), restored);
+    let body = replayed_body(&next);
+    // Three chunks, the unsigned one still unsigned, none merged, none
+    // re-encoded, the text chunk after them.
+    let expected = format!(
+        r#"{{"type":"message.output","role":"assistant","content":[{SIGNED_A},{UNSIGNED_B},{SIGNED_C},{{"type":"text","text":"Answer."}}]}}"#
+    );
+    assert!(body.contains(&expected), "{body}");
+    assert_eq!(body.matches("SIG-").count(), 2, "{body}");
+    assert_eq!(replayed_body(&next), body);
+}
+
+#[test]
+fn signed_reasoning_is_replayed_only_to_the_family_and_model_that_produced_it() {
+    let (events, _) = run_all(&signed_turn());
+    let parts = persisted_parts(&events);
+    for (family, model) in [
+        (Family::Chat, "mistral-medium-latest"),
+        (Family::Anthropic, "mistral-medium-latest"),
+        (Family::Mistral, "mistral-large-latest"),
+    ] {
+        let source = ReplaySource {
+            family,
+            model: model.into(),
+        };
+        let body = replayed_body(&next_turn(source, parts.clone()));
+        assert!(body.contains(TEXT_ONLY), "{family:?} {model}: {body}");
+        assert!(!body.contains("SIG-"), "{family:?} {model}: {body}");
+        assert!(!body.contains("signature"), "{family:?} {model}: {body}");
+    }
+    // The producing source sent to another model of the family is foreign too.
+    let mut other = next_turn(replay_source(), parts);
+    other.model = ModelRoute::Api {
+        family: Family::Mistral,
+        model: "mistral-large-latest".into(),
+    };
+    let body = replayed_body(&other);
+    assert!(body.contains(TEXT_ONLY), "{body}");
+    assert!(!body.contains("signature"), "{body}");
+}
+
+#[test]
+fn signed_reasoning_is_dropped_while_reasoning_is_off() {
+    let (events, _) = run_all(&signed_turn());
+    let parts = persisted_parts(&events);
+    for effort in [Some("none"), None] {
+        let next = next_turn(replay_source(), parts.clone());
+        let body = body_text(&next, &plan(effort, None));
+        assert!(!body.contains(r#""type":"thinking""#), "{effort:?}: {body}");
+        assert!(!body.contains("signature"), "{effort:?}: {body}");
+        assert!(
+            body.contains(r#"{"type":"text","text":"Answer."}"#),
+            "{effort:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn history_recorded_before_signatures_replays_as_text_only() {
+    for replay in [None, Some(RawJson::null())] {
+        let parts = vec![thinking_part("old reasoning", replay), answer_part("Ok.")];
+        let body = replayed_body(&next_turn(replay_source(), parts));
+        let chunk = r#"{"type":"thinking","thinking":[{"type":"text","text":"old reasoning"}]}"#;
+        assert!(body.contains(chunk), "{body}");
+        assert!(!body.contains("signature"), "{body}");
+    }
+}
+
+#[test]
+fn a_payload_that_does_not_match_its_part_is_never_sent() {
+    const TEXT_X: &str = r#"{"type":"thinking","thinking":[{"type":"text","text":"x"}]}"#;
+    let refused = [
+        // Not an array.
+        r#"{"type":"thinking","thinking":[{"type":"text","text":"x"}],"signature":"SIG-X"}"#,
+        "[]",
+        "[1]",
+        // A chunk that is not a `thinking` chunk.
+        r#"[{"type":"text","thinking":[{"type":"text","text":"x"}],"signature":"SIG-X"}]"#,
+        // A signature the schema does not allow, and none or an empty one.
+        r#"[{"type":"thinking","thinking":[{"type":"text","text":"x"}],"signature":7}]"#,
+        r#"[{"type":"thinking","thinking":[{"type":"text","text":"x"}]}]"#,
+        r#"[{"type":"thinking","thinking":[{"type":"text","text":"x"}],"signature":""}]"#,
+        // Text that is no longer the text of the part, and parts that are no array.
+        r#"[{"type":"thinking","thinking":[{"type":"text","text":"y"}],"signature":"SIG-X"}]"#,
+        r#"[{"type":"thinking","thinking":"x","signature":"SIG-X"}]"#,
+    ];
+    for payload in refused {
+        let parts = vec![thinking_part("x", Some(raw(payload)))];
+        let body = replayed_body(&next_turn(replay_source(), parts));
+        assert!(body.contains(TEXT_X), "{payload}: {body}");
+        assert!(!body.contains("SIG-X"), "{payload}: {body}");
+    }
+    // The control: the same text with a well-formed signed payload goes back.
+    let chunk =
+        r#"{"type":"thinking","thinking":[{"type":"text","text":"x"}],"signature":"SIG-X"}"#;
+    let parts = vec![thinking_part("x", Some(raw(&format!("[{chunk}]"))))];
+    let body = replayed_body(&next_turn(replay_source(), parts));
+    assert!(body.contains(&format!(r#""content":[{chunk}]"#)), "{body}");
+}
+
+#[test]
+fn reasoning_runs_split_by_visible_text_keep_separate_signed_items() {
+    let (first, second) = (SIGNED_ONE, SIGNED_TWO);
+    let datas = [
+        STARTED.to_owned(),
+        delta(&format!("[{first}]")),
+        delta(r#"[{"type":"text","text":"t1 "}]"#),
+        delta(&format!("[{second}]")),
+        delta(r#""t2""#),
+        DONE.to_owned(),
+    ];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    let expected = [
+        vec![
+            reasoning("one"),
+            replay_event(first),
+            visible("t1 "),
+            reasoning("two"),
+            replay_event(second),
+            visible("t2"),
+        ],
+        five_two_done(Vec::new(), StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+    let parts = persisted_parts(&events);
+    assert_eq!(
+        parts,
+        vec![
+            thinking_part("one", Some(raw(&format!("[{first}]")))),
+            answer_part("t1 "),
+            thinking_part("two", Some(raw(&format!("[{second}]")))),
+            answer_part("t2"),
+        ]
+    );
+    let body = replayed_body(&next_turn(replay_source(), parts));
+    let expected = format!(
+        r#"{{"type":"message.output","role":"assistant","content":[{first},{second},{{"type":"text","text":"t1 \nt2"}}]}}"#
+    );
+    assert!(body.contains(&expected), "{body}");
+}
+
+#[test]
+fn unsigned_reasoning_emits_no_replay_item_and_replays_as_text() {
+    for signature in [
+        None,
+        Some("null"),
+        Some(r#""""#),
+        Some("7"),
+        Some(r#"{"a":1}"#),
+    ] {
+        let member = signature
+            .map(|value| format!(r#","signature":{value}"#))
+            .unwrap_or_default();
+        let chunk = format!(
+            r#"{{"type":"thinking","thinking":[{{"type":"text","text":"plain"}}]{member}}}"#
+        );
+        let datas = [
+            delta(&format!("[{chunk}]")),
+            delta(r#""Answer.""#),
+            DONE.to_owned(),
+        ];
+        let (events, error) = run_all(&datas);
+        assert!(error.is_none(), "{signature:?}: {error:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Replay { .. })),
+            "{signature:?}: {events:?}"
+        );
+        let parts = persisted_parts(&events);
+        assert_eq!(
+            parts[0],
+            thinking_part("plain", Some(RawJson::null())),
+            "{signature:?}"
+        );
+        let body = replayed_body(&next_turn(replay_source(), parts));
+        assert!(
+            body.contains(r#"{"type":"thinking","thinking":[{"type":"text","text":"plain"}]}"#),
+            "{signature:?}: {body}"
+        );
+        assert!(!body.contains("signature"), "{signature:?}: {body}");
+    }
+}
+
+#[test]
+fn a_signature_only_chunk_before_a_tool_call_is_replayed_ahead_of_the_call() {
+    let chunk = r#"{"type":"thinking","thinking":[],"signature":"SIG-ONLY"}"#;
+    let datas = [
+        delta(&format!("[{chunk}]")),
+        CALL_DELTA.to_owned(),
+        DONE.to_owned(),
+    ];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    let call = ToolCall {
+        id: "a1b2c3d4e".into(),
+        name: "search".into(),
+        args: ToolArgs::Parsed(raw("{}")),
+    };
+    let expected = [
+        vec![
+            StreamEvent::ToolCallStarted {
+                id: "a1b2c3d4e".into(),
+                name: "search".into(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "a1b2c3d4e".into(),
+                fragment: b"{}".to_vec(),
+            },
+            replay_event(chunk),
+        ],
+        five_two_done(vec![call], StopReason::ToolUse),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+    let parts = persisted_parts(&events);
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert_eq!(
+        parts[0],
+        thinking_part("", Some(raw(&format!("[{chunk}]"))))
+    );
+    let body = replayed_body(&next_turn(replay_source(), parts));
+    let expected = format!(
+        r#"{{"type":"message.output","role":"assistant","content":[{chunk}]}},{{"type":"function.call","tool_call_id":"a1b2c3d4e","name":"search","arguments":{{}}}}"#
+    );
+    assert!(body.contains(&expected), "{body}");
+}
+
+#[test]
+fn a_run_with_a_signature_the_schema_forbids_goes_back_as_text_only() {
+    let signed =
+        r#"{"type":"thinking","thinking":[{"type":"text","text":"ok "}],"signature":"SIG-OK"}"#;
+    let odd = r#"{"type":"thinking","thinking":[{"type":"text","text":"odd"}],"signature":7}"#;
+    let datas = [
+        delta(&format!("[{signed},{odd}]")),
+        delta(r#""Answer.""#),
+        DONE.to_owned(),
+    ];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    // Capture is verbatim and judges nothing; the encoder refuses the run.
+    assert_eq!(
+        events[..4],
+        [
+            reasoning("ok "),
+            reasoning("odd"),
+            replay_event(&format!("{signed},{odd}")),
+            visible("Answer."),
+        ]
+    );
+    let body = replayed_body(&next_turn(replay_source(), persisted_parts(&events)));
+    assert!(
+        body.contains(r#"{"type":"thinking","thinking":[{"type":"text","text":"ok odd"}]}"#),
+        "{body}"
+    );
+    assert!(!body.contains("SIG-OK"), "{body}");
+}
+
+#[test]
+fn visible_text_closes_the_run_in_the_event_it_arrives_in() {
+    let (first, second) = (SIGNED_ONE, SIGNED_TWO);
+    let datas = [
+        delta(&format!(r#"[{first},{{"type":"text","text":"before"}}]"#)),
+        delta(&format!(r#"[{{"type":"text","text":" mid"}},{second}]"#)),
+        DONE.to_owned(),
+    ];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    let expected = [
+        vec![
+            reasoning("one"),
+            replay_event(first),
+            visible("before"),
+            visible(" mid"),
+            reasoning("two"),
+            replay_event(second),
+        ],
+        five_two_done(Vec::new(), StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn the_done_marker_flushes_an_open_signed_run_before_the_terminal() {
+    let datas = [delta(&format!("[{SIGNED_A}]")), "[DONE]".to_owned()];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    let expected = [
+        vec![reasoning("alpha "), replay_event(SIGNED_A)],
+        done(Vec::new(), NO_USAGE, StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn the_signed_stream_runs_through_sse_framing_and_the_event_stream_guard() {
+    let chunks: Vec<Vec<u8>> = signed_turn()
+        .iter()
+        .map(|data| format!("data: {data}\n\n").into_bytes())
+        .collect();
+    let mut events = crate::stream::EventStream::new(
+        decode_events(
+            crate::sse::decode_stream(futures::stream::iter(chunks)),
+            MistralDecoder::new("mistral", "mistral-medium-latest"),
+        ),
+        || panic!("a clean Stop must not cancel"),
+    );
+    let seen: Vec<_> = block_on(async {
+        let mut seen = Vec::new();
+        while let Some(item) = events.next().await {
+            seen.push(item.unwrap());
+        }
+        seen
+    });
+    let expected = [
+        vec![
+            reasoning("alpha "),
+            reasoning("beta "),
+            reasoning("gamma"),
+            StreamEvent::Replay {
+                payload: ReplayPayload {
+                    family: Family::Mistral,
+                    model: "mistral-medium-latest".into(),
+                    item: signed_run(),
+                },
+            },
+            visible("Answer."),
+        ],
+        five_two_done(Vec::new(), StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(seen, expected);
 }

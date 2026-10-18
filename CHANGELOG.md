@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- Keep the `signature` of Mistral Conversations `thinking` chunks and send it
+  back on the next request. The published `ThinkChunk` schema defines
+  `signature` (`string | null`, "Signature to replay some reasoning blocks
+  across turns") on streamed chunks and on the `message.output` entries a
+  request carries, but the decoder dropped it, so every turn replayed the
+  reasoning as one unsigned text chunk. Each run of reasoning (the chunks
+  between two visible text deltas) that holds a signed chunk now journals
+  its chunks exactly as received, in order and unmerged, with unsigned chunks
+  staying unsigned. The next request sends them back only to the same
+  provider family and model, only while reasoning is on, and only while they
+  still match the recorded text; any other reasoning, including every
+  session recorded before this change, replays as before as one text-only
+  chunk. The schema does not say whether the service issues or requires
+  signatures; this change does not rely on either.
 - The automatic compaction notice at a tool-round boundary now reports the
   measured context size that triggered it (`Compacting context (threshold, 85
   percent of the window).`). It read the usage after the round's route was

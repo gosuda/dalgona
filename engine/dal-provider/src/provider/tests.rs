@@ -2489,6 +2489,146 @@ async fn mistral_cancelled_before_start_sends_nothing() -> TestResult {
     Ok(())
 }
 
+/// A conversations stream whose reasoning arrives as two signed chunks, each
+/// in its own event, ahead of the visible answer.
+fn mistral_signed_reply() -> String {
+    let mut body = String::new();
+    for data in [
+        r#"{"type":"conversation.response.started","conversation_id":"conv-1"}"#,
+        r#"{"type":"message.output.delta","output_index":0,"id":"e1","content":[{"type":"thinking","thinking":[{"type":"text","text":"alpha "}],"signature":"SIG-A"}]}"#,
+        r#"{"type":"message.output.delta","output_index":0,"id":"e2","content":[{"type":"thinking","thinking":[{"type":"text","text":"beta"}],"signature":"SIG-B"}]}"#,
+        r#"{"type":"message.output.delta","output_index":0,"id":"e3","content":"Answer."}"#,
+        r#"{"type":"conversation.response.done","usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+    ] {
+        body.push_str("data: ");
+        body.push_str(data);
+        body.push_str("\n\n");
+    }
+    body
+}
+
+fn mistral_set(dir: &TestDir, base: String) -> Result<ProviderSet, Box<dyn Error>> {
+    Ok(ProviderSet::new(
+        &config(
+            vec![entry(
+                "mistral-test",
+                Family::Mistral,
+                base,
+                Some("MISTRAL_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("MISTRAL_TEST_KEY", "mistral-secret")]),
+        dir.path(),
+        dir.path(),
+    )?)
+}
+
+#[tokio::test]
+async fn mistral_signed_reasoning_round_trips_through_the_http_adapter() -> TestResult {
+    use dal_core::{AssistantPart, ReplaySource};
+
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server(
+        "/v1",
+        vec![
+            stream_reply(mistral_signed_reply()),
+            stream_reply(mistral_reply()),
+            stream_reply(mistral_reply()),
+        ],
+    )
+    .await?;
+    let set = mistral_set(&dir, base)?;
+    let provider = set.provider(resolved("mistral-test", Family::Mistral, "mistral-test"))?;
+    let cancel = CancellationToken::new();
+
+    // Turn one: the signed stream, decoded off the wire.
+    let mut first = request(Family::Mistral, "mistral-test", vec![user_text("Think.")]);
+    first.params.thinking = ThinkingLevel::Medium;
+    let events = collect(
+        provider
+            .open(SessionId::new_v7(), &first, &[], notice_sink(), &cancel)
+            .await?,
+    )
+    .await?;
+    let replay = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Replay { payload } => Some(payload.item.clone()),
+            _ => None,
+        })
+        .expect("the signed stream carries one replay item");
+    let reasoning: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ReasoningDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "alpha beta");
+    let parts = vec![
+        AssistantPart::Thinking {
+            text: reasoning.into(),
+            replay: Some(replay),
+        },
+        AssistantPart::Text {
+            text: "Answer.".into(),
+            replay: None,
+        },
+    ];
+
+    // Turns two and three: the recorded answer, produced by this model and by
+    // another one.
+    for producer in ["mistral-test", "mistral-other"] {
+        let mut next = request(
+            Family::Mistral,
+            "mistral-test",
+            vec![
+                user_text("Think."),
+                ContextItem::Assistant {
+                    source: ReplaySource {
+                        family: Family::Mistral,
+                        model: producer.into(),
+                    },
+                    parts: parts.clone(),
+                    replay: None,
+                },
+                user_text("More."),
+            ],
+        );
+        next.params.thinking = ThinkingLevel::Medium;
+        collect(
+            provider
+                .open(SessionId::new_v7(), &next, &[], notice_sink(), &cancel)
+                .await?,
+        )
+        .await?;
+    }
+
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let body = |index: usize| String::from_utf8_lossy(request_body(&captured[index])).into_owned();
+    assert!(!body(0).contains("signature"), "{}", body(0));
+    let signed = body(1);
+    assert!(
+        signed.contains(r#""reasoning_effort":"medium""#),
+        "{signed}"
+    );
+    let chunks = concat!(
+        r#""content":[{"type":"thinking","thinking":[{"type":"text","text":"alpha "}],"signature":"SIG-A"},"#,
+        r#"{"type":"thinking","thinking":[{"type":"text","text":"beta"}],"signature":"SIG-B"},"#,
+        r#"{"type":"text","text":"Answer."}]"#,
+    );
+    assert!(signed.contains(chunks), "{signed}");
+    let foreign = body(2);
+    let text_only = r#"{"type":"thinking","thinking":[{"type":"text","text":"alpha beta"}]}"#;
+    assert!(foreign.contains(text_only), "{foreign}");
+    assert!(!foreign.contains("SIG-"), "{foreign}");
+    Ok(())
+}
+
 fn pi_messages_reply() -> String {
     String::from(
         "data: {\"type\":\"start\"}\n\ndata: {\"type\":\"text_start\",\"contentIndex\":0}\n\ndata: {\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"Hello\"}\n\ndata: {\"type\":\"text_end\",\"contentIndex\":0,\"content\":\"Hello\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"usage\":{\"input\":7,\"output\":3,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":10,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n",

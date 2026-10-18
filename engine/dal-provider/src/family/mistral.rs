@@ -45,6 +45,25 @@
 //! `tool.execution.*` and `agent.handoff.*` events and any unknown type are
 //! ignored; requests dalgon builds stay strict.
 //!
+//! Reasoning replay: a `thinking` chunk may carry a `signature` (an opaque,
+//! optional `string | null` the schema documents as the means "to replay some
+//! reasoning blocks across turns"). The decoder keeps every `thinking` chunk
+//! of a run of reasoning, exactly as the server sent it and in arrival order,
+//! where a run is the reasoning between two visible text deltas (the same
+//! boundary the session fold uses to close one reasoning block). When some
+//! chunk of the run carries a non-empty string signature, the run ends with
+//! one [`StreamEvent::Replay`] whose item is the JSON array of those chunks,
+//! bound to the family and the model. Chunks are never merged, reordered, or
+//! re-encoded, an unsigned chunk stays unsigned beside a signed one, and no
+//! signature is ever invented. A run without a signature emits no replay
+//! item, so unsigned reasoning journals as before. [`request_body`] sends the
+//! array back, in order, ahead of the message text only for an assistant
+//! message produced by this family and this model, while reasoning is on, and
+//! only when the array still matches the shape and the text it was captured
+//! with; anything else, including every message of another family or model,
+//! falls back to one text-only `thinking` chunk. That fallback is the whole
+//! behavior for history recorded before replay was captured.
+//!
 //! The done event carries no finish reason, so the stop reason is derived:
 //! calls present give `ToolUse`, otherwise `EndTurn`. Usage maps
 //! `prompt_tokens` to `input_tokens` and `completion_tokens` to
@@ -73,7 +92,7 @@ use crate::{
     error::ProviderError,
     retry::{RequestState, RetryDecision, classify},
     sse::SseEvent,
-    stream::{StopReason, StreamEvent, ToolArgs, ToolCall},
+    stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
     stream_budget::StreamBudget,
     thinking::{ThinkingPlan, WireThinking},
     tool_names::{WIRE_NAME_MAX, wire_name},
@@ -147,7 +166,10 @@ enum Entry<'a> {
     #[serde(rename = "message.input")]
     MessageInput { role: Role, content: Vec<Chunk<'a>> },
     #[serde(rename = "message.output")]
-    MessageOutput { role: Role, content: Vec<Chunk<'a>> },
+    MessageOutput {
+        role: Role,
+        content: Vec<OutputChunk<'a>>,
+    },
     #[serde(rename = "function.call")]
     FunctionCall {
         tool_call_id: String,
@@ -166,6 +188,16 @@ enum Entry<'a> {
 enum Role {
     User,
     Assistant,
+}
+
+/// One content chunk of an assistant `message.output` entry.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OutputChunk<'a> {
+    /// A chunk dalgon builds from the message parts.
+    Built(Chunk<'a>),
+    /// A `thinking` chunk the server produced, sent back exactly as received.
+    Replayed(RawJson),
 }
 
 #[derive(Serialize)]
@@ -227,7 +259,9 @@ struct CompletionArgs {
 /// role-order validation is not documented to accept two in a row.
 /// Assistant text and reasoning become one `message.output` with the
 /// thinking chunks first (Mistral takes reasoning back as a `thinking` part
-/// at the front of the content), each tool call becomes its own
+/// at the front of the content; reasoning this family and model produced
+/// goes back as the signed chunks it captured, any other reasoning as one
+/// text-only chunk, see the module documentation), each tool call becomes its own
 /// `function.call` with the nine-character wire id, and each tool result
 /// becomes a `function.result`; the images of a tool result follow in one
 /// user message, each run's images after the text part `Images from tool
@@ -284,7 +318,7 @@ pub(crate) fn request_body(
     };
     let body = Body {
         model,
-        inputs: entries(request, history)?,
+        inputs: entries(request, model, history)?,
         instructions: (!request.system.is_empty()).then(|| request.system.as_ref()),
         tools: request
             .tools
@@ -315,10 +349,11 @@ enum ThinkingHistory {
     Omit,
 }
 
-fn entries(
-    request: &ModelRequest,
+fn entries<'a>(
+    request: &'a ModelRequest,
+    model: &str,
     history: ThinkingHistory,
-) -> Result<Vec<Entry<'_>>, MistralBodyError> {
+) -> Result<Vec<Entry<'a>>, MistralBodyError> {
     let mut normalizer = CallIdNormalizer::default();
     let mut inputs: Vec<Entry<'_>> = Vec::with_capacity(request.context.len() + 1);
     // Images of the current run of tool results, sent after the run.
@@ -334,8 +369,11 @@ fn entries(
                     push_user(&mut inputs, chunks);
                 }
             }
-            ContextItem::Assistant { parts, .. } => {
-                append_assistant(&mut inputs, parts, &mut normalizer, history);
+            ContextItem::Assistant { source, parts, .. } => {
+                // Signed reasoning is bound to the family and the exact model
+                // that produced it, like every other replay item.
+                let bound = source.family == Family::Mistral && source.model.as_ref() == model;
+                append_assistant(&mut inputs, parts, &mut normalizer, history, bound);
             }
             ContextItem::ToolResult { call, parts, .. } => {
                 let (text, mut images) = split_tool_result(parts)?;
@@ -416,23 +454,36 @@ fn split_tool_result(parts: &[Part]) -> Result<(String, Vec<Chunk<'_>>), Mistral
     Ok((texts.join("\n"), images))
 }
 
+/// Appends one assistant message. `bound` says the message was produced by
+/// this family and the request's model, the only case its captured
+/// reasoning chunks may go back.
 fn append_assistant<'a>(
     inputs: &mut Vec<Entry<'a>>,
     parts: &'a [AssistantPart],
     normalizer: &mut CallIdNormalizer,
     history: ThinkingHistory,
+    bound: bool,
 ) {
-    let mut content: Vec<Chunk<'_>> = Vec::new();
-    for part in parts {
-        if history == ThinkingHistory::Replay
-            && let AssistantPart::Thinking { text, .. } = part
-            && !text.is_empty()
-        {
-            content.push(Chunk::Thinking {
-                thinking: vec![ThinkingText::Text {
-                    text: Cow::Borrowed(text),
-                }],
-            });
+    let mut content: Vec<OutputChunk<'_>> = Vec::new();
+    if history == ThinkingHistory::Replay {
+        for part in parts {
+            let AssistantPart::Thinking { text, replay } = part else {
+                continue;
+            };
+            let captured = if bound {
+                replayed_chunks(text, replay.as_ref())
+            } else {
+                None
+            };
+            if let Some(chunks) = captured {
+                content.extend(chunks.into_iter().map(OutputChunk::Replayed));
+            } else if !text.is_empty() {
+                content.push(OutputChunk::Built(Chunk::Thinking {
+                    thinking: vec![ThinkingText::Text {
+                        text: Cow::Borrowed(text),
+                    }],
+                }));
+            }
         }
     }
     let texts: Vec<&str> = parts
@@ -443,9 +494,9 @@ fn append_assistant<'a>(
         })
         .collect();
     if !texts.is_empty() {
-        content.push(Chunk::Text {
+        content.push(OutputChunk::Built(Chunk::Text {
             text: Cow::Owned(texts.join("\n")),
-        });
+        }));
     }
     let mut calls = Vec::new();
     for part in parts {
@@ -472,6 +523,56 @@ fn append_assistant<'a>(
         });
     }
     inputs.extend(calls);
+}
+
+/// The shape a captured `thinking` chunk must keep to go back to the server:
+/// a `thinking` chunk whose `signature`, when present, is a string or `null`
+/// and whose parts are objects. Other members are not read; the chunk is
+/// sent back as stored.
+#[derive(Deserialize)]
+struct ReplayedChunk {
+    #[serde(rename = "type")]
+    kind: String,
+    thinking: Vec<ReplayedPart>,
+    signature: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReplayedPart {
+    text: Option<String>,
+}
+
+/// The `thinking` chunks a reasoning part captured, ready to send back, or
+/// `None` when the part has to go back as text only.
+///
+/// The payload is the array [`MistralDecoder`] stored. It is accepted only
+/// when it is a non-empty array of `thinking` chunks, at least one of them
+/// carries a non-empty string signature, and the text of their parts, in
+/// order, is exactly the text of the reasoning part: a payload that no longer
+/// describes the text the journal shows (an edited or damaged record) is never
+/// sent. The chunks are returned byte for byte, so nothing is merged,
+/// reordered, or re-encoded and no signature is invented. An absent or `null`
+/// replay is the shape of reasoning recorded before signatures were captured.
+fn replayed_chunks(text: &str, replay: Option<&RawJson>) -> Option<Vec<RawJson>> {
+    let replay = replay.filter(|raw| raw.as_str() != "null")?;
+    let chunks: Vec<RawJson> = replay.decode_as().ok()?;
+    let mut joined = String::with_capacity(text.len());
+    let mut signed = false;
+    for chunk in &chunks {
+        let shape: ReplayedChunk = chunk.decode_as().ok()?;
+        if shape.kind != "thinking" {
+            return None;
+        }
+        signed |= shape
+            .signature
+            .is_some_and(|signature| !signature.is_empty());
+        for part in shape.thinking {
+            if let Some(part_text) = part.text {
+                joined.push_str(&part_text);
+            }
+        }
+    }
+    (signed && joined == text).then_some(chunks)
 }
 
 /// Projects one internal call id into the nine-character Mistral wire
@@ -618,6 +719,11 @@ pub(crate) struct MistralDecoder {
     usage: Option<Usage>,
     /// The conversation id the server assigned to this response.
     conversation_id: Option<String>,
+    /// The `thinking` chunks of the open run of reasoning, each exactly as
+    /// the server sent it.
+    run: Vec<String>,
+    /// Some chunk of the open run carries a non-empty string signature.
+    run_signed: bool,
     /// Some event was emitted.
     emitted: bool,
     ended: bool,
@@ -636,6 +742,8 @@ impl MistralDecoder {
             spoken: None,
             usage: None,
             conversation_id: None,
+            run: Vec::new(),
+            run_signed: false,
             emitted: false,
             ended: false,
         }
@@ -694,7 +802,7 @@ impl MistralDecoder {
 
     fn step(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<Progress, ProviderError> {
         if data.trim() == "[DONE]" {
-            self.finish(out);
+            self.finish(out)?;
             return Ok(Progress::Ended);
         }
         let kind = match sonic_rs::get_from_str(data, ["type"]) {
@@ -715,7 +823,7 @@ impl MistralDecoder {
             }
             Some("message.output.delta") => {
                 let delta: OutputDelta = parse(data, "message.output.delta")?;
-                Self::output_delta(delta, out);
+                self.output_delta(data, delta, out)?;
             }
             Some("function.call.delta") => {
                 let delta: FunctionDelta = parse(data, "function.call.delta")?;
@@ -726,7 +834,7 @@ impl MistralDecoder {
                 if let Some(usage) = event.usage.as_ref().map(normalize) {
                     self.usage = Some(usage);
                 }
-                self.finish(out);
+                self.finish(out)?;
                 return Ok(Progress::Ended);
             }
             Some("conversation.response.error") => {
@@ -740,23 +848,57 @@ impl MistralDecoder {
         Ok(Progress::Open)
     }
 
-    fn output_delta(delta: OutputDelta, out: &mut Vec<StreamEvent>) {
+    /// Decodes one `message.output.delta`. `data` is the event text `delta`
+    /// was parsed from; a `thinking` chunk keeps its verbatim text for the
+    /// replay item of its run. Visible text closes the open run first, so
+    /// the replay item lands between the run's reasoning and that text, the
+    /// order the session fold reads reasoning in.
+    fn output_delta(
+        &mut self,
+        data: &str,
+        delta: OutputDelta,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
         let non_empty = |text: &String| !text.is_empty();
         match delta.content {
             Some(DeltaContent::Text(text)) => {
                 if !text.is_empty() {
+                    self.close_run(out)?;
                     out.push(StreamEvent::TextDelta { text });
                 }
             }
             Some(DeltaContent::Chunks(chunks)) => {
+                // The verbatim chunk texts are read only for an event that
+                // carries reasoning, so plain text events stay on the typed
+                // path alone.
+                let reasoning = chunks
+                    .iter()
+                    .any(|chunk| chunk.kind.as_deref() == Some("thinking"));
+                let raws = if reasoning {
+                    chunk_texts(data)?
+                } else {
+                    Vec::new()
+                };
+                if reasoning && raws.len() != chunks.len() {
+                    return Err(protocol(String::from(
+                        "malformed message.output.delta event: the content array changed while it was read",
+                    )));
+                }
+                let mut raws = raws.into_iter();
                 for chunk in chunks {
+                    let raw = raws.next();
                     match chunk.kind.as_deref() {
                         Some("text") => {
                             if let Some(text) = chunk.text.filter(non_empty) {
+                                self.close_run(out)?;
                                 out.push(StreamEvent::TextDelta { text });
                             }
                         }
                         Some("thinking") => {
+                            if let Some(raw) = raw {
+                                self.run_signed |= is_signed(&raw);
+                                self.run.push(raw);
+                            }
                             let joined = chunk
                                 .thinking
                                 .into_iter()
@@ -774,6 +916,30 @@ impl MistralDecoder {
             }
             None => {}
         }
+        Ok(())
+    }
+
+    /// Ends the open run of reasoning. A run with a signed chunk becomes one
+    /// replay item, the array of its chunks in arrival order; an unsigned
+    /// run leaves nothing behind.
+    fn close_run(&mut self, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+        let chunks = mem::take(&mut self.run);
+        if !mem::take(&mut self.run_signed) {
+            return Ok(());
+        }
+        let item = RawJson::parse(&format!("[{}]", chunks.join(","))).map_err(|error| {
+            protocol(format!(
+                "thinking chunks did not encode as a replay item: {error}"
+            ))
+        })?;
+        out.push(StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Mistral,
+                model: self.model.clone(),
+                item,
+            },
+        });
+        Ok(())
     }
 
     fn function_delta(
@@ -839,10 +1005,12 @@ impl MistralDecoder {
         self.spoken.unwrap_or(0)
     }
 
-    /// Emits the terminal group. Calls close in `output_index` order; empty
-    /// argument text is `{}`. The stop reason is derived: calls give
-    /// `ToolUse`, otherwise `EndTurn`.
-    fn finish(&mut self, out: &mut Vec<StreamEvent>) {
+    /// Emits the terminal group, after the replay item of a reasoning run
+    /// still open. Calls close in `output_index` order; empty argument text
+    /// is `{}`. The stop reason is derived: calls give `ToolUse`, otherwise
+    /// `EndTurn`.
+    fn finish(&mut self, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+        self.close_run(out)?;
         let has_calls = !self.calls.is_empty();
         let calls = mem::take(&mut self.calls)
             .into_values()
@@ -867,6 +1035,7 @@ impl MistralDecoder {
                 StopReason::EndTurn
             },
         });
+        Ok(())
     }
 
     /// Maps a `conversation.response.error` event to the error its HTTP twin
@@ -906,6 +1075,28 @@ impl MistralDecoder {
             },
         }
     }
+}
+
+/// Whether a verbatim `thinking` chunk carries a non-empty string
+/// `signature`. A missing member, `null`, and any other JSON type read as
+/// unsigned, so a strange signature never fails the stream; it is read from
+/// the chunk text because a typed member cannot hold an arbitrary value
+/// inside the untagged content type.
+fn is_signed(chunk: &str) -> bool {
+    sonic_rs::get_from_str(chunk, ["signature"])
+        .is_ok_and(|signature| signature.as_str().is_some_and(|text| !text.is_empty()))
+}
+
+/// The verbatim text of every element of the `content` array of one
+/// `message.output.delta` event, in order.
+fn chunk_texts(data: &str) -> Result<Vec<String>, ProviderError> {
+    let malformed =
+        |error: sonic_rs::Error| protocol(format!("malformed message.output.delta event: {error}"));
+    let content = sonic_rs::get_from_str(data, ["content"]).map_err(malformed)?;
+    sonic_rs::to_array_iter(content.as_raw_str())
+        .map(|chunk| chunk.map(|chunk| chunk.as_raw_str().to_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(malformed)
 }
 
 /// One `conversation.response.error` event: a message and a numeric or string code.
