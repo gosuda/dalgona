@@ -303,6 +303,22 @@ fn request_body(captured: &[u8]) -> &[u8] {
     &captured[head_end + 4..]
 }
 
+fn stored_oauth(dir: &TestDir, id: &str, access: &str) -> Result<(), Box<dyn Error>> {
+    let mut auth = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+    auth.set(
+        id,
+        Credential::OAuth(OAuthCredential {
+            access_token: SecretString::from(access),
+            refresh_token: SecretString::from("stored-refresh"),
+            expires_at: None,
+            id_token: None,
+            account_id: None,
+        }),
+    )?;
+    auth.store()?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn chat_and_responses_complete_through_the_real_http_lifecycle() -> TestResult {
     let dir = TestDir::new()?;
@@ -538,6 +554,8 @@ async fn mapped_tool_names_round_trip_through_all_http_families() -> TestResult 
     let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
         "http://127.0.0.1:1/anthropic",
         "http://127.0.0.1:1/codex",
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
     )?;
     let set = ProviderSet::build(
         &config(mapped_entries(&servers), 0),
@@ -980,6 +998,8 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
     let endpoints = crate::auth::refresh::TokenEndpoints::with_bases(
         "http://127.0.0.1:1/anthropic",
         &token_base,
+        "http://127.0.0.1:1/workos",
+        "http://127.0.0.1:1/gitlab",
     )?;
     let set = ProviderSet::build(
         &config,
@@ -2279,6 +2299,66 @@ async fn open_error_text(
 }
 
 #[tokio::test]
+async fn droid_completions_wire_carries_registry_upstream() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![stream_reply(chat_reply())]).await?;
+    stored_oauth(&dir, "factory-droid", "workos-token")?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "factory-droid",
+                Family::Droid,
+                base,
+                None,
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("factory-droid", Family::Droid, "kimi-k3"))?;
+    let request = request(Family::Droid, "kimi-k3", vec![user_text("Read the file.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        head.starts_with("post /api/llm/o/v1/chat/completions "),
+        "{head}"
+    );
+    assert!(
+        head.contains("authorization: bearer workos-token"),
+        "{head}"
+    );
+    assert!(head.contains("x-api-provider: fireworks"), "{head}");
+    assert!(
+        String::from_utf8_lossy(request_body(&captured[0])).contains("You are Droid,"),
+        "the proxy requires the Droid identity prefix"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn copilot_chat_denial_resends_with_the_fallback_identity() -> TestResult {
     let dir = TestDir::new()?;
     let (base, mut server_task) =
@@ -2900,6 +2980,51 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
         ],
     )?;
     assert_prepared_base(&blank, "openai", default);
+    Ok(())
+}
+
+#[tokio::test]
+async fn droid_api_key_never_reaches_the_proxy() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![stream_reply(chat_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "droid-test",
+                Family::Droid,
+                base,
+                Some("DROID_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("DROID_TEST_KEY", "control-plane-key")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("droid-test", Family::Droid, "kimi-k3"))?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Droid, "kimi-k3", vec![user_text("Read the file.")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let events = collect(stream).await;
+    assert!(
+        matches!(&events, Err(ProviderError::InvalidRequest { message }) if message.contains("Factory API keys")),
+        "{events:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
     Ok(())
 }
 

@@ -95,6 +95,7 @@ fn methods_follow_the_row() {
         methods("openai-codex"),
         Some(vec![Method::Browser, Method::Device])
     );
+    assert_eq!(methods("factory-droid"), Some(vec![Method::Device]));
     assert_eq!(methods("radius"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("openrouter"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("nobody"), None);
@@ -108,6 +109,7 @@ fn a_vendor_family_is_named_by_its_first_row() {
     for (family, vendor) in [
         (Family::Codex, "openai-codex"),
         (Family::Anthropic, "anthropic"),
+        (Family::Droid, "factory-droid"),
         (Family::PiMessages, "radius"),
     ] {
         let first = PROVIDERS.iter().find(|def| def.family == family);

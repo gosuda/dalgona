@@ -163,6 +163,11 @@ pub enum Hook {
     /// Claude sign-in: the code exchange is JSON and echoes the PKCE verifier
     /// as `state`. The authorize query encodes spaces as `+`.
     ClaudeCode,
+    /// `WorkOS` sign-in (Factory Droid): the device authorization and token
+    /// endpoints take form-encoded bodies and the device poll delivers the
+    /// tokens directly, with no second code exchange. After sign-in and
+    /// after refresh the Factory whoami endpoint verifies the session.
+    WorkOsDevice,
 }
 
 impl ProviderDef {
@@ -307,6 +312,45 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
     shape: Shape::Codex,
 };
 
+pub(crate) const FACTORY_DROID: ProviderDef = ProviderDef {
+    id: "factory-droid",
+    name: "Factory Droid",
+    family: Family::Droid,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://api.factory.ai",
+    transport: Transport::Https,
+    // Factory API keys are control-plane only and answer 403 on the
+    // inference proxy; the row takes no API key.
+    key: None,
+    oauth: Some(OAuthSpec {
+        client_id: "client_01HNM792M5G5G1A2THWPXKFMXB",
+        client_id_env: None,
+        authorize_url: "https://api.workos.com/user_management/authorize/device",
+        token_url: "https://api.workos.com/user_management/authenticate",
+        scopes: &[],
+        query: &[],
+        redirect: Redirect {
+            host: "localhost",
+            port: 0,
+            path: "",
+        },
+        completion: Completion::Callback,
+        // Device-only: the vendor registered no browser redirect, so no
+        // `Method::Browser` is offered. `Method::Device` drives
+        // `authorize_device` directly without binding a callback listener.
+        browser: false,
+        device: Some(Device {
+            usercode_url: "https://api.workos.com/user_management/authorize/device",
+            poll_url: "https://api.workos.com/user_management/authenticate",
+            page_url: "https://workos.com/device",
+            redirect_uri: "",
+        }),
+        revoke_url: None,
+        hook: Hook::WorkOsDevice,
+    }),
+    shape: Shape::Plain,
+};
+
 pub(crate) const GITHUB_COPILOT: ProviderDef = ProviderDef {
     id: "github-copilot",
     name: "GitHub Copilot",
@@ -385,6 +429,7 @@ const VENDOR_ROWS: &[ProviderDef] = &[
     OPENAI,
     OPENAI_CODEX,
     ANTHROPIC,
+    FACTORY_DROID,
     GITHUB_COPILOT,
     RADIUS,
     OPENROUTER,

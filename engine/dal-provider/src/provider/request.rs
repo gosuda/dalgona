@@ -6,6 +6,7 @@ use dal_core::{
     Caps, ContextItem, Family, ModelInfo, ModelRequest, ModelRoute, SessionId, ThinkingLevel,
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::api::Http;
 use super::config::{AuthStyle, ProviderEntry};
@@ -25,6 +26,7 @@ use crate::{
         },
         codex::CodexRequest,
         copilot::{self, CopilotKey, CopilotRequest, IdentityRetry, Integration},
+        droid::{self, DroidRequest, RoutePolicy},
         responses::ResponsesRequest,
     },
     http::{self, Exchange},
@@ -156,6 +158,7 @@ pub(crate) async fn stream_attempt(
     }
     match context.family {
         Family::Bedrock => Box::pin(bedrock_attempt(&context, &credential, &cancel, &owner)).await,
+        Family::Droid => droid_attempt(&context, &credential, &cancel).await,
         _ => {
             let parts =
                 build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
@@ -468,6 +471,95 @@ pub(crate) fn is_azure_entry(entry: &ProviderEntry) -> bool {
             || !entry.settings.deployments.is_empty())
 }
 
+/// The default `x-api-provider` of one Droid model id: the first entry of
+/// its `upstream-rotation` in the pinned Factory registry. Ids outside the
+/// registry fall back to their route's dominant upstream; that fallback is
+/// a join default, not a pin fact.
+pub(crate) fn droid_default_upstream(model: &str) -> &'static str {
+    if let Some(upstream) = DROID_UPSTREAMS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, upstream)| *upstream)
+    {
+        return upstream;
+    }
+    match droid::wire_for(model) {
+        droid::Wire::Anthropic => "anthropic",
+        droid::Wire::Responses => "openai",
+        droid::Wire::Gemini => "google",
+        droid::Wire::Completions => "fireworks",
+    }
+}
+
+/// The default `x-api-provider` per Droid model id, transcribed from the
+/// first entry of each `upstream-rotation` in the pinned Factory registry.
+/// Region narrowing (`region-upstreams-eu/us`) is not applied: the stream
+/// path carries no region signal.
+const DROID_UPSTREAMS: &[(&str, &str)] = &[
+    ("aster-07-15", "anthropic"),
+    ("atlas-07-21", "anthropic"),
+    ("claude-fable-5", "anthropic"),
+    ("claude-fable-5.1", "anthropic"),
+    ("claude-haiku-4-5-20251001", "anthropic"),
+    ("claude-haiku-5-5", "anthropic"),
+    ("claude-opus-4-5-20251101", "anthropic"),
+    ("claude-opus-4-6", "anthropic"),
+    ("claude-opus-4-7", "anthropic"),
+    ("claude-opus-4-8", "anthropic"),
+    ("claude-opus-4-8-fast", "anthropic"),
+    ("claude-opus-5", "anthropic"),
+    ("claude-opus-5-5", "anthropic"),
+    ("claude-opus-5-5-fast", "anthropic"),
+    ("claude-opus-5-fast", "anthropic"),
+    ("claude-sonnet-4-5-20250929", "anthropic"),
+    ("claude-sonnet-4-6", "anthropic"),
+    ("claude-sonnet-5", "anthropic"),
+    ("claude-sonnet-5-5", "anthropic"),
+    ("deepseek-v4-flash-0731", "fireworks"),
+    ("deepseek-v4-pro", "fireworks"),
+    ("deepseek-v4.1-flash", "fireworks"),
+    ("garnet-07-15", "google"),
+    ("gemini-3-flash-preview", "google"),
+    ("gemini-3.1-pro-preview", "google"),
+    ("gemini-3.5-flash", "google"),
+    ("gemini-3.6-flash", "google"),
+    ("gemini-3.7-flash", "google"),
+    ("gemini-3.8-flash", "google"),
+    ("glm-5.2", "baseten"),
+    ("glm-5.2-fast", "baseten"),
+    ("glm-5.3", "fireworks"),
+    ("glm-5.3-flash", "fireworks"),
+    ("gpt-5.2", "openai"),
+    ("gpt-5.3-codex", "openai"),
+    ("gpt-5.3-codex-fast", "openai"),
+    ("gpt-5.4", "openai"),
+    ("gpt-5.4-fast", "openai"),
+    ("gpt-5.4-mini", "openai"),
+    ("gpt-5.4-mini-fast", "openai"),
+    ("gpt-5.5", "openai"),
+    ("gpt-5.5-fast", "openai"),
+    ("gpt-5.5-pro", "openai"),
+    ("gpt-5.6-luna", "openai"),
+    ("gpt-5.6-sol", "openai"),
+    ("gpt-5.6-sol-fast", "openai"),
+    ("gpt-5.6-terra", "openai"),
+    ("gpt-6-astra", "openai"),
+    ("gpt-6-luna", "openai"),
+    ("gpt-6-sol", "openai"),
+    ("gpt-6.1-sol", "openai"),
+    ("grok-4.5", "xai"),
+    ("grok-4.6", "xai"),
+    ("grok-4.7", "xai"),
+    ("inkling", "fireworks"),
+    ("kimi-k3", "fireworks"),
+    ("minimax-m2.7", "fireworks"),
+    ("minimax-m3", "fireworks"),
+    ("mistral-large-4", "mistral"),
+    ("mistral-medium-3.5", "mistral"),
+    ("nemotron-3-ultra", "baseten"),
+    ("qwen3.8-max", "fireworks"),
+];
+
 /// Lowers one Azure-routed request through the Azure adapter: deployment
 /// routing, the `api-version` query, and the `api-key` header.
 ///
@@ -506,6 +598,44 @@ fn azure_parts(
         secrets,
         None,
     ))
+}
+
+/// Runs one Droid turn through the proxy lifecycle: the wire lowers the
+/// request to its route shape and the family owns send, rejection mapping,
+/// redaction, and replay rebinding.
+///
+/// The upstream router is the registry default for the model id; the
+/// per-turn assistant-message id is fresh per attempt.
+async fn droid_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let bearer = droid::require_bearer(credential).map_err(AttemptFailure::Provider)?;
+    let model = context.request.model.id().to_owned();
+    let request_id = Uuid::new_v4().to_string();
+    let policy = RoutePolicy {
+        reasoning_summary: context.entry.supports_reasoning_summaries,
+        display_supported: context.entry.display_supported,
+        max_output: context.entry.max_output,
+        ..Default::default()
+    };
+    let wire = droid::build_wire(&DroidRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        base_url: &context.base_url,
+        upstream: droid_default_upstream(&model),
+        session: context.session,
+        request_id: &request_id,
+        bearer,
+        policy: &policy,
+    })
+    .map_err(AttemptFailure::Provider)?;
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(None),
+        result = droid::open(&context.client, wire) => result.map(Some),
+    }
 }
 
 /// The Copilot token an API-key credential carries; an OAuth sign-in is
