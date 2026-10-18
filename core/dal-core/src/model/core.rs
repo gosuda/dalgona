@@ -16,6 +16,43 @@ pub enum Family {
     /// Anthropic Messages.
     #[serde(rename = "anthropic")]
     Anthropic,
+    /// AWS Bedrock Converse API.
+    #[serde(rename = "bedrock")]
+    Bedrock,
+    /// Cursor agent API over Connect framing.
+    #[serde(rename = "cursor")]
+    Cursor,
+    /// Devin API over Connect framing.
+    #[serde(rename = "devin")]
+    Devin,
+    /// Droid API.
+    #[serde(rename = "droid")]
+    Droid,
+    /// GitLab Duo API.
+    #[serde(rename = "gitlab")]
+    GitLab,
+    /// Google Generative Language API.
+    #[serde(rename = "google-generative-ai")]
+    GoogleGenerativeAi,
+    /// Google Vertex AI API.
+    #[serde(rename = "google-vertex")]
+    GoogleVertex,
+    /// Google Gemini CLI API.
+    #[serde(rename = "google-gemini-cli")]
+    GoogleGeminiCli,
+    /// Google Antigravity API.
+    #[serde(rename = "google-antigravity")]
+    GoogleAntigravity,
+    /// Mistral conversations API.
+    #[serde(rename = "mistral")]
+    Mistral,
+    /// Ollama chat API.
+    #[serde(rename = "ollama")]
+    Ollama,
+    /// The pi-messages gateway protocol: one JSON POST, then an SSE stream of
+    /// serialized assistant-message events.
+    #[serde(rename = "pi-messages")]
+    PiMessages,
 }
 
 /// The provider API family and exact model that produced an assistant message.
