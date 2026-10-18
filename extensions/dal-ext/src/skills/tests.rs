@@ -741,6 +741,68 @@ fn missing_skill_empty_registry_names_the_request() {
     assert!(text.contains("no skills are loaded"), "{text}");
 }
 
+fn extension_record(name: &str, description: &str, body: &str) -> SkillRecord {
+    SkillRecord {
+        name: dal_core::Name::parse(name).unwrap(),
+        description: description.into(),
+        body: Arc::from(body),
+        letter2image: false,
+        mcp: None,
+    }
+}
+
+fn plugin_extension(plugin: &str, skills: Vec<SkillRecord>) -> Extension {
+    let mut builder = ExtensionBuilder::new(plugin, "0.1.0", ServiceSet::EMPTY).unwrap();
+    for skill in skills {
+        builder = builder.skill(skill);
+    }
+    builder.build().unwrap()
+}
+
+#[test]
+fn merge_extensions_settles_claims_across_extension_records() {
+    let zeta = plugin_extension(
+        "zeta",
+        vec![
+            extension_record("focus", "zeta focus", "zeta body"),
+            extension_record("other", "zeta other", "zeta body"),
+        ],
+    );
+    let alpha = plugin_extension(
+        "alpha",
+        vec![
+            extension_record("focus", "alpha focus", "alpha body"),
+            extension_record("solo", "alpha solo", "alpha body"),
+        ],
+    );
+    let quiet = plugin_extension("mid", Vec::new());
+    // Slice order is not merge order: `zeta` is listed first, but `alpha`
+    // still owns `focus`, and the skill-free extension contributes nothing.
+    // This is the product seam `cli/dalgon/src/product.rs` merges through.
+    let Err(conflict) = SkillRegistry::merge_extensions(&[zeta, alpha, quiet]) else {
+        panic!("conflicting extension claims merged cleanly");
+    };
+    assert_eq!(
+        conflict.to_string(),
+        "skill 'focus' is already registered by plugin 'alpha'"
+    );
+    let registry = conflict.registry;
+    let owners: Vec<(&str, &str)> = registry
+        .iter()
+        .map(|s| (&*s.name, &*s.plugin))
+        .collect();
+    // The clash rejects all of `zeta`: its uncontested `other` leaks nothing.
+    assert_eq!(owners, [("focus", "alpha"), ("solo", "alpha")]);
+    assert_eq!(&*registry.body("focus").unwrap(), "alpha body");
+    assert_eq!(registry.body("other"), None);
+    assert_eq!(
+        registry.section(&empty()).as_deref(),
+        Some(
+            "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.\n- focus: alpha focus\n- solo: alpha solo"
+        )
+    );
+}
+
 #[test]
 fn missing_skill_lists_all_twenty_names_without_a_tail_count() {
     let mut all = Vec::new();
