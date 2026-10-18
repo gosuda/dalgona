@@ -271,6 +271,15 @@ fn stream_reply(body: String) -> Reply {
     }
 }
 
+/// The body bytes after the request head's blank line.
+fn request_body(captured: &[u8]) -> &[u8] {
+    let head_end = captured
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("a request head ends");
+    &captured[head_end + 4..]
+}
+
 #[tokio::test]
 async fn chat_and_responses_complete_through_the_real_http_lifecycle() -> TestResult {
     let dir = TestDir::new()?;
@@ -1971,5 +1980,395 @@ async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -
     for header in ["authorization:", "x-api-key:", "api-key:"] {
         assert!(!head.contains(header), "{header} reached the wire: {head}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_chat_uses_deployment_and_api_version() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(chat_reply())]).await?;
+    let mut azure_entry = entry(
+        "azure-test",
+        Family::Chat,
+        base,
+        Some("AZURE_TEST_KEY"),
+        1,
+        Transport::Https,
+    );
+    azure_entry.auth = AuthStyle::ApiKey;
+    azure_entry.settings.api_version = Some("2025-01-01-preview".into());
+    azure_entry
+        .settings
+        .deployments
+        .insert("gpt-test".into(), "prod".into());
+    let set = ProviderSet::new(
+        &config(vec![azure_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[("AZURE_TEST_KEY", "az-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("azure-test", Family::Chat, "gpt-test"))?;
+    let request = request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        head.starts_with(
+            "post /v1/deployments/prod/chat/completions?api-version=2025-01-01-preview "
+        ),
+        "{head}"
+    );
+    assert!(head.contains("api-key: az-secret"), "{head}");
+    let body = String::from_utf8_lossy(request_body(&captured[0]));
+    assert!(body.starts_with(r#"{"model":"prod","#), "{body}");
+    assert!(!body.contains(r#""model":"gpt-test""#), "{body}");
+    Ok(())
+}
+
+/// The built-in `openai` row shaped as Azure (`api-key` header, `api_version`),
+/// the way a host opts a row into the Azure adapter; `extra` is more TOML for
+/// the same table.
+fn azure_row(extra: &str) -> String {
+    format!(
+        "[providers.openai]\nauth = 'api-key'\nkey_env = 'AZURE_TEST_KEY'\napi_version = '2025-03-01-preview'\n{extra}"
+    )
+}
+
+const AZURE_KEY: (&str, &str) = ("AZURE_TEST_KEY", "az-secret");
+
+fn model_list_reply() -> Reply {
+    Reply {
+        status: 200,
+        content_type: "application/json",
+        body: br#"{"data":[{"id":"gpt-azure"}]}"#.to_vec(),
+    }
+}
+
+/// Asserts that provider `id` carries `expected` where each request path reads
+/// its base URL: the slot that serves catalog and inference, and the
+/// configuration the set keeps. One prepared endpoint, no second copy.
+fn assert_prepared_base(set: &ProviderSet, id: &str, expected: &str) {
+    let slot = &set
+        .inner
+        .providers
+        .get(id)
+        .unwrap_or_else(|| panic!("{id} is configured"))
+        .entry
+        .base_url;
+    let kept = &set
+        .inner
+        .config
+        .providers
+        .iter()
+        .find(|entry| &*entry.id == id)
+        .unwrap_or_else(|| panic!("{id} is configured"))
+        .base_url;
+    assert_eq!(&**slot, expected, "{id}: the serving slot's base URL");
+    assert_eq!(&**kept, expected, "{id}: the kept configuration's base URL");
+}
+
+/// Opens one text turn on the `openai` Responses route and checks its text.
+async fn azure_hello(set: &ProviderSet) -> TestResult {
+    let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Responses,
+                    "gpt-azure",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello")),
+        "the Azure turn streamed no text"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_environment_base_url_serves_catalog_and_turn_when_base_url_is_omitted() -> TestResult
+{
+    let dir = TestDir::new()?;
+    let (base, mut asked) = server(
+        "/azure",
+        vec![model_list_reply(), stream_reply(responses_reply())],
+    )
+    .await?;
+    // The base URL variable outranks the resource variable, so a resource
+    // name nothing needs is never validated; padding is trimmed.
+    let padded = format!("  {base}  ");
+    let set = preset_set(
+        &dir,
+        &azure_row(""),
+        &[
+            AZURE_KEY,
+            ("AZURE_OPENAI_BASE_URL", padded.as_str()),
+            ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
+        ],
+    )?;
+    // Checked before any request: a set that kept the row default would send
+    // the key to the default host.
+    assert_prepared_base(&set, "openai", &base);
+
+    let listed = set.load_models("openai").await?;
+    assert_eq!(
+        listed.source,
+        CatalogSource::Live,
+        "{:?}",
+        listed.live_error
+    );
+    azure_hello(&set).await?;
+
+    let requests = asked.join_next().await.expect("server completes")??;
+    assert_eq!(requests.len(), 2);
+    let list = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
+    assert!(list.starts_with("get /azure/models "), "{list}");
+    assert!(list.contains("api-key: az-secret"), "{list}");
+    assert!(!list.contains("authorization:"), "{list}");
+    let turn = String::from_utf8_lossy(&requests[1]).to_ascii_lowercase();
+    assert!(
+        turn.starts_with("post /azure/responses?api-version=2025-03-01-preview "),
+        "{turn}"
+    );
+    assert!(turn.contains("api-key: az-secret"), "{turn}");
+    assert!(!turn.contains("authorization:"), "{turn}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_resource_name_derives_the_endpoint_when_base_url_is_omitted() -> TestResult {
+    let dir = TestDir::new()?;
+    let derived = "https://my-res.openai.azure.com/openai/v1";
+    // A blank base URL variable is unset; the padded resource name is trimmed.
+    let set = preset_set(
+        &dir,
+        &azure_row(""),
+        &[
+            AZURE_KEY,
+            ("AZURE_OPENAI_BASE_URL", "   "),
+            ("AZURE_OPENAI_RESOURCE_NAME", " my-res "),
+        ],
+    )?;
+    assert_prepared_base(&set, "openai", derived);
+    let provider = set.provider(resolved("openai", Family::Responses, "gpt-azure"))?;
+    let Provider::Responses(http) = &provider else {
+        return Err(io::Error::other("the openai row binds the Responses variant").into());
+    };
+    assert_eq!(&*http.entry.base_url, derived);
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_invalid_resource_name_refuses_an_entry_with_an_omitted_base_url() -> TestResult {
+    let dir = TestDir::new()?;
+    for bad in ["evil.example/x", "a.b", "-x", "x-", "x@evil.com"] {
+        let built = preset_set(
+            &dir,
+            &azure_row(""),
+            &[AZURE_KEY, ("AZURE_OPENAI_RESOURCE_NAME", bad)],
+        );
+        let Err(error) = built else {
+            return Err(io::Error::other(format!("resource {bad:?} was accepted")).into());
+        };
+        let Some(ProviderError::InvalidRequest { message }) = error.downcast_ref::<ProviderError>()
+        else {
+            return Err(io::Error::other(format!("{bad:?} failed untyped: {error}")).into());
+        };
+        assert!(
+            message.contains("openai")
+                && message.contains("AZURE_OPENAI_RESOURCE_NAME")
+                && message.contains(bad),
+            "{bad:?}: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_explicit_base_url_beats_the_environment_and_its_invalid_resource() -> TestResult {
+    let dir = TestDir::new()?;
+    let (explicit, mut asked) = server(
+        "/explicit",
+        vec![model_list_reply(), stream_reply(responses_reply())],
+    )
+    .await?;
+    let (decoy, mut decoy_asked) = server("/decoy", vec![stream_reply(responses_reply())]).await?;
+    let set = preset_set(
+        &dir,
+        &azure_row(&format!("base_url = '{explicit}'\n")),
+        &[
+            AZURE_KEY,
+            ("AZURE_OPENAI_BASE_URL", decoy.as_str()),
+            ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
+        ],
+    )?;
+    assert_prepared_base(&set, "openai", &explicit);
+
+    let listed = set.load_models("openai").await?;
+    assert_eq!(
+        listed.source,
+        CatalogSource::Live,
+        "{:?}",
+        listed.live_error
+    );
+    azure_hello(&set).await?;
+
+    let requests = asked.join_next().await.expect("server completes")??;
+    assert_eq!(requests.len(), 2);
+    let list = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
+    assert!(list.starts_with("get /explicit/models "), "{list}");
+    assert!(list.contains("api-key: az-secret"), "{list}");
+    let turn = String::from_utf8_lossy(&requests[1]).to_ascii_lowercase();
+    assert!(turn.starts_with("post /explicit/responses?"), "{turn}");
+    assert!(turn.contains("api-key: az-secret"), "{turn}");
+    // The environment endpoint never saw a connection, so it never saw the key.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), decoy_asked.join_next())
+            .await
+            .is_err()
+    );
+    decoy_asked.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row() -> TestResult {
+    let dir = TestDir::new()?;
+    let default = crate::find("openai")
+        .expect("the openai row exists")
+        .base_url;
+    let env = [
+        AZURE_KEY,
+        ("AZURE_OPENAI_BASE_URL", "http://127.0.0.1:9/decoy"),
+        ("AZURE_OPENAI_RESOURCE_NAME", "my-res"),
+    ];
+
+    // Naming the row's own default is still naming a URL: it wins, because
+    // omission is what the table said, not what the value equals.
+    let configured = preset_set(&dir, &azure_row(&format!("base_url = '{default}'\n")), &env)?;
+    assert_prepared_base(&configured, "openai", default);
+
+    // A named Azure-shaped provider names its own base URL and keeps it.
+    let named = preset_set(
+        &dir,
+        concat!(
+            "[providers.azure-named]\napi = 'openai_responses'\n",
+            "base_url = 'https://named.example.com/openai/v1'\n",
+            "key_env = 'AZURE_TEST_KEY'\nauth = 'api-key'\n",
+        ),
+        &env,
+    )?;
+    assert_prepared_base(&named, "azure-named", "https://named.example.com/openai/v1");
+
+    // A row without the Azure shape never takes an Azure variable, and an
+    // invalid resource name no Azure entry needs refuses nothing.
+    let plain = preset_set(
+        &dir,
+        "",
+        &[
+            AZURE_KEY,
+            ("AZURE_OPENAI_BASE_URL", "http://127.0.0.1:9/decoy"),
+            ("AZURE_OPENAI_RESOURCE_NAME", "evil.example/x"),
+        ],
+    )?;
+    assert_prepared_base(&plain, "openai", default);
+
+    // Blank variables name nothing: the Azure-shaped row keeps its default.
+    let blank = preset_set(
+        &dir,
+        &azure_row(""),
+        &[
+            AZURE_KEY,
+            ("AZURE_OPENAI_BASE_URL", "  "),
+            ("AZURE_OPENAI_RESOURCE_NAME", "\t"),
+        ],
+    )?;
+    assert_prepared_base(&blank, "openai", default);
+    Ok(())
+}
+
+fn compact_request(model: &str) -> ModelRequest {
+    let mut compact = request(Family::Responses, model, vec![user_text("Summarize.")]);
+    compact.purpose = Purpose::Compact;
+    compact
+}
+
+#[tokio::test]
+async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
+    // The control for the gate above: the same row with the bearer style
+    // posts to the plain compaction endpoint, so the local-only outcome
+    // comes from the Azure and Copilot shapes, not from the capability gate.
+    let dir = TestDir::new()?;
+    let body = br#"{"output":[{"type":"compaction","encrypted_content":"opaque"}]}"#;
+    let (base, mut server_task) = server(
+        "/v1",
+        vec![Reply {
+            status: 200,
+            content_type: "application/json",
+            body: body.to_vec(),
+        }],
+    )
+    .await?;
+    let plain = entry(
+        "openai",
+        Family::Responses,
+        base,
+        Some("PLAIN_KEY"),
+        1,
+        Transport::Https,
+    );
+    let set = ProviderSet::new(
+        &config(vec![plain], 0),
+        identity(),
+        EnvSnapshot::test(&[("PLAIN_KEY", "plain-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("openai", Family::Responses, "gpt-5.4"))?;
+    let outcome = provider
+        .compact(
+            SessionId::new_v7(),
+            &compact_request("gpt-5.4"),
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let Some(CompactOutcome::Compacted(history)) = outcome else {
+        return Err(io::Error::other(format!("not compacted: {outcome:?}")).into());
+    };
+    assert_eq!(history.family, Family::Responses);
+    assert_eq!(history.items.len(), 1);
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /v1/responses/compact "), "{head}");
+    assert!(head.contains("authorization: bearer plain-secret"), "{head}");
     Ok(())
 }

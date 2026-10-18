@@ -16,6 +16,7 @@ use crate::{
     catalog::{self, CatalogFetch, ModelFetch, ResolvedModel},
     compact::{self, CompactOutcome},
     error::{self, ProviderError, UsageCheckReason},
+    family::azure,
     lifecycle::{self, Plan},
     stream::{EventStream, NoticeSink},
     thinking::{self, BeforeRequest, BeforeRequestPatch, ThinkingPlan},
@@ -127,6 +128,9 @@ impl Provider {
                     "WebSocket transport is supported only by Responses and Codex",
                 ),
             });
+        }
+        if request_mod::is_azure_entry(&entry) {
+            azure::require_https(&entry.id, entry.transport)?;
         }
         // An entry that authenticates nothing admits the credential-less
         // row; every other style still refuses to build without one.
@@ -412,11 +416,18 @@ impl Provider {
         );
         let ctx = request_mod::stream_context(http, request, thinking, session);
         let ctx_for_attempt = ctx.clone();
+        let owner_for_attempt = Arc::clone(owner);
         let attempt = move |credential: &Credential, attempt_cancel: &CancellationToken| {
             let ctx = ctx_for_attempt.clone();
             let credential = credential.clone();
             let attempt_cancel = attempt_cancel.clone();
-            async move { request_mod::stream_attempt(ctx, credential, attempt_cancel).await }
+            let owner = Arc::clone(&owner_for_attempt);
+            Box::pin(request_mod::stream_attempt(
+                ctx,
+                credential,
+                attempt_cancel,
+                owner,
+            ))
         };
         let refresher = Arc::clone(&owner.refresher);
         let (id, def) = (http.entry.id.clone(), http.entry.def);
@@ -575,19 +586,10 @@ impl Provider {
     /// # Errors
     /// Returns `InvalidRequest` when this provider is not HTTP-backed or the
     /// request is not a compact-purpose request.
-    pub async fn compact(
-        &self,
-        session: SessionId,
+    fn check_compact_preconditions(
+        http: &Http,
         request: &ModelRequest,
-        notices: NoticeSink,
-        cancel: &CancellationToken,
     ) -> Result<Option<CompactOutcome>, ProviderError> {
-        if let Self::Scripted(script) = self {
-            return script.compact().map(Some);
-        }
-        let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
-            message: String::from("provider is not HTTP-backed"),
-        })?;
         request_mod::ensure_request(http, request)?;
         if request.purpose != Purpose::Compact {
             return Err(ProviderError::InvalidRequest {
@@ -604,10 +606,47 @@ impl Provider {
         if !http.resolved.entry.remote_compact {
             return Ok(Some(CompactOutcome::Unsupported));
         }
+        // A row's compaction capability describes the plain endpoint it was
+        // built for. An Azure- or Copilot-routed entry sends its turns
+        // through its own adapter (deployment routing, `api-version`, the
+        // identity headers), and no remote compaction request is built for
+        // either, so the plain `/responses/compact` call would reach the
+        // wrong surface: history compacts locally instead.
+        if request_mod::is_azure_entry(&http.entry) {
+            return Ok(Some(CompactOutcome::Unsupported));
+        }
         if http.entry.family == Family::Codex && !matches!(&http.credential, Credential::OAuth(_)) {
             return Err(ProviderError::InvalidRequest {
                 message: format!("{} needs an OAuth credential", http.entry.id),
             });
+        }
+        Ok(None)
+    }
+
+    /// Compacts one session's context remotely through the provider when the
+    /// family supports it, returning the outcome. `None` means the caller
+    /// should compact locally.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` when this provider is not HTTP-backed or the
+    /// request is not a compact-purpose request, `UnresolvedBlob` when the
+    /// request still carries unresolved content, and `Provider` on wire or
+    /// remote failures.
+    pub async fn compact(
+        &self,
+        session: SessionId,
+        request: &ModelRequest,
+        notices: NoticeSink,
+        cancel: &CancellationToken,
+    ) -> Result<Option<CompactOutcome>, ProviderError> {
+        if let Self::Scripted(script) = self {
+            return script.compact().map(Some);
+        }
+        let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from("provider is not HTTP-backed"),
+        })?;
+        if let Some(outcome) = Self::check_compact_preconditions(http, request)? {
+            return Ok(Some(outcome));
         }
         let owner = http
             .owner

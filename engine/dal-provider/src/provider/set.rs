@@ -16,6 +16,7 @@ use crate::{
     },
     catalog::ResolvedModel,
     error::ProviderError,
+    family::azure,
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
     scripted::Script,
@@ -84,7 +85,9 @@ impl ProviderSet {
     ///
     /// # Errors
     /// Returns the URL admission or usage-endpoint error for invalid provider
-    /// configuration. The auth file is loaded only when a credential is resolved.
+    /// configuration, or names the provider whose defaulted Azure-shaped entry
+    /// names an invalid `AZURE_OPENAI_RESOURCE_NAME`. The auth file is loaded
+    /// only when a credential is resolved.
     pub fn new(
         config: &ProviderConfig,
         identity: ProviderIdentity,
@@ -102,20 +105,22 @@ impl ProviderSet {
         )
     }
 
-    pub(super) fn build(
-        config: &ProviderConfig,
-        identity: ProviderIdentity,
-        env: EnvSnapshot,
-        data_dir: &Path,
-        cache_dir: &Path,
-        endpoints: TokenEndpoints,
-    ) -> Result<Self, ProviderError> {
-        let user_agent = identity.user_agent().into_boxed_str();
+    fn build_provider_slots(
+        providers_list: &[ProviderEntry],
+        user_agent: &str,
+    ) -> Result<
+        (
+            HashMap<Box<str>, http::LazyClient>,
+            HashMap<Box<str>, ProviderSlot>,
+            HashMap<Box<str>, Arc<UsageChecker>>,
+        ),
+        ProviderError,
+    > {
         let mut clients: HashMap<Box<str>, http::LazyClient> = HashMap::new();
-        let mut providers = HashMap::with_capacity(config.providers.len());
+        let mut providers = HashMap::with_capacity(providers_list.len());
         let mut usage = HashMap::new();
 
-        for provider in &config.providers {
+        for provider in providers_list {
             http::check_base_url(provider.family, &provider.base_url)?;
             let origin = origin_key(&provider.base_url, provider.family)?;
             let client = clients.entry(origin).or_default().clone();
@@ -146,7 +151,7 @@ impl ProviderSet {
                 && usage
                     .insert(
                         provider.id.clone(),
-                        Arc::new(UsageChecker::new(client, &provider.base_url, &user_agent)?),
+                        Arc::new(UsageChecker::new(client, &provider.base_url, user_agent)?),
                     )
                     .is_some()
             {
@@ -158,6 +163,25 @@ impl ProviderSet {
                 });
             }
         }
+        Ok((clients, providers, usage))
+    }
+
+    pub(super) fn build(
+        config: &ProviderConfig,
+        identity: ProviderIdentity,
+        env: EnvSnapshot,
+        data_dir: &Path,
+        cache_dir: &Path,
+        endpoints: TokenEndpoints,
+    ) -> Result<Self, ProviderError> {
+        let user_agent = identity.user_agent().into_boxed_str();
+        // One shared effective endpoint per entry, resolved before any slot,
+        // client, or kept configuration is built from it: the catalog and
+        // inference paths both read the prepared entries, so no second copy
+        // can go stale.
+        let config = with_azure_endpoints(config, &env)?;
+        let (clients, providers, usage) =
+            Self::build_provider_slots(&config.providers, &user_agent)?;
 
         let refresher = Arc::new(Refresher::new(
             user_agent.clone(),
@@ -178,7 +202,7 @@ impl ProviderSet {
         };
         Ok(Self {
             inner: Arc::new(ProviderSetInner {
-                config: config.clone(),
+                config,
                 identity,
                 user_agent,
                 data_dir: data_dir.to_path_buf(),
@@ -362,6 +386,38 @@ impl ProviderSet {
         self.inner.ws.end_session(session);
         drop(lock(&self.inner.notices).remove(session));
     }
+}
+
+/// Resolves the effective endpoint of every Azure-shaped entry whose table
+/// named no `base_url`: the captured `AZURE_OPENAI_BASE_URL`, else the
+/// canonical endpoint of the validated `AZURE_OPENAI_RESOURCE_NAME`, else the
+/// row default the entry already carries. An explicit table URL always wins,
+/// even when it equals the row default, so an invalid resource name the entry
+/// never needs is never validated and can neither override the URL nor fail
+/// the set. A blank variable names nothing. Entries without the Azure shape
+/// are untouched, whatever the Azure variables hold.
+///
+/// The configuration stays pure: the environment here is the host's captured
+/// snapshot, never ambient process state.
+///
+/// # Errors
+///
+/// [`ProviderError::InvalidRequest`] naming the provider when a defaulted
+/// Azure-shaped entry names a resource that is not one DNS label.
+fn with_azure_endpoints(
+    config: &ProviderConfig,
+    env: &EnvSnapshot,
+) -> Result<ProviderConfig, ProviderError> {
+    let mut prepared = config.clone();
+    for entry in &mut prepared.providers {
+        if !entry.settings.base_url_defaulted || !super::request::is_azure_entry(entry) {
+            continue;
+        }
+        if let Some(base) = azure::base_url_from_env(&entry.id, env)? {
+            entry.base_url = base.into();
+        }
+    }
+    Ok(prepared)
 }
 
 impl std::fmt::Debug for ProviderSet {

@@ -1,5 +1,7 @@
 //! Provider request assembly: contexts, wire builders, and parameter shaping.
 
+use std::sync::Arc;
+
 use dal_core::{
     Caps, ContextItem, Family, ModelInfo, ModelRequest, ModelRoute, SessionId, ThinkingLevel,
 };
@@ -7,14 +9,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::api::Http;
 use super::config::{AuthStyle, ProviderEntry};
+use super::set::ProviderSetInner;
 use crate::{
-    auth::credential::{Credential, OAuthCredential},
+    auth::credential::{Credential, EnvSnapshot, OAuthCredential},
     catalog::{CatalogEntry, ResolvedModel},
     compact::{self, CompactedHistory},
     error::ProviderError,
     family::{
         self,
         anthropic::{AnthropicAuth, AnthropicRequest},
+        azure::{self, AzureRequest, AzureSettings},
         codex::CodexRequest,
         responses::ResponsesRequest,
     },
@@ -80,6 +84,7 @@ pub(crate) async fn stream_attempt(
     context: StreamContext,
     credential: Credential,
     cancel: CancellationToken,
+    owner: Arc<ProviderSetInner>,
 ) -> Result<Option<EventStream>, AttemptFailure> {
     if context.family == Family::Codex {
         let Credential::OAuth(oauth) = &credential else {
@@ -102,6 +107,16 @@ pub(crate) async fn stream_attempt(
                 result.map(Some)
             }
         };
+    }
+    let slot = owner.providers.get(&context.provider).ok_or_else(|| {
+        AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!("provider {} is not configured", context.provider),
+        })
+    })?;
+    if is_azure_entry(&slot.entry) {
+        let parts = azure_parts(&context, &credential, &slot.entry, &owner.env)
+            .map_err(AttemptFailure::Provider)?;
+        return send_parts(&context, &credential, &cancel, parts).await;
     }
     let parts = build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
     send_parts(&context, &credential, &cancel, parts).await
@@ -141,6 +156,59 @@ async fn send_parts(
         secrets,
         None,
     )))
+}
+
+/// Whether `entry` routes through Azure `OpenAI`: a Chat or Responses row
+/// with the Azure `api-key` style or Azure settings.
+///
+/// The style gate matters: [`azure::build`] serves only those two families,
+/// so any other family keeps its own path whatever its auth style.
+#[must_use]
+pub(crate) fn is_azure_entry(entry: &ProviderEntry) -> bool {
+    matches!(entry.family, Family::Chat | Family::Responses)
+        && (entry.auth == AuthStyle::ApiKey
+            || entry.settings.api_version.is_some()
+            || !entry.settings.deployments.is_empty())
+}
+
+/// Lowers one Azure-routed request through the Azure adapter: deployment
+/// routing, the `api-version` query, and the `api-key` header.
+///
+/// Entry settings win over the captured environment snapshot, per the
+/// adapter contract; the decoder stays the surface family's.
+fn azure_parts(
+    context: &StreamContext,
+    credential: &Credential,
+    entry: &ProviderEntry,
+    env: &EnvSnapshot,
+) -> Result<StreamRequestParts, ProviderError> {
+    let settings = AzureSettings {
+        api_version: entry.settings.api_version.clone(),
+        deployments: entry
+            .settings
+            .deployments
+            .iter()
+            .map(|(model, deployment)| (model.clone(), deployment.clone()))
+            .collect(),
+    }
+    .over(AzureSettings::from_env(env));
+    let wire = azure::build(&AzureRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        reasoning_summary: context.entry.supports_reasoning_summaries,
+        provider: &context.provider,
+        base_url: &context.base_url,
+        settings: &settings,
+        credential,
+    })?;
+    let url = wire.endpoint()?;
+    let secrets = vec![wire.secret.clone()];
+    Ok((
+        wire.into_request(&context.client, url),
+        context.user_agent.clone(),
+        secrets,
+        None,
+    ))
 }
 
 /// A built streaming request with its user agent, redaction secrets, and the
