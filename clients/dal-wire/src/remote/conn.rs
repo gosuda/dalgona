@@ -902,6 +902,7 @@ mod tests {
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
     use super::{Connection, SubState, unsubscribe_task};
+    use crate::error::WireError;
     use crate::remote::RemoteEndpoint;
 
     const DROPPED: &str = "018f0f62-3b00-7000-8000-0000000000d1";
@@ -1173,5 +1174,79 @@ mod tests {
         )
         .await
         .expect("the stale cleanup finishes");
+    }
+
+    /// A `401` upgrade denial over real loopback ends `reconnect` with `Auth`
+    /// instead of retrying forever.
+    #[tokio::test]
+    async fn reconnect_stops_on_auth_via_loopback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let serve = async {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                if request.len() > 16_384 {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("deny upgrade");
+        };
+        let url = url::Url::parse(&format!("ws://{address}/")).expect("socket url");
+        let endpoint = RemoteEndpoint::WebSocket(url);
+        let (epoch, _) = tokio::sync::watch::channel(0);
+        let core = Arc::new(super::Core {
+            state: std::sync::Mutex::new(super::State {
+                next_id: 1,
+                link: super::Link::Down { epoch: 0 },
+                pending: std::collections::HashMap::new(),
+                subs: std::collections::HashMap::new(),
+                host_sub: None,
+                next_fence: 1,
+            }),
+            changed: tokio::sync::Notify::new(),
+            epoch,
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async {
+                tokio::join!(
+                    serve,
+                    super::reconnect(Arc::clone(&core), endpoint, None, 0)
+                )
+            }),
+        )
+        .await
+        .expect("auth stops the reconnect");
+        match outcome.1 {
+            super::Event::Failed { error, .. } => {
+                assert!(
+                    matches!(error, WireError::Auth),
+                    "a 401 denial stops with Auth, got {error:?}"
+                );
+            }
+            super::Event::Connected { epoch, .. } => {
+                panic!("a 401 denial must not reconnect, got epoch {epoch}")
+            }
+            super::Event::Frame { .. } => panic!("reconnect never yields a frame"),
+        }
     }
 }

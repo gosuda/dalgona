@@ -161,6 +161,10 @@ impl WebSocketTransport {
 
     /// Connects one client transport to a WebSocket URL.
     ///
+    /// An upgrade denial with `401`/`403` maps to [`WireError::Auth`] and is
+    /// permanent; every other failure maps to [`WireError::Transport`] and
+    /// stays retryable for the remote reconnect loop.
+    ///
     /// # Errors
     ///
     /// Returns [`WireError`] when the connection fails.
@@ -171,6 +175,9 @@ impl WebSocketTransport {
     /// Connects with a bearer token in the WebSocket upgrade authorization header.
     ///
     /// The token is never placed in the URL, query, subprotocol, or log output.
+    /// An upgrade denial with `401`/`403` maps to [`WireError::Auth`] and is
+    /// permanent; every other failure maps to [`WireError::Transport`] and
+    /// stays retryable for the remote reconnect loop.
     ///
     /// # Errors
     ///
@@ -199,7 +206,16 @@ impl WebSocketTransport {
     {
         let (socket, _) = tokio_tungstenite::connect_async(request)
             .await
-            .map_err(|error| WireError::Transport(format!("websocket connect failed: {error}")))?;
+            .map_err(|error| match &error {
+                WsError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
+                    tracing::debug!(
+                        status = %response.status(),
+                        "websocket upgrade denied; not retrying"
+                    );
+                    WireError::Auth
+                }
+                _ => WireError::Transport(format!("websocket connect failed: {error}")),
+            })?;
         let (sink, stream) = socket.split();
         Ok(Self::halves(Box::pin(stream), Box::pin(sink)))
     }

@@ -234,3 +234,82 @@ async fn websocket_oversized_message_ends_without_a_close_frame() {
         Some(Ok(frame)) => panic!("an oversized message must end without a reply, got {frame:?}"),
     }
 }
+
+/// A `401`/`403` upgrade denial over real loopback maps to `Auth` and is
+/// permanent, while other handshake failures stay `Transport` and retryable.
+///
+/// Each case serves one real TCP handshake: the client sends a WebSocket
+/// upgrade, the server answers with a bare HTTP status and closes. No
+/// credentials are sent beyond the loopback handshake and no token enters
+/// logs.
+#[tokio::test]
+async fn websocket_upgrade_denials_map_to_auth_while_other_failures_stay_transient() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::error::WireError;
+    use crate::transport::WebSocketTransport;
+
+    /// Serves one denied upgrade; the returned set owns the server task.
+    async fn denied_once(status: &'static str) -> (url::Url, tokio::task::JoinSet<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let url = url::Url::parse(&format!("ws://{address}/")).expect("socket url");
+        // `tokio::spawn` is workspace-banned; JoinSet is the tracked spawn.
+        let mut server = tokio::task::JoinSet::new();
+        server.spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                if request.len() > 16_384 {
+                    break;
+                }
+            }
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (url, server)
+    }
+
+    for status in ["401 Unauthorized", "403 Forbidden"] {
+        let (url, _server) = denied_once(status).await;
+        let Err(error) = WebSocketTransport::connect(url).await else {
+            panic!("a denied upgrade must fail");
+        };
+        assert!(
+            matches!(error, WireError::Auth),
+            "{status} must map to Auth, got {error:?}"
+        );
+        assert_eq!(error.to_string(), "authentication failed");
+    }
+
+    let (url, _server) = denied_once("500 Internal Server Error").await;
+    let Err(error) = WebSocketTransport::connect(url).await else {
+        panic!("a failed handshake must fail");
+    };
+    assert!(
+        matches!(error, WireError::Transport(_)),
+        "500 must stay Transport for retry, got {error:?}"
+    );
+
+    let (url, _server) = denied_once("401 Unauthorized").await;
+    let Err(error) = WebSocketTransport::connect_with_auth(url.as_str(), "loopback-token").await
+    else {
+        panic!("an authenticated denial must fail");
+    };
+    assert!(
+        matches!(error, WireError::Auth),
+        "authenticated 401 must map to Auth, got {error:?}"
+    );
+}
