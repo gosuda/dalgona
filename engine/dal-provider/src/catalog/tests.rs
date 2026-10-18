@@ -157,6 +157,18 @@ fn route_resolution_retries_an_unlisted_id_under_its_family_provider() {
 #[test]
 fn route_retry_serves_every_family_through_its_single_owner() {
     let cases = [
+        (Family::Chat, "my-chat", "https://example.test/v1"),
+        (
+            Family::Responses,
+            "my-responses",
+            "https://example.test/v1",
+        ),
+        (Family::Codex, "my-codex", "https://example.test/codex"),
+        (
+            Family::Anthropic,
+            "my-anthropic",
+            "https://example.test",
+        ),
         (
             Family::Bedrock,
             "my-bedrock",
@@ -185,6 +197,13 @@ fn route_retry_serves_every_family_through_its_single_owner() {
             Family::GoogleAntigravity,
             "my-antigravity",
             "http://127.0.0.1:1",
+        ),
+        (Family::Mistral, "my-mistral", "https://api.mistral.ai"),
+        (Family::Ollama, "my-ollama", "http://10.0.0.9:11434"),
+        (
+            Family::PiMessages,
+            "my-pimessages",
+            "https://example.test/pi",
         ),
     ];
     for (family, id, base) in cases {
@@ -265,6 +284,190 @@ fn route_retry_uses_the_catalogs_only_owner_including_custom_ids() {
         assert_eq!(resolved.route, route);
     }
 }
+
+#[test]
+fn route_retry_serves_single_vendor_chat_and_responses_owners() {
+    for (id, family, base) in [
+        ("openai", Family::Chat, "https://api.openai.com/v1"),
+        ("openai", Family::Responses, "https://api.openai.com/v1"),
+    ] {
+        let typed = Catalog::with_sources(
+            vec![(provider(id, family, base), CatalogSource::Typed)],
+            Vec::new(),
+        );
+        let route = ModelRoute::Api {
+            family,
+            model: "some-new-id".into(),
+        };
+        assert!(resolve(&typed, &[], "some-new-id").is_err());
+        let resolved = resolve_route(&typed, &[], &route)
+            .unwrap_or_else(|error| panic!("{id:?}/{family:?}: vendor single serves typed id: {error:?}"));
+        assert_eq!(resolved.provider.as_ref(), id);
+        assert_eq!(resolved.route, route);
+    }
+}
+
+#[test]
+fn route_retry_never_guesses_among_chat_or_responses_owners() {
+    let chat_dual = Catalog::with_sources(
+        vec![
+            (
+                provider("my-chat", Family::Chat, "https://example.test/a"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("other-chat", Family::Chat, "https://example.test/b"),
+                CatalogSource::Typed,
+            ),
+        ],
+        Vec::new(),
+    );
+    let chat_route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "some-new-id".into(),
+    };
+    assert!(
+        resolve(&chat_dual, &[], "my-chat/some-new-id").is_ok(),
+        "qualified custom Chat id keeps its identity",
+    );
+    assert_eq!(
+        resolve_route(&chat_dual, &[], &chat_route)
+            .unwrap_err()
+            .to_string(),
+        "unknown model some-new-id",
+        "two Chat owners mean no retry guess",
+    );
+    let responses_dual = Catalog::with_sources(
+        vec![
+            (
+                provider("openai", Family::Responses, "https://api.openai.com/v1"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("my-responses", Family::Responses, "https://example.test/v1"),
+                CatalogSource::Typed,
+            ),
+        ],
+        Vec::new(),
+    );
+    let responses_route = ModelRoute::Api {
+        family: Family::Responses,
+        model: "some-new-id".into(),
+    };
+    assert!(
+        resolve(&responses_dual, &[], "my-responses/some-new-id").is_ok(),
+        "qualified custom Responses id keeps its identity",
+    );
+    assert_eq!(
+        resolve_route(&responses_dual, &[], &responses_route)
+            .unwrap_err()
+            .to_string(),
+        "unknown model some-new-id",
+        "two Responses owners mean no canonical guess",
+    );
+}
+
+#[test]
+fn route_retry_without_owner_keeps_bare_error() {
+    let empty = Catalog::with_sources(Vec::new(), Vec::new());
+    let route = ModelRoute::Api {
+        family: Family::Ollama,
+        model: "some-new-id".into(),
+    };
+    assert_eq!(
+        resolve_route(&empty, &[], &route).unwrap_err().to_string(),
+        "unknown model some-new-id",
+        "zero owners return the bare error without a degenerate probe",
+    );
+    let other_family = Catalog::with_sources(
+        vec![(
+            provider("my-chat", Family::Chat, "https://example.test/v1"),
+            CatalogSource::Typed,
+        )],
+        Vec::new(),
+    );
+    let ollama_route = ModelRoute::Api {
+        family: Family::Ollama,
+        model: "some-new-id".into(),
+    };
+    assert_eq!(
+        resolve_route(&other_family, &[], &ollama_route)
+            .unwrap_err()
+            .to_string(),
+        "unknown model some-new-id",
+        "a family with no owner keeps the bare error",
+    );
+}
+
+#[test]
+fn route_retry_keeps_ambiguous_bare_error() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("ollama", Family::Ollama, "http://127.0.0.1:11434"),
+                CatalogSource::Cache,
+            ),
+            (
+                provider("ollama-cloud", Family::Ollama, "https://ollama.com"),
+                CatalogSource::Cache,
+            ),
+        ],
+        vec![
+            row("ollama", "shared-id", Some(10_000)),
+            row("ollama-cloud", "shared-id", Some(10_000)),
+        ],
+    );
+    let route = ModelRoute::Api {
+        family: Family::Ollama,
+        model: "shared-id".into(),
+    };
+    let error = resolve_route(&catalog, &[], &route).unwrap_err().to_string();
+    assert!(
+        error.starts_with("model id shared-id matches several providers: "),
+        "dual listed owners keep the ambiguous error, got: {error}",
+    );
+    assert!(error.contains("ollama/shared-id"));
+    assert!(error.contains("ollama-cloud/shared-id"));
+}
+
+#[test]
+fn route_retry_keeps_explicit_provider_identity() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("ollama", Family::Ollama, "http://127.0.0.1:11434"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("ollama-cloud", Family::Ollama, "https://ollama.com"),
+                CatalogSource::Typed,
+            ),
+        ],
+        Vec::new(),
+    );
+    let cloud = resolve(&catalog, &[], "ollama-cloud/gpt-oss:120b")
+        .unwrap_or_else(|error| panic!("qualified cloud keeps identity: {error:?}"));
+    assert_eq!(cloud.provider.as_ref(), "ollama-cloud");
+    let local = resolve(&catalog, &[], "ollama/gpt-oss:120b")
+        .unwrap_or_else(|error| panic!("qualified local keeps identity: {error:?}"));
+    assert_eq!(local.provider.as_ref(), "ollama");
+    assert_eq!(
+        resolve(&catalog, &[], "openai/gpt-oss:120b").unwrap_err().to_string(),
+        "unknown model openai/gpt-oss:120b",
+        "an unconfigured provider id stays unknown",
+    );
+    let openai_chat = Catalog::with_sources(
+        vec![(
+            provider("openai", Family::Chat, "https://api.openai.com/v1"),
+            CatalogSource::Typed,
+        )],
+        Vec::new(),
+    );
+    let explicit = resolve(&openai_chat, &[], "openai-chat/some-new-id")
+        .unwrap_or_else(|error| panic!("explicit openai-chat keeps identity: {error:?}"));
+    assert_eq!(explicit.provider.as_ref(), "openai");
+}
+
 
 #[test]
 fn route_resolution_prefers_the_listed_bare_id() {

@@ -40,7 +40,8 @@ pub fn resolve(
 /// configured with, so `openai-responses/gpt-6` becomes the bare id `gpt-6`.
 /// A catalog built without a model list resolves only provider-qualified
 /// ids. The bare id therefore resolves first, and an unknown bare id retries
-/// under the family's own provider prefix. Synthetic and harness routes
+/// under the catalog's single configured owner for that family, or not at
+/// all. Synthetic and harness routes
 /// resolve by their id.
 ///
 /// # Errors
@@ -66,16 +67,21 @@ pub fn resolve_route(
     ) {
         return bare;
     }
-    let prefix = match family {
-        Family::Chat => "openai-chat",
-        Family::Responses => "openai-responses",
-        // Every other family retries under the catalog's single configured
-        // owner for that family, or not at all. The static provider table is
-        // never consulted: it cannot see custom ids and it guesses among
-        // shared families.
-        _ => single_family_owner(catalog, family).unwrap_or(""),
+    // Every family retries under the catalog's single configured owner for
+    // that family, or not at all. The static provider table is never
+    // consulted: it cannot see custom ids and it guesses among shared
+    // families. Explicit openai-chat and openai-responses references stay
+    // valid through family_provider, but the retry itself uses the census
+    // owner so a lone custom Chat or Responses owner serves typed routes and
+    // dual owners never silently pick the canonical row. Zero or several
+    // owners return the bare error without a degenerate probe.
+    let Some(owner) = single_family_owner(catalog, family) else {
+        return bare;
     };
-    match resolve(catalog, aliases, &format!("{prefix}/{model}"))
+    if model.is_empty() {
+        return bare;
+    }
+    match resolve(catalog, aliases, &format!("{owner}/{model}"))
         .ok()
         .and_then(in_family)
     {
