@@ -65,9 +65,9 @@ pub use jiff::Timestamp;
 pub use journal::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, Block, Branch, BranchError, BranchMode,
     DecodeError, Decoded, EncodeError, Entry, EntryKind, Header, InferredPurpose, JobEvent,
-    JobKind, JobOutcome, JournalPart, MAX_RECORD, Mail, Product, Record, ScannedHead, Source,
-    TreeKind, TurnEndStop, TurnSequence, TurnSequenceError, VERSION as JOURNAL_VERSION, branch,
-    decode, encode, scan_head,
+    JobKind, JobOutcome, JournalPart, MAX_RECORD, Mail, PrivateOutcome, Product, Record,
+    ScannedHead, Source, TreeKind, TurnEndStop, TurnSequence, TurnSequenceError,
+    VERSION as JOURNAL_VERSION, branch, decode, encode, scan_head,
 };
 pub use model::{
     AssistantPart, Caps, CompactOutcome, CompactedHistory, ContextItem, Family, InferFailure,

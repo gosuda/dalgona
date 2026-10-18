@@ -36,7 +36,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ApprovalMode, Mode};
 use crate::ext::MailMode;
-use crate::id::{CallId, ClientId, EntryId, Gen, JobId, RequestId, SessionId, TurnId};
+use crate::id::{
+    CallId, ClientId, EntryId, Gen, JobId, PrivateEffectId, PrivateLoopId, RequestId, SessionId,
+    TurnId,
+};
 use crate::model::{Family, ModelRoute, RouteError, ThinkingLevel, Usage};
 use crate::raw::{RawJson, Tagged};
 use crate::request::{Answer, Owner};
@@ -60,7 +63,9 @@ pub use decode_records::{decode, scan_head};
 pub use encode::encode;
 pub(crate) use encode::encoded_len;
 pub use entries::{Entry, InferredPurpose, JobEvent, JobKind, JobOutcome, Mail};
-pub use records::{DecodeError, Decoded, EncodeError, Record, ScannedHead, TreeKind};
+pub use records::{
+    DecodeError, Decoded, EncodeError, PrivateOutcome, Record, ScannedHead, TreeKind,
+};
 pub use turn_sequence::{TurnSequence, TurnSequenceError};
 pub use types::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, Block, EntryKind, Header, JournalPart,

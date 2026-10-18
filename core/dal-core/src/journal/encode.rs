@@ -1,14 +1,16 @@
 use super::wire::{
     AnswerWire, AssistantBlocksWire, AssistantStopWire, JobOutcomeWire, JournalPartsWire,
-    OwnerWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire, checked_premium, encode_json,
+    OwnerWire, PrivateOutcomeWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire,
+    checked_premium, encode_json,
 };
 use super::wire_entries::{
     AllowAlwaysWire, ApprovalWire, ArchiveWire, AssistantWire, BeforeRequestMutWire, BootWire,
     BranchSummaryWire, CompactionWire, ExtWire, GrantGivenWire, InferredWire, JobWire, LabelWire,
     LeafWire, MailRecordWire, ModeValueWire, ModeWire, ModelRouteWire, ModelWire, NameWire,
-    ReminderWire, ResolutionCauseWire, ResolvedWire, RouteWire, RuleFiredWire,
-    ScopedGrantEndedWire, ScopedGrantWire, SessionWire, SourceWire, ThinkingWire, ToolPromotedWire,
-    ToolResultWire, ToolStartWire, TurnEndWire, TurnStartWire, UserWire, WakeAttemptWire,
+    PrivateEndWire, PrivateLoopWire, PrivateStartWire, ReminderWire, ResolutionCauseWire,
+    ResolvedWire, RouteWire, RuleFiredWire, ScopedGrantEndedWire, ScopedGrantWire, SessionWire,
+    SourceWire, ThinkingWire, ToolPromotedWire, ToolResultWire, ToolStartWire, TurnEndWire,
+    TurnStartWire, UserWire, WakeAttemptWire,
 };
 use std::io;
 
@@ -192,6 +194,9 @@ fn encode_body(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeErr
         | Record::ScopedGrantEnded { .. } => encode_grants(record, out),
         Record::Job { .. } | Record::Ext { .. } | Record::Mail { .. } | Record::Inferred { .. } => {
             encode_effects(record, out)
+        }
+        Record::PrivateLoop { .. } | Record::PrivateStart { .. } | Record::PrivateEnd { .. } => {
+            encode_private(record, out)
         }
     }
 }
@@ -758,6 +763,70 @@ fn encode_effects(record: &Record, out: &mut dyn io::Write) -> Result<(), Encode
             out,
         ),
         _ => unreachable!("the encode_body index routes only encode_effects kinds here"),
+    }
+}
+
+/// Owner-scoped private audit records. Non-tree, format 1, no entry id, no
+/// turn accounting. Member order matches the wire structs, which match the
+/// Record field order.
+fn encode_private(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    match record {
+        Record::PrivateLoop {
+            at,
+            r#loop,
+            who,
+            turn,
+        } => encode_json(
+            &PrivateLoopWire {
+                r#type: "private_loop",
+                at: TsWire(at),
+                r#loop,
+                who: OwnerWire(who),
+                turn: *turn,
+            },
+            out,
+        ),
+        Record::PrivateStart {
+            at,
+            r#loop,
+            token,
+            who,
+            turn,
+            round,
+            call,
+            name,
+            args,
+        } => encode_json(
+            &PrivateStartWire {
+                r#type: "private_start",
+                at: TsWire(at),
+                r#loop,
+                token,
+                who: OwnerWire(who),
+                turn: *turn,
+                round: *round,
+                call,
+                name: name.as_ref(),
+                args,
+            },
+            out,
+        ),
+        Record::PrivateEnd {
+            at,
+            r#loop,
+            token,
+            outcome,
+        } => encode_json(
+            &PrivateEndWire {
+                r#type: "private_end",
+                at: TsWire(at),
+                r#loop,
+                token,
+                outcome: PrivateOutcomeWire(outcome),
+            },
+            out,
+        ),
+        _ => unreachable!("the encode_body index routes only encode_private kinds here"),
     }
 }
 

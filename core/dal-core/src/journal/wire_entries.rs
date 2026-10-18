@@ -1,11 +1,11 @@
 use super::wire::{
     AnswerWire, AssistantBlocksWire, AssistantStopWire, JobOutcomeWire, JournalPartsWire,
-    OwnerWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire,
+    OwnerWire, PrivateOutcomeWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire,
 };
 use super::{
     ApprovalMode, AssistantRoute, Block, CallId, ClientId, EntryId, Family, FileChange, Gen, JobId,
-    MailMode, Mode, Product, RawJson, RequestId, Serialize, SessionId, ThinkingLevel, TurnId,
-    Workspace,
+    MailMode, Mode, PrivateEffectId, PrivateLoopId, Product, RawJson, RequestId, Serialize,
+    SessionId, ThinkingLevel, TurnId, Workspace,
 };
 use crate::update::ResolutionCause;
 
@@ -473,4 +473,38 @@ pub(super) struct InferredWire<'a> {
     pub(super) usage: UsageWire<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) premium_requests: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub(super) struct PrivateLoopWire<'a> {
+    pub(super) r#type: &'static str,
+    pub(super) at: TsWire<'a>,
+    pub(super) r#loop: &'a PrivateLoopId,
+    pub(super) who: OwnerWire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) turn: Option<TurnId>,
+}
+
+#[derive(Serialize)]
+pub(super) struct PrivateStartWire<'a> {
+    pub(super) r#type: &'static str,
+    pub(super) at: TsWire<'a>,
+    pub(super) r#loop: &'a PrivateLoopId,
+    pub(super) token: &'a PrivateEffectId,
+    pub(super) who: OwnerWire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) turn: Option<TurnId>,
+    pub(super) round: u32,
+    pub(super) call: &'a CallId,
+    pub(super) name: &'a str,
+    pub(super) args: &'a RawJson,
+}
+
+#[derive(Serialize)]
+pub(super) struct PrivateEndWire<'a> {
+    pub(super) r#type: &'static str,
+    pub(super) at: TsWire<'a>,
+    pub(super) r#loop: &'a PrivateLoopId,
+    pub(super) token: &'a PrivateEffectId,
+    pub(super) outcome: PrivateOutcomeWire<'a>,
 }

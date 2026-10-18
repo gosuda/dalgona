@@ -1843,6 +1843,472 @@ fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn s
     Ok(())
 }
 
+// Private audit records: v1 wire, rejection, parity spot-check, branch omission.
+// Full old-journal byte parity lives in `canonical_vectors_round_trip_byte_for_byte`
+// and `resolved_and_extended_records_round_trip`; the spot check below only proves
+// the private codec did not perturb old lines. Wire order follows the landed
+// codec: private_loop type/at/loop/who/turn?, private_start
+// type/at/loop/token/who/turn?/round/call/name/args, private_end
+// type/at/loop/token/outcome with settled {type/is_error/parts} and closed
+// indeterminate, all v1, absent turn means None.
+fn private_loop_id(value: &str) -> PrivateLoopId {
+    PrivateLoopId::parse(value).expect("valid fixture loop id")
+}
+
+fn private_token_id(value: &str) -> PrivateEffectId {
+    PrivateEffectId::parse(value).expect("valid fixture token id")
+}
+
+fn private_owner() -> Owner {
+    Owner::Extension {
+        name: "fusion".into(),
+        origin: "bundled".into(),
+    }
+}
+
+fn private_at() -> jiff::Timestamp {
+    "2026-09-25T10:15:35.420Z"
+        .parse()
+        .expect("valid fixture timestamp")
+}
+
+fn private_settled_parts() -> Vec<JournalPart> {
+    let digest = "0123456789abcdef".repeat(4);
+    vec![
+        JournalPart::Text {
+            text: "checked 3 files".into(),
+        },
+        JournalPart::Blob {
+            mime: "application/pdf".into(),
+            blob: digest.as_str().into(),
+            bytes: 9,
+        },
+    ]
+}
+
+fn private_round_trip_ids() -> (PrivateLoopId, PrivateEffectId, Owner) {
+    (
+        private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f"),
+        private_token_id("01927f40-0000-7000-8000-000000000002"),
+        private_owner(),
+    )
+}
+
+#[test]
+fn private_loop_and_start_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, who) = private_round_trip_ids();
+
+    let loop_rec = Record::PrivateLoop {
+        at: private_at(),
+        r#loop: loop_a,
+        who: who.clone(),
+        turn: None,
+    };
+    let encoded = encode(&loop_rec)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(
+        text.starts_with(r#"{"v":1,"type":"private_loop""#),
+        "{text}"
+    );
+    assert!(!text.contains("\"turn\""), "{text}");
+    assert_eq!(loop_rec.tag(), "private_loop");
+    assert!(loop_rec.entry().is_none());
+    assert_eq!(decode(&encoded)?.record, loop_rec);
+    assert_eq!(encode(&decode(&encoded)?.record)?, encoded);
+
+    let args = RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?;
+    let args_text = args.as_str().to_owned();
+    let start = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        who: who.clone(),
+        turn: None,
+        round: 2,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args,
+    };
+    let encoded = encode(&start)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(
+        text.starts_with(r#"{"v":1,"type":"private_start""#),
+        "{text}"
+    );
+    assert!(!text.contains("\"turn\""), "{text}");
+    assert!(text.contains(r#""round":2"#), "{text}");
+    assert!(text.contains(r#""call":"toolu_01""#), "{text}");
+    assert_eq!(start.tag(), "private_start");
+    assert!(start.entry().is_none());
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, start);
+    assert_eq!(encode(&decoded)?, encoded);
+    let Record::PrivateStart {
+        r#loop,
+        token,
+        turn,
+        round,
+        call,
+        name,
+        args,
+        ..
+    } = &decoded
+    else {
+        return Err("expected a private start".into());
+    };
+    assert_eq!(*r#loop, loop_a);
+    assert_eq!(*token, token_a);
+    assert_eq!(*turn, None);
+    assert_eq!(*round, 2);
+    assert_eq!(call.as_str(), "toolu_01");
+    assert_eq!(name.as_ref(), "read");
+    assert_eq!(args.as_str(), args_text.as_str());
+    Ok(())
+}
+
+#[test]
+fn private_records_round_trip_settled() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, _) = private_round_trip_ids();
+
+    let settled = Record::PrivateEnd {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        outcome: PrivateOutcome::Settled {
+            is_error: false,
+            parts: private_settled_parts(),
+        },
+    };
+    let encoded = encode(&settled)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(text.starts_with(r#"{"v":1,"type":"private_end""#), "{text}");
+    assert!(text.contains(r#""type":"settled""#), "{text}");
+    assert_eq!(settled.tag(), "private_end");
+    assert!(settled.entry().is_none());
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, settled);
+    assert_eq!(encode(&decoded)?, encoded);
+    let Record::PrivateEnd {
+        r#loop,
+        token,
+        outcome,
+        ..
+    } = &decoded
+    else {
+        return Err("expected a private end".into());
+    };
+    assert_eq!(*r#loop, loop_a);
+    assert_eq!(*token, token_a);
+    let PrivateOutcome::Settled { is_error, parts } = outcome else {
+        return Err("expected settled parts".into());
+    };
+    assert!(!*is_error);
+    assert_eq!(parts.as_slice(), private_settled_parts().as_slice());
+    Ok(())
+}
+
+#[test]
+fn private_records_round_trip_indeterminate() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, _) = private_round_trip_ids();
+
+    let open = Record::PrivateEnd {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        outcome: PrivateOutcome::Indeterminate,
+    };
+    let encoded = encode(&open)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(text.contains(r#""type":"indeterminate""#), "{text}");
+    assert!(!text.contains("\"parts\""), "{text}");
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, open);
+    assert_eq!(encode(&decoded)?, encoded);
+    assert!(matches!(
+        decoded,
+        Record::PrivateEnd {
+            outcome: PrivateOutcome::Indeterminate,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn private_turn_present_and_shared_call_across_loops() -> Result<(), Box<dyn std::error::Error>> {
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let loop_b = private_loop_id("01927f40-0000-7000-8000-000000000001");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let token_b = private_token_id("01927f40-0000-7000-8000-000000000003");
+    let turn = Some(TurnId::new(nz(1)));
+
+    let loop_turned = Record::PrivateLoop {
+        at: private_at(),
+        r#loop: loop_a,
+        who: private_owner(),
+        turn,
+    };
+    let text = String::from_utf8(encode(&loop_turned)?)?;
+    assert!(text.contains("\"turn\":1"), "{text}");
+    assert_eq!(decode(text.as_bytes())?.record, loop_turned);
+
+    let start_a = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        who: private_owner(),
+        turn,
+        round: 0,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args: RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?,
+    };
+    let start_b = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_b,
+        token: token_b,
+        who: private_owner(),
+        turn,
+        round: 1,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args: RawJson::parse(r#"{"path":"lib/parser.ml"}"#)?,
+    };
+    let decoded_a = decode(&encode(&start_a)?)?.record;
+    let decoded_b = decode(&encode(&start_b)?)?.record;
+    assert_eq!(decoded_a, start_a);
+    assert_eq!(decoded_b, start_b);
+    let (
+        Record::PrivateStart {
+            r#loop: got_a,
+            token: tok_a,
+            turn: turn_a,
+            call: call_a,
+            ..
+        },
+        Record::PrivateStart {
+            r#loop: got_b,
+            token: tok_b,
+            turn: turn_b,
+            call: call_b,
+            ..
+        },
+    ) = (&decoded_a, &decoded_b)
+    else {
+        return Err("expected two private starts".into());
+    };
+    assert_ne!(*got_a, *got_b);
+    assert_ne!(*tok_a, *tok_b);
+    assert_eq!(*turn_a, turn);
+    assert_eq!(*turn_b, turn);
+    assert_eq!(call_a.as_str(), "toolu_01");
+    assert_eq!(call_b.as_str(), "toolu_01");
+    Ok(())
+}
+
+#[test]
+fn private_outcome_rejects_unknown_and_malformed_shapes() {
+    let head = "{\"v\":1,\"type\":\"private_end\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\",\"outcome\":";
+    let cases = [
+        // Unknown outcome type.
+        "{\"type\":\"queued\"}",
+        // Settled without a required member.
+        "{\"type\":\"settled\",\"parts\":[]}",
+        "{\"type\":\"settled\",\"is_error\":false}",
+        // Settled with an undeclared member.
+        "{\"type\":\"settled\",\"is_error\":false,\"parts\":[],\"extra\":1}",
+        // Indeterminate takes no other member.
+        "{\"type\":\"indeterminate\",\"parts\":[]}",
+        "{\"type\":\"indeterminate\",\"is_error\":false}",
+        // Outcome without its type member.
+        "{\"is_error\":false,\"parts\":[]}",
+        // Missing and null outcomes.
+        "null",
+        "7",
+        "\"settled\"",
+    ];
+    for outcome in cases {
+        let line = format!("{head}{outcome}}}\n");
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+    let missing = "{\"v\":1,\"type\":\"private_end\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\"}\n";
+    assert!(matches!(
+        decode(missing.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+    // An absent turn reads as None; a present null never does.
+    let loop_head = "{\"v\":1,\"type\":\"private_loop\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"who\":\"core\"";
+    let absent = format!("{loop_head}}}\n");
+    let decoded = decode(absent.as_bytes()).expect("absent turn is None");
+    assert!(matches!(
+        decoded.record,
+        Record::PrivateLoop { turn: None, .. }
+    ));
+    let null_turn = format!("{loop_head},\"turn\":null}}\n");
+    assert!(
+        matches!(
+            decode(null_turn.as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ),
+        "{null_turn}"
+    );
+    let start_null_turn = "{\"v\":1,\"type\":\"private_start\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\",\"who\":\"core\",\"turn\":null,\"round\":0,\"call\":\"toolu_01\",\"name\":\"read\",\"args\":{}}\n";
+    assert!(matches!(
+        decode(start_null_turn.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn private_records_reject_format_2_and_stay_non_tree() -> Result<(), Box<dyn std::error::Error>> {
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let records = [
+        Record::PrivateLoop {
+            at: private_at(),
+            r#loop: loop_a,
+            who: Owner::Core,
+            turn: None,
+        },
+        Record::PrivateStart {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            who: Owner::Core,
+            turn: Some(TurnId::new(nz(1))),
+            round: 0,
+            call: CallId::new("toolu_01"),
+            name: "read".into(),
+            args: RawJson::parse(r"{}")?,
+        },
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ];
+    for record in records {
+        assert!(record.entry().is_none());
+        let v1 = String::from_utf8(encode(&record)?)?;
+        assert!(v1.starts_with("{\"v\":1,"), "{v1}");
+        assert_eq!(scan_head(v1.as_bytes()), None);
+        let v2 = v1.replacen("\"v\":1", "\"v\":2", 1);
+        assert!(
+            matches!(decode(v2.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{v2}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn branch_omits_private_non_tree_records() -> Result<(), Box<dyn std::error::Error>> {
+    let header = Header {
+        id: SessionId::new_v7(),
+        at: "2026-09-25T10:15:30.000Z".parse()?,
+        workspace: harness_workspace()?,
+        product: Product::Dal,
+        from: None,
+    };
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let who = private_owner();
+    let records = vec![
+        Record::User(user_entry(1, None, "first")),
+        Record::PrivateLoop {
+            at: private_at(),
+            r#loop: loop_a,
+            who: who.clone(),
+            turn: None,
+        },
+        Record::User(user_entry(2, Some(1), "second")),
+        Record::PrivateStart {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            who: who.clone(),
+            turn: None,
+            round: 0,
+            call: CallId::new("toolu_01"),
+            name: "read".into(),
+            args: RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?,
+        },
+        Record::User(user_entry(3, Some(2), "third")),
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Settled {
+                is_error: false,
+                parts: vec![JournalPart::Text { text: "ok".into() }],
+            },
+        },
+        Record::Label {
+            at: private_at(),
+            entry: EntryId::new(nz(1)),
+            label: Some("kept".into()),
+        },
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ];
+    let is_private = |record: &Record| {
+        matches!(
+            record,
+            Record::PrivateLoop { .. } | Record::PrivateStart { .. } | Record::PrivateEnd { .. }
+        )
+    };
+    let forked = branch(
+        &records,
+        Some(EntryId::new(nz(3))),
+        BranchMode::Fork {
+            at: EntryId::new(nz(2)),
+        },
+        &header,
+    )?;
+    assert!(
+        !forked.records.iter().any(is_private),
+        "fork drops private audit records"
+    );
+    let ids: Vec<u64> = forked
+        .records
+        .iter()
+        .filter_map(|record| record.entry().map(|entry| entry.id.get()))
+        .collect();
+    assert_eq!(ids, vec![1]);
+    assert_eq!(
+        forked.anchor_parts,
+        vec![JournalPart::Text {
+            text: "second".into()
+        }]
+    );
+    let cloned = branch(
+        &records,
+        Some(EntryId::new(nz(3))),
+        BranchMode::Clone,
+        &header,
+    )?;
+    assert!(
+        !cloned.records.iter().any(is_private),
+        "clone drops private audit records"
+    );
+    let ids: Vec<u64> = cloned
+        .records
+        .iter()
+        .filter_map(|record| record.entry().map(|entry| entry.id.get()))
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(cloned.anchor_parts, []);
+    Ok(())
+}
+
 fn usage_with_premium(premium_requests: Option<f64>) -> Usage {
     Usage {
         input_tokens: 1,

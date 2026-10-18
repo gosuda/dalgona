@@ -7,8 +7,9 @@ use super::decode::{
 use super::scan::{Member, Members};
 use super::{
     Answer, ApprovalMode, AssistantRoute, AssistantStop, ClientId, DecodeError, Decoded, Entry,
-    EntryId, EntryKind, Header, JobEvent, JobOutcome, Mail, Mode, NonZeroU64, Product, RawJson,
-    Record, ScannedHead, SessionId, Source, TreeKind, TurnEndStop, TurnId, VERSION,
+    EntryId, EntryKind, Header, JobEvent, JobOutcome, Mail, Mode, NonZeroU64, PrivateEffectId,
+    PrivateLoopId, PrivateOutcome, Product, RawJson, Record, ScannedHead, SessionId, Source,
+    TreeKind, TurnEndStop, TurnId, VERSION,
 };
 use crate::update::ResolutionCause;
 
@@ -455,6 +456,7 @@ pub(super) fn decode_record(kind: &str, members: &mut Members<'_>) -> Result<Rec
         .or_else(|| decode_control(kind, members))
         .or_else(|| decode_grants(kind, members))
         .or_else(|| decode_effects(kind, members))
+        .or_else(|| decode_private(kind, members))
         .unwrap_or_else(|| Err(DecodeError::UnknownRecordKind { kind: kind.into() }))
 }
 
@@ -679,6 +681,94 @@ fn decode_effects(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
     Some(record)
 }
 
+/// Reads the private `outcome` member: exactly one `type` plus the members
+/// that type owns. Unknown `type`, missing `is_error`/`parts`, or any extra
+/// member on `indeterminate` is Invalid, not a default.
+pub(super) fn private_outcome_member(member: &Member<'_>) -> Result<PrivateOutcome, DecodeError> {
+    let (offset, raw) = (member.offset, member.value);
+    let mut inner = object_members(raw, offset, &["type", "is_error", "parts"])?;
+    let Some(ty) = want(&mut inner, "type") else {
+        return Err(invalid(offset, "an `outcome` object needs a `type` member"));
+    };
+    let ty = text_member(&ty, "type")?;
+    if ty.as_ref() == "indeterminate" {
+        if !inner.is_empty() {
+            return Err(invalid(
+                offset,
+                "an `indeterminate` outcome takes no other member",
+            ));
+        }
+        return Ok(PrivateOutcome::Indeterminate);
+    }
+    if ty.as_ref() != "settled" {
+        return Err(invalid(
+            offset,
+            format!("unknown private outcome type `{ty}`"),
+        ));
+    }
+    let Some(is_error) = want(&mut inner, "is_error") else {
+        return Err(invalid(offset, "a `settled` outcome needs `is_error`"));
+    };
+    let Some(parts) = want(&mut inner, "parts") else {
+        return Err(invalid(offset, "a `settled` outcome needs `parts`"));
+    };
+    if !inner.is_empty() {
+        return Err(invalid(offset, "unknown member in `settled` outcome"));
+    }
+    Ok(PrivateOutcome::Settled {
+        is_error: bool_member(&is_error, "is_error")?,
+        parts: parts_member(&parts)?,
+    })
+}
+
+/// Owner-scoped private audit records. Non-tree, format 1, no entry id, no
+/// turn accounting. Each arm consumes exactly its wire members; anything
+/// else at top level stays dropped per the `decode()` forward-compat rule.
+fn decode_private(kind: &str, members: &mut Members<'_>) -> Option<Result<Record, DecodeError>> {
+    if !matches!(kind, "private_loop" | "private_start" | "private_end") {
+        return None;
+    }
+    let record = (|| -> Result<Record, DecodeError> {
+        match kind {
+            "private_loop" => Ok(Record::PrivateLoop {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                who: owner_member(&need(members, "who")?)?,
+                turn: match want(members, "turn") {
+                    Some(member) => Some(json_member::<TurnId>(&member)?),
+                    None => None,
+                },
+            }),
+            "private_start" => Ok(Record::PrivateStart {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                token: json_member::<PrivateEffectId>(&need(members, "token")?)?,
+                who: owner_member(&need(members, "who")?)?,
+                turn: match want(members, "turn") {
+                    Some(member) => Some(json_member::<TurnId>(&member)?),
+                    None => None,
+                },
+                round: u32::try_from(u64_member(&need(members, "round")?, "round")?)
+                    .map_err(|_| invalid(0, "member `round` exceeds u32"))?,
+                call: json_member(&need(members, "call")?)?,
+                name: text_member(&need(members, "name")?, "name")?,
+                args: {
+                    let member = need(members, "args")?;
+                    RawJson::parse(member.value)
+                        .map_err(|error| invalid(member.offset, error.to_string()))?
+                },
+            }),
+            "private_end" => Ok(Record::PrivateEnd {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                token: json_member::<PrivateEffectId>(&need(members, "token")?)?,
+                outcome: private_outcome_member(&need(members, "outcome")?)?,
+            }),
+            _ => unreachable!("the tag filter above admits only this group's kinds"),
+        }
+    })();
+    Some(record)
+}
 pub(super) fn decode_entry_kind(
     kind: &str,
     members: &mut Members<'_>,

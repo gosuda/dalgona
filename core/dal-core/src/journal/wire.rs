@@ -3,7 +3,7 @@ use std::io;
 use super::wire_entries::BlockWire;
 use super::{
     Answer, AssistantStop, Block, EncodeError, Entry, InferredPurpose, JobOutcome, JournalPart,
-    Owner, RawJson, Record, Serialize, TurnEndStop, Usage, fmt,
+    Owner, PrivateOutcome, RawJson, Record, Serialize, TurnEndStop, Usage, fmt,
 };
 
 impl Record {
@@ -44,6 +44,9 @@ impl Record {
             Self::Ext { .. } => "ext",
             Self::Mail(_) => "mail",
             Self::Inferred { .. } => "inferred",
+            Self::PrivateLoop { .. } => "private_loop",
+            Self::PrivateStart { .. } => "private_start",
+            Self::PrivateEnd { .. } => "private_end",
         }
     }
 
@@ -329,6 +332,43 @@ impl Serialize for JobOutcomeWire<'_> {
     }
 }
 
+/// The `outcome` member of a private end record:
+/// `{"type":"settled","is_error":<bool>,"parts":[...]}` or
+/// `{"type":"indeterminate"}`.
+/// Settled parts ride the journal part wire so digest-backed spellings keep
+/// their shared `"type":"image"` / `"type":"blob"` + `blob` member order.
+pub(super) struct PrivateOutcomeWire<'a>(pub(super) &'a PrivateOutcome);
+
+impl Serialize for PrivateOutcomeWire<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            PrivateOutcome::Settled { is_error, parts } => {
+                #[derive(Serialize)]
+                struct SettledMember<'a> {
+                    r#type: &'static str,
+                    is_error: bool,
+                    parts: JournalPartsWire<'a>,
+                }
+                SettledMember {
+                    r#type: "settled",
+                    is_error: *is_error,
+                    parts: JournalPartsWire(parts),
+                }
+                .serialize(serializer)
+            }
+            PrivateOutcome::Indeterminate => {
+                #[derive(Serialize)]
+                struct IndeterminateMember {
+                    r#type: &'static str,
+                }
+                IndeterminateMember {
+                    r#type: "indeterminate",
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
 pub(super) struct JournalPartsWire<'a>(pub(super) &'a [JournalPart]);
 
 impl Serialize for JournalPartsWire<'_> {
