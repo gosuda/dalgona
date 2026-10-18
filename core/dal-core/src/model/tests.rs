@@ -20,6 +20,7 @@ fn price(input: f64, cached_input: f64, output: f64, reasoning: f64) -> ModelPri
         cached_input,
         output,
         reasoning,
+        cache_write: None,
         tiers: Box::default(),
     }
 }
@@ -176,6 +177,21 @@ fn premium_requests_defaults_when_absent_and_roundtrips_when_present() -> TestRe
     };
     let encoded = sonic_rs::to_string(&measured)?;
     assert_eq!(sonic_rs::from_str::<Usage>(&encoded)?, measured);
+    Ok(())
+}
+
+#[test]
+fn base_cache_write_defaults_when_absent_and_roundtrips_when_present() -> TestResult {
+    let legacy = r#"{"input":1.0,"cached_input":0.5,"output":2.0,"reasoning":0.25,"tiers":[]}"#;
+    let decoded: ModelPrice = sonic_rs::from_str(legacy)?;
+    assert_eq!(decoded.cache_write, None);
+    assert_eq!(decoded, price(1.0, 0.5, 2.0, 0.25));
+    let measured = ModelPrice {
+        cache_write: Some(5.0),
+        ..price(1.0, 0.5, 2.0, 0.25)
+    };
+    let encoded = sonic_rs::to_string(&measured)?;
+    assert_eq!(sonic_rs::from_str::<ModelPrice>(&encoded)?, measured);
     Ok(())
 }
 

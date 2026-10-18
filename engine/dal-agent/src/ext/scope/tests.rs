@@ -699,6 +699,7 @@ fn unit_price() -> super::PriceFn {
             cached_input: 1.0,
             output: 1.0,
             reasoning: 1.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     })

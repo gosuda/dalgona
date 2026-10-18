@@ -29,7 +29,14 @@ pub(super) const RULES_KEYS: &[&str] = &[
     "disabled",
     "judge",
 ];
-pub(super) const PRICE_KEYS: &[&str] = &["input", "cached_input", "output", "reasoning", "tiers"];
+pub(super) const PRICE_KEYS: &[&str] = &[
+    "input",
+    "cached_input",
+    "cache_write",
+    "output",
+    "reasoning",
+    "tiers",
+];
 
 pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "mode",
@@ -59,6 +66,7 @@ pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "prices",
     "prices.<model-id>.input",
     "prices.<model-id>.cached_input",
+    "prices.<model-id>.cache_write",
     "prices.<model-id>.output",
     "prices.<model-id>.reasoning",
     "prices.<model-id>.tiers",

@@ -149,6 +149,7 @@ reasoning = 5.0
             cached_input: 0.0,
             output: 4.0,
             reasoning: 5.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     );

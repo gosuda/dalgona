@@ -128,6 +128,13 @@ pub struct ModelPrice {
     pub output: f64,
     /// Separately reported reasoning rate.
     pub reasoning: f64,
+    /// Cache-write rate, when it differs from uncached input.
+    ///
+    /// `None` keeps the historical fallback to the applicable input rate.
+    /// Tier writes resolve `tier.cache_write` then `base.cache_write` then
+    /// `tier.input` then `base.input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
     /// Request-wide context tiers, in any order.
     #[serde(default)]
     pub tiers: Box<[PriceTier]>,
@@ -141,7 +148,8 @@ impl ModelPrice {
     /// Tiers select one complete request-wide rate card using
     /// [`Usage::input_tokens`]. That counter already includes cached input and
     /// cache writes; cache writes use the tier's separate rate when present,
-    /// otherwise that tier's input rate.
+    /// otherwise the base cache-write rate, otherwise that tier's input rate,
+    /// otherwise the base input rate.
     ///
     /// A premium-only response carries no token measurement, so it stays
     /// unknown even when a price exists.
@@ -192,7 +200,7 @@ impl ModelPrice {
             return (
                 self.input,
                 self.cached_input,
-                self.input,
+                self.cache_write.unwrap_or(self.input),
                 self.output,
                 self.reasoning,
             );
@@ -200,7 +208,10 @@ impl ModelPrice {
         (
             tier.input.unwrap_or(self.input),
             tier.cached_input.unwrap_or(self.cached_input),
-            tier.cache_write.unwrap_or(tier.input.unwrap_or(self.input)),
+            tier.cache_write
+                .or(self.cache_write)
+                .or(tier.input)
+                .unwrap_or(self.input),
             tier.output.unwrap_or(self.output),
             tier.reasoning.unwrap_or(self.reasoning),
         )
@@ -217,6 +228,7 @@ mod tests {
             cached_input: 1.0,
             output: 2.0,
             reasoning: 3.0,
+            cache_write: None,
             tiers: vec![
                 PriceTier {
                     size: 100,
@@ -342,6 +354,88 @@ mod tests {
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.0016));
+    }
+
+    #[test]
+    fn base_cache_write_rate_prices_writes_distinct_from_input() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: Some(5.0),
+            tiers: Box::default(),
+        };
+        let usage = Usage {
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 100,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.0005));
+    }
+
+    #[test]
+    fn tier_writes_inherit_base_cache_write_before_tier_input() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: Some(5.0),
+            tiers: vec![PriceTier {
+                size: 100,
+                input: Some(10.0),
+                cached_input: None,
+                cache_write: None,
+                output: None,
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
+        };
+        let usage = Usage {
+            input_tokens: 101,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 101,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.000_505));
+    }
+
+    #[test]
+    fn absent_base_cache_write_keeps_the_input_fallback() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: None,
+            tiers: vec![PriceTier {
+                size: 100,
+                input: Some(10.0),
+                cached_input: None,
+                cache_write: None,
+                output: None,
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
+        };
+        let usage = Usage {
+            input_tokens: 101,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 101,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.00101));
     }
 
     #[test]

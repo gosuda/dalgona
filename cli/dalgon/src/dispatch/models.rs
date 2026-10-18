@@ -283,6 +283,7 @@ mod tests {
             cached_input: 0.0,
             output,
             reasoning: 0.0,
+            cache_write: None,
             tiers: Box::new([]),
         }
     }
