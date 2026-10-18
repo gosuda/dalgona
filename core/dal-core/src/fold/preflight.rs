@@ -280,6 +280,18 @@ impl Session {
     }
 
     fn preflight_response_entries(&self, inference: &super::Inference) -> Result<(), Rejection> {
+        // A native compaction outcome answers a compaction request, never a
+        // turn stream. Refuse it here: once `stream_ended` has recorded the
+        // answering route the fold can no longer back out.
+        if inference
+            .events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Compaction { .. }))
+        {
+            return Err(invalid(
+                "native compaction outcome appeared in a turn stream",
+            ));
+        }
         let stop = inference.events.iter().rev().find_map(|event| match event {
             StreamEvent::Stop(stop) => Some(*stop),
             // The capture rides the closing entry; it journals no entry of

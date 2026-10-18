@@ -116,8 +116,6 @@ impl Session {
             result,
             partial,
         } = end;
-        self.active_model = Some(model.clone());
-        self.active_family = Some(family);
         match result {
             Ok(inference) => {
                 let response = CompletedResponse {
@@ -127,8 +125,23 @@ impl Session {
                 };
                 self.response_completed(turn, response, now, emit, effects)
             }
-            Err(failure) => self.stream_failed(turn, failure, partial, now, emit, effects),
+            Err(failure) => {
+                self.active_model = Some(model);
+                self.active_family = Some(family);
+                self.stream_failed(turn, failure, partial, now, emit, effects)
+            }
         }
+    }
+
+    /// Records the route that answered the stream and clears the turn's
+    /// overflow mark.
+    ///
+    /// A completed response calls this only after every check that can refuse
+    /// it, so a refused stream end leaves both untouched.
+    fn record_response_route(&mut self, model: &ModelRoute, family: Family) {
+        self.active_model = Some(model.clone());
+        self.active_family = Some(family);
+        self.turn_flags.overflow = Overflow::Clear;
     }
 
     pub(super) fn stream_failed(
@@ -243,7 +256,6 @@ impl Session {
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
-        self.turn_flags.overflow = Overflow::Clear;
         let CompletedResponse {
             model: response_model,
             family: response_family,
@@ -257,6 +269,7 @@ impl Session {
             replay,
         } = blocks_from_inference(inference)?;
         let Some(stop) = stop else {
+            self.record_response_route(&response_model, response_family);
             let partial = Some(PartialResponse {
                 content: blocks,
                 usage: usage.unwrap_or(zero_usage()),
@@ -309,6 +322,7 @@ impl Session {
                 }
             }
         };
+        self.record_response_route(&response_model, response_family);
         let closing = ClosingResponse {
             kind: assistant_kind(
                 response_family,
