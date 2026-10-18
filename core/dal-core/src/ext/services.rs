@@ -1,6 +1,8 @@
 use super::{
     Arc, CommandName, Deserialize, Deserializer, McpBlock, Name, Origin, RawJson, Serialize, fmt,
 };
+use crate::id::{PrivateEffectId, PrivateLoopId, TurnId};
+use crate::journal::PrivateOutcome;
 
 /// A service named in an extension's requested injection set.
 #[non_exhaustive]
@@ -317,6 +319,28 @@ pub struct SkillRecord {
     /// The MCP servers the skill declares in its front matter, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpBlock>,
+}
+
+/// One terminal private-effect fact owned by the calling extension.
+///
+/// The raw arguments stay journal-only and are never returned here; the
+/// terminal parts ride inside the outcome.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateEffect {
+    /// The loop identity.
+    pub r#loop: PrivateLoopId,
+    /// The effect identity.
+    pub token: PrivateEffectId,
+    /// The owning turn, when the loop runs inside one.
+    pub turn: Option<TurnId>,
+    /// The private round number.
+    pub round: u32,
+    /// The tool name.
+    pub name: Box<str>,
+    /// The terminal outcome.
+    pub outcome: PrivateOutcome,
 }
 
 /// The source that already owns a conflicting extension name.
