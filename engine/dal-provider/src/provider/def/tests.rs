@@ -95,6 +95,7 @@ fn methods_follow_the_row() {
         methods("openai-codex"),
         Some(vec![Method::Browser, Method::Device])
     );
+    assert_eq!(methods("openrouter"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("nobody"), None);
 }
 
@@ -228,4 +229,24 @@ fn every_row_decodes_to_the_entry_it_describes() {
         assert!(entry.key_env.is_none(), "{id}");
         assert_eq!(entry.shape(), def.shape, "{id}");
     }
+}
+
+#[test]
+fn the_openrouter_row_defaults_to_responses_with_a_bearer_key() {
+    let def = find("openrouter").expect("the openrouter row is registered");
+    assert_eq!(def.id, "openrouter");
+    assert_eq!(def.name, "OpenRouter");
+    assert_eq!(def.family, Family::Responses);
+    assert_eq!(def.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(def.transport, Transport::Https);
+    assert!(def.oauth.is_none(), "openrouter signs in by key only");
+    let key = def.key.expect("openrouter takes an API key");
+    assert_eq!(key.style, AuthStyle::Bearer);
+    assert_eq!(key.env, ["OPENROUTER_API_KEY"]);
+    assert_eq!(def.shape, Shape::Plain);
+    assert!(
+        crate::http::check_base_url(def.family, def.base_url).is_ok(),
+        "{} is not an admitted base URL",
+        def.base_url
+    );
 }

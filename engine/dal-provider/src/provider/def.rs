@@ -322,7 +322,44 @@ pub(crate) const GITHUB_COPILOT: ProviderDef = ProviderDef {
     shape: Shape::Plain,
 };
 
-const VENDOR_ROWS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC, GITHUB_COPILOT];
+/// The OpenRouter gateway, which serves one OpenAI-style endpoint for every
+/// upstream model.
+///
+/// Key sign-in only. The reference also signs in through a browser PKCE flow
+/// that exchanges the authorization code for a durable key at
+/// `/api/v1/auth/keys` and stores the key as a plain API key. The table's
+/// `OAuthSpec` can express neither the stateless callback (OpenRouter echoes
+/// no `state`) nor a browser grant that yields an API key instead of the
+/// token pair the generic flow refreshes and revokes, so the flow is not
+/// ported.
+///
+/// The row's family is the reference's default: the Responses wire. The
+/// reference downgrades a stream to the Chat Completions wire when its
+/// captured `PI_OPENROUTER_RESPONSES` names `"0"`; the request adapter
+/// applies the same override under `DAL_OPENROUTER_RESPONSES`, so the row
+/// keeps one endpoint, one credential, and both wires.
+pub(crate) const OPENROUTER: ProviderDef = ProviderDef {
+    id: "openrouter",
+    name: "OpenRouter",
+    family: Family::Responses,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://openrouter.ai/api/v1",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::Bearer,
+        env: &["OPENROUTER_API_KEY"],
+    }),
+    oauth: None,
+    shape: Shape::Plain,
+};
+
+const VENDOR_ROWS: &[ProviderDef] = &[
+    OPENAI,
+    OPENAI_CODEX,
+    ANTHROPIC,
+    GITHUB_COPILOT,
+    OPENROUTER,
+];
 const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
 
 /// The vendor rows, then the presets, joined at compile time.

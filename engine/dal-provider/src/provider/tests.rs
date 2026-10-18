@@ -2772,3 +2772,114 @@ async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
     assert!(head.contains("authorization: bearer plain-secret"), "{head}");
     Ok(())
 }
+
+/// One `openrouter` entry bound to a loopback base, through the same entry
+/// construction as the configured set: the row's own def supplies the
+/// dual-dispatch identity.
+fn openrouter_set(
+    dir: &TestDir,
+    base: String,
+    env: &[(&str, &str)],
+) -> Result<ProviderSet, Box<dyn Error>> {
+    let openrouter = entry(
+        "openrouter",
+        Family::Responses,
+        base,
+        Some("OPENROUTER_API_KEY"),
+        2,
+        Transport::Https,
+    );
+    ProviderSet::new(
+        &config(vec![openrouter], 0),
+        identity(),
+        EnvSnapshot::test(env),
+        dir.path(),
+        dir.path(),
+    )
+    .map_err(Into::into)
+}
+
+/// The openrouter row streams its Responses surface by default and its Chat
+/// Completions surface only when the captured environment names `"0"`
+/// exactly: any other captured value keeps Responses.
+#[tokio::test]
+async fn openrouter_streams_responses_by_default_and_chat_only_when_the_env_names_zero()
+-> TestResult {
+    let dir = TestDir::new()?;
+    let key = ("OPENROUTER_API_KEY", "or-secret");
+    for (label, extra, expected_path, reply, marker, absent) in [
+        (
+            "no captured value",
+            Vec::new(),
+            "/v1/responses",
+            responses_reply(),
+            "\"instructions\"",
+            "\"messages\"",
+        ),
+        (
+            "`0`",
+            vec![("DAL_OPENROUTER_RESPONSES", "0")],
+            "/v1/chat/completions",
+            chat_reply(),
+            "\"messages\"",
+            "\"instructions\"",
+        ),
+        (
+            "another value",
+            vec![("DAL_OPENROUTER_RESPONSES", "1")],
+            "/v1/responses",
+            responses_reply(),
+            "\"instructions\"",
+            "\"messages\"",
+        ),
+    ] {
+        let (base, mut captured) = server("/v1", vec![stream_reply(reply)]).await?;
+        let mut env = vec![key];
+        env.extend(extra);
+        let set = openrouter_set(&dir, base, &env)?;
+        let provider = set.provider(resolved("openrouter", Family::Responses, "openai/gpt-5.5"))?;
+        let request = request(
+            Family::Responses,
+            "openai/gpt-5.5",
+            vec![user_text("Say hello.")],
+        );
+        let events = collect(
+            provider
+                .open(
+                    SessionId::new_v7(),
+                    &request,
+                    &[],
+                    notice_sink(),
+                    &CancellationToken::new(),
+                )
+                .await?,
+        )
+        .await?;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello")),
+            "{label} streamed no text"
+        );
+        let request = captured.join_next().await.expect("server completes")??;
+        let head = String::from_utf8_lossy(&request[0]).to_ascii_lowercase();
+        assert!(
+            head.starts_with(&format!("post {expected_path} ")),
+            "{label}: {head}"
+        );
+        assert!(
+            head.contains("authorization: bearer or-secret"),
+            "{label} sent no bearer key: {head}"
+        );
+        let body = String::from_utf8_lossy(request_body(&request[0])).into_owned();
+        assert!(
+            body.contains(marker),
+            "{label} body misses {marker}: {body}"
+        );
+        assert!(
+            !body.contains(absent),
+            "{label} body carries {absent}: {body}"
+        );
+    }
+    Ok(())
+}

@@ -81,6 +81,23 @@ pub(crate) struct CompactContext {
     pub(crate) user_agent: Box<str>,
 }
 
+/// The captured variable that downgrades an openrouter stream to its Chat
+/// Completions wire: only the exact value `"0"` counts, mirroring the
+/// reference's `PI_OPENROUTER_RESPONSES` semantic.
+const OPENROUTER_RESPONSES_ENV: &str = "DAL_OPENROUTER_RESPONSES";
+
+/// Whether the openrouter row streams its Chat Completions wire this turn:
+/// the row's resolved route is its Responses default and the captured
+/// environment names `"0"` exactly. Any other value, including none, keeps
+/// the Responses default, and a route the configuration already pinned to
+/// another family keeps that pin.
+#[must_use]
+fn is_openrouter_chat_override(context: &StreamContext, env: &EnvSnapshot) -> bool {
+    context.provider.as_ref() == "openrouter"
+        && context.family == Family::Responses
+        && env.get(OPENROUTER_RESPONSES_ENV) == Some("0")
+}
+
 pub(crate) async fn stream_attempt(
     context: StreamContext,
     credential: Credential,
@@ -114,6 +131,17 @@ pub(crate) async fn stream_attempt(
             message: format!("provider {} is not configured", context.provider),
         })
     })?;
+    // The openrouter row's Responses default downgrades to its Chat
+    // Completions wire for this turn: the route family follows the context
+    // family, so the body, endpoint, and decoder all agree on the Chat wire.
+    let mut context = context;
+    if is_openrouter_chat_override(&context, &owner.env) {
+        context.family = Family::Chat;
+        context.request.model = ModelRoute::Api {
+            family: Family::Chat,
+            model: context.model.clone(),
+        };
+    }
     if is_copilot_entry(&slot.entry) {
         return copilot_attempt(&context, &credential, &cancel, &owner, &slot.entry).await;
     }
