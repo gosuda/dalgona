@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Plan: read the file.","thought":true,"thoughtSignature":"dGhvdWdodC1zaWduYXR1cmU="}]},"index":0}],"usageMetadata":{"promptTokenCount":40,"thoughtsTokenCount":12,"totalTokenCount":52},"modelVersion":"gemini-3-pro","responseId":"resp-tool-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a.txt"},"id":"call_read_1"},"thoughtSignature":"CiQBjz1rXq7N0b5Y3sT9vKdLmWcH4eUa2Fg8PxRZ6oJt+/yE1w=="}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":7,"thoughtsTokenCount":21,"totalTokenCount":68},"modelVersion":"gemini-3-pro","responseId":"resp-tool-1"}
+
