@@ -3,9 +3,14 @@
 With `sandbox = true` in dal.toml (or `--sandbox`), every `exec` child runs
 through the platform sandbox helper: Landlock on Linux through the
 `dalgon __sandbox` helper, Seatbelt on macOS, and an AppContainer on Windows.
-The allowed roots are the workspace, the system temp directory, the platform
-cache directory, and the `sandbox_writable` entries; nothing else under the
-home directory is writable, and there is no network restriction. The Windows
+The allowed roots are the workspace, the temporary directory, the platform
+cache directory, and the `sandbox_writable` entries. The temporary directory
+comes from the environment captured at startup. On Unix, dal uses `TMPDIR`,
+or `/tmp` if `TMPDIR` is absent or invalid. On Windows, dal checks `TMP`,
+then `TEMP`, then `AppData/Local/Temp` under the captured home directory.
+Only non-empty absolute paths are valid. Later environment changes do not
+change these roots. Nothing else under the home directory is writable,
+and there is no network restriction. The Windows
 backend matches the read-open model as far as DACL editing safely reaches:
 the per-run `dalgon.sandbox.<guid>` container reads and executes wherever
 system ACLs already permit application containers (`ALL APPLICATION

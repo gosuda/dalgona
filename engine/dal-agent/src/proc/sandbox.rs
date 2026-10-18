@@ -32,6 +32,8 @@ pub(crate) struct SandboxInputs<'a> {
     pub home: &'a Path,
     /// The platform cache directory.
     pub cache: &'a Path,
+    /// The process temporary directory captured for this launch.
+    pub temp: PathBuf,
     /// `sandbox_writable` entries in config order.
     pub sandbox_writable: &'a [Box<str>],
     /// dal/dalgona config and data roots a writable path must not overlap.
@@ -159,11 +161,13 @@ pub(crate) fn session_launcher(
         )
     })?;
     let cache = platform_cache(vars, &home);
+    let temp = platform_temp(vars, &home);
     resolve_launcher(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
         home: &home,
         cache: &cache,
+        temp,
         sandbox_writable: config.sandbox_writable(),
         protected_roots,
         helper,
@@ -186,11 +190,13 @@ pub fn sandbox_notice(
     }
     let home = platform_home(vars)?;
     let cache = platform_cache(vars, &home);
+    let temp = platform_temp(vars, &home);
     let roots = resolve_roots(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
         home: &home,
         cache: &cache,
+        temp,
         sandbox_writable: writable,
         protected_roots,
         helper: None,
@@ -223,7 +229,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
     // Automatic roots that do not exist are skipped: a missing path is
     // never created, and omitting it denies it like a raw path would while
     // the Linux helper can still open every root it is handed.
-    if let Ok(temp) = std::fs::canonicalize(std::env::temp_dir()) {
+    if let Ok(temp) = std::fs::canonicalize(&inputs.temp) {
         push_unique(temp, &mut roots);
     }
     if let Ok(cache) = std::fs::canonicalize(inputs.cache) {
@@ -379,6 +385,35 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
     }
 }
 
+/// Resolves the temporary directory from the captured variables, never the
+/// ambient process environment: `TMPDIR` then `/tmp` on Unix, `TMP` then
+/// `TEMP` then the captured home's `AppData/Local/Temp` on Windows. Only
+/// absolute non-empty entries are honored.
+pub(crate) fn platform_temp(vars: &BTreeMap<OsString, OsString>, home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        for name in ["TMP", "TEMP"] {
+            if let Some(dir) = vars.get(OsStr::new(name)) {
+                if !dir.is_empty() && Path::new(dir).is_absolute() {
+                    return PathBuf::from(dir);
+                }
+            }
+        }
+        home.join("AppData").join("Local").join("Temp")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = home;
+        if let Some(dir) = vars.get(OsStr::new("TMPDIR"))
+            && !dir.is_empty()
+            && Path::new(dir).is_absolute()
+        {
+            return PathBuf::from(dir);
+        }
+        PathBuf::from("/tmp")
+    }
+}
+
 /// Kernel-enforced restrictions inherited by every macOS child, including
 /// processes launched when the filesystem sandbox is disabled.
 /// A process may not leave the process group that the host owns.
@@ -521,6 +556,7 @@ mod tests {
             workspace_root: workspace,
             home,
             cache,
+            temp: home.join("temp"),
             sandbox_writable: writable,
             protected_roots: protected,
             helper,
@@ -534,6 +570,7 @@ mod tests {
             workspace_root: Path::new("/nonexistent-workspace"),
             home: Path::new("/nonexistent-home"),
             cache: Path::new("/nonexistent-cache"),
+            temp: PathBuf::from("/nonexistent-temp"),
             sandbox_writable: &[],
             protected_roots: &[],
             helper: None,
@@ -547,6 +584,8 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cache = home.path().join("cache");
         std::fs::create_dir(&cache).expect("cache dir");
+        let temp = home.path().join("temp");
+        std::fs::create_dir(&temp).expect("temp dir");
         let extra = tempfile::tempdir().expect("extra writable");
         let writable: Vec<Box<str>> = vec![
             "~/extra".into(),
@@ -557,7 +596,7 @@ mod tests {
         let inputs = inputs(workspace.path(), home.path(), &cache, &writable, &[], None);
         let roots = resolve_roots(&inputs).expect("roots resolve");
         let workspace_root = std::fs::canonicalize(workspace.path()).expect("canonical");
-        let temp = canonical_or_raw(&std::env::temp_dir());
+        let temp = std::fs::canonicalize(&temp).expect("canonical temp");
         let cache_root = std::fs::canonicalize(&cache).expect("canonical cache");
         let extra_root = std::fs::canonicalize(extra.path()).expect("canonical extra");
         assert_eq!(roots[0], workspace_root);
@@ -690,6 +729,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn platform_temp_prefers_captured_vars_over_ambient() {
+        let home = tempfile::tempdir().expect("home");
+        let captured = tempfile::tempdir().expect("captured temp");
+        let vars = BTreeMap::from([
+            (
+                OsString::from("TMPDIR"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TEMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), captured.path());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn platform_temp_on_unix_uses_tmpdir_then_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        let captured = tempfile::tempdir().expect("captured temp");
+        assert_eq!(
+            platform_temp(&BTreeMap::new(), home.path()),
+            PathBuf::from("/tmp"),
+        );
+        for invalid in [OsString::from(""), OsString::from("relative/tmp")] {
+            let vars = BTreeMap::from([(OsString::from("TMPDIR"), invalid)]);
+            assert_eq!(platform_temp(&vars, home.path()), PathBuf::from("/tmp"));
+        }
+        let vars = BTreeMap::from([
+            (
+                OsString::from("TMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TEMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), PathBuf::from("/tmp"));
+        let vars = BTreeMap::from([(
+            OsString::from("TMPDIR"),
+            captured.path().as_os_str().to_owned(),
+        )]);
+        assert_eq!(platform_temp(&vars, home.path()), captured.path());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn platform_temp_on_windows_uses_tmp_then_temp_then_home() {
+        let home = tempfile::tempdir().expect("home");
+        let first = tempfile::tempdir().expect("first temp");
+        let second = tempfile::tempdir().expect("second temp");
+        let fallback = home.path().join("AppData").join("Local").join("Temp");
+        assert_eq!(platform_temp(&BTreeMap::new(), home.path()), fallback);
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let vars = BTreeMap::from([(
+            OsString::from("TMPDIR"),
+            elsewhere.path().as_os_str().to_owned(),
+        )]);
+        assert_eq!(platform_temp(&vars, home.path()), fallback);
+        let vars = BTreeMap::from([
+            (OsString::from("TMP"), OsString::from("relative/tmp")),
+            (OsString::from("TEMP"), second.path().as_os_str().to_owned()),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), second.path());
+        let vars = BTreeMap::from([
+            (OsString::from("TMP"), first.path().as_os_str().to_owned()),
+            (OsString::from("TEMP"), second.path().as_os_str().to_owned()),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), first.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_temp_accepts_non_unicode_tmpdir() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let home = tempfile::tempdir().expect("home");
+        let mut bytes = home.path().as_os_str().as_encoded_bytes().to_vec();
+        bytes.extend_from_slice(b"/tmp-\xff");
+        let dir = OsString::from_vec(bytes);
+        assert!(Path::new(&dir).is_absolute());
+        let expected = PathBuf::from(&dir);
+        let vars = BTreeMap::from([(OsString::from("TMPDIR"), dir)]);
+        assert_eq!(platform_temp(&vars, home.path()), expected);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn missing_seatbelt_fails_closed_when_sandbox_enabled() {
@@ -806,5 +938,51 @@ mod tests {
         );
         let launcher = resolve_launcher(&with_helper).expect("abi 3 resolves");
         assert!(matches!(launcher, Launcher::Sandbox { .. }));
+    }
+    #[test]
+    fn sandbox_notice_reports_roots_when_on_and_none_when_off_or_unresolvable() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let temp = tempfile::tempdir().expect("temp");
+        let vars = BTreeMap::from([
+            (OsString::from("HOME"), home.path().as_os_str().to_owned()),
+            (
+                OsString::from("XDG_CACHE_HOME"),
+                cache.path().as_os_str().to_owned(),
+            ),
+            (OsString::from("TMPDIR"), temp.path().as_os_str().to_owned()),
+            (OsString::from("TMP"), temp.path().as_os_str().to_owned()),
+            (OsString::from("TEMP"), temp.path().as_os_str().to_owned()),
+        ]);
+        let empty: Vec<Box<str>> = vec![];
+        let notice = sandbox_notice(true, &vars, workspace.path(), &empty, &[])
+            .expect("resolvable roots render a notice");
+        assert!(
+            notice.starts_with("Sandbox on. Commands can write only under: "),
+            "unexpected notice: {notice}",
+        );
+        let canonical = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        assert!(
+            notice.contains(canonical.to_string_lossy().as_ref()),
+            "the notice names the workspace root: {notice}",
+        );
+        let temp_canonical = std::fs::canonicalize(temp.path()).expect("canonical temp");
+        assert!(
+            notice.contains(temp_canonical.to_string_lossy().as_ref()),
+            "the notice names the captured temp root: {notice}",
+        );
+        assert!(sandbox_notice(false, &vars, workspace.path(), &empty, &[]).is_none());
+        assert!(sandbox_notice(true, &BTreeMap::new(), workspace.path(), &empty, &[]).is_none());
+        assert!(
+            sandbox_notice(
+                true,
+                &vars,
+                Path::new("/nonexistent-workspace"),
+                &empty,
+                &[]
+            )
+            .is_none()
+        );
     }
 }

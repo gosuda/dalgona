@@ -98,8 +98,10 @@ async fn run_probe_turn(
     let tmp = tempfile::tempdir()?;
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
+    let captured_temp = tmp.path().join("stemp");
     std::fs::create_dir_all(&data)?;
     std::fs::create_dir_all(&workspace_dir)?;
+    std::fs::create_dir_all(&captured_temp)?;
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, format!("{STEP_CALL}{STEP_END}"))?;
     let mut user = format!(
@@ -153,6 +155,12 @@ async fn run_probe_turn(
                 OsString::from("XDG_CACHE_HOME"),
                 OsString::from(tmp.path().join("cache")),
             ),
+            (
+                OsString::from("TMPDIR"),
+                captured_temp.as_os_str().to_owned(),
+            ),
+            (OsString::from("TMP"), captured_temp.as_os_str().to_owned()),
+            (OsString::from("TEMP"), captured_temp.as_os_str().to_owned()),
         ]),
         cwd: workspace_dir.clone(),
         sandbox_helper: None,
