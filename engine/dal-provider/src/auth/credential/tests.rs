@@ -6,7 +6,7 @@ use std::{
 use dal_core::Family;
 
 use super::*;
-use crate::{AuthStyle, Transport};
+use crate::{AuthStyle, ProviderSettings, Transport};
 
 const OPENAI: &str = "openai";
 const ANTHROPIC: &str = "anthropic";
@@ -60,6 +60,7 @@ fn entry(id: &str, key_env: Option<&str>) -> ProviderEntry {
         key_env: key_env.map(Box::from),
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 4,
+        settings: ProviderSettings::default(),
     }
 }
 
@@ -310,6 +311,96 @@ fn credential_order_is_entry_then_environment_then_error() {
 }
 
 #[test]
+fn none_auth_style_overrides_stored_oauth_and_env_keys() {
+    let dir = TestDir::new("none-override");
+    let mut store = AuthStore::load(dir.auth()).expect("missing file is empty");
+    let stored_oauth = codex_oauth(Some(1_789_000_000));
+    store
+        .set(OPENAI_CODEX, stored_oauth.clone())
+        .expect("codex takes oauth");
+    let stored_key = Credential::ApiKey {
+        key: SecretString::from("stored-openai-key"),
+    };
+    store
+        .set(OPENAI, stored_key.clone())
+        .expect("openai takes a key");
+    store.store().expect("store writes to disk");
+    let store = AuthStore::load(dir.auth()).expect("reload from disk");
+
+    let env = EnvSnapshot::test(&[
+        ("OPENAI_API_KEY", "env-openai-key"),
+        ("CODEX_KEY", "env-codex-key"),
+        ("CUSTOM_KEY", "env-custom-key"),
+    ]);
+
+    let mut codex = entry(OPENAI_CODEX, Some("CODEX_KEY"));
+    let mut openai = entry(OPENAI, None);
+    let mut custom = entry("custom", Some("CUSTOM_KEY"));
+    let mut unconfigured = entry("unconfigured", None);
+
+    // Explicit AuthStyle::None yields Credential::None before stored lookup and env fallback:
+    codex.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&codex, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    openai.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&openai, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    custom.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&custom, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    unconfigured.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&unconfigured, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    // Normal styles preserve store-first precedence and standard fallback / error:
+    for normal in [AuthStyle::Bearer, AuthStyle::XApiKey, AuthStyle::ApiKey] {
+        codex.auth = normal;
+        assert_eq!(
+            resolve(&codex, &store, &env).expect("normal style resolves"),
+            stored_oauth,
+            "stored oauth takes precedence under {normal:?}"
+        );
+
+        openai.auth = normal;
+        assert_eq!(
+            resolve(&openai, &store, &env).expect("normal style resolves"),
+            stored_key,
+            "stored key takes precedence under {normal:?}"
+        );
+
+        custom.auth = normal;
+        assert_eq!(
+            resolve(&custom, &store, &env).expect("normal style falls back to env"),
+            Credential::ApiKey {
+                key: SecretString::from("env-custom-key"),
+            },
+            "env fallback under {normal:?}"
+        );
+
+        unconfigured.auth = normal;
+        let error = resolve(&unconfigured, &store, &env).expect_err("no credentials");
+        assert!(
+            matches!(
+                error,
+                ProviderError::NoCredentials { ref provider } if provider == "unconfigured"
+            ),
+            "expected NoCredentials under {normal:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
 fn set_rejects_kinds_the_member_cannot_hold() {
     let mut store = AuthStore::empty("unused/auth.json");
     let oauth = codex_oauth(None);
@@ -344,9 +435,11 @@ fn set_rejects_kinds_the_member_cannot_hold() {
 
 #[test]
 fn debug_output_redacts_secrets() {
-    let env = EnvSnapshot::test(&[("OPENAI_API_KEY", "SECRET-ENV")]);
+    let env = EnvSnapshot::test(&[("OPENAI_API_KEY", "SECRET-ENV")])
+        .with_cwd(PathBuf::from("/secret/cwd-value"));
     let shown = format!("{env:?} {:?}", codex_oauth(Some(1)));
     assert!(!shown.contains("SECRET"), "{shown}");
+    assert!(!shown.contains("/secret/cwd-value"), "{shown}");
     assert!(shown.contains("OPENAI_API_KEY"), "{shown}");
 }
 
@@ -395,6 +488,17 @@ fn expiry_prefers_expires_in_then_jwt_exp_then_absent() {
     );
     assert_eq!(oauth_expires_at(1_000, None, &jwt(r#"{"sub":"x"}"#)), None);
     assert_eq!(oauth_expires_at(1_000, None, "opaque-token"), None);
+}
+
+#[test]
+fn issuance_counts_from_created_at_only_when_it_is_an_integer() {
+    let value = |text: &str| sonic_rs::from_str::<sonic_rs::Value>(text).expect("valid JSON");
+    assert_eq!(oauth_issued_at(None, 9), 9);
+    assert_eq!(oauth_issued_at(Some(&value("100")), 9), 100);
+    assert_eq!(oauth_issued_at(Some(&value("-5")), 9), -5);
+    for text in ["null", r#""100""#, "1.5", "true", "18446744073709551615"] {
+        assert_eq!(oauth_issued_at(Some(&value(text)), 9), 9, "{text}");
+    }
 }
 
 /// Files written by the serializer before the member map replaced the three
