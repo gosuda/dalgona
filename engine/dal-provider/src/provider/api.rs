@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::config::{AuthStyle, ProviderEntry, Transport};
 use super::set::{ProviderSet, ProviderSetInner, authenticates_ambiently};
+use crate::family::cursor::{decode as cursor_decode, lower as cursor_lower};
+use crate::run::{HostToolResult, ProviderRun};
 use crate::{
     auth::credential::{Credential, OAuthCredential},
     catalog::{self, CatalogFetch, ModelFetch, ResolvedModel},
@@ -201,6 +203,16 @@ impl Provider {
         }
     }
 
+    /// Whether this provider speaks the Cursor duplex `Run` protocol.
+    ///
+    /// Ordinary [`Provider::open`] routes here internally for a single step.
+    /// Callers that keep a run across tool exchanges select Cursor requests
+    /// by the family of their model route and call [`Provider::open_run`] and
+    /// [`Provider::resume_run`] directly.
+    pub(crate) fn is_cursor(&self) -> bool {
+        matches!(self, Self::Http(http) if http.entry.family == Family::Cursor)
+    }
+
     /// Opens one provider stream for `session`.
     ///
     /// The session id is explicit and never inferred from the optional prompt
@@ -221,6 +233,15 @@ impl Provider {
     ) -> Result<EventStream, ProviderError> {
         if let Self::Scripted(script) = self {
             return script.open();
+        }
+        // A fresh single-step Cursor call works without keeping a run: the
+        // returned stream owns its run until the terminal, so a live run is
+        // never dropped before its `Stop`. A run left awaiting host results
+        // after a tool-use stop is released with the stream, never resumed.
+        if self.is_cursor() {
+            return self
+                .open_cursor_single(session, request, hooks, notices, cancel)
+                .await;
         }
         let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
             message: String::from("provider is not HTTP-backed"),
@@ -301,6 +322,322 @@ impl Provider {
             Self::open_http(turn)?
         };
         Ok(stream.restoring(names))
+    }
+
+    /// Opens one Cursor run and returns its owner plus its first step stream.
+    ///
+    /// The pre-wire pipeline of [`Provider::open`] is preserved
+    /// (route and blob validation, hooks, merged parameters, the thinking
+    /// plan and support check, thinking notices, credential refresh) and
+    /// fails before any socket is opened. A provider permit is acquired
+    /// before the HTTP/2 handshake; the first step keeps it through its
+    /// `Stop` or error via [`transport_mod::hold_permit`]. A run awaiting
+    /// host results holds no permit; its owner drives the keepalive future
+    /// and no provider task is spawned.
+    ///
+    /// The decoded step events already carry internal tool names, so they are
+    /// handed to the run directly and `respond` matches journaled names
+    /// verbatim.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` for a non-Cursor provider, a WebSocket entry,
+    /// an unlowerable request, or hook/thinking misuse; `UnresolvedBlob` for
+    /// stored content; `NoCredentials` without a key; `Transport` when the
+    /// handshake cannot start or admission is closed/cancelled.
+    pub async fn open_run(
+        &self,
+        session: SessionId,
+        request: &ModelRequest,
+        hooks: &[Arc<dyn BeforeRequest>],
+        notices: NoticeSink,
+        cancel: &CancellationToken,
+    ) -> Result<(ProviderRun, EventStream), ProviderError> {
+        let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from("provider is not HTTP-backed"),
+        })?;
+        if http.entry.family != Family::Cursor {
+            return Err(ProviderError::InvalidRequest {
+                message: String::from("open_run serves the cursor family only"),
+            });
+        }
+        if http.entry.transport == Transport::Websocket {
+            return Err(ProviderError::InvalidRequest {
+                message: String::from("this provider family has no WebSocket transport"),
+            });
+        }
+        request_mod::ensure_request(http, request)?;
+        if let Some(blob_id) = request_mod::unresolved_blob(request) {
+            return Err(ProviderError::UnresolvedBlob { blob_id });
+        }
+        let owner = http
+            .owner
+            .upgrade()
+            .ok_or_else(|| ProviderError::InvalidRequest {
+                message: String::from("provider host has ended"),
+            })?;
+        let patch = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Transport {
+                family: http.entry.family,
+                reason: String::from("provider request cancelled before it started"),
+            }),
+            result = thinking::compose_hooks(
+                hooks,
+                request_mod::request_model(request),
+                request.params.thinking,
+            ) => result?,
+        };
+        let patch = request_mod::merge_request_parameters(request, patch)?;
+        let thinking = request_mod::make_thinking_plan(http, request, &patch)?;
+        let family = request_mod::request_family(request)?;
+        if !request.tools.is_empty()
+            && !http
+                .resolved
+                .entry
+                .tool_support
+                .allows(family, thinking.level)
+        {
+            return Err(ProviderError::InvalidRequest {
+                message: format!(
+                    "{} does not support tools for thinking level {}",
+                    error::family_label(family),
+                    thinking::level_name(thinking.level)
+                ),
+            });
+        }
+        request_mod::emit_thinking_notices(
+            &owner,
+            session,
+            request_mod::request_model(request),
+            &thinking.notices,
+            &notices,
+        );
+        let credential = transport_mod::refresh_expiring(
+            &owner.refresher,
+            &http.entry,
+            &http.credential,
+            cancel,
+        )
+        .await?;
+        let bearer = Self::cursor_bearer(&credential, &http.entry.id)?;
+        let wire = Self::cursor_wire(http, request);
+        // Admission before the handshake: a parked run never blocks catalog.
+        let permit = transport_mod::acquire_provider_permit(&owner, &http.entry.id, cancel).await?;
+        let conversation_id = cursor_lower::uuid_text();
+        let message_id = cursor_lower::uuid_text();
+        let open = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Transport {
+                family: Family::Cursor,
+                reason: String::from("provider request cancelled before it started"),
+            }),
+            open = cursor_decode::open_run(cursor_decode::OpenArgs {
+                client: &http.client,
+                base_url: &http.entry.base_url,
+                bearer: &bearer,
+                provider: &http.entry.id,
+                user_agent: &http.user_agent,
+                request,
+                wire: &wire,
+                conversation_id,
+                message_id,
+            }) => open?,
+        };
+        let mut run = ProviderRun::new(Family::Cursor, open.events, open.transport);
+        // `permit` drops here on `next_step` misuse, so no step ever runs
+        // without admission.
+        let step = run.next_step()?;
+        Ok((run, transport_mod::hold_permit(step, permit)))
+    }
+
+    /// Answers a parked Cursor run and returns its next step stream.
+    ///
+    /// Acquires a generation permit before calling `respond`/`next_step`; the
+    /// step keeps it through its `Stop` or error via `hold_permit`. Awaiting
+    /// holds no permit, so cancellation while acquiring leaves the run
+    /// untouched (still awaiting) for its owner to retry or release. The
+    /// result supplier runs only after admission succeeds. Cancellation while
+    /// waiting does not consume the caller's results. The supplier returns
+    /// exactly the pending calls in pending-step order under their step-event
+    /// names; `respond` re-verifies the exact cover and
+    /// loses the run on mismatch. No hooks, notices, thinking, or refresh
+    /// run here: the connection is already open.
+    ///
+    /// The run owner is the only caller; it never calls `next_step`/`respond`
+    /// directly, so every generation step passes through admission.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` for a non-Cursor provider or a misuse (no
+    /// pending calls); `RunLost` for a cover mismatch or a dead transport;
+    /// `Transport` when admission is closed or cancelled before `respond`.
+    pub async fn resume_run(
+        &self,
+        run: &mut ProviderRun,
+        results: impl FnOnce() -> Result<Vec<HostToolResult>, ProviderError> + Send,
+        cancel: &CancellationToken,
+    ) -> Result<EventStream, ProviderError> {
+        let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from("provider is not HTTP-backed"),
+        })?;
+        if http.entry.family != Family::Cursor {
+            return Err(ProviderError::InvalidRequest {
+                message: String::from("resume_run serves the cursor family only"),
+            });
+        }
+        let owner = http
+            .owner
+            .upgrade()
+            .ok_or_else(|| ProviderError::InvalidRequest {
+                message: String::from("provider host has ended"),
+            })?;
+        let permit = transport_mod::acquire_provider_permit(&owner, &http.entry.id, cancel).await?;
+        run.respond(results()?)?;
+        let step = run.next_step()?;
+        Ok(transport_mod::hold_permit(step, permit))
+    }
+
+    /// Single-step Cursor `open`: fresh run, first step owned until its end.
+    ///
+    /// Reuses [`Provider::open_run`] (no duplicated validation pipeline) and
+    /// ties the run's lifetime to the returned stream so a live run is never
+    /// dropped before its `Stop`. After a tool-use stop the owned run is
+    /// released with the stream; it is never resumed from this path.
+    async fn open_cursor_single(
+        &self,
+        session: SessionId,
+        request: &ModelRequest,
+        hooks: &[Arc<dyn BeforeRequest>],
+        notices: NoticeSink,
+        cancel: &CancellationToken,
+    ) -> Result<EventStream, ProviderError> {
+        let (run, first) = self
+            .open_run(session, request, hooks, notices, cancel)
+            .await?;
+        Ok(Self::own_until_end(first, run))
+    }
+
+    /// Holds `run` alive until `first` ends: the stream owns the run.
+    ///
+    /// The unfold state retains the run across polls; the terminal `Stop` or
+    /// error is delivered first, then the next poll observes the inner end
+    /// and drops both. Early drop aborts the step (released) and drops the
+    /// run once (no-op after). No task is spawned; permits stay with the
+    /// inner `hold_permit` stream.
+    fn own_until_end(first: EventStream, run: ProviderRun) -> EventStream {
+        let source = futures::stream::unfold((Some(run), first), |(run, mut stream)| async move {
+            let item = stream.next().await?;
+            Some((item, (run, stream)))
+        });
+        EventStream::new(source, || {})
+    }
+
+    /// Cursor bearer material: API key or OAuth access token, never invented.
+    fn cursor_bearer(credential: &Credential, provider: &str) -> Result<String, ProviderError> {
+        match credential {
+            Credential::ApiKey { key } => Ok(key.expose().to_owned()),
+            Credential::OAuth(oauth) => Ok(oauth.access_token.expose().to_owned()),
+            Credential::None => Err(ProviderError::NoCredentials {
+                provider: provider.to_owned(),
+            }),
+        }
+    }
+
+    /// Resolves the Cursor wire route for one request.
+    ///
+    /// The wire carries two identities: the routed base id and the
+    /// account-usable slug, plus reasoning parameters and the max-mode flag.
+    /// Effort rides the requested model id as a trailing tier
+    /// (`gpt-5.5-high`), mirroring the reference resolver: for OpenAI-class
+    /// bases the tier is stripped into a `reasoning` parameter and the base
+    /// id is routed, while other ids pass through unchanged. A bare
+    /// `composer-2.5` pins the Standard tier (`fast=false`); its `-fast`
+    /// selection declares no parameter. Without discovery rows the max-mode
+    /// flag falls back to the wire slug: an `xhigh`/`max` tier or the
+    /// Opus fast lane.
+    fn cursor_wire(http: &Http, request: &ModelRequest) -> cursor_lower::WireModel {
+        let wire_id = request_mod::request_model(request);
+        let display = http.resolved.entry.display.clone();
+        if wire_id == "composer-2.5" {
+            return cursor_lower::WireModel {
+                model_id: wire_id.into(),
+                details_id: wire_id.into(),
+                display_name: display,
+                parameters: vec![("fast".into(), "false".into())],
+                max_mode: Self::cursor_max_mode(wire_id, None),
+            };
+        }
+        match Self::cursor_effort_split(wire_id) {
+            Some((base, effort)) if Self::is_cursor_openai_base(&base) => {
+                if effort == "none" {
+                    return cursor_lower::WireModel {
+                        model_id: base.into(),
+                        details_id: wire_id.into(),
+                        display_name: display,
+                        parameters: Vec::new(),
+                        max_mode: Self::cursor_max_mode(wire_id, None),
+                    };
+                }
+                cursor_lower::WireModel {
+                    model_id: base.clone().into(),
+                    details_id: wire_id.into(),
+                    display_name: display,
+                    parameters: vec![("reasoning".into(), effort.clone().into())],
+                    max_mode: Self::cursor_max_mode(wire_id, Some(&effort)),
+                }
+            }
+            _ => cursor_lower::WireModel {
+                model_id: wire_id.into(),
+                details_id: wire_id.into(),
+                display_name: display,
+                parameters: Vec::new(),
+                max_mode: Self::cursor_max_mode(wire_id, None),
+            },
+        }
+    }
+
+    /// Splits a trailing effort tier off a Cursor model id.
+    ///
+    /// Returns the base id with its lane kept (`gpt-5.5-high-fast` keeps
+    /// `-fast`) and the tier (`minimal|low|medium|high|xhigh|max|none`).
+    /// Matching is ASCII case-insensitive; the base keeps its original bytes.
+    fn cursor_effort_split(wire_id: &str) -> Option<(String, String)> {
+        const TIERS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "none"];
+        const LANE: &str = "-fast";
+        let lower = wire_id.to_ascii_lowercase();
+        let mut rest = lower.as_str();
+        let mut lane = "";
+        if let Some(trimmed) = rest.strip_suffix(LANE) {
+            lane = LANE;
+            rest = trimmed;
+        }
+        for tier in TIERS {
+            let suffix = format!("-{tier}");
+            if let Some(base) = rest.strip_suffix(suffix.as_str()) {
+                if base.is_empty() {
+                    continue;
+                }
+                let original_base = &wire_id[..base.len()];
+                return Some((format!("{original_base}{lane}"), (*tier).to_owned()));
+            }
+        }
+        None
+    }
+
+    /// Whether a Cursor base id is OpenAI-class: a `gpt-` prefix followed by
+    /// an ASCII version digit.
+    fn is_cursor_openai_base(base: &str) -> bool {
+        let bytes = base.as_bytes();
+        bytes.len() > 4 && bytes[..4].eq_ignore_ascii_case(b"gpt-") && bytes[4].is_ascii_digit()
+    }
+
+    /// Falls back the max-mode flag to the wire slug when no discovery row
+    /// carries a marker: an `xhigh`/`max` tier or the Opus fast lane.
+    fn cursor_max_mode(wire_id: &str, effort: Option<&str>) -> bool {
+        if matches!(effort, Some("xhigh" | "max")) {
+            return true;
+        }
+        let lower = wire_id.to_ascii_lowercase();
+        lower.contains("opus") && lower.contains("-fast")
     }
 
     async fn open_websocket(&self, turn: OpenTurn<'_>) -> Result<EventStream, ProviderError> {

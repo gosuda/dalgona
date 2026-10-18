@@ -47,7 +47,8 @@ pub use family::anthropic::supports_tool_search;
 pub use http::{
     BODY_LIMIT, COMPACT_TIMEOUT, CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, NON_STREAM_TOTAL_TIMEOUT,
     OAUTH_TIMEOUT, RESPONSE_HEADER_TIMEOUT, STREAM_IDLE_TIMEOUT, USAGE_TIMEOUT, WS_MESSAGE_LIMIT,
-    build_client, build_client_no_redirect, check_base_url, endpoint, read_body, send, user_agent,
+    build_client, build_client_http2_prior_knowledge, build_client_no_redirect, check_base_url,
+    endpoint, read_body, send, user_agent,
 };
 pub use provider::{
     AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,
@@ -58,7 +59,7 @@ pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, 
 pub use retry::{
     MAX_RETRY_WAIT, RequestState, RetryAfterTooLong, RetryDecision, classify, delay_for_attempt,
 };
-pub use run::{HostToolResult, ProviderRun, RunLostReason, RunState};
+pub use run::{HostToolResult, KeepAlive, ProviderRun, RunLostReason, RunState};
 pub use scripted::{Operation, Script, ScriptError, ScriptStep, StepKind};
 pub use sse::{SSE_EVENT_LIMIT, SSE_LINE_LIMIT, SseEvent, decode_stream, encode};
 pub use stream::{
