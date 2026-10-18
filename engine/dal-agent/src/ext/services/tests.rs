@@ -52,6 +52,8 @@ struct FakeBackend {
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
     headless: std::sync::atomic::AtomicBool,
+    /// Every path `fs_read` reached; a gate that refuses first leaves it empty.
+    seen_reads: Mutex<Vec<String>>,
 }
 
 impl SessionBackend for FakeBackend {
@@ -80,8 +82,9 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(bytes) })
     }
 
-    fn fs_read(&self, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        Box::pin(async move { unreachable!("this test never reads files") })
+    fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        self.seen_reads.lock().unwrap().push(path.to_owned());
+        Box::pin(async move { Ok(Some(b"served".to_vec())) })
     }
 
     fn fs_write(&self, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
@@ -579,6 +582,65 @@ async fn not_injected_does_not_consult_grants() {
              and approve the new grant when asked",
         ),
         "a missing span renders as unknown",
+    );
+}
+
+/// The session's `jobs/` directory is outside the workspace, so an absolute
+/// `fs.read` path is a Builtin privilege: the guard reads the exec tool's
+/// spill log by the absolute path its footer names. Any other origin holding
+/// the same service is refused before the backend sees the path, with the
+/// refusal a path outside the workspace always had; its relative reads are
+/// untouched.
+#[tokio::test]
+async fn an_absolute_fs_read_path_reaches_the_backend_only_for_a_builtin_caller() {
+    let fx = fixture(Duration::from_secs(30));
+    let absolute = fx.temp.path().join("jobs").join("a.log");
+    let absolute = absolute.to_str().expect("utf-8 path");
+    let reader = |ext: &str, origin: Origin, kind: CallerKind| {
+        Caller::new(
+            ext.parse::<Name>().unwrap(),
+            origin,
+            ServiceSet::from_names(["fs.read"]).unwrap(),
+            std::num::NonZeroU32::MIN,
+            kind,
+            Some(turn()),
+        )
+        .with_test_digest()
+    };
+    let builtin = reader("guard", Origin::Builtin, CallerKind::Hook);
+    // Cells skip the grant store, so the origin check is the only gate under test.
+    let user = reader("focus", Origin::User, CallerKind::Cell { approved: true });
+    let bundled = reader(
+        "focus",
+        Origin::Bundled,
+        CallerKind::Cell { approved: true },
+    );
+
+    assert_eq!(
+        fx.services.fs_read(&builtin, absolute).await.unwrap(),
+        Some(b"served".to_vec()),
+        "a Builtin caller reaches the backend with the absolute path"
+    );
+    for refused in [&user, &bundled] {
+        let error = fx.services.fs_read(refused, absolute).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServiceError::Denied(DenyReason::OutOfScope { ref what })
+                    if what.contains(absolute)
+            ),
+            "an absolute path is out of scope for a non-Builtin caller, got {error:?}"
+        );
+    }
+    assert_eq!(
+        fx.backend.seen_reads.lock().unwrap().as_slice(),
+        [absolute],
+        "only the Builtin read reached the backend"
+    );
+    assert_eq!(
+        fx.services.fs_read(&user, "a.txt").await.unwrap(),
+        Some(b"served".to_vec()),
+        "a workspace-relative read is unchanged for every origin"
     );
 }
 

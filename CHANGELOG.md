@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Repair the guard's warning router for real exec results. The exec tool
+  spills a long result to `<session dir>/jobs/<job id>.log` and ends its text
+  with a `Full output: <path>` line; the guard now reads that log, takes the
+  last such line as the tool's own so output that merely looks like a footer
+  cannot name the file it reads, and surfaces the warnings the 4 KiB preview
+  lost. The hook preview keeps that footer inside its 4096-byte bound, and
+  `fs.read` serves a Builtin caller an absolute path under the session's own
+  `jobs/` directory. Every other absolute path, and every absolute path from
+  a non-Builtin caller, is still refused.
 - Return an unavailable denial when a run approval expires without an answer.
   An explicit decline remains distinct. Neither outcome starts the process,
   and the next run can request approval.

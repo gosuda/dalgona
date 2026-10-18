@@ -606,6 +606,16 @@ impl Services for SessionServices {
         let path = path.to_owned();
         Box::pin(async move {
             Self::check_inject(&who, Service::FsRead)?;
+            // The backend serves one absolute location, the session's own
+            // `jobs/` directory where the exec tool spills its log, and only
+            // to a Builtin caller. Any other origin keeps the workspace-only
+            // reach its grant declares, and is refused before a grant
+            // question can open for a path no answer could make readable.
+            if who.origin() != Origin::Builtin && std::path::Path::new(&path).is_absolute() {
+                return Err(ServiceError::Denied(DenyReason::out_of_scope(format!(
+                    "path \"{path}\""
+                ))));
+            }
             self.gated(&who, Service::FsRead).await?;
             self.backend.fs_read(&path).await
         })

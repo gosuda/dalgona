@@ -31,8 +31,11 @@ impl Warning {
     }
 }
 
+/// The path on the last `Full output: ` line of an exec result. The tool
+/// appends that line after everything the command printed, so an earlier
+/// line of the same shape is command output and never names the log.
 pub(super) fn full_output_path(preview: &str) -> Option<&str> {
-    preview.lines().find_map(|line| {
+    preview.lines().rev().find_map(|line| {
         line.strip_prefix("Full output: ")
             .filter(|path| !path.is_empty())
     })

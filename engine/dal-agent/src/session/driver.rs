@@ -1358,18 +1358,52 @@ impl Driver {
         }
     }
 
+    /// Cuts a settled tool text to the 4096 bytes a hook sees. A tool that
+    /// ends its text with a `Full output: <path>` line names the file that
+    /// holds what the cut drops, so a cut that would lose that line shrinks
+    /// the content to keep it inside the same bound instead.
     fn bounded_preview(text: &str) -> Box<str> {
         const MAX_BYTES: usize = 4096;
         if text.len() <= MAX_BYTES {
             return text.into();
         }
-        let end = text
-            .char_indices()
+        let end = Self::char_floor(text, MAX_BYTES);
+        let Some((start, footer)) = Self::full_output_footer(text) else {
+            return text[..end].into();
+        };
+        let room = MAX_BYTES.saturating_sub(footer.len() + 1);
+        if start + footer.len() <= end || room == 0 {
+            return text[..end].into();
+        }
+        let content = &text[..Self::char_floor(&text[..start], room)];
+        let mut preview = String::with_capacity(MAX_BYTES);
+        preview.push_str(content);
+        if !content.is_empty() && !content.ends_with('\n') {
+            preview.push('\n');
+        }
+        preview.push_str(footer);
+        preview.into()
+    }
+
+    /// The largest char boundary of `text` at or below `max`.
+    fn char_floor(text: &str, max: usize) -> usize {
+        let mut end = max.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    }
+
+    /// The last line of `text` that starts with the full-output prefix, with
+    /// its byte offset. The tool appends that line after everything a command
+    /// printed, so an earlier line of the same shape is command output.
+    fn full_output_footer(text: &str) -> Option<(usize, &str)> {
+        let start = text
+            .rmatch_indices(crate::FULL_OUTPUT_PREFIX)
             .map(|(index, _)| index)
-            .take_while(|index| *index <= MAX_BYTES)
-            .last()
-            .unwrap_or(0);
-        text[..end].into()
+            .find(|index| *index == 0 || text[..*index].ends_with('\n'))?;
+        let line = text[start..].lines().next()?;
+        Some((start, line))
     }
 
     /// Runs the registered compactor chain over the current leaf entries.
@@ -2125,5 +2159,62 @@ mod tests {
         assert!(!compaction_has_reserved_policy_record(&parts(letter(
             "ordinary",
         ))));
+    }
+
+    const FOOTER: &str =
+        "Full output: /data/sessions/w/s/jobs/0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000.log";
+
+    #[test]
+    fn a_preview_keeps_a_short_text_whole() {
+        let text = format!("short\n{FOOTER}");
+        assert_eq!(&*Driver::bounded_preview(&text), text);
+    }
+
+    #[test]
+    fn a_preview_without_a_footer_is_the_head_cut_at_a_char_boundary() {
+        let preview = Driver::bounded_preview(&"x".repeat(5000));
+        assert_eq!(preview.len(), 4096);
+        let preview = Driver::bounded_preview(&"é".repeat(3000));
+        assert_eq!(preview.len(), 4096);
+        let preview = Driver::bounded_preview(&format!("a{}", "é".repeat(3000)));
+        assert_eq!(preview.len(), 4095, "never splits a char to reach the cap");
+    }
+
+    #[test]
+    fn a_footer_the_cut_would_drop_is_carried_inside_the_bound() {
+        // A full tail of command output, then the tool's footer and status.
+        let text = format!("{}\n{FOOTER}\nCommand exited with code 1", "x".repeat(4096));
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert!(preview.starts_with("xxxx"));
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+        assert!(!preview.contains("Command exited"), "{preview}");
+    }
+
+    #[test]
+    fn a_carried_footer_never_splits_a_char_of_the_content() {
+        let text = format!("{}\n{FOOTER}", "é".repeat(2500));
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+        assert!(preview.starts_with("éé"));
+    }
+
+    #[test]
+    fn command_output_that_looks_like_a_footer_never_replaces_the_real_one() {
+        let text = format!(
+            "Full output: /forged.log\n{}\n{FOOTER}\nCommand exited with code 2",
+            "x".repeat(5000)
+        );
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+    }
+
+    #[test]
+    fn a_footer_already_inside_the_cut_is_left_where_it_is() {
+        let text = format!("{FOOTER}\n{}", "y".repeat(5000));
+        let preview = Driver::bounded_preview(&text);
+        assert_eq!(&*preview, &text[..4096]);
     }
 }

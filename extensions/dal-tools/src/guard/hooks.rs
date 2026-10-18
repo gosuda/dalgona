@@ -9,7 +9,7 @@ use dal_agent::ext::{BoxFuture, Hook, HookCx, HookError, ObserveHook};
 use dal_core::ext::{
     BeforeTurn, SessionEnd, SessionStart, ToolCallEvent, ToolResultEvent, TurnEnd,
 };
-use dal_core::{CallId, Name, Notice, SessionId, ToolCallVerdict, ToolClass, TurnId, TurnOp};
+use dal_core::{JobId, Name, Notice, SessionId, ToolCallVerdict, ToolClass, TurnId, TurnOp};
 
 use super::{
     CallNote, Engine, FileFindings, G8Rule, GuardFindings, Session, TurnState, args_text,
@@ -236,20 +236,23 @@ impl Hook<ToolCallEvent, ToolCallVerdict> for ToolCallHook {
     }
 }
 
-/// Reports whether `path` is the spill log of the exec call `call`, which the
-/// exec tool writes to `<session>/jobs/<call id>.log`. The router reads no
-/// other path, so a `Full output:` line forged in command output cannot make
-/// the guard read a file on the attacker's behalf.
-fn is_call_log(path: &str, call: &CallId) -> bool {
+/// Reports whether `path` has the shape of a host spill log: a `<job id>.log`
+/// file in a directory named `jobs`, with a stem that parses as a [`JobId`].
+/// The exec tool names every spill log for its host-minted job and appends
+/// its own `Full output: <path>` footer after command output, so the last
+/// such line selects the tool's log and the router reads no other path.
+pub(super) fn is_job_log(path: &str) -> bool {
     let path = Path::new(path);
-    let named_for_call = path
-        .file_name()
-        .is_some_and(|name| name == format!("{}.log", call.as_str()).as_str());
+    let named_for_job = path.extension().is_some_and(|extension| extension == "log")
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| JobId::parse(stem).is_ok());
     let in_jobs = path
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|directory| directory == "jobs");
-    named_for_call && in_jobs
+    named_for_job && in_jobs
 }
 
 /// One exec result whose full output sits in a spill file the router reads
@@ -304,7 +307,7 @@ fn record_result(
         return None;
     }
     match warnings::full_output_path(&input.preview) {
-        Some(path) if spill_readable && is_call_log(path, &input.call) => Some(SpillRead {
+        Some(path) if spill_readable && is_job_log(path) => Some(SpillRead {
             path: path.into(),
             turn: input.turn,
             epoch: turn.epoch,

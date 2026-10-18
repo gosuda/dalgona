@@ -343,6 +343,72 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Resolves an absolute `raw` to a file under the session's own `jobs/`
+/// directory, the only absolute location `fs.read` serves: the exec tool
+/// prints its job log as `Full output: <jobs dir>/<job id>.log`, outside the
+/// workspace, and a reader of that line must reach the file.
+///
+/// `Ok(None)` means nothing exists there. Links are resolved, so one that
+/// leaves the directory is refused like any other outside path.
+///
+/// # Errors
+///
+/// Returns [`ConfineError::Outside`] when `raw` is not below `jobs_dir`, is
+/// `jobs_dir` itself, or resolves outside it; [`ConfineError::ParentDir`]
+/// when the part below `jobs_dir` climbs with `..`; and
+/// [`ConfineError::Unresolvable`] when a component exists but cannot be
+/// resolved.
+pub(crate) fn resolve_job_log(
+    jobs_dir: &Path,
+    raw: &Path,
+) -> Result<Option<PathBuf>, ConfineError> {
+    let relative = raw
+        .strip_prefix(jobs_dir)
+        .map_err(|_| ConfineError::Outside)?;
+    let mut names = 0_usize;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => names += 1,
+            Component::CurDir => {}
+            _ => return Err(ConfineError::ParentDir),
+        }
+    }
+    if names == 0 {
+        return Err(ConfineError::Outside);
+    }
+    let canonical_jobs = match std::fs::canonicalize(jobs_dir) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ConfineError::Unresolvable),
+    };
+    let resolved = match std::fs::canonicalize(raw) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ConfineError::Unresolvable),
+    };
+    if resolved != canonical_jobs && resolved.starts_with(&canonical_jobs) {
+        Ok(Some(resolved))
+    } else {
+        Err(ConfineError::Outside)
+    }
+}
+
+/// Reads one job log by absolute path on a blocking thread, then the bytes.
+async fn read_job_log(jobs_dir: PathBuf, path: &str) -> Result<Option<Vec<u8>>, ServiceError> {
+    let raw = PathBuf::from(path);
+    let outcome = tokio::task::spawn_blocking(move || resolve_job_log(&jobs_dir, &raw))
+        .await
+        .map_err(|error| ServiceError::failed(Some(Service::FsRead), error.to_string()))?;
+    let Some(resolved) = outcome.map_err(|error| refusal(Service::FsRead, path, error))? else {
+        return Ok(None);
+    };
+    match tokio::fs::read(resolved).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_failure(Service::FsRead, path, &error)),
+    }
+}
+
 /// Resolves a script-supplied path inside the session root on a blocking
 /// thread.
 async fn confine_path(
@@ -642,8 +708,12 @@ fn is_git_redirect_var(key: &std::ffi::OsString) -> bool {
 impl SessionBackend for Backend {
     fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
         let root = self.canonical_root.clone();
+        let jobs_dir = self.jobs_dir.clone();
         let path = path.to_owned();
         Box::pin(async move {
+            if Path::new(&path).is_absolute() {
+                return read_job_log(jobs_dir, &path).await;
+            }
             let confined = confine_path(root.clone(), &path, Service::FsRead).await?;
             let confined = recheck_path(root, confined, &path, Service::FsRead).await?;
             match tokio::fs::read(confined.resolved()).await {
@@ -2218,6 +2288,92 @@ mod path_tests {
             std::fs::canonicalize(&root)?.join("real/file")
         );
         confined.recheck(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_job_log_below_the_jobs_dir_resolves_and_a_missing_one_is_none() -> TestResult {
+        let (_temp, root, _outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(jobs.join("a.log"), b"output")?;
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("a.log"))?,
+            Some(std::fs::canonicalize(jobs.join("a.log"))?)
+        );
+        assert_eq!(resolve_job_log(&jobs, &jobs.join("absent.log"))?, None);
+        let nowhere = root.join("never-created");
+        assert_eq!(resolve_job_log(&nowhere, &nowhere.join("a.log"))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn only_paths_below_the_jobs_dir_are_served() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        std::fs::write(root.join("note.txt"), b"workspace file")?;
+        for raw in [
+            outside.join("secret"),
+            root.join("note.txt"),
+            jobs.clone(),
+            jobs.join(".."),
+            PathBuf::from("/etc/passwd"),
+        ] {
+            assert!(
+                resolve_job_log(&jobs, &raw).is_err(),
+                "{} must be refused",
+                raw.display()
+            );
+        }
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("../outside/secret")),
+            Err(ConfineError::ParentDir)
+        );
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("x/../../note.txt")),
+            Err(ConfineError::ParentDir)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_jobs_dir_is_refused() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        std::os::unix::fs::symlink(outside.join("secret"), jobs.join("leak.log"))?;
+        std::os::unix::fs::symlink(&outside, jobs.join("dir"))?;
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("leak.log")),
+            Err(ConfineError::Outside)
+        );
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("dir/secret")),
+            Err(ConfineError::Outside)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_job_log_serves_bytes_and_still_refuses_other_absolute_paths() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(jobs.join("a.log"), b"head\ntail\n")?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        let served = read_job_log(jobs.clone(), &jobs.join("a.log").to_string_lossy()).await?;
+        assert_eq!(served.as_deref(), Some(b"head\ntail\n".as_slice()));
+        let absent = read_job_log(jobs.clone(), &jobs.join("b.log").to_string_lossy()).await?;
+        assert_eq!(absent, None);
+        let refused = read_job_log(jobs, &outside.join("secret").to_string_lossy()).await;
+        assert!(
+            matches!(refused, Err(ServiceError::Denied(_))),
+            "an absolute path outside the jobs dir stays denied: {refused:?}"
+        );
         Ok(())
     }
 

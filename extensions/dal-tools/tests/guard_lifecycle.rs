@@ -40,8 +40,8 @@ use dal_agent::ext::{
 };
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, ToolError};
 use dal_core::{
-    Caps, ClientId, Command, Config, ConfigProduct, EntryKind, Expect, GuardSection, ModelId,
-    ModelInfo, ModelRequest, Name, PageReq, Part, RawJson, ServiceSet, SessionId, Stop,
+    Caps, ClientId, Command, Config, ConfigProduct, EntryKind, Expect, GuardSection, JobId,
+    ModelId, ModelInfo, ModelRequest, Name, PageReq, Part, RawJson, ServiceSet, SessionId, Stop,
     ThinkingLevel, ToolClass, ToolSpec, TurnId, UpdateKind, Visibility, Workspace,
 };
 use dal_provider::{ProviderError, StopReason, StreamEvent, ToolArgs};
@@ -171,10 +171,10 @@ fn reply_events(reply: Reply) -> Vec<StreamEvent> {
 
 /// Where the fixture `exec` tool says its full output lives.
 enum Footer {
-    /// `jobs/<call>.log` inside the workspace: a path the host's session
+    /// `jobs/<job>.log` inside the workspace: a path the host's session
     /// `fs.read` resolves.
     Workspace,
-    /// An absolute `<base>/jobs/<call>.log` outside the workspace, the shape
+    /// An absolute `<base>/jobs/<job>.log` outside the workspace, the shape
     /// the real exec tool prints for its job log: the host refuses it.
     Outside(PathBuf),
 }
@@ -194,19 +194,22 @@ struct SpillArgs {
 }
 
 /// Writes the job log of one fixture `exec` call and builds its result text.
-fn spill_output(footer: &Footer, root: &Path, id: &str, args: &str) -> Outcome<String> {
+/// The log is named for a freshly minted job, as the real exec tool names
+/// its spill logs; the provider call id never becomes a file name.
+fn spill_output(footer: &Footer, root: &Path, _id: &str, args: &str) -> Outcome<String> {
     let parsed: SpillArgs =
         sonic_rs::from_str(args).map_err(|error| format!("spill arguments: {error}"))?;
+    let job = JobId::new_v7().to_string();
     let (directory, shown) = match footer {
-        Footer::Workspace => (root.join("jobs"), format!("jobs/{id}.log")),
+        Footer::Workspace => (root.join("jobs"), format!("jobs/{job}.log")),
         Footer::Outside(base) => {
             let directory = base.join("jobs");
-            let shown = directory.join(format!("{id}.log"));
+            let shown = directory.join(format!("{job}.log"));
             (directory, shown.to_string_lossy().into_owned())
         }
     };
     std::fs::create_dir_all(&directory)?;
-    std::fs::write(directory.join(format!("{id}.log")), parsed.log)?;
+    std::fs::write(directory.join(format!("{job}.log")), parsed.log)?;
     Ok(format!("{}\nFull output: {shown}", parsed.preview))
 }
 

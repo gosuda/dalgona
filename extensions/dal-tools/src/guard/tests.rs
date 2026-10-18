@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -559,6 +560,45 @@ fn warnings_scan_rust_and_ocaml() {
         warnings::full_output_path("done\nFull output: /tmp/jobs/c1.log\n"),
         Some("/tmp/jobs/c1.log")
     );
+    // Command output may print the same shape; the tool's own footer is the
+    // last such line, and the status lines after it are not footers.
+    assert_eq!(
+        warnings::full_output_path(
+            "Full output: /tmp/jobs/forged.log\nx\nFull output: /tmp/jobs/real.log\nCommand exited with code 1"
+        ),
+        Some("/tmp/jobs/real.log")
+    );
+    assert_eq!(warnings::full_output_path("Full output: \nx"), None);
+    assert_eq!(warnings::full_output_path("no footer here"), None);
+}
+
+#[test]
+fn spill_candidates_are_minted_job_id_logs() {
+    let minted = format!("/data/sessions/w/s/jobs/{}.log", dal_core::JobId::new_v7());
+    let relative = format!("jobs/{}.log", dal_core::JobId::new_v7());
+    for path in [minted.as_str(), relative.as_str()] {
+        assert!(super::hooks::is_job_log(path), "{path}");
+    }
+    let id = dal_core::JobId::new_v7().to_string().to_uppercase();
+    let uppercase = format!("/s/jobs/{id}.log");
+    let not_v7 = "/s/jobs/123e4567-e89b-12d3-a456-426614174000.log";
+    for path in [
+        "/etc/secret",
+        "/s/cache/c1.log",
+        "/s/cache/0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000.log",
+        "/s/jobs/c1.log",
+        "/s/jobs/c1.txt",
+        "/s/jobs/other.log",
+        "/s/jobs/.log",
+        "/s/jobs/",
+        "jobs/c1.log",
+        "c1.log",
+        "",
+        uppercase.as_str(),
+        not_v7,
+    ] {
+        assert!(!super::hooks::is_job_log(path), "{path:?}");
+    }
 }
 
 #[test]
@@ -1077,6 +1117,8 @@ struct ScriptedHost {
     notices: Mutex<Vec<Notice>>,
     stray: Mutex<Vec<&'static str>>,
     hold_reads: Mutex<bool>,
+    /// Serves paths no test staged from the real filesystem.
+    disk: Mutex<bool>,
     read_entered: Notify,
     read_release: Notify,
 }
@@ -1114,12 +1156,19 @@ impl Services for ScriptedHost {
         locked(&self.fs_reads).push(path.to_owned());
         let hold = *locked(&self.hold_reads);
         let refusal = locked(&self.fs_grant).refusal();
-        let bytes = locked(&self.files).get(path).cloned();
+        let staged = locked(&self.files).get(path).cloned();
+        let from_disk = staged.is_none() && *locked(&self.disk);
+        let path = path.to_owned();
         Box::pin(async move {
             if hold {
                 self.read_entered.notify_one();
                 self.read_release.notified().await;
             }
+            let bytes = if from_disk {
+                tokio::fs::read(&path).await.ok()
+            } else {
+                staged
+            };
             refusal.map_or(Ok(bytes), Err)
         })
     }
@@ -1658,15 +1707,15 @@ async fn granted_spill_output_is_scanned_for_warnings() {
     let rig = Rig::open(test_config()).await;
     rig.begin(1, "build").await;
     rig.touch(1, "src/a.rs");
-    rig.host.put_file("/s/jobs/c1.log", A_WARNING);
+    let log = minted_log("/s");
+    rig.host.put_file(&log, A_WARNING);
     assert_eq!(
         rig.call(1, &exec("c1", CARGO_BUILD)).await,
         ToolCallVerdict::Allow
     );
-    // The preview names the log but carries no warning: only the log does.
-    let preview = "Compiling\nFull output: /s/jobs/c1.log";
-    rig.result(1, "c1", "exec", true, preview).await;
-    assert_eq!(rig.host.reads(), vec!["/s/jobs/c1.log".to_owned()]);
+    let preview = format!("Compiling\nFull output: {log}");
+    rig.result(1, "c1", "exec", true, &preview).await;
+    assert_eq!(rig.host.reads(), vec![log]);
     rig.end(1).await;
     let findings = rig.findings();
     assert_eq!(findings.warnings.len(), 1, "{:?}", findings.warnings);
@@ -1688,11 +1737,12 @@ async fn a_withheld_spill_read_scans_previews_and_is_reported_once_per_session()
         rig.begin(1, "build").await;
         rig.touch(1, "src/a.rs");
         rig.touch(1, "src/b.rs");
+        let first_log = minted_log("/s");
         assert_eq!(
             rig.call(1, &exec("c1", CARGO_BUILD)).await,
             ToolCallVerdict::Allow
         );
-        let first = format!("{A_WARNING}Full output: /s/jobs/c1.log");
+        let first = format!("{A_WARNING}Full output: {first_log}");
         rig.result(1, "c1", "exec", true, &first).await;
         let reported = vec![denial_notice(
             1,
@@ -1704,10 +1754,11 @@ async fn a_withheld_spill_read_scans_previews_and_is_reported_once_per_session()
             rig.call(1, &exec("c2", CARGO_BUILD)).await,
             ToolCallVerdict::Allow
         );
-        let second = format!("{B_WARNING}Full output: /s/jobs/c2.log");
+        let second_log = minted_log("/s");
+        let second = format!("{B_WARNING}Full output: {second_log}");
         rig.result(1, "c2", "exec", true, &second).await;
         // The router stopped asking and stopped telling, yet kept scanning.
-        assert_eq!(rig.host.reads(), vec!["/s/jobs/c1.log".to_owned()]);
+        assert_eq!(rig.host.reads(), vec![first_log]);
         assert_eq!(rig.host.notices(), reported);
         rig.end(1).await;
         let found: Vec<_> = rig
@@ -1729,7 +1780,8 @@ async fn a_spill_read_that_fails_without_a_denial_keeps_the_router_reading() {
     *locked(&rig.host.fs_grant) = Grant::Failed;
     rig.begin(1, "build").await;
     rig.touch(1, "src/a.rs");
-    for (id, log) in [("c1", "/s/jobs/c1.log"), ("c2", "/s/jobs/c2.log")] {
+    let failed_logs = [minted_log("/s"), minted_log("/s")];
+    for (id, log) in [("c1", &failed_logs[0]), ("c2", &failed_logs[1])] {
         assert_eq!(
             rig.call(1, &exec(id, CARGO_BUILD)).await,
             ToolCallVerdict::Allow
@@ -1761,10 +1813,11 @@ async fn grep_like_commands_are_never_scanned() {
     let rig = Rig::open(test_config()).await;
     rig.begin(1, "search the log").await;
     rig.touch(1, "src/a.rs");
-    rig.host.put_file("/s/jobs/c1.log", A_WARNING);
+    let log = minted_log("/s");
+    rig.host.put_file(&log, A_WARNING);
     let grep = exec("c1", r#"{"command":"grep -rn unused ."}"#);
     assert_eq!(rig.call(1, &grep).await, ToolCallVerdict::Allow);
-    let preview = format!("{A_WARNING}Full output: /s/jobs/c1.log");
+    let preview = format!("{A_WARNING}Full output: {log}");
     rig.result(1, "c1", "exec", true, &preview).await;
     assert_eq!(rig.host.reads(), [] as [String; 0]);
     rig.end(1).await;
@@ -1775,7 +1828,7 @@ async fn grep_like_commands_are_never_scanned() {
 }
 
 #[tokio::test]
-async fn only_the_calls_own_spill_log_is_ever_read() {
+async fn only_host_shaped_spill_logs_are_ever_read() {
     let rig = Rig::open(test_config()).await;
     rig.begin(1, "build").await;
     rig.touch(1, "src/a.rs");
@@ -1783,6 +1836,7 @@ async fn only_the_calls_own_spill_log_is_ever_read() {
         ("c1", "/etc/secret"),
         ("c2", "/s/jobs/other.log"),
         ("c3", "/s/cache/c3.log"),
+        ("c4", "/s/jobs/c4.log"),
     ];
     for (id, path) in forged {
         rig.host.put_file(path, A_WARNING);
@@ -1801,6 +1855,197 @@ async fn only_the_calls_own_spill_log_is_ever_read() {
     );
 }
 
+/// A spill log path as the real exec tool names it: the host-minted job,
+/// never the provider call id.
+fn minted_log(dir: &str) -> String {
+    format!("{dir}/jobs/{}.log", dal_core::JobId::new_v7())
+}
+
+#[tokio::test]
+async fn a_minted_job_log_is_read() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    let log = minted_log("/data/sessions/w/s");
+    rig.host.put_file(&log, A_WARNING);
+    let build = exec("exec-call", CARGO_BUILD);
+    assert_eq!(rig.call(1, &build).await, ToolCallVerdict::Allow);
+    let preview = format!("Compiling\nFull output: {log}");
+    rig.result(1, "exec-call", "exec", true, &preview).await;
+    assert_eq!(rig.host.reads(), vec![log]);
+    rig.end(1).await;
+    let findings = rig.findings();
+    assert_eq!(findings.warnings.len(), 1, "{:?}", findings.warnings);
+    assert_eq!(rig.host.notices(), [] as [Notice; 0]);
+    rig.assert_no_stray_service_use();
+}
+
+#[tokio::test]
+async fn the_last_footer_line_names_the_log_not_a_line_the_command_printed() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    rig.touch(1, "src/b.rs");
+    let forged = minted_log("/data/sessions/w/s");
+    let real = minted_log("/data/sessions/w/s");
+    rig.host.put_file(&forged, A_WARNING);
+    rig.host.put_file(&real, B_WARNING);
+    let build = exec("exec-call", CARGO_BUILD);
+    assert_eq!(rig.call(1, &build).await, ToolCallVerdict::Allow);
+    // The command printed a footer-shaped line of its own before the tool
+    // appended the real footer and the status line.
+    let preview = format!(
+        "Full output: {forged}\nCompiling\nFull output: {real}\nCommand exited with code 1"
+    );
+    rig.result(1, "exec-call", "exec", false, &preview).await;
+    assert_eq!(rig.host.reads(), vec![real]);
+    rig.end(1).await;
+    let found: Vec<_> = rig
+        .findings()
+        .warnings
+        .iter()
+        .map(|warning| (warning.0.to_string(), warning.1))
+        .collect();
+    assert_eq!(found, vec![("src/b.rs".to_owned(), 30)]);
+}
+
+#[tokio::test]
+async fn a_spill_file_on_disk_surfaces_the_warning_the_preview_tail_lost() {
+    let dir = tempfile::tempdir().expect("scratch directory");
+    let jobs = dir.path().join("jobs");
+    std::fs::create_dir(&jobs).expect("jobs directory");
+    let log = jobs.join(format!("{}.log", dal_core::JobId::new_v7()));
+    // What a long build leaves behind: a warning at the head, then output
+    // far beyond the 4 KiB tail the tool returns inline.
+    let mut filler = String::new();
+    for line in 0..300 {
+        let _ = writeln!(
+            filler,
+            "   Compiling crate-{line} v0.1.0 (/work/crate-{line})"
+        );
+    }
+    let full = format!("{A_WARNING}{filler}");
+    std::fs::write(&log, &full).expect("write the spill file");
+    let tail = &full[full.len() - 4096..];
+    let rig = Rig::open(test_config()).await;
+    *locked(&rig.host.disk) = true;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    assert_eq!(
+        rig.call(1, &exec("exec-call", CARGO_BUILD)).await,
+        ToolCallVerdict::Allow
+    );
+    assert!(
+        !tail.contains("unused variable"),
+        "the tail lost the warning"
+    );
+    let preview = format!("{tail}\nFull output: {}", log.display());
+    rig.result(1, "exec-call", "exec", true, &preview).await;
+    assert_eq!(rig.host.reads(), vec![log.display().to_string()]);
+    rig.end(1).await;
+    let findings = rig.findings();
+    assert_eq!(
+        findings
+            .warnings
+            .iter()
+            .map(|warning| (warning.0.to_string(), warning.1))
+            .collect::<Vec<_>>(),
+        vec![("src/a.rs".to_owned(), 12)]
+    );
+    assert_eq!(rig.host.notices(), [] as [Notice; 0]);
+    rig.assert_no_stray_service_use();
+}
+
+#[tokio::test]
+async fn spill_log_text_replaces_preview_text() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    rig.touch(1, "src/b.rs");
+    let log = minted_log("/s");
+    rig.host.put_file(&log, B_WARNING);
+    assert_eq!(
+        rig.call(1, &exec("c1", CARGO_BUILD)).await,
+        ToolCallVerdict::Allow
+    );
+    // Only the served log is scanned.
+    let preview = format!("{A_WARNING}Full output: {log}");
+    rig.result(1, "c1", "exec", true, &preview).await;
+    assert_eq!(rig.host.reads(), vec![log]);
+    rig.end(1).await;
+    let found: Vec<_> = rig
+        .findings()
+        .warnings
+        .iter()
+        .map(|warning| (warning.0.to_string(), warning.1))
+        .collect();
+    assert_eq!(found, vec![("src/b.rs".to_owned(), 30)]);
+    rig.assert_no_stray_service_use();
+}
+
+#[tokio::test]
+async fn missing_spill_file_falls_back_to_preview() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    assert_eq!(
+        rig.call(1, &exec("c1", CARGO_BUILD)).await,
+        ToolCallVerdict::Allow
+    );
+    // No log staged: the preview is still scanned, nothing withheld.
+    let log = minted_log("/s");
+    let preview = format!("{A_WARNING}Full output: {log}");
+    rig.result(1, "c1", "exec", true, &preview).await;
+    assert_eq!(rig.host.reads(), vec![log]);
+    assert_eq!(rig.host.notices(), [] as [Notice; 0]);
+    rig.end(1).await;
+    let found: Vec<_> = rig
+        .findings()
+        .warnings
+        .iter()
+        .map(|warning| (warning.0.to_string(), warning.1))
+        .collect();
+    assert_eq!(found, vec![("src/a.rs".to_owned(), 12)]);
+    rig.assert_no_stray_service_use();
+}
+
+#[tokio::test]
+async fn failed_spill_read_keeps_preview_warnings_and_keeps_reading() {
+    let rig = Rig::open(test_config()).await;
+    *locked(&rig.host.fs_grant) = Grant::Failed;
+    rig.begin(1, "build").await;
+    rig.touch(1, "src/a.rs");
+    rig.touch(1, "src/b.rs");
+    let kept_logs = [minted_log("/s"), minted_log("/s")];
+    for (id, warning, log) in [
+        ("c1", A_WARNING, &kept_logs[0]),
+        ("c2", B_WARNING, &kept_logs[1]),
+    ] {
+        assert_eq!(
+            rig.call(1, &exec(id, CARGO_BUILD)).await,
+            ToolCallVerdict::Allow
+        );
+        let preview = format!("{warning}Full output: {log}");
+        rig.result(1, id, "exec", true, &preview).await;
+    }
+    // A failure that withholds nothing is silent, yet every later spill is
+    // still attempted and every preview still scanned.
+    assert_eq!(rig.host.reads(), kept_logs.to_vec());
+    assert_eq!(rig.host.notices(), [] as [Notice; 0]);
+    rig.end(1).await;
+    let found: Vec<_> = rig
+        .findings()
+        .warnings
+        .iter()
+        .map(|warning| (warning.0.to_string(), warning.1))
+        .collect();
+    assert_eq!(
+        found,
+        vec![("src/a.rs".to_owned(), 12), ("src/b.rs".to_owned(), 30)]
+    );
+    rig.assert_no_stray_service_use();
+}
+
 type ParkedHook = tokio::task::JoinSet<Result<(), HookError>>;
 
 /// Parks the result hook of exec call `c1` inside the host's `fs.read`, then
@@ -1808,13 +2053,14 @@ type ParkedHook = tokio::task::JoinSet<Result<(), HookError>>;
 /// session does. The read is still pending when this returns.
 async fn park_read_across_turns(rig: &Rig) -> ParkedHook {
     rig.begin(1, "build").await;
-    rig.host.put_file("/s/jobs/c1.log", A_WARNING);
+    let log = minted_log("/s");
+    rig.host.put_file(&log, A_WARNING);
     *locked(&rig.host.hold_reads) = true;
     let build = exec("c1", CARGO_BUILD);
     assert_eq!(rig.call(1, &build).await, ToolCallVerdict::Allow);
     let hook = ToolResultHook(Arc::clone(&rig.engine));
-    let preview = "Full output: /s/jobs/c1.log";
-    let event = Rig::result_event(turn_n(1), "c1", "exec", true, preview);
+    let preview = format!("Full output: {log}");
+    let event = Rig::result_event(turn_n(1), "c1", "exec", true, &preview);
     let cx = rig.cx(Some(turn_n(1)));
     let mut pending = tokio::task::JoinSet::new();
     pending.spawn(async move { hook.call(event, cx).await });
@@ -1868,8 +2114,8 @@ async fn a_withheld_spill_read_that_outlives_its_turn_still_ends_spill_reads() {
     assert_eq!(rig.host.notices(), reported);
     let next = exec("c2", CARGO_BUILD);
     assert_eq!(rig.call(1, &next).await, ToolCallVerdict::Allow);
-    rig.result(1, "c2", "exec", true, "Full output: /s/jobs/c2.log")
-        .await;
+    let next_preview = format!("Full output: {}", minted_log("/s"));
+    rig.result(1, "c2", "exec", true, &next_preview).await;
     assert_eq!(rig.host.reads().len(), 1);
     assert_eq!(rig.host.notices(), reported);
     rig.end(1).await;
@@ -1887,9 +2133,10 @@ async fn a_disabled_guard_never_blocks_or_calls_a_service() {
         let verdict = rig.call(1, &patch(id, SAME)).await;
         assert_eq!(verdict, ToolCallVerdict::Allow);
     }
-    rig.host.put_file("/s/jobs/c1.log", A_WARNING);
-    rig.result(1, "e1", "exec", true, "Full output: /s/jobs/c1.log")
-        .await;
+    let log = minted_log("/s");
+    rig.host.put_file(&log, A_WARNING);
+    let preview = format!("Full output: {log}");
+    rig.result(1, "e1", "exec", true, &preview).await;
     assert_eq!(rig.host.turn_ops(), [] as [TurnOp; 0]);
     assert_eq!(rig.host.reads(), [] as [String; 0]);
     assert_eq!(rig.host.notices(), [] as [Notice; 0]);
