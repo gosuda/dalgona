@@ -306,15 +306,14 @@ impl Session {
         if overflowed {
             self.turn_flags.overflow = Overflow::Clear;
         }
-        let stage = match &self.phase {
+        let pending = match &self.phase {
             Phase::Running {
                 turn: active,
                 stage,
                 ..
-            } if *active == turn => stage.clone(),
+            } if *active == turn => unsettled_calls(stage, partial.as_ref()),
             _ => return Ok(()),
         };
-        let pending = unsettled_calls(stage, partial.as_ref());
         let cancelled = matches!(stop, TurnEndStop::Cancelled);
         if cancelled {
             self.turn_flags.pending_reminders.clear();

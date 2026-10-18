@@ -3979,9 +3979,9 @@ fn turn_premium_rejects_invalid_and_overflowing_measurements() {
             "premium {premium:?} is rejected"
         );
         assert_eq!(
-            totals.usage().and_then(|usage| usage.premium_requests),
-            Some(0.0),
-            "a rejected premium measurement leaves the prior total folded"
+            totals.usage(),
+            None,
+            "a rejected premium measurement folds none of its members"
         );
     }
     let mut totals = super::types::TurnTotals::default();
@@ -3991,14 +3991,22 @@ fn turn_premium_rejects_invalid_and_overflowing_measurements() {
             ..usage(1)
         })
         .unwrap();
+    let before = totals.clone();
+    let overflowing = Usage {
+        premium_requests: Some(f64::MAX),
+        ..usage(1)
+    };
     assert!(
-        totals
-            .add_usage(Usage {
-                premium_requests: Some(f64::MAX),
-                ..usage(1)
-            })
-            .is_err(),
+        totals.check_usage(overflowing).is_err(),
+        "the preflight check refuses the same premium sum"
+    );
+    assert!(
+        totals.add_usage(overflowing).is_err(),
         "a premium sum that stops being finite is rejected"
+    );
+    assert_eq!(
+        totals, before,
+        "a refused premium sum leaves the token members it passed unfolded"
     );
 }
 

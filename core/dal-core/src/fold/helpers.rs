@@ -212,32 +212,65 @@ pub(super) fn resolution_failure(call: &ResolvedCall) -> Option<Box<str>> {
         }
     }
 }
+/// The calls a turn stage tracks as pending.
+fn staged_pending(stage: &TurnStage) -> &[PendingCall] {
+    match stage {
+        TurnStage::Dispatching { pending } | TurnStage::Resolving { pending } => pending,
+        TurnStage::Streaming { .. } | TurnStage::Boundary | TurnStage::Compacting { .. } => &[],
+    }
+}
+
+/// The tool calls of a journaled partial response that `staged` does not
+/// track, each call identity once, in content order.
+fn untracked_partial_calls<'a>(
+    staged: &'a [PendingCall],
+    partial: Option<&'a PartialResponse>,
+) -> impl Iterator<Item = (&'a CallId, &'a str)> {
+    let content: &[Block] = match partial {
+        Some(partial) => partial.content.as_slice(),
+        None => &[],
+    };
+    content
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, block)| {
+            let Block::ToolCall { id, name, .. } = block else {
+                return None;
+            };
+            let tracked = staged.iter().any(|item| item.call == *id)
+                || content[..index].iter().any(
+                    |prior| matches!(prior, Block::ToolCall { id: other, .. } if other == id),
+                );
+            (!tracked).then_some((id, &**name))
+        })
+}
+
 /// Calls that still need a result when a turn ends: the stage's pending calls, then
 /// tool calls from a journaled partial response that no stage tracked.
+///
+/// The list is owned because the turn ending rewrites the phase that holds the stage.
+/// [`unsettled_call_count`] counts the same list without building it.
 pub(super) fn unsettled_calls(
-    stage: TurnStage,
+    stage: &TurnStage,
     partial: Option<&PartialResponse>,
 ) -> Vec<PendingCall> {
-    let mut pending = match stage {
-        TurnStage::Dispatching { pending } | TurnStage::Resolving { pending } => pending,
-        TurnStage::Streaming { .. } | TurnStage::Boundary | TurnStage::Compacting { .. } => {
-            Vec::new()
-        }
-    };
-    let partial_calls = partial.into_iter().flat_map(|partial| &partial.content);
-    for block in partial_calls {
-        if let Block::ToolCall { id, name, .. } = block
-            && !pending.iter().any(|item| item.call == *id)
-        {
-            pending.push(PendingCall {
-                call: id.clone(),
-                name: name.clone(),
-                started: false,
-                promotes: None,
-            });
-        }
-    }
+    let staged = staged_pending(stage);
+    let mut pending = staged.to_vec();
+    pending.extend(
+        untracked_partial_calls(staged, partial).map(|(call, name)| PendingCall {
+            call: call.clone(),
+            name: name.into(),
+            started: false,
+            promotes: None,
+        }),
+    );
     pending
+}
+
+/// The length of [`unsettled_calls`], without copying a call.
+pub(super) fn unsettled_call_count(stage: &TurnStage, partial: Option<&PartialResponse>) -> usize {
+    let staged = staged_pending(stage);
+    staged.len() + untracked_partial_calls(staged, partial).count()
 }
 /// The call and extension a guarding hook result names.
 pub(super) struct HookTarget {

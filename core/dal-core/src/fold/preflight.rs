@@ -1,13 +1,27 @@
 use std::collections::HashSet;
 
-use super::helpers::{invalid, unsettled_calls, wrong_turn};
+use super::helpers::{invalid, unsettled_call_count, wrong_turn, zero_usage};
 use super::types::{MAX_INTERRUPTS, MAX_STEERS, MAX_WAKE_RUN, Overflow};
 use super::{
     Answer, CallId, CancelScope, Command, Event, Expect, HookEvent, HookOutcome, HookVerdict,
     InferFailure, Name, PartialResponse, Phase, Rejection, RequestId, Session, Stop, StreamEvent,
-    StreamVerdict, ToolCallVerdict, TurnId, TurnStage, TurnState,
+    StreamVerdict, ToolCallVerdict, TurnId, TurnStage, TurnState, Usage,
 };
 use crate::update::ResolutionCause;
+
+/// The usage the fold journals for a completed response: the last
+/// measurement the stream carried, or zero when it carried none.
+fn response_usage(inference: &super::Inference) -> Usage {
+    inference
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .unwrap_or_else(zero_usage)
+}
 
 /// Rejects a broker resolution whose cause contradicts its answer or its
 /// default flag.
@@ -97,14 +111,13 @@ impl Session {
             } => self.preflight_cancel(*turn),
             Event::Settled { turn, call, .. } => self.preflight_settled(*turn, call),
             Event::Inferred { usage, .. } if matches!(&self.phase, Phase::Running { .. }) => {
-                let mut totals = self.turn_totals.clone();
-                totals.add_usage(*usage)
+                self.turn_totals.check_usage(*usage)
             }
             Event::CompactionSettled {
                 turn,
                 outcome: Ok(summary),
             } if summary.tokens_after < summary.tokens_before => {
-                self.preflight_compaction_entry(*turn)
+                self.preflight_compaction_entry(*turn, summary.usage)
             }
             _ => Ok(()),
         }
@@ -242,6 +255,9 @@ impl Session {
             }
             _ => (usize::from(partial_entry), true, true),
         };
+        if let Some(partial) = partial.filter(|_| response_entries > 0) {
+            self.turn_totals.check_usage(partial.usage)?;
+        }
         let pending = if drains_pending {
             self.turn_flags.pending_reminders.len()
         } else {
@@ -249,7 +265,7 @@ impl Session {
         };
         let tool_entries = if ends_turn {
             match &self.phase {
-                Phase::Running { stage, .. } => unsettled_calls(stage.clone(), partial).len(),
+                Phase::Running { stage, .. } => unsettled_call_count(stage, partial),
                 _ => 0,
             }
         } else {
@@ -310,6 +326,11 @@ impl Session {
                     | StreamEvent::Compaction { .. } => false,
                 }),
         );
+        // A journaled response entry folds its usage into the turn totals;
+        // refuse an overflowing measurement before anything changes.
+        if response == 1 {
+            self.turn_totals.check_usage(response_usage(inference))?;
+        }
         let reminders = if stop == Some(Stop::Cancelled) {
             0
         } else {
@@ -391,7 +412,11 @@ impl Session {
         }
     }
 
-    pub(super) fn preflight_compaction_entry(&self, turn: Option<TurnId>) -> Result<(), Rejection> {
+    pub(super) fn preflight_compaction_entry(
+        &self,
+        turn: Option<TurnId>,
+        usage: Option<Usage>,
+    ) -> Result<(), Rejection> {
         let phase_matches = match (turn, &self.phase) {
             (None, Phase::Compacting { .. }) => true,
             (
@@ -404,10 +429,17 @@ impl Session {
             ) => turn == *active,
             _ => false,
         };
-        if phase_matches && (self.next_entry.is_none() || self.compactions == u32::MAX) {
-            Err(invalid("entry or compaction counter space exhausted"))
-        } else {
-            Ok(())
+        if !phase_matches {
+            return Ok(());
+        }
+        if self.next_entry.is_none() || self.compactions == u32::MAX {
+            return Err(invalid("entry or compaction counter space exhausted"));
+        }
+        // The compactor's own inference usage folds into the turn totals
+        // after the compaction entry is journaled; refuse an overflow first.
+        match usage {
+            Some(usage) => self.turn_totals.check_usage(usage),
+            None => Ok(()),
         }
     }
     pub(super) fn preflight_command(&self, cmd: &Command) -> Result<(), Rejection> {

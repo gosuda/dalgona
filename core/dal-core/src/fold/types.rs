@@ -607,7 +607,7 @@ pub(super) struct TurnTotals {
 ///
 /// Missing members stay unknown after the fold, so a later measured member
 /// does not imply the absent members were zero.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct KnownUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
@@ -644,13 +644,29 @@ impl TurnTotals {
     /// a measured zero stays a known zero. Only finite nonnegative premium
     /// measurements fold into the known sum.
     ///
+    /// The fold is all or nothing: a refused report leaves every member of
+    /// the totals as it was.
+    ///
     /// # Errors
     ///
     /// Returns [`Rejection::Invalid`] when a token total overflows `u64`,
     /// the cost total stops being finite, or a premium measurement is
     /// negative, non-finite, or sums to a non-finite total.
     pub(super) fn add_usage(&mut self, usage: Usage) -> Result<(), Rejection> {
-        let total = self.usage.get_or_insert_with(KnownUsage::default);
+        self.usage = Some(self.folded_usage(usage)?);
+        Ok(())
+    }
+
+    /// Checks that [`TurnTotals::add_usage`] would accept `usage`, without
+    /// folding it. Preflight uses this so a refusal precedes every mutation.
+    pub(super) fn check_usage(&self, usage: Usage) -> Result<(), Rejection> {
+        self.folded_usage(usage).map(|_| ())
+    }
+
+    /// The totals after `usage`, computed whole: a refused fold changes nothing,
+    /// not even the members that were summed before the failing one.
+    fn folded_usage(&self, usage: Usage) -> Result<KnownUsage, Rejection> {
+        let mut total = self.usage.unwrap_or_default();
         total.input_tokens = checked_add(total.input_tokens, usage.input_tokens)?;
         total.cached_input_tokens =
             checked_add(total.cached_input_tokens, usage.cached_input_tokens)?;
@@ -691,7 +707,7 @@ impl TurnTotals {
         } else {
             total.cost_usd = None;
         }
-        Ok(())
+        Ok(total)
     }
 
     /// Folds tool-result file changes into the open turn's totals, merging
