@@ -32,9 +32,12 @@ process-wrap.workspace = true
 quick-xml.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
+[features]
+test-support = []
+
 [dev-dependencies]
 proptest.workspace = true
-hyper = { workspace = true, features = ["server", "http1"] }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
 [lints]
