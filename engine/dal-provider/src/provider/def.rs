@@ -69,6 +69,12 @@ pub struct KeySpec {
 pub struct OAuthSpec {
     /// The public OAuth client id.
     pub client_id: &'static str,
+    /// The environment variable whose non-blank value replaces `client_id`
+    /// for this row's authorize, exchange, refresh, and revoke requests;
+    /// `None` when the client id is fixed. The caller resolves it from a
+    /// captured `EnvSnapshot`; the library never reads the process
+    /// environment.
+    pub client_id_env: Option<&'static str>,
     /// The authorization endpoint.
     pub authorize_url: &'static str,
     /// The token endpoint, for code exchange and refresh.
@@ -81,6 +87,10 @@ pub struct OAuthSpec {
     pub redirect: Redirect,
     /// How the browser sign-in completes.
     pub completion: Completion,
+    /// Whether the row signs in through the user's browser. A device-only
+    /// row sets this to `false` and offers no `Method::Browser`; its OAuth
+    /// sign-in runs only as `Method::Device`.
+    pub browser: bool,
     /// The device-code sign-in; `None` when the provider has none.
     pub device: Option<Device>,
     /// The refresh-token revocation endpoint called on sign-out.
@@ -161,7 +171,10 @@ impl ProviderDef {
     pub fn methods(&self) -> impl Iterator<Item = Method> {
         [
             (self.key.is_some(), Method::ApiKey),
-            (self.oauth.is_some(), Method::Browser),
+            (
+                self.oauth.is_some_and(|oauth| oauth.browser),
+                Method::Browser,
+            ),
             (
                 self.oauth.is_some_and(|oauth| oauth.device.is_some()),
                 Method::Device,
@@ -206,6 +219,7 @@ pub(crate) const ANTHROPIC: ProviderDef = ProviderDef {
     }),
     oauth: Some(OAuthSpec {
         client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        client_id_env: None,
         authorize_url: "https://claude.ai/oauth/authorize",
         token_url: "https://platform.claude.com/v1/oauth/token",
         scopes: &[
@@ -232,6 +246,7 @@ pub(crate) const ANTHROPIC: ProviderDef = ProviderDef {
             path: "/callback",
         },
         completion: Completion::PasteCode,
+        browser: true,
         device: None,
         revoke_url: None,
         hook: Hook::ClaudeCode,
@@ -249,6 +264,7 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
     key: None,
     oauth: Some(OAuthSpec {
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+        client_id_env: None,
         authorize_url: "https://auth.openai.com/oauth/authorize",
         token_url: "https://auth.openai.com/oauth/token",
         scopes: &[
@@ -277,6 +293,7 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
             path: "/auth/callback",
         },
         completion: Completion::Callback,
+        browser: true,
         device: Some(Device {
             usercode_url: "https://auth.openai.com/api/accounts/deviceauth/usercode",
             poll_url: "https://auth.openai.com/api/accounts/deviceauth/token",

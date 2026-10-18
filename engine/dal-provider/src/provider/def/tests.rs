@@ -57,6 +57,23 @@ fn rows_that_share_a_loopback_share_a_client() {
 }
 
 #[test]
+fn callback_rows_keep_their_device_fallback() {
+    // A `Completion::Callback` row whose registered port is busy falls back
+    // to its device sign-in; without one the login has no way to complete
+    // on a busy port, and routing it into another row's device flow would
+    // be a crash (`gitlab-duo` has no device sign-in, so it stays
+    // `PasteCode`). A paste row needs no fallback.
+    for def in PROVIDERS {
+        let Some(oauth) = def.oauth else { continue };
+        assert!(
+            oauth.completion != Completion::Callback || oauth.device.is_some(),
+            "{} completes by callback but offers no device fallback",
+            def.id
+        );
+    }
+}
+
+#[test]
 fn every_row_signs_in_somehow() {
     for def in PROVIDERS {
         assert!(
@@ -167,6 +184,35 @@ fn a_key_variable_is_shared_only_within_one_origin() {
             "{name} would send one vendor's key to another host: {:?}",
             rows.iter().map(|def| def.id).collect::<Vec<_>>()
         );
+    }
+}
+
+#[test]
+fn a_client_id_override_never_names_a_key_variable() {
+    // The override's value is sent to the vendor as a public client id in
+    // the authorize URL; a variable that also holds an API key would put
+    // that secret in a browser URL.
+    for def in PROVIDERS {
+        let Some(name) = def.oauth.and_then(|oauth| oauth.client_id_env) else {
+            continue;
+        };
+        assert!(
+            name.starts_with(|first: char| first.is_ascii_uppercase())
+                && name
+                    .bytes()
+                    .all(|byte| matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_')),
+            "{}: {name} is not an environment variable name",
+            def.id
+        );
+        for other in PROVIDERS {
+            let keys = other.key.map_or(&[][..], |key| key.env);
+            assert!(
+                !keys.contains(&name),
+                "{} reads {name} as a client id, but {} reads it as a key",
+                def.id,
+                other.id
+            );
+        }
     }
 }
 
