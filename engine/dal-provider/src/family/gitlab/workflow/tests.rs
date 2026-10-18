@@ -466,6 +466,45 @@ fn actions_require_request_id_and_detect_stalls() {
         decoder.feed(&action("r-5"), &mut out),
         Ok(FrameOutcome::Action(_))
     ));
+    // A second bare action with no fresh checkpoint since the last boundary
+    // has nothing comparable: the snapshot reading was consumed once by
+    // that boundary, so this must not stall on the stale length.
+    assert!(matches!(
+        decoder.feed(&action("r-6"), &mut out),
+        Ok(FrameOutcome::Action(_))
+    ));
+    // A boundary whose own frame carries a checkpoint compares that length:
+    // a repeat of the previous boundary stalls, an advanced checkpoint does
+    // not, and a later bare action still does not stall.
+    let checkpointed_action = |id: &str, text: &str| {
+        let content = sonic_rs::to_string(text).unwrap_or_default();
+        let inner = ["{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"m1\",\"content\":", content.as_str(), "}]}}"].concat();
+        let checkpoint = sonic_rs::to_string(inner.as_str()).unwrap_or_default();
+        [
+            "{\"newCheckpoint\":{\"checkpoint\":",
+            checkpoint.as_str(),
+            "},\"action\":{\"name\":\"runMCPTool\",\"requestID\":\"",
+            id,
+            "\",\"args\":{\"name\":\"read\"}}}",
+        ]
+        .concat()
+    };
+    assert!(matches!(
+        decoder.feed(&checkpointed_action("r-7", "hello"), &mut out),
+        Ok(FrameOutcome::Action(act)) if act.name.as_str() == "read"
+    ));
+    assert!(matches!(
+        decoder.feed(&checkpointed_action("r-8", "hello"), &mut out),
+        Ok(FrameOutcome::Stalled)
+    ));
+    assert!(matches!(
+        decoder.feed(&checkpointed_action("r-9", "hello world"), &mut out),
+        Ok(FrameOutcome::Action(_))
+    ));
+    assert!(matches!(
+        decoder.feed(&action("r-10"), &mut out),
+        Ok(FrameOutcome::Action(_))
+    ));
 }
 
 #[test]
@@ -769,6 +808,105 @@ async fn loopback_idle_restart_uses_a_fresh_workflow_once() {
     let counts = lock(&counts);
     assert_eq!(counts.creates, 2);
     assert_eq!(counts.stops, vec![String::from("w-1")]);
+    drop(counts);
+    servers.abort_all();
+}
+
+#[tokio::test]
+async fn loopback_fresh_connect_failure_stops_the_created_workflow() {
+    let rest = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rest_base = format!("http://{}", rest.local_addr().unwrap());
+    // A socket base nobody listens on: the REST setup still creates `w-1`,
+    // then the workflow-socket handshake fails before the first frame.
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_base = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    let counts = Arc::new(Mutex::new(RestCounts::default()));
+    lock(&counts).ws_base = dead_base;
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(rest_router(rest, Arc::clone(&counts)));
+    let cancel = CancellationToken::new();
+    let sessions = WorkflowSessions::default();
+    let client = http::build_client();
+    let scope = WorkflowScope {
+        root_namespace_id: "42".into(),
+        namespace_path: Some("g".into()),
+        project_id: Some("11".into()),
+        project_path: None,
+        workflow_definition: None,
+    };
+    let model_request = request(vec![user("hi")]);
+    let turn = test_turn(&model_request, &scope, &cancel, &rest_base, SessionId::new_v7());
+    // The fresh run fails before its first frame; without the cleanup the
+    // created workflow would strand server-side with no terminal owning it.
+    let result = run_turn(&client, &sessions, &turn).await;
+    assert!(matches!(
+        result,
+        Err(crate::lifecycle::AttemptFailure::Provider(
+            ProviderError::Transport { .. }
+        ))
+    ));
+    let counts = lock(&counts);
+    assert_eq!(counts.creates, 1);
+    assert_eq!(counts.stops, vec![String::from("w-1")]);
+    drop(counts);
+    servers.abort_all();
+}
+
+#[tokio::test]
+async fn loopback_restart_open_failure_stops_the_created_workflow() {
+    let rest = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rest_base = format!("http://{}", rest.local_addr().unwrap());
+    let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_base = format!("http://{}", ws.local_addr().unwrap());
+    let counts = Arc::new(Mutex::new(RestCounts::default()));
+    lock(&counts).ws_base = ws_base;
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(rest_router(rest, Arc::clone(&counts)));
+    servers.spawn(async move {
+        // First socket: accept, then stay silent past the 100 ms test idle
+        // deadline so the client restarts on a fresh workflow — then drop
+        // the listener so the fresh open fails instead of completing.
+        let (tcp, _) = ws.accept().await.unwrap();
+        let mut first = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let start = first.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(start.contains("\"workflowID\":\"w-1\""));
+        drop(ws);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        drop(first);
+    });
+    let model_request = request(vec![user("hi")]);
+    let scope = WorkflowScope {
+        root_namespace_id: "42".into(),
+        namespace_path: Some("g".into()),
+        project_id: Some("11".into()),
+        project_path: None,
+        workflow_definition: None,
+    };
+    let cancel = CancellationToken::new();
+    let sessions = WorkflowSessions::default();
+    let client = http::build_client();
+    let turn = test_turn(
+        &model_request,
+        &scope,
+        &cancel,
+        &rest_base,
+        SessionId::new_v7(),
+    );
+    let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
+    let (events, error) = drain(stream).await;
+    // The restart's fresh open fails: exactly one terminal error, and both
+    // the dead workflow and the created workflow are stopped server-side.
+    let Some(ProviderError::Transport { .. }) = error else {
+        panic!("restart open failure must surface its transport error, got {error:?}");
+    };
+    assert!(events.is_empty());
+    let counts = lock(&counts);
+    assert_eq!(counts.creates, 2);
+    assert_eq!(
+        counts.stops,
+        vec![String::from("w-1"), String::from("w-2")]
+    );
     drop(counts);
     servers.abort_all();
 }

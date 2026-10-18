@@ -1080,12 +1080,16 @@ enum FrameOutcome {
 struct Decoder {
     budget: StreamBudget,
     checkpoint: CheckpointState,
-    /// The previous tool-call boundary's checkpoint byte length (`None`
-    /// until a checkpointed boundary exists).
+    /// The checkpoint byte length of the previous tool-call boundary (`None`
+    /// until a comparable prior reading exists, so a lone boundary is never
+    /// flagged as a stall).
     last_action_len: Option<usize>,
-    /// The latest frame's checkpoint byte length (`None` when the frame
-    /// carried no checkpoint).
-    last_checkpoint_len: Option<usize>,
+    /// The latest checkpoint frame's byte length, consumed once by the next
+    /// action edge. A checkpoint snapshot arms this; the following boundary
+    /// compares against it and clears it, so a later bare action with no
+    /// fresh checkpoint has nothing comparable and never stalls on a stale
+    /// reading.
+    pending_checkpoint_len: Option<usize>,
     context_used: Option<u64>,
 }
 
@@ -1095,7 +1099,7 @@ impl Decoder {
             budget: StreamBudget::default(),
             checkpoint,
             last_action_len,
-            last_checkpoint_len: None,
+            pending_checkpoint_len: None,
             context_used: None,
         }
     }
@@ -1118,8 +1122,8 @@ impl Decoder {
         if let Some(usage) = frame.usage {
             self.context_used = Some(usage);
         }
-        if let Some(checkpoint_len) = frame.checkpoint_len {
-            self.last_checkpoint_len = Some(checkpoint_len);
+        if frame.checkpoint_len.is_some() {
+            self.pending_checkpoint_len = frame.checkpoint_len;
         }
         if let Some(status) = frame.status.as_deref() {
             if APPROVAL_STATUSES.contains(&status) {
@@ -1133,7 +1137,18 @@ impl Decoder {
             }
         }
         if let Some(action) = frame.action {
-            if let Some(current) = self.last_checkpoint_len {
+            // Stall compares the current checkpoint reading at this action
+            // edge: the frame's own checkpoint length when it carries one,
+            // else the latest checkpoint frame consumed once. A bare action
+            // with no checkpoint since the last boundary records nothing
+            // and never stalls on a stale reading.
+            if frame.checkpoint_len.is_some() {
+                self.pending_checkpoint_len = None;
+            }
+            let current = frame
+                .checkpoint_len
+                .or_else(|| self.pending_checkpoint_len.take());
+            if let Some(current) = current {
                 if self.last_action_len == Some(current) {
                     return Ok(FrameOutcome::Stalled);
                 }
@@ -1600,15 +1615,31 @@ pub(crate) async fn run_turn(
         }
         Resume::Fresh => {
             let setup = setup_fresh(client, turn, &goal, multiturn).await?;
-            let frame = render_start(&setup.start).map_err(AttemptFailure::Provider)?;
-            let mut socket = connect_socket(
+            // The setup already created the workflow, so a `START` render
+            // or socket-open failure must stop it before surfacing the
+            // terminal error; the send arm below already stops the same way.
+            let frame = match render_start(&setup.start) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    stop_workflow(client, turn, &setup.workflow_id).await;
+                    return Err(AttemptFailure::Provider(error));
+                }
+            };
+            let mut socket = match connect_socket(
                 turn,
                 &setup.connection,
                 &setup.start.definition,
                 &setup.selected,
                 setup.project_id.as_deref(),
             )
-            .await?;
+            .await
+            {
+                Ok(socket) => socket,
+                Err(error) => {
+                    stop_workflow(client, turn, &setup.workflow_id).await;
+                    return Err(error);
+                }
+            };
             if send_text(&mut socket, &frame, turn.cancel).await.is_err() {
                 stop_workflow(client, turn, &setup.workflow_id).await;
                 return Err(AttemptFailure::Provider(ProviderError::WsClosed {
@@ -1752,7 +1783,9 @@ struct FreshSetup {
 }
 
 /// Runs the REST setup of a fresh run and returns its connection data. The
-/// socket opens after, so a setup failure spends no connection.
+/// socket opens after, so a setup failure spends no connection. A
+/// `start_parts` failure after the workflow create stops the created
+/// workflow before it strands.
 async fn setup_fresh(
     client: &reqwest::Client,
     turn: &WorkflowTurn<'_>,
@@ -1798,7 +1831,7 @@ async fn setup_fresh(
     .await
     .map_err(AttemptFailure::Provider)?;
     let selected = selected_model(client, turn, &root_graphql).await;
-    let start = start_parts(
+    let start = match start_parts(
         turn,
         &workflow_id,
         definition,
@@ -1807,7 +1840,13 @@ async fn setup_fresh(
         &selected,
         numeric_id.as_deref(),
         &rest_namespace,
-    )?;
+    ) {
+        Ok(start) => start,
+        Err(error) => {
+            stop_workflow(client, turn, &workflow_id).await;
+            return Err(error);
+        }
+    };
     Ok(FreshSetup {
         connection,
         workflow_id,
@@ -2414,7 +2453,10 @@ impl Driver {
         self.fresh_workflow().await;
     }
 
-    /// Stops the dead workflow and opens a fresh one with the same goal.
+    /// Stops the dead workflow and opens a fresh one with the same goal. A
+    /// fresh open or `START` render failure stops the created workflow
+    /// before surfacing its terminal, so no created id strands; the send
+    /// arm already stopped the same way.
     async fn fresh_workflow(&mut self) {
         self.close_and_stop().await;
         if self.sockets_used >= MAX_SOCKETS {
@@ -2450,6 +2492,7 @@ impl Driver {
                 let frame = match render_start(&self.start) {
                     Ok(frame) => frame,
                     Err(error) => {
+                        self.close_and_stop().await;
                         self.finish_error(error);
                         return;
                     }
@@ -2462,7 +2505,10 @@ impl Driver {
                     self.finish_error(ProviderError::WsClosed { code: None });
                 }
             }
-            Err(error) => self.finish_error(error),
+            Err(error) => {
+                self.close_and_stop().await;
+                self.finish_error(error);
+            }
         }
     }
 
