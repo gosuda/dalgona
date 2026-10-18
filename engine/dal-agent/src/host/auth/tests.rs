@@ -153,7 +153,7 @@ async fn claude_paste_completes_the_login() {
         seen.as_slice(),
         [
             LoginProgress::OpenUrl { url },
-            LoginProgress::AskPaste { hint },
+            LoginProgress::AskPaste { hint, .. },
             LoginProgress::Exchanging,
         ] if url.contains("/claude/oauth/authorize") && hint == PASTE_HINT
     ));

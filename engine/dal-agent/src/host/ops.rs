@@ -256,6 +256,26 @@ impl Host {
         self.state.shared.providers.credential(provider).is_ok()
     }
 
+    /// Reports, for every configured provider in provider-id order, whether
+    /// a credential source is available, without resolving, refreshing,
+    /// fetching, or sending anything.
+    ///
+    /// # Errors
+    /// Returns [`HostError::Provider`] with the typed provider failure,
+    /// including [`dal_provider::ProviderError::Cancelled`] when `cancel`
+    /// fires; cancellation never reads as an unready provider.
+    pub async fn provider_readiness(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<dal_provider::ProviderReadiness>, HostError> {
+        self.state
+            .shared
+            .providers
+            .provider_readiness(cancel)
+            .await
+            .map_err(HostError::Provider)
+    }
+
     /// Opens one attributed provider stream with no journal turn or retry.
     ///
     /// # Errors
