@@ -95,6 +95,13 @@ pub(super) fn compaction_started_notice(
         text: text.into(),
     })
 }
+/// Converts a token bill to the character basis of `estimate_tokens`, with saturation.
+pub(super) fn characters_billed_as(tokens: u64) -> u64 {
+    tokens.saturating_mul(7) / 2
+}
+
+/// Returns the character weight for the unmeasured context estimate.
+/// Compaction parts use their stored token bill, not their encoded image size.
 pub(super) fn entry_weight(entry: &Entry) -> u64 {
     match &entry.kind {
         EntryKind::User { parts } | EntryKind::ToolResult { parts, .. } => {
@@ -107,11 +114,16 @@ pub(super) fn entry_weight(entry: &Entry) -> u64 {
         {
             text.len() as u64
         }
-        EntryKind::Compaction { summary, parts, .. } => {
+        EntryKind::Compaction {
+            summary,
+            parts,
+            parts_tokens,
+            ..
+        } => {
             if parts.is_empty() {
                 summary.as_ref().map_or(0, |text| text.len() as u64)
             } else {
-                parts.iter().map(journal_part_bytes).sum()
+                characters_billed_as(*parts_tokens)
             }
         }
         _ => 0,

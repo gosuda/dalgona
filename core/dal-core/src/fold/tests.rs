@@ -1,4 +1,4 @@
-use super::helpers::{part_to_journal, truncated_args};
+use super::helpers::{characters_billed_as, part_to_journal, truncated_args};
 use super::types::MAX_STEERS;
 
 use super::*;
@@ -2918,20 +2918,11 @@ fn projection_matches_replay_after_branch_selection() {
 #[test]
 fn projection_excludes_replaced_prefix_and_compactor_metadata() {
     let compacted = Session::replay_declared(projection_journal(None)).unwrap();
-    let equivalent = Session::replay_declared([Record::User(Entry {
-        id: entry(1),
-        parent: None,
-        at: stamp(),
-        kind: EntryKind::User {
-            parts: vec![JournalPart::Text {
-                text: "replacement".into(),
-            }],
-        },
-    })])
-    .unwrap();
     assert_eq!(
         compacted.tokens_since_last_compaction(),
-        equivalent.tokens_since_last_compaction(),
+        3,
+        "only the replacement counts, at its stored bill: not the replaced prefix, the \
+         superseded summary, or the replay payload"
     );
 }
 
@@ -2950,22 +2941,187 @@ fn projection_includes_first_kept_prefix_and_later_entries() {
     let mut records = projection_journal(Some(entry(3)));
     records.push(Record::User(later));
     let compacted = Session::replay_declared(records).unwrap();
-    let equivalent = Session::replay_declared([Record::User(Entry {
+    let kept_and_later = u64::try_from("kept context".len() + "later question".len()).unwrap();
+    assert_eq!(
+        compacted.tokens_since_last_compaction(),
+        crate::tokens::estimate_tokens(kept_and_later.saturating_add(characters_billed_as(3))),
+        "the replacement at its stored bill, then the kept prefix and later entries as text"
+    );
+}
+
+/// A one-page replacement: a label and a stored PNG of `png_bytes` bytes.
+fn png_page(png_bytes: u64) -> Vec<JournalPart> {
+    vec![
+        JournalPart::Text {
+            text: "letter://history/1.1".into(),
+        },
+        JournalPart::ImageBlob {
+            mime: "image/png".into(),
+            blob: "0".repeat(64).into(),
+            bytes: png_bytes,
+        },
+    ]
+}
+
+/// A session whose only live context is a compaction that replaced the whole
+/// path with `parts`, billed at `parts_tokens`, in a 100 000 token window
+/// that compacts at 85 000 tokens. No usage is measured, so the context size
+/// is the unmeasured estimate.
+fn session_with_parts_compaction(parts: Vec<JournalPart>, parts_tokens: u64) -> Session {
+    let records = [
+        Record::User(Entry {
+            id: entry(1),
+            parent: None,
+            at: stamp(),
+            kind: EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "question".into(),
+                }],
+            },
+        }),
+        Record::Compaction(Entry {
+            id: entry(2),
+            parent: Some(entry(1)),
+            at: stamp(),
+            kind: EntryKind::Compaction {
+                summary: None,
+                first_kept: None,
+                tokens_before: 40_000,
+                replay: None,
+                usage: None,
+                parts,
+                parts_tokens,
+            },
+        }),
+    ];
+    let mut session = Session::replay(records, stamp()).unwrap().0;
+    send(&mut session, limits(0)).unwrap();
+    session
+}
+
+#[test]
+fn characters_billed_as_is_the_exact_inverse_of_the_token_estimate() {
+    for tokens in [0, 1, 2, 3, 4, 5, 6, 7, 2_996, 85_000, u64::from(u32::MAX)] {
+        assert_eq!(
+            crate::tokens::estimate_tokens(characters_billed_as(tokens)),
+            tokens,
+            "{tokens} tokens"
+        );
+    }
+    assert_eq!(characters_billed_as(u64::MAX), u64::MAX / 2, "saturates");
+}
+
+#[test]
+fn a_parts_compaction_is_estimated_at_its_bill_not_at_its_image_bytes() {
+    // Three million bytes of PNG, billed as one image of 3 000 tokens. Read as
+    // prose those bytes are 857 143 estimated tokens, ten times the window.
+    let session = session_with_parts_compaction(png_page(3_000_000), 3_000);
+    assert_eq!(session.measured_context_tokens(), None);
+    assert_eq!(session.tokens_since_last_compaction(), 3_000);
+    assert_eq!(
+        session.should_compact(),
+        None,
+        "3 000 billed tokens in a 100 000 token window are far under the 85 000 threshold"
+    );
+}
+
+#[test]
+fn a_parts_compaction_triggers_when_its_bill_reaches_the_threshold() {
+    let under = session_with_parts_compaction(png_page(1), 80_000);
+    assert_eq!(under.tokens_since_last_compaction(), 80_000);
+    assert_eq!(under.should_compact(), None);
+
+    let over = session_with_parts_compaction(png_page(1), 90_000);
+    assert_eq!(over.tokens_since_last_compaction(), 90_000);
+    assert_eq!(
+        over.should_compact(),
+        Some(CompactionReason::Threshold),
+        "the bill alone crosses the threshold, however few bytes the images hold"
+    );
+}
+
+#[test]
+fn a_zero_bill_weighs_zero_as_it_does_at_the_cut_point() {
+    let session = session_with_parts_compaction(png_page(3_000_000), 0);
+    assert_eq!(session.tokens_since_last_compaction(), 0);
+    assert_eq!(session.should_compact(), None);
+}
+
+#[test]
+fn an_unbounded_bill_saturates_instead_of_wrapping() {
+    let session = session_with_parts_compaction(png_page(1), u64::MAX);
+    assert!(session.tokens_since_last_compaction() > 1 << 60);
+    assert_eq!(session.should_compact(), Some(CompactionReason::Threshold));
+}
+
+#[test]
+fn a_live_parts_compaction_is_estimated_like_its_replay() {
+    let mut records = vec![Record::User(Entry {
         id: entry(1),
         parent: None,
         at: stamp(),
         kind: EntryKind::User {
-            parts: ["replacement", "kept context", "later question"]
-                .into_iter()
-                .map(|text| JournalPart::Text { text: text.into() })
-                .collect(),
+            parts: vec![JournalPart::Text {
+                text: "question".into(),
+            }],
         },
-    })])
+    })];
+    let mut live = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
+    send(&mut live, limits(0)).unwrap();
+    let out = send(
+        &mut live,
+        Event::Command {
+            cmd: Command::Compact { focus: None },
+            by: client(),
+        },
+    )
     .unwrap();
-    assert_eq!(
-        compacted.tokens_since_last_compaction(),
-        equivalent.tokens_since_last_compaction(),
+    append_emitted(&out, &mut records);
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000002").unwrap();
+    let settled = CompactionSummary {
+        compactor: name("history"),
+        tokens_before: 40_000,
+        tokens_after: 3_100,
+        summary: None,
+        first_kept: Some(entry(1)),
+        replay: None,
+        usage: None,
+        parts: png_page(3_000_000),
+        parts_tokens: 3_000,
+        letters: Vec::new(),
+    };
+    for event in [
+        Event::JobStarted {
+            job,
+            kind: JobKind::Compaction,
+        },
+        Event::CompactionSettled {
+            turn: None,
+            outcome: Ok(settled),
+        },
+        Event::JobSettled {
+            job,
+            outcome: JobOutcome::Exited { code: 0 },
+        },
+    ] {
+        let out = send(&mut live, event).unwrap();
+        append_emitted(&out, &mut records);
+    }
+    let replayed = Session::replay_declared(records).unwrap();
+    let expected = crate::tokens::estimate_tokens(
+        u64::try_from("question".len())
+            .unwrap()
+            .saturating_add(characters_billed_as(3_000)),
     );
+    assert_eq!(
+        (
+            live.tokens_since_last_compaction(),
+            replayed.tokens_since_last_compaction()
+        ),
+        (expected, expected),
+        "the kept question as text plus the replacement at its bill"
+    );
+    assert_eq!(live.should_compact(), None);
 }
 
 #[test]
