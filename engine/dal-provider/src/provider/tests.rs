@@ -2960,6 +2960,9 @@ fn json_reply(status: u16, body: &str) -> Reply {
         body: body.as_bytes().to_vec(),
     }
 }
+
+const CCA_RATE_LIMITED: &str =
+    r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"slow down"}}"#;
 const CCA_QUOTA_EXHAUSTED: &str = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota will reset at midnight","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}"#;
 
 /// Whether the loopback server behind `task` was never contacted.
@@ -2967,6 +2970,58 @@ async fn never_contacted(task: &mut tokio::task::JoinSet<io::Result<Vec<Vec<u8>>
     tokio::time::timeout(Duration::from_millis(50), task.join_next())
         .await
         .is_err()
+}
+
+#[tokio::test]
+async fn antigravity_fails_over_on_a_transient_status_before_any_stream_byte() -> TestResult {
+    for (status, body) in [
+        (408, "{}"),
+        (429, CCA_RATE_LIMITED),
+        (500, "{}"),
+        (503, "{}"),
+    ] {
+        let (first, mut first_task) = server("", vec![json_reply(status, body)]).await?;
+        let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+        let result =
+            run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        let Ok(Some(stream)) = result else {
+            return Err(io::Error::other(format!(
+                "{status} did not fail over: {}",
+                match result {
+                    Ok(_) => String::from("cancelled"),
+                    Err(failure) => format!("{failure:?}"),
+                }
+            ))
+            .into());
+        };
+        let events = collect(stream).await?;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hi")),
+            "{status}: the second endpoint's stream was not served: {events:?}"
+        );
+        first_task.join_next().await.expect("first answered")??;
+        second_task.join_next().await.expect("second answered")??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_returns_the_last_endpoints_failure_to_the_lifecycle() -> TestResult {
+    let (first, mut first_task) = server("", vec![json_reply(503, "{}")]).await?;
+    let (second, mut second_task) = server("", vec![json_reply(500, "{}")]).await?;
+    let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+    assert!(
+        matches!(
+            result,
+            Err(crate::lifecycle::AttemptFailure::Response { status: 500, .. })
+        ),
+        "the last endpoint's own failure is the attempt's failure"
+    );
+    first_task.join_next().await.expect("first answered")??;
+    second_task.join_next().await.expect("second answered")??;
+    Ok(())
 }
 
 #[tokio::test]

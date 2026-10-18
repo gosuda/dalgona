@@ -1424,7 +1424,14 @@ async fn google_antigravity_attempt(
 ///
 /// Endpoint selection stays with the caller (`antigravity::endpoints`); this
 /// owns only the failover rule, so a test can drive it with loopback
-/// endpoints.
+/// endpoints. An error status is classified through the established
+/// `google_status_failure` (which consumes the body and releases the
+/// response) and fails over only on a transient pre-byte status
+/// (`408`/`429`-non-quota/`500`/`502`/`503`/`504`/`529`, the shared retry
+/// table's retryable set); terminal quota (`Provider(Quota)`), account
+/// verification, and all other statuses return at once. The last endpoint's
+/// own failure is the attempt's failure. No retry sleep, discovery call,
+/// config knob, or session state lives here.
 pub(super) async fn antigravity_failover<F>(
     context: &StreamContext,
     secrets: &[Box<str>],
@@ -1437,23 +1444,57 @@ where
     F: Fn() -> Result<google_shared::GoogleWire, ProviderError>,
 {
     let mut last_failure: Option<AttemptFailure> = None;
-    for endpoint in endpoints {
+    let total = endpoints.len();
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let is_last = index + 1 == total;
         let mut wire = build().map_err(AttemptFailure::Provider)?;
         wire.base_override = Some(endpoint.clone());
-        match send_google_wire(context, cancel, wire).await {
-            Ok(Some(response)) => {
-                return google_decoded(
-                    context,
-                    secrets,
-                    cancel,
-                    response,
-                    true,
-                    Some(response_slot.clone()),
-                )
-                .await;
-            }
+        let response = match send_google_wire(context, cancel, wire).await {
             Ok(None) => return Ok(None),
-            Err(failure) => last_failure = Some(failure),
+            Err(failure) => {
+                if is_last || !is_antigravity_body_failure_failover(&failure) {
+                    return Err(failure);
+                }
+                last_failure = Some(failure);
+                continue;
+            }
+            Ok(Some(response)) => response,
+        };
+        if response.status().is_success() {
+            return google_decoded(
+                context,
+                secrets,
+                cancel,
+                response,
+                true,
+                Some(response_slot.clone()),
+            )
+            .await;
+        }
+        match google_status_failure(
+            response,
+            context.family,
+            &context.provider,
+            &context.model,
+            true,
+            secrets,
+            cancel,
+        )
+        .await
+        {
+            Ok(None) => return Ok(None),
+            Err(failure) => {
+                if is_last || !is_antigravity_body_failure_failover(&failure) {
+                    return Err(failure);
+                }
+                last_failure = Some(failure);
+            }
+            Ok(Some(failure)) => {
+                if is_last || !is_antigravity_status_failover(&failure) {
+                    return Err(failure);
+                }
+                last_failure = Some(failure);
+            }
         }
     }
     Err(last_failure.unwrap_or_else(|| {
@@ -1462,6 +1503,36 @@ where
             reason: String::from("the antigravity endpoints answered nothing"),
         })
     }))
+}
+
+/// Whether a mapped Antigravity error status fails over to the next endpoint.
+///
+/// Only a transient pre-byte `Response` status does: `408`, non-quota `429`,
+/// and `500`/`502`/`503`/`504`/`529` (the shared retry table's retryable
+/// set). Quota never reaches here as a `Response` (the shared classifier
+/// maps it to `Provider(Quota)`, which is terminal), and an account
+/// verification message stays terminal even on a transient status because a
+/// second endpoint cannot clear account state.
+fn is_antigravity_status_failover(failure: &AttemptFailure) -> bool {
+    match failure {
+        AttemptFailure::Response { status, message, .. } => {
+            let transient = matches!(*status, 408 | 429 | 500 | 502 | 503 | 504 | 529);
+            transient && !message.contains("Account verification required.")
+        }
+        AttemptFailure::Provider(_) => false,
+    }
+}
+
+/// Whether a body-read failure inside `google_status_failure` fails over.
+///
+/// A transport failure happens before any stream byte, so the next endpoint
+/// may still serve; every other provider error (limit, auth, quota) returns
+/// at once.
+fn is_antigravity_body_failure_failover(failure: &AttemptFailure) -> bool {
+    matches!(
+        failure,
+        AttemptFailure::Provider(ProviderError::Transport { .. })
+    )
 }
 
 /// Sends one Google wire and decodes its SSE reply through the shared
