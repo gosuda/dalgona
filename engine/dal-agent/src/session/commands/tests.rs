@@ -41,6 +41,7 @@ fn usage() -> Usage {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -78,6 +79,7 @@ fn view(workspace: Workspace) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: Some("Moon".into()),
+            scoped_models: None,
         },
         open: Vec::new(),
         changes: Vec::new(),

@@ -56,6 +56,7 @@ const NO_USAGE: Usage = Usage {
     output_tokens: 0,
     reasoning_tokens: None,
     cache_write_tokens: 0,
+    premium_requests: None,
     cost_usd: None,
 };
 
@@ -433,6 +434,7 @@ fn normalize(usage: &WireUsage) -> Usage {
             .saturating_sub(reasoning.unwrap_or(0)),
         reasoning_tokens: reasoning,
         cache_write_tokens: prompt.and_then(|p| p.cache_write_tokens).unwrap_or(0),
+        premium_requests: None,
         cost_usd: None,
     }
 }

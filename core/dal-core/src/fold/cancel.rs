@@ -385,6 +385,9 @@ impl Session {
             approval: self.settings.approval,
             mode: self.settings.mode,
             name: self.settings.name.clone(),
+            // The fold never authors scope: `None` keeps the projection's
+            // driver-published scope. Only the driver publishes `Some`.
+            scoped_models: None,
         }
     }
 

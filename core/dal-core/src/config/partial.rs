@@ -35,6 +35,7 @@ pub(super) struct PartialGuardBands {
 pub(super) struct ParsedLayer {
     pub(super) mode: Option<Mode>,
     pub(super) model: Option<Box<str>>,
+    pub(super) model_route: Option<crate::model::ModelRoute>,
     pub(super) thinking: Option<crate::model::ThinkingLevel>,
     pub(super) approval: Option<ApprovalMode>,
     pub(super) screen: Option<Screen>,
@@ -153,6 +154,7 @@ impl PartialPrice {
 pub(super) struct FileText {
     pub(super) mode: Option<toml::Value>,
     pub(super) model: Option<toml::Value>,
+    pub(super) model_route: Option<toml::Value>,
     pub(super) thinking: Option<toml::Value>,
     pub(super) approval: Option<toml::Value>,
     pub(super) screen: Option<toml::Value>,

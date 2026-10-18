@@ -39,6 +39,7 @@ use crate::ext::hooks::{
     HookScope, dispatch_before_turn, dispatch_input, hook_fanout, input_failed_notice,
     join_before_turn,
 };
+use crate::host::default_store::{DefaultUpdate, persist_default};
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
@@ -254,6 +255,8 @@ pub(crate) struct ActorDeps {
     pub(crate) backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     /// The owner for background work that must stop before the journal closes.
     pub(crate) tasks: crate::session::tasks::SessionTasks,
+    /// The default reasoning level this session opened under.
+    pub(crate) thinking: dal_core::ThinkingLevel,
 }
 
 /// Lifecycle latches for one session actor.
@@ -343,6 +346,9 @@ pub(crate) struct Actor {
     /// right after the actor spawns.
     backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     tasks: crate::session::tasks::SessionTasks,
+    /// The default reasoning level this session opened under; a default
+    /// saved later reaches only sessions opened after it.
+    thinking: dal_core::ThinkingLevel,
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
@@ -586,6 +592,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         services: None,
         backend: deps.backend,
         tasks: deps.tasks,
+        thinking: deps.thinking,
     };
     let handle = SessionHandle::new(
         deps.session,
@@ -1577,21 +1584,57 @@ impl Actor {
         }
         self.sweep_expiry().await;
         self.flags.note_submit(&command);
+        let default = DefaultUpdate::requested(&command);
         let mut effects = Vec::new();
         let stepped = self.fold.step(
             Event::Command { cmd: command, by },
             Timestamp::now(),
             &mut effects,
         );
-        match stepped {
-            Err(rejection) => {
+        match (stepped, default) {
+            (Err(rejection), _) => {
                 let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
-            Ok(()) => {
+            (Ok(()), None) => {
                 let _ = self.execute(effects, Some(reply)).await;
             }
+            (Ok(()), Some(default)) => self.execute_then_persist(effects, default, reply).await,
         }
+    }
+
+    /// Runs one `Save::SessionAndDefault` setting, then persists it as the
+    /// product default only after its settings journal append succeeded.
+    ///
+    /// A rejected or journal-failed operation writes nothing and forwards its
+    /// outcome unchanged. A failed default write keeps the journaled session
+    /// as is and replies `PersistenceFailed` with the writer's distinct
+    /// wording (remote-gated or `default write failed`), never a success.
+    async fn execute_then_persist(
+        &mut self,
+        effects: Vec<Effect>,
+        default: DefaultUpdate,
+        reply: ReplyTx,
+    ) {
+        let (local, mut outcome) = oneshot::channel();
+        let _ = self.execute(effects, Some(local)).await;
+        // Setting commands settle their reply inside this frame; an absent
+        // outcome means the frame dropped it, and dropping `reply` here
+        // reports the same closed channel the plain path would.
+        let Ok(result) = outcome.try_recv() else {
+            return;
+        };
+        if result.is_err() {
+            let _ = reply.send(result);
+            return;
+        }
+        let result = match persist_default(&self.host.shared, &default).await {
+            Ok(()) => result,
+            Err(error) => Err(AgentError::PersistenceFailed {
+                message: error.to_string().into(),
+            }),
+        };
+        let _ = reply.send(result);
     }
 
     /// Fires the turn token before the fold step touches any channel.
@@ -1947,11 +1990,14 @@ impl Actor {
         let model = if hooked {
             let shared = Arc::clone(&self.host.shared);
             let requested = self.requested_route();
+            // The session's opening thinking, not the live default: a default
+            // saved later reaches only sessions opened after it.
+            let thinking = self.thinking;
             // Boxed: the resolution future would otherwise push this fold
             // (and its `drive_opening` caller) over the `large_future` cap.
-            Box::pin(
-                self.pump_opening(async move { opening_model(&shared, requested.as_ref()).await }),
-            )
+            Box::pin(self.pump_opening(async move {
+                opening_model(&shared, requested.as_ref(), thinking).await
+            }))
             .await
         } else {
             None

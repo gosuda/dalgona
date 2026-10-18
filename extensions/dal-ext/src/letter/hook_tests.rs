@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use dal_agent::error::ServiceError;
 use dal_agent::ext::services::ServiceFuture;
 use dal_agent::ext::{Caller, HookCx, HookError, RawValue, Services, Tool, ToolOutcome};
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
+use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, PrivateEffect};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, BlobId, Caps, EntryId, FetchRequest, FetchResponse, Inference,
     InputEvent, InputVerdict, JobsOp, JobsReply, ModelInfo, ModelRequest, ModelRoute, Notice, Part,
@@ -235,6 +235,10 @@ impl Services for Tap {
             .map(|row| Box::new(RawValue::parse(row).expect("canned row parses")))
             .collect();
         Box::pin(async move { Ok(parsed) })
+    }
+
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        declined()
     }
 
     fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

@@ -735,7 +735,7 @@ fn history_aborts_on_empty_tool_result_id() {
             source: replay_source(),
             parts: vec![AssistantPart::ToolCall {
                 call: CallId::new(""),
-                name: String::new(),
+                name: String::new().into(),
                 args: raw("{}"),
                 replay: None,
             }],
@@ -743,7 +743,7 @@ fn history_aborts_on_empty_tool_result_id() {
         },
         ContextItem::ToolResult {
             call: CallId::new(""),
-            name: String::new(),
+            name: String::new().into(),
             is_error: false,
             parts: vec![Part::Text { text: "hit".into() }],
         },

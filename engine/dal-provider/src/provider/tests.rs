@@ -5662,7 +5662,7 @@ async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult 
         }],
         replay: None,
     };
-    let turn_request = |context| ModelRequest {
+    let turn_request = |context: Vec<ContextItem>| ModelRequest {
         purpose: Purpose::Turn,
         model: ModelRoute::Api {
             family: Family::GitLab,

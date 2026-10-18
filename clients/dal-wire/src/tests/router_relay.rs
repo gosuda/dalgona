@@ -31,6 +31,7 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             output_tokens: output,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         },
     }

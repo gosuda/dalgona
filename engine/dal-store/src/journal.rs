@@ -1580,6 +1580,8 @@ struct UsageTotal {
     reasoning_tokens: u64,
     reasoning_known: bool,
     cache_write_tokens: u64,
+    premium_requests: f64,
+    premium_known: bool,
     cost_usd: f64,
     cost_known: bool,
     seen: bool,
@@ -1594,6 +1596,8 @@ impl UsageTotal {
             reasoning_tokens: 0,
             reasoning_known: true,
             cache_write_tokens: 0,
+            premium_requests: 0.0,
+            premium_known: true,
             cost_usd: 0.0,
             cost_known: true,
             seen: false,
@@ -1637,6 +1641,16 @@ impl UsageTotal {
             offset,
             "turn usage total overflows",
         )?;
+        match usage.premium_requests {
+            Some(premium) => {
+                let total = self.premium_requests + premium;
+                if !total.is_finite() {
+                    return Err(damaged(offset, "turn usage premium total overflows"));
+                }
+                self.premium_requests = total;
+            }
+            None => self.premium_known = false,
+        }
         match usage.cost_usd {
             Some(cost) => {
                 let total = self.cost_usd + cost;
@@ -1657,6 +1671,7 @@ impl UsageTotal {
             output_tokens: self.output_tokens,
             reasoning_tokens: self.reasoning_known.then_some(self.reasoning_tokens),
             cache_write_tokens: self.cache_write_tokens,
+            premium_requests: self.premium_known.then_some(self.premium_requests),
             cost_usd: self.cost_known.then_some(self.cost_usd),
         })
     }
@@ -1792,8 +1807,28 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         }
+    }
+
+    #[test]
+    fn usage_total_premium_sums_known_and_stays_unknown_after_an_unmetered_record() {
+        let totalled = |premiums: &[Option<f64>]| {
+            let mut total = UsageTotal::new();
+            for (offset, premium_requests) in (0_u64..).zip(premiums) {
+                let usage = Usage {
+                    premium_requests: *premium_requests,
+                    ..usage(1)
+                };
+                total.add(usage, offset).expect("finite premium totals");
+            }
+            total.finish().expect("usage seen").premium_requests
+        };
+        assert_eq!(totalled(&[Some(1.5), Some(0.5)]), Some(2.0));
+        assert_eq!(totalled(&[Some(0.0)]), Some(0.0));
+        assert_eq!(totalled(&[Some(1.5), None]), None);
+        assert_eq!(totalled(&[None, Some(1.5)]), None);
     }
 
     fn assistant_record(

@@ -75,6 +75,7 @@ impl Projection {
                 approval,
                 mode,
                 name: None,
+                scoped_models: None,
             },
             usage: UsageView {
                 usage: Usage {
@@ -83,6 +84,7 @@ impl Projection {
                     output_tokens: 0,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
+                    premium_requests: None,
                     cost_usd: None,
                 },
                 context_tokens: 0,
@@ -143,7 +145,17 @@ impl Projection {
                 }
             }
             UpdateKind::Settings(settings) => {
+                // Scope merge: the fold always emits `scoped_models: None`
+                // (keep-existing); only the driver's authoritative
+                // publication carries `Some` (replace, possibly empty on
+                // clear). Catalog gaps never reach here: scope is stored
+                // verbatim and never intersected with the catalog.
+                let scope = settings
+                    .scoped_models
+                    .clone()
+                    .or_else(|| self.settings.scoped_models.clone());
                 self.settings = settings.clone();
+                self.settings.scoped_models = scope;
             }
             UpdateKind::Usage(usage) => {
                 self.usage = usage.clone();
@@ -188,6 +200,14 @@ impl Projection {
         self.steers_queued = steers;
         self.follow_ups_queued = follow_ups;
         self.auto_compaction = auto;
+    }
+
+    /// Records the authoritative scope committed by `SetScopedModels` and
+    /// returns the settings view carrying it for publication. The driver
+    /// is the single writer; the fold only ever emits `None`.
+    pub(crate) fn set_scope(&mut self, scope: Vec<Box<str>>) -> SettingsView {
+        self.settings.scoped_models = Some(scope);
+        self.settings.clone()
     }
 
     /// Builds the client-facing snapshot with leaf paging applied.

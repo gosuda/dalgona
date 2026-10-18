@@ -429,6 +429,24 @@ impl Shared {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::publish_locked(&mut inner, kind);
+    }
+
+    /// Commits the authoritative scoped-model list `SetScopedModels` set and
+    /// publishes the settings carrying it, verbatim (an empty list is a
+    /// clear). The settings are read and republished under one lock, so a
+    /// concurrent fold settings update can never be reverted by this one.
+    pub(crate) fn publish_scope(&self, scope: Vec<Box<str>>) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let settings = inner.projection.set_scope(scope);
+        Self::publish_locked(&mut inner, UpdateKind::Settings(settings));
+    }
+
+    /// Applies, sequences, rings, and offers one update under the held lock.
+    fn publish_locked(inner: &mut SharedInner, kind: UpdateKind) {
         inner.projection.apply(&kind);
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
         inner.next_seq = inner.next_seq.max(1).saturating_add(1);

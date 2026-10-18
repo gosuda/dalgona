@@ -1054,7 +1054,7 @@ mod tests {
     /// A dropped actor lane turns a private-loop birth into `SessionClosed`.
     #[tokio::test]
     async fn private_loop_birth_reports_a_closed_session() {
-        let (handle, _broker, _inbox) = fixture();
+        let (handle, _broker, _inbox, _, _) = fixture();
         let error = handle
             .private_loop_born(PrivateLoopId::new_v7(), Owner::Core, None)
             .await
@@ -1069,7 +1069,7 @@ mod tests {
     /// service errors with the standard closed-record text.
     #[tokio::test]
     async fn private_start_and_end_report_a_closed_session() {
-        let (handle, _broker, _inbox) = fixture();
+        let (handle, _broker, _inbox, _, _) = fixture();
         let r#loop = PrivateLoopId::new_v7();
         let token = PrivateEffectId::new_v7();
         let args = RawJson::parse("{}").expect("literal test args parse");

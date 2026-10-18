@@ -56,6 +56,7 @@ fn usage() -> Usage {
         output_tokens: 5,
         reasoning_tokens: Some(1),
         cache_write_tokens: 3,
+        premium_requests: None,
         cost_usd: None,
     }
 }

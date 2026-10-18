@@ -24,13 +24,22 @@
 //! stream is live and at most one result batch is outstanding, so the run
 //! holds no queue; the transport supplies the one batch of room
 //! [`RunTransport::send`] needs.
+//!
+//! Maintenance while awaiting: a run that ended its step in tool use keeps
+//! its connection open but does no generation. [`RunEvents::poll_maintain`]
+//! performs the family's upkeep (heartbeats, solicitation answers) without
+//! yielding step events or adding a run queue, and
+//! [`ProviderRun::keepalive`] drives it without spawning: the owner polls the
+//! [`KeepAlive`] future through its own task scope. Upkeep runs only while no
+//! step stream is live, so it never polls the source concurrently with step
+//! delivery; the terminal and drop transitions are unchanged.
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use dal_core::{CallId, Family, Part};
@@ -146,7 +155,33 @@ pub(crate) trait RunTransport: Send + 'static {
     fn abort(&mut self);
 }
 
-type EventSource = Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
+/// Duplex upkeep of one run's event source while the run waits on the host.
+///
+/// Awaiting does no generation: the server holds the step until the host's
+/// results arrive. Sources with an open connection during that wait (Cursor:
+/// heartbeats, KV answers, exec-control replies) override
+/// [`RunEvents::poll_maintain`] to perform that upkeep. Upkeep never yields
+/// a [`StreamEvent`] and adds no queue to the run: step events decoded along
+/// the way stay buffered in the source for the next step, and a terminal
+/// failure surfaces as the returned error for the keeper to fold into the
+/// run. The default is no upkeep; it stays parked until the run ends.
+pub(crate) trait RunEvents:
+    Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static
+{
+    /// Drives one round of upkeep while the run awaits host results.
+    ///
+    /// The keeper calls this only while no step stream is live, so it never
+    /// runs concurrently with step delivery. `Poll::Pending` parks until the
+    /// source or the next phase change wakes the keeper;
+    /// `Poll::Ready(Ok(()))` reports quiescence and parks until the next
+    /// phase change; `Poll::Ready(Err(_))` ends the run through the usual
+    /// failure mapping.
+    fn poll_maintain(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), ProviderError>> {
+        Poll::Pending
+    }
+}
+
+type EventSource = Pin<Box<dyn RunEvents>>;
 
 /// One server run kept open across host tool exchanges, owned by the caller.
 ///
@@ -165,11 +200,12 @@ impl ProviderRun {
     ///
     /// `events` carries every step back to back, each following the
     /// [`StreamEvent`] grammar and ending in `Stop`, with tool names already
-    /// restored to internal names. The first step is in flight.
-    #[cfg(test)]
+    /// restored to internal names. The source also carries the run's upkeep
+    /// for [`ProviderRun::keepalive`] through [`RunEvents`]. The first step
+    /// is in flight.
     pub(crate) fn new(
         family: Family,
-        events: impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static,
+        events: impl RunEvents,
         transport: impl RunTransport,
     ) -> Self {
         let live = Live {
@@ -182,6 +218,7 @@ impl ProviderRun {
                 phase: Phase::Streaming { taken: false },
                 live: Some(live),
                 handed_off: false,
+                keeper: None,
             })),
         }
     }
@@ -253,6 +290,29 @@ impl ProviderRun {
         }
     }
 
+    /// The maintenance driver for this run: upkeep while it awaits host
+    /// results, resolved once it ends.
+    ///
+    /// The provider never spawns; the owner polls the returned future
+    /// through its own task scope. Dropping it changes nothing: the run
+    /// keeps its state and its transport.
+    pub fn keepalive(&self) -> KeepAlive {
+        KeepAlive {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// The calls the run is waiting on, in response order, or `None` unless
+    /// the last step ended in tool use. The same ids as
+    /// [`RunState::Awaiting`].
+    #[must_use]
+    pub fn awaiting(&self) -> Option<Vec<CallId>> {
+        match &lock(&self.shared).phase {
+            Phase::Awaiting(pending) => Some(pending.iter().map(|call| call.id.clone()).collect()),
+            _ => None,
+        }
+    }
+
     /// Where the run stands.
     #[must_use]
     pub fn state(&self) -> RunState {
@@ -273,6 +333,56 @@ impl Drop for ProviderRun {
         let mut core = lock(&self.shared);
         if core.live.is_some() {
             core.end(Phase::Released);
+        }
+    }
+}
+
+/// The owner's maintenance driver for one [`ProviderRun`].
+///
+/// While the run awaits host results this drives the event source's
+/// [`RunEvents::poll_maintain`]; while a step stream is live it stays parked
+/// and never touches the source, so step delivery and maintenance never poll
+/// the same stream. It resolves once the run leaves its live states
+/// (closed, released, or lost, including the owner dropping the run), and
+/// dropping it aborts nothing and releases nothing.
+#[must_use = "a KeepAlive performs no upkeep unless polled"]
+pub struct KeepAlive {
+    shared: Arc<Mutex<Core>>,
+}
+
+impl Future for KeepAlive {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut core = lock(&self.shared);
+        if !matches!(core.phase, Phase::Awaiting(_)) {
+            if matches!(core.phase, Phase::Closed | Phase::Released | Phase::Lost(_)) {
+                return Poll::Ready(());
+            }
+            core.keeper = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let outcome = core
+            .live
+            .as_mut()
+            .map(|live| live.events.as_mut().poll_maintain(cx));
+        match outcome {
+            None => Poll::Ready(()),
+            Some(Poll::Pending) => {
+                core.keeper = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Some(Poll::Ready(Ok(()))) => {
+                // Upkeep is quiescent; park until the next phase change. The
+                // source registered its own wakeups before reporting
+                // readiness, so nothing is missed.
+                core.keeper = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Some(Poll::Ready(Err(error))) => {
+                core.fail(error);
+                Poll::Ready(())
+            }
         }
     }
 }
@@ -308,6 +418,9 @@ struct Core {
     /// A step ended in tool use: the server now holds state a fresh run
     /// would not.
     handed_off: bool,
+    /// The parked maintenance driver, woken when the run starts awaiting
+    /// and when it ends.
+    keeper: Option<Waker>,
 }
 
 impl Core {
@@ -323,6 +436,7 @@ impl Core {
             drop(events);
             transport.abort();
         }
+        self.wake_keeper();
     }
 
     fn lose(&mut self, reason: RunLostReason) -> ProviderError {
@@ -330,6 +444,13 @@ impl Core {
         ProviderError::RunLost {
             family: self.family,
             reason,
+        }
+    }
+
+    /// Wakes the parked maintenance driver, if any.
+    fn wake_keeper(&mut self) {
+        if let Some(waker) = self.keeper.take() {
+            waker.wake();
         }
     }
 
@@ -523,6 +644,7 @@ impl Step {
                     }
                     core.phase = Phase::Awaiting(calls);
                     core.handed_off = true;
+                    core.wake_keeper();
                 } else {
                     core.end(Phase::Closed);
                 }

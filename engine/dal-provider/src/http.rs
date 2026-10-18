@@ -113,6 +113,66 @@ pub enum Exchange {
     reason = "the builder fails only when the compiled TLS backend cannot initialize"
 )]
 pub fn build_client() -> reqwest::Client {
+    client_builder()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// A [`build_client`] client for AWS credential resolution that never uses a
+/// proxy.
+///
+/// The shared builder sets no proxy policy, so reqwest would otherwise honor
+/// ambient `HTTP(S)_PROXY` and route ECS/IMDS credential HTTP bearing
+/// container and metadata tokens to egress. Disabling the proxy keeps that
+/// traffic direct. Redirects, timeouts, retries, referrer policy, and cookie
+/// handling are exactly [`build_client`]'s: both come from one builder.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+pub(crate) fn build_resolver_client() -> reqwest::Client {
+    client_builder()
+        .no_proxy()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// A [`build_client`] client that speaks HTTP/2 from the first byte, with
+/// prior knowledge of the peer.
+///
+/// Over `https` [`build_client`] already reaches an HTTP/2 server: reqwest
+/// offers ALPN `h2` before `http/1.1`. A cleartext socket has no ALPN, so the
+/// only way to HTTP/2 there is to open with the HTTP/2 connection preface.
+/// This client does that on every connection, and an HTTP/1.1-only peer
+/// fails the exchange instead of being downgraded to. Every other rule
+/// (timeouts, redirects, no retries, trust boundary in [`send`]) is exactly
+/// [`build_client`]'s: both come from one builder.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+pub fn build_client_http2_prior_knowledge() -> reqwest::Client {
+    client_builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// The one policy every [`build_client`] variant shares; a variant overrides
+/// only the field it exists to change.
+fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(STREAM_IDLE_TIMEOUT)
@@ -124,8 +184,6 @@ pub fn build_client() -> reqwest::Client {
         }))
         .referer(false)
         .retry(reqwest::retry::never())
-        .build()
-        .expect("the reqwest TLS backend initializes")
 }
 
 /// A [`build_client`] client that returns every redirect to the caller
@@ -142,12 +200,8 @@ pub fn build_client() -> reqwest::Client {
     reason = "the builder fails only when the compiled TLS backend cannot initialize"
 )]
 pub fn build_client_no_redirect() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(STREAM_IDLE_TIMEOUT)
+    client_builder()
         .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
         .build()
         .expect("the reqwest TLS backend initializes")
 }

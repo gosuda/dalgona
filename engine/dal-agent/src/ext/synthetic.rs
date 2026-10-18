@@ -163,6 +163,8 @@ fn entry_for(record: &ModelRecord) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: caps.custom_grammar,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -753,6 +755,10 @@ impl Loop {
                 cache_write_tokens: total
                     .cache_write_tokens
                     .saturating_add(next.cache_write_tokens),
+                premium_requests: total
+                    .premium_requests
+                    .zip(next.premium_requests)
+                    .map(|(left, right)| left + right),
                 cost_usd: total
                     .cost_usd
                     .zip(next.cost_usd)

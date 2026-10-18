@@ -34,7 +34,7 @@ use crate::ext::overlay::{Overlay, TurnTools};
 use crate::ext::prompt::{PromptOrder, PromptSection, SectionCx};
 use crate::ext::services::SessionBackend;
 use crate::ext::{Caller, CallerKind, Services, ToolDescription};
-use crate::host::{HostShared, HostState};
+use crate::host::{DefaultModel, HostShared, HostState};
 use crate::jobs::JobTable;
 use crate::session::actor::{DriverPorts, TurnBatch, TurnWork, WatchOutcome};
 use crate::session::backend::Backend;
@@ -173,6 +173,11 @@ pub(crate) struct DriverDeps {
     pub tasks: SessionTasks,
     /// Whether the journal is in-memory.
     pub ephemeral: bool,
+    /// The default execution mode this session opened under; a default
+    /// saved later reaches only sessions opened after it.
+    pub mode: dal_core::Mode,
+    /// The default reasoning level this session opened under.
+    pub thinking: dal_core::ThinkingLevel,
 }
 
 /// Per-turn driver state.
@@ -721,9 +726,17 @@ async fn resolve_requested(
     }
 }
 
-/// Resolves the configured default model.
+/// Resolves the live default model: a committed structured route resolves
+/// as a requested route, so every family survives a restart exactly; a
+/// legacy-only file resolves its reference string as before.
 async fn resolve_default(shared: &HostShared) -> Result<ResolvedRequest, Box<str>> {
-    resolve_reference(shared, shared.config.model().unwrap_or(""), None).await
+    match shared.default_model() {
+        Some(DefaultModel::Route(route)) => resolve_requested(shared, &route, None).await,
+        Some(DefaultModel::Reference(reference)) => {
+            resolve_reference(shared, &reference, None).await
+        }
+        None => resolve_reference(shared, "", None).await,
+    }
 }
 
 /// Resolves `reference`, or the model `route` names when one is given.
@@ -783,17 +796,14 @@ fn synthetic(shared: &HostShared, reference: &str) -> Option<crate::ext::synthet
 pub(crate) async fn opening_model(
     shared: &HostShared,
     requested: Option<&ModelRoute>,
+    thinking: dal_core::ThinkingLevel,
 ) -> Option<ModelInfo> {
     let resolved = match requested {
         Some(route) => resolve_requested(shared, route, None).await,
         None => resolve_default(shared).await,
     }
     .ok()?;
-    Some(model_info_for(
-        &resolved.entry,
-        &resolved.route,
-        shared.config.thinking(),
-    ))
+    Some(model_info_for(&resolved.entry, &resolved.route, thinking))
 }
 
 impl Driver {
@@ -825,8 +835,8 @@ impl Driver {
         resolved: &ResolvedRequest,
         params: RequestParams,
     ) -> ModelRequest {
-        let mode = self.deps.host.shared.config.mode();
-        let thinking = self.deps.host.shared.config.thinking();
+        let mode = self.deps.mode;
+        let thinking = self.deps.thinking;
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
         let info = model_info_for(&resolved.entry, &resolved.route, thinking);
@@ -1113,7 +1123,7 @@ impl Driver {
     /// from a boundary event, and an empty resolved is dropped outside
     /// the resolving stage.
     async fn resolve(&mut self, turn: TurnId) {
-        let mode = self.deps.host.shared.config.mode();
+        let mode = self.deps.mode;
         let workspace = self.deps.workspace.clone();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
@@ -1173,7 +1183,7 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
-            mode: self.deps.host.shared.config.mode(),
+            mode: self.deps.mode,
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
@@ -1605,7 +1615,7 @@ impl Driver {
             Some(turn) => self.compaction_cancel(turn)?,
         };
         let params = RequestParams {
-            thinking: self.deps.host.shared.config.thinking(),
+            thinking: self.deps.thinking,
             ..RequestParams::default()
         };
         let mut refused: Option<Box<str>> = None;

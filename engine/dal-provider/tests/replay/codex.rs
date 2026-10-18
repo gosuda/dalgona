@@ -16,8 +16,8 @@ use dal_core::{
 use dal_provider::{
     AuthStore, AuthStyle, BeforeRequest, BeforeRequestInput, BeforeRequestPatch, CatalogEntry,
     CompactOutcome, Credential, EnvSnapshot, Listing, NoticeSink, OAuthCredential, ProviderConfig,
-    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ResolvedModel, SecretString,
-    StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel,
+    SecretString, StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -64,6 +64,8 @@ fn entry() -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -164,6 +166,7 @@ fn config(base: &str) -> ProviderConfig {
             key_env: None,
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     }

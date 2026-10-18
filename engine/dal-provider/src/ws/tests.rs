@@ -619,6 +619,19 @@ fn assert_responses_handshake(request: &Request, auth: AuthStyle) {
             );
             assert!(headers.get("authorization").is_none());
         }
+        AuthStyle::ApiKey => {
+            assert_eq!(
+                headers.get("api-key").and_then(|value| value.to_str().ok()),
+                Some("responses-test-key")
+            );
+            assert!(headers.get("authorization").is_none());
+            assert!(headers.get("x-api-key").is_none());
+        }
+        AuthStyle::None => {
+            assert!(headers.get("authorization").is_none());
+            assert!(headers.get("x-api-key").is_none());
+            assert!(headers.get("api-key").is_none());
+        }
     }
     for name in [
         "chatgpt-account-id",

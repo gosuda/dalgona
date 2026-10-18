@@ -262,6 +262,7 @@ fn text_turn_decodes_over_any_network_split() {
             output_tokens: 7,
             reasoning_tokens: Some(3),
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         },
         StopReason::EndTurn,

@@ -85,6 +85,7 @@ fn done_stream() -> EventStream {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     };
     let items: Vec<Result<ProviderEvent, ProviderError>> = vec![

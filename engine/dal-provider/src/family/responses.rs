@@ -405,16 +405,28 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
         ));
     };
     let body = request_body(input.request, input.thinking, input.reasoning_summary)?;
+    if input.auth == AuthStyle::None && !matches!(input.credential, Credential::None) {
+        return Err(invalid("credential-less entries carry no auth header"));
+    }
     let (auth_header, oauth, secret) = match input.credential {
         Credential::ApiKey { key } => {
             let secret = key.expose().to_owned().into_boxed_str();
             let auth_header = match input.auth {
                 AuthStyle::Bearer => ("authorization", format!("Bearer {}", secret.as_ref())),
                 AuthStyle::XApiKey => ("x-api-key", secret.to_string()),
+                AuthStyle::ApiKey => ("api-key", secret.to_string()),
+                AuthStyle::None => {
+                    return Err(invalid("credential-less entries carry no auth header"));
+                }
             };
             (Some(auth_header), false, secret)
         }
         Credential::OAuth(credential) => {
+            if input.auth == AuthStyle::ApiKey {
+                return Err(invalid(
+                    "an OAuth credential cannot use the api-key header style",
+                ));
+            }
             let secret = credential.access_token.expose().to_owned().into_boxed_str();
             (
                 Some(("authorization", format!("Bearer {}", secret.as_ref()))),
@@ -555,6 +567,7 @@ fn usage(wire: Option<WireUsage>) -> Usage {
         cache_write_tokens: input
             .and_then(|details| details.cache_write_tokens)
             .unwrap_or(0),
+        premium_requests: None,
         cost_usd: None,
     }
 }

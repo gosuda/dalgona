@@ -63,6 +63,11 @@ async fn execute(
         },
         Command::Export { path, format } => export(deps, path, format).await,
         Command::SetScopedModels(ids) => {
+            // The view carries the committed list verbatim, so a clear shows
+            // as `Some([])`: the projection reads a published `None` as
+            // keep-existing and could not carry it. The driver keeps its
+            // existing reading, where an empty list means no scope.
+            deps.shared.publish_scope(ids.clone());
             *scoped = if ids.is_empty() { None } else { Some(ids) };
             Ok(Reply::Done(Output::Nothing))
         }

@@ -1042,6 +1042,7 @@ fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEve
             output_tokens,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         }));
     }

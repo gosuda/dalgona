@@ -28,8 +28,8 @@ use dal_core::{
 };
 use dal_provider::{
     AuthStyle, CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderEntry,
-    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
-    ToolSupport, Transport,
+    ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel, StopReason, StreamEvent,
+    ThinkingSupport, ToolSupport, Transport,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -63,6 +63,8 @@ fn entry() -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -116,6 +118,7 @@ async fn chat_text_turn() {
             key_env: Some("CHAT_TEST_KEY".into()),
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     };

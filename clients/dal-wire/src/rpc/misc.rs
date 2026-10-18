@@ -125,6 +125,18 @@ pub(super) fn route_identity(route: &ModelRoute) -> (String, String) {
                 Family::Chat | Family::Responses => "openai",
                 Family::Codex => "openai-codex",
                 Family::Anthropic => "anthropic",
+                Family::Bedrock => "bedrock",
+                Family::Cursor => "cursor",
+                Family::Devin => "devin",
+                Family::Droid => "droid",
+                Family::GitLab => "gitlab",
+                Family::GoogleGenerativeAi => "google-generative-ai",
+                Family::GoogleVertex => "google-vertex",
+                Family::GoogleGeminiCli => "google-gemini-cli",
+                Family::GoogleAntigravity => "google-antigravity",
+                Family::Mistral => "mistral",
+                Family::Ollama => "ollama",
+                Family::PiMessages => "radius",
             }
             .to_owned();
             (model.to_string(), provider)

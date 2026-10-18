@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dal_agent::{Env, Host, Product};
+use dal_agent::{DefaultAuthority, Env, Host, Product};
 use dal_core::Screen as ConfigScreen;
 use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -222,7 +222,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
     }
     let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color, binary);
-    let save_diagrams = diagram_saver(config.clone(), config_path);
+    let save_diagrams = diagram_saver(config.clone(), config_path.clone());
     if let Some(addr) = cli.connect.as_deref() {
         return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
     }
@@ -230,7 +230,10 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
     }
-    let host = match Host::start(
+    // The local process edge owns the user configuration path, so the
+    // host it starts may persist `SessionAndDefault` outcomes there. Remote
+    // hosts never write: `connect_remote` above takes no host write path.
+    let host = match Host::start_with_defaults(
         product,
         config,
         Env {
@@ -238,6 +241,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
             cwd,
             sandbox_helper: helper,
         },
+        DefaultAuthority::Local { path: config_path },
     )
     .await
     {

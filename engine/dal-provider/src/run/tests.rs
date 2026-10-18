@@ -83,10 +83,27 @@ impl Server {
     }
 }
 
+/// A channel-backed event source: upkeep stays parked, exactly as a source
+/// without maintenance behaves.
+struct TestEvents {
+    inner: mpsc::Receiver<Item>,
+}
+
+impl Stream for TestEvents {
+    type Item = Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl RunEvents for TestEvents {}
+
 fn loopback() -> (ProviderRun, Server) {
     let (events, inbox) = mpsc::channel(SCRIPT_ROOM);
     let wire = Arc::new(Wire::default());
-    let run = ProviderRun::new(Family::Chat, inbox, Loopback(Arc::clone(&wire)));
+    let source = TestEvents { inner: inbox };
+    let run = ProviderRun::new(Family::Chat, source, Loopback(Arc::clone(&wire)));
     (run, Server { events, wire })
 }
 
@@ -102,6 +119,7 @@ fn zero_usage() -> StreamEvent {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         },
     }

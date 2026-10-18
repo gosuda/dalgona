@@ -22,7 +22,8 @@ pub use broker::Broker;
 pub use error::{AgentError, DenyReason, HostError, ServiceError, ToolError, ValidationError};
 pub use ext::grants::{GrantKey, GrantStore, GrantStoreError, PersistentGrant};
 pub use host::{
-    DocEntry, Env, Host, HostSubscription, HostUpdate, Product, SessionRef, ShutdownReport,
+    DefaultAuthority, DocEntry, Env, Host, HostSubscription, HostUpdate, Product, SessionRef,
+    ShutdownReport,
 };
 pub use proc::sandbox::sandbox_notice;
 pub use proc::{

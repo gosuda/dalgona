@@ -489,12 +489,19 @@ impl CommandHost for DriverHost {
         let route = if let Some(route) = &self.route {
             route.clone()
         } else {
-            let Some(default) = self.host.shared.config.model() else {
-                return Vec::new();
-            };
-            match self.resolve_model_inner(default) {
-                Ok(resolved) => resolved.route,
-                Err(_) => return Vec::new(),
+            match self.host.shared.default_model() {
+                // A structured table resolves by route below, so families the
+                // legacy string cannot encode keep their levels.
+                Some(crate::host::DefaultModel::Route(route)) => route,
+                // No structured table: the legacy string keeps its existing
+                // alias-aware resolution path unchanged.
+                Some(crate::host::DefaultModel::Reference(reference)) => {
+                    match self.resolve_model_inner(&reference) {
+                        Ok(resolved) => resolved.route,
+                        Err(_) => return Vec::new(),
+                    }
+                }
+                None => return Vec::new(),
             }
         };
         if let Some(found) = crate::ext::synthetic::find_route(&self.host.shared, &route) {

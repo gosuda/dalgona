@@ -41,8 +41,8 @@ use dal_core::{
 };
 use dal_provider::{
     AuthStyle, CatalogEntry, EnvSnapshot, EventStream, Listing, NoticeSink, Provider,
-    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ResolvedModel,
-    StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings,
+    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -93,6 +93,8 @@ fn entry(model: &str) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -213,6 +215,7 @@ fn start_set(name: &str, base: &str) -> (ProviderSet, PathBuf) {
             key_env: None,
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     };

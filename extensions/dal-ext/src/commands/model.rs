@@ -264,6 +264,18 @@ fn route_origin(route: &ModelRoute) -> (String, String) {
                 Family::Codex => "openai-codex",
                 Family::Responses => "openai",
                 Family::Chat => "openai-chat",
+                Family::Bedrock => "bedrock",
+                Family::Cursor => "cursor",
+                Family::Devin => "devin",
+                Family::Droid => "droid",
+                Family::GitLab => "gitlab",
+                Family::GoogleGenerativeAi => "google-generative-ai",
+                Family::GoogleVertex => "google-vertex",
+                Family::GoogleGeminiCli => "google-gemini-cli",
+                Family::GoogleAntigravity => "google-antigravity",
+                Family::Mistral => "mistral",
+                Family::Ollama => "ollama",
+                Family::PiMessages => "radius",
             };
             (provider.to_owned(), model.to_string())
         }

@@ -325,14 +325,24 @@ impl Host {
             })
     }
 
-    /// Resolves the configured default model through aliases and the catalog.
+    /// Resolves the live default model through aliases and the catalog.
     ///
-    /// Returns `None` when no model is configured or the reference does not
+    /// Returns `None` when no model is configured or the default does not
     /// resolve. Mirrors the driver's request-time resolution for preflight
-    /// callers that must decide before a turn exists.
+    /// callers that must decide before a turn exists: a committed
+    /// structured route resolves by route, a legacy-only file by its
+    /// reference string.
     pub async fn default_route(&self) -> Option<ModelRoute> {
         let shared = &self.state.shared;
-        let reference = shared.config.model()?;
+        let default = shared.default_model()?;
+        let rendered;
+        let reference: &str = match &default {
+            super::DefaultModel::Route(route) => {
+                rendered = request_reference(route);
+                &rendered
+            }
+            super::DefaultModel::Reference(reference) => reference,
+        };
         if reference.is_empty() {
             return None;
         }
@@ -347,9 +357,16 @@ impl Host {
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        dal_provider::resolve(&catalog, &aliases, reference)
-            .ok()
-            .map(|resolved| resolved.route)
+        match &default {
+            super::DefaultModel::Route(route) => {
+                dal_provider::resolve_route(&catalog, &aliases, route)
+            }
+            super::DefaultModel::Reference(reference) => {
+                dal_provider::resolve(&catalog, &aliases, reference)
+            }
+        }
+        .ok()
+        .map(|resolved| resolved.route)
     }
 }
 
@@ -432,7 +449,7 @@ fn builtin_models(
         models.push(crate::session::context::model_info_for(
             &resolved.entry,
             &resolved.route,
-            shared.config.thinking(),
+            shared.default_thinking(),
         ));
     }
     models

@@ -316,6 +316,17 @@ pub enum AgentError {
     /// The command or answer failed validation.
     #[error(transparent)]
     Invalid(#[from] ValidationError),
+    /// A journal append failed after the operation passed validation.
+    ///
+    /// Emit batches reach the fold before they reach the journal, so a
+    /// failure here can leave live state the journal never recorded; the
+    /// message names the failed persistence. Validation failures that
+    /// change nothing are [`AgentError::Invalid`].
+    #[error("{message}")]
+    PersistenceFailed {
+        /// The complete product text, naming the failed persistence.
+        message: Box<str>,
+    },
     /// The session no longer accepts operations (`session.closed`).
     #[error("session {id} is closed.")]
     SessionClosed {

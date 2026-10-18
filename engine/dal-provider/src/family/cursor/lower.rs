@@ -1068,23 +1068,26 @@ struct Round<'a> {
 /// Splits assistant parts into model rounds with thinking intact: a round
 /// ends at a call followed by anything but another call; consecutive calls
 /// stay together. For entries this family and model wrote.
-fn split_rounds(parts: &[AssistantPart], wire_ids: &WireIds) -> Vec<Round<'_>> {
+fn split_rounds<'a>(parts: &'a [AssistantPart], wire_ids: &WireIds) -> Vec<Round<'a>> {
     split_rounds_impl(parts, true, wire_ids)
 }
 
 /// Splits assistant parts into model rounds without thinking: foreign
 /// reasoning replays solely through server records, never rebuilt here.
-fn split_rounds_without_thinking(parts: &[AssistantPart], wire_ids: &WireIds) -> Vec<Round<'_>> {
+fn split_rounds_without_thinking<'a>(
+    parts: &'a [AssistantPart],
+    wire_ids: &WireIds,
+) -> Vec<Round<'a>> {
     split_rounds_impl(parts, false, wire_ids)
 }
 
 /// The shared round splitter; `thinking` selects the thinking policy its
 /// two named entry points pin down.
-fn split_rounds_impl(
-    parts: &[AssistantPart],
+fn split_rounds_impl<'a>(
+    parts: &'a [AssistantPart],
     thinking: bool,
     wire_ids: &WireIds,
-) -> Vec<Round<'_>> {
+) -> Vec<Round<'a>> {
     let mut rounds = Vec::new();
     let mut current = Round {
         content: Vec::new(),

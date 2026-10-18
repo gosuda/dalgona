@@ -24,6 +24,7 @@ fn tokens(input_tokens: u64, output_tokens: u64) -> Usage {
         output_tokens,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }

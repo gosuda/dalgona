@@ -177,6 +177,8 @@ struct ReplayedSession {
     pending: Vec<Effect>,
     /// The session job table.
     jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
+    /// The host defaults this session opened under; it keeps them for life.
+    defaults: crate::host::SessionDefaults,
 }
 
 /// The wired runtime pieces of one spawned session.
@@ -207,6 +209,8 @@ struct WiredSession {
     model: Option<ModelRoute>,
     /// The selected model identity, empty when no model is available.
     model_id: Box<str>,
+    /// The host defaults this session opened under, for the driver.
+    defaults: crate::host::SessionDefaults,
 }
 
 /// Owns a wired session until registry admission transfers its resources.
@@ -872,14 +876,15 @@ impl Host {
         journal: &mut Journal,
     ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
-        let thinking = self.state.shared.config.thinking();
+        // One snapshot for the whole session: a default saved after this
+        // point reaches only sessions opened later.
+        let (defaults, configured_model) = self.state.shared.session_defaults();
+        let thinking = defaults.thinking;
         let policy = replay_child_policy(journal.records())?;
-        let approval = policy.as_ref().map_or_else(
-            || self.state.shared.config.approval(),
-            |policy| policy.approval,
-        );
-        let mode = self.state.shared.config.mode();
-        let configured_model = self.state.shared.config.model().map(ModelRoute::from_id);
+        let approval = policy
+            .as_ref()
+            .map_or(defaults.approval, |policy| policy.approval);
+        let mode = defaults.mode;
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
                 model: configured_model.clone(),
@@ -950,6 +955,7 @@ impl Host {
             opening_texts,
             pending,
             jobs,
+            defaults,
         })
     }
 
@@ -972,6 +978,7 @@ impl Host {
             opening_texts,
             pending,
             jobs,
+            defaults,
         } = replayed;
         let broker = Arc::new(Broker::new());
         let extensions = self.grants_and_overlay(&broker, cancel, resolved.workspace.as_path())?;
@@ -992,6 +999,7 @@ impl Host {
             host: Arc::clone(&self.state),
             tasks: tasks.clone(),
             backend: Arc::clone(&backend_cell),
+            thinking: defaults.thinking,
         });
         let backend = Arc::new(Backend::new(BackendDeps {
             session: resolved.id,
@@ -1016,7 +1024,7 @@ impl Host {
             procs: Arc::clone(backend.procs()),
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: backend.launcher().clone(),
-            approval: self.state.shared.config.approval(),
+            approval: defaults.approval,
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
@@ -1063,6 +1071,7 @@ impl Host {
             jobs,
             model,
             model_id,
+            defaults,
         })
     }
 
@@ -1180,6 +1189,8 @@ impl Host {
                         tasks: tasks.clone(),
                         cancel: cancel.clone(),
                         ephemeral: resolved.ephemeral,
+                        mode: wired.defaults.mode,
+                        thinking: wired.defaults.thinking,
                     },
                 );
                 let ports = SessionPorts {

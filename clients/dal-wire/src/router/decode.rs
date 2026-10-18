@@ -467,6 +467,18 @@ pub(crate) fn route_id(route: &ModelRoute) -> String {
                 Family::Responses => "openai-responses",
                 Family::Codex => "openai-codex",
                 Family::Anthropic => "anthropic",
+                Family::Bedrock => "bedrock",
+                Family::Cursor => "cursor",
+                Family::Devin => "devin",
+                Family::Droid => "droid",
+                Family::GitLab => "gitlab",
+                Family::GoogleGenerativeAi => "google-generative-ai",
+                Family::GoogleVertex => "google-vertex",
+                Family::GoogleGeminiCli => "google-gemini-cli",
+                Family::GoogleAntigravity => "google-antigravity",
+                Family::Mistral => "mistral",
+                Family::Ollama => "ollama",
+                Family::PiMessages => "radius",
             };
             format!("{prefix}/{model}")
         }
