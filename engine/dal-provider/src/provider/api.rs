@@ -137,7 +137,11 @@ impl Provider {
         // An entry that authenticates nothing admits the credential-less
         // row; every other style still refuses to build without one. Bedrock
         // also admits it: the AWS chain in `aws_resolver` owns Bedrock auth
-        // (bearer-or-SigV4 per attempt), never the bound credential.
+        // (bearer-or-SigV4 per attempt), never the bound credential. Vertex
+        // admits it too: without a key or stored sign-in each attempt reads
+        // the pre-minted bearer token from the captured environment and
+        // refuses with `NoCredentials` itself when there is none.
+        if matches!(&credential, Credential::None)
             && entry.auth != AuthStyle::None
             && !authenticates_ambiently(entry.family)
         {

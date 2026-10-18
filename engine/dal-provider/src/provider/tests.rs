@@ -342,6 +342,12 @@ fn mistral_reply() -> String {
     )
 }
 
+fn google_reply() -> String {
+    String::from(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":1,\"totalTokenCount\":8}}\n\n",
+    )
+}
+
 fn ollama_reply() -> String {
     String::from(
         "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n{\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":10,\"eval_count\":5}\n",
@@ -2709,6 +2715,127 @@ async fn pi_messages_cancelled_before_start_sends_nothing() -> TestResult {
 }
 
 #[tokio::test]
+async fn google_generative_ai_streams_with_api_key_header() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(google_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "gemini-test",
+                Family::GoogleGenerativeAi,
+                base,
+                Some("GEMINI_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("GEMINI_TEST_KEY", "gemini-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(
+        "gemini-test",
+        Family::GoogleGenerativeAi,
+        "gem-test",
+    ))?;
+    let request = request(
+        Family::GoogleGenerativeAi,
+        "gem-test",
+        vec![user_text("Say hello.")],
+    );
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(
+        events.iter().find_map(|event| match event {
+            StreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        }),
+        Some(usage)
+            if usage.input_tokens == 3
+                && usage.output_tokens == 4
+                && usage.reasoning_tokens == Some(1)
+    ));
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        head.starts_with("post /v1/models/gem-test:streamgeneratecontent?alt=sse "),
+        "{head}"
+    );
+    assert!(head.contains("x-goog-api-key: gemini-secret"), "{head}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn google_vertex_without_project_location_refuses_before_any_request() -> TestResult {
+    // The Vertex adapter always overrides the base with its location host,
+    // so a loopback stream cannot prove the success path here; the dispatch
+    // proves the settings gate instead: no project/location means no
+    // request leaves at all.
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![stream_reply(google_reply())]).await?;
+    let vertex_entry = entry(
+        "factory-droid",
+        Family::GoogleVertex,
+        base,
+        None,
+        1,
+        Transport::Https,
+    );
+    stored_oauth(&dir, "factory-droid", "ya29-test")?;
+    let set = ProviderSet::new(
+        &config(vec![vertex_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("factory-droid", Family::GoogleVertex, "v-test"))?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(
+                Family::GoogleVertex,
+                "v-test",
+                vec![user_text("Say hello.")],
+            ),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let events = collect(stream).await;
+    assert!(
+        matches!(&events, Err(ProviderError::InvalidRequest { .. })),
+        "{events:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
 async fn devin_router_turn_flows_jwt_assign_chat() -> TestResult {
     let dir = TestDir::new()?;
     let (base, mut server_task) = server(
@@ -4761,6 +4888,75 @@ async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
     let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
     assert!(head.starts_with("post /v1/responses/compact "), "{head}");
     assert!(head.contains("authorization: bearer plain-secret"), "{head}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn google_vertex_binds_without_a_key_and_reads_the_captured_bearer_token() -> TestResult {
+    // Without a key or stored sign-in the Vertex row binds credential-less:
+    // each attempt reads the pre-minted bearer token from the captured
+    // environment. The adapter always overrides the base with its location
+    // host, so a loopback cannot serve the success path; a route refusal
+    // proves the token was accepted, and the typed credential refusal
+    // proves a missing token still fails closed.
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![stream_reply(google_reply())]).await?;
+    let cases = [
+        (
+            EnvSnapshot::test(&[("GOOGLE_CLOUD_ACCESS_TOKEN", "ya29-env")]),
+            true,
+        ),
+        (EnvSnapshot::test(&[]), false),
+    ];
+    for (env, holds_token) in cases {
+        let vertex_entry = entry(
+            "google-vertex",
+            Family::GoogleVertex,
+            base.clone(),
+            None,
+            1,
+            Transport::Https,
+        );
+        let set = ProviderSet::new(
+            &config(vec![vertex_entry], 0),
+            identity(),
+            env,
+            dir.path(),
+            dir.path(),
+        )?;
+        let provider = set.provider(resolved("google-vertex", Family::GoogleVertex, "v-test"))?;
+        let stream = provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::GoogleVertex,
+                    "v-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?;
+        let events = collect(stream).await;
+        if holds_token {
+            assert!(
+                matches!(&events, Err(ProviderError::InvalidRequest { .. })),
+                "{events:?}"
+            );
+        } else {
+            assert!(
+                matches!(&events, Err(ProviderError::NoCredentials { .. })),
+                "{events:?}"
+            );
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
     Ok(())
 }
 

@@ -102,6 +102,8 @@ fn methods_follow_the_row() {
     );
     assert_eq!(methods("radius"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("openrouter"), Some(vec![Method::ApiKey]));
+    assert_eq!(methods("google"), Some(vec![Method::ApiKey]));
+    assert_eq!(methods("google-vertex"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("nobody"), None);
 }
 
@@ -116,6 +118,8 @@ fn a_vendor_family_is_named_by_its_first_row() {
         (Family::Droid, "factory-droid"),
         (Family::GitLab, "gitlab-duo"),
         (Family::PiMessages, "radius"),
+        (Family::GoogleGenerativeAi, "google"),
+        (Family::GoogleVertex, "google-vertex"),
     ] {
         let first = PROVIDERS.iter().find(|def| def.family == family);
         assert_eq!(first.map(|def| def.id), Some(vendor), "{family:?}");
@@ -237,6 +241,45 @@ fn every_row_decodes_to_the_entry_it_describes() {
         );
         assert!(entry.key_env.is_none(), "{id}");
         assert_eq!(entry.shape(), def.shape, "{id}");
+    }
+}
+
+#[test]
+fn the_google_rows_key_sign_in_only_with_their_wire_headers() {
+    for (id, name, family, base, env) in [
+        (
+            "google",
+            "Google Gemini",
+            Family::GoogleGenerativeAi,
+            "https://generativelanguage.googleapis.com/v1beta",
+            ["GEMINI_API_KEY"],
+        ),
+        (
+            "google-vertex",
+            "Google Vertex AI",
+            Family::GoogleVertex,
+            "https://aiplatform.googleapis.com",
+            ["GOOGLE_CLOUD_API_KEY"],
+        ),
+    ] {
+        let def = find(id).unwrap_or_else(|| panic!("the {id} row is registered"));
+        assert_eq!(def.id, id);
+        assert_eq!(def.name, name);
+        assert_eq!(def.family, family, "{id}");
+        assert_eq!(def.base_url, base, "{id}");
+        assert_eq!(def.transport, Transport::Https, "{id}");
+        assert!(def.oauth.is_none(), "{id} signs in by key only");
+        let key = def.key.unwrap_or_else(|| panic!("{id} takes an API key"));
+        // The Google adapters hardcode their own key header, so the row
+        // style never reaches a request header; it only labels the row.
+        assert_eq!(key.style, AuthStyle::XApiKey, "{id}");
+        assert_eq!(key.env, env, "{id}");
+        assert_eq!(def.shape, Shape::Plain, "{id}");
+        assert!(
+            crate::http::check_base_url(def.family, def.base_url).is_ok(),
+            "{id}: {} is not an admitted base URL",
+            def.base_url
+        );
     }
 }
 

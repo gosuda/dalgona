@@ -43,10 +43,17 @@ use crate::{
             self,
             workflow::{self as gitlab_workflow, WorkflowScope, WorkflowTurn},
         },
+        google::{
+            antigravity,
+            gemini::{self, GeminiRequest},
+            shared as google_shared,
+            vertex::{self, VertexAuth, VertexRequest},
+        },
         responses::ResponsesRequest,
     },
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
     lifecycle::AttemptFailure,
+    retry::RequestState,
     stream::{EventStream, NoticeSink},
     thinking::{
         self, BeforeRequestPatch, Effort, RequestLimits, ThinkingNotice, ThinkingPlan, WireThinking,
@@ -177,6 +184,9 @@ pub(crate) async fn stream_attempt(
         Family::GitLab => gitlab_attempt(&context, &credential, &cancel, &owner).await,
         Family::Devin => devin_attempt(&context, &credential, &cancel).await,
         Family::Droid => droid_attempt(&context, &credential, &cancel).await,
+        Family::GoogleGenerativeAi | Family::GoogleVertex => {
+            google_attempt(&context, &credential, &cancel, &owner, &slot.entry).await
+        }
         _ => {
             let parts =
                 build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
@@ -1076,6 +1086,334 @@ async fn droid_attempt(
         () = cancel.cancelled() => Ok(None),
         result = droid::open(&context.client, wire) => result.map(Some),
     }
+}
+
+/// Runs one Google turn: the surface lowers its wire, the shared transport
+/// sends it, and the reply decodes as SSE through the shared decoder.
+async fn google_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    match context.family {
+        Family::GoogleGenerativeAi => {
+            let api_key = match credential {
+                Credential::ApiKey { key } => key.expose().to_owned(),
+                Credential::OAuth(_) => {
+                    return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+                        message: format!(
+                            "{} does not accept an OAuth credential",
+                            context.provider
+                        ),
+                    }));
+                }
+                Credential::None => {
+                    return Err(AttemptFailure::Provider(ProviderError::NoCredentials {
+                        provider: context.provider.to_string(),
+                    }));
+                }
+            };
+            let wire = gemini::build(&GeminiRequest {
+                request: &context.request,
+                thinking: &context.thinking,
+                api_key: &api_key,
+                image_input: context.entry.image_input,
+            })
+            .map_err(AttemptFailure::Provider)?;
+            google_send(
+                context,
+                &credential_secrets(credential),
+                cancel,
+                wire,
+                false,
+                None,
+            )
+            .await
+        }
+        Family::GoogleVertex => {
+            vertex_attempt(context, credential, cancel, owner, entry).await
+        }
+        _ => Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: String::from("not a Google request"),
+        })),
+    }
+}
+
+/// Environment variables that may carry the Vertex project, in resolve
+/// order.
+const VERTEX_PROJECT_ENV: &[&str] = &["GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "GCLOUD_PROJECT"];
+
+/// Environment variables that may carry the Vertex location, in resolve
+/// order.
+const VERTEX_LOCATION_ENV: &[&str] =
+    &["GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"];
+
+/// Environment variables that may carry a pre-minted Vertex bearer token,
+/// in resolve order: the `GOOGLE_CLOUD_ACCESS_TOKEN` alias, then gcloud's own
+/// override variable.
+const VERTEX_TOKEN_ENV: &[&str] = &["GOOGLE_CLOUD_ACCESS_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN"];
+
+/// The pre-minted Vertex bearer token the captured environment holds, if
+/// any. Readiness and the request adapter share this one lookup.
+pub(super) fn vertex_env_token(env: &EnvSnapshot) -> Option<&str> {
+    env_value(env, VERTEX_TOKEN_ENV)
+}
+
+/// The first non-blank value among `names` in the captured snapshot.
+fn env_value<'a>(env: &'a EnvSnapshot, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| env.get(name).filter(|value| !value.trim().is_empty()))
+}
+
+/// Resolves the Vertex project and location for one request: the provider
+/// settings win, then the captured environment (`owner.env`, never the
+/// process environment). A location from settings is an explicit residency
+/// choice; one from the environment is ambient and may fall back to the
+/// global endpoint on a 404.
+fn resolve_vertex_env<'a>(
+    entry: &'a ProviderEntry,
+    env: &'a EnvSnapshot,
+) -> (Option<&'a str>, Option<&'a str>, bool) {
+    let settings_project = entry
+        .settings
+        .project
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let settings_location = entry
+        .settings
+        .location
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let project = settings_project.or_else(|| env_value(env, VERTEX_PROJECT_ENV));
+    let location = settings_location.or_else(|| env_value(env, VERTEX_LOCATION_ENV));
+    (project, location, settings_location.is_some())
+}
+
+/// The Vertex bearer credential for one request: the stored OAuth sign-in,
+/// else a pre-minted token from the captured environment. (The caller only
+/// reaches here for a non-key credential.)
+fn vertex_bearer<'a>(
+    credential: &'a Credential,
+    owner: &'a ProviderSetInner,
+    provider: &str,
+) -> Result<&'a str, AttemptFailure> {
+    if let Credential::OAuth(oauth) = credential {
+        return Ok(oauth.access_token.expose());
+    }
+    vertex_env_token(&owner.env).ok_or_else(|| {
+        AttemptFailure::Provider(ProviderError::NoCredentials {
+            provider: provider.to_string(),
+        })
+    })
+}
+
+/// Refuses a bearer request whose route is incomplete: the message names the
+/// settings keys and the environment variables that can supply them.
+fn require_vertex_route(
+    provider: &str,
+    project: Option<&str>,
+    location: Option<&str>,
+) -> Result<(), AttemptFailure> {
+    let usable = |value: Option<&str>| value.is_some_and(|v| !v.trim().is_empty());
+    if usable(project) && usable(location) {
+        return Ok(());
+    }
+    Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+        message: format!(
+            "{provider} needs a Vertex project and location: set providers.{provider}.project \
+             and providers.{provider}.location, or the GOOGLE_CLOUD_PROJECT/GCP_PROJECT/\
+             GCLOUD_PROJECT and GOOGLE_VERTEX_LOCATION/GOOGLE_CLOUD_LOCATION/VERTEX_LOCATION \
+             environment variables"
+        ),
+    }))
+}
+
+/// Runs one Vertex turn: project/location come from the provider settings
+/// with the captured environment as fallback; an Express key authenticates
+/// directly, a bearer token comes from the stored sign-in or the captured
+/// environment. Key precedence mirrors the reference: key first, then the
+/// env bearer, else no credentials.
+async fn vertex_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let (project, location, explicit_location) = resolve_vertex_env(entry, &owner.env);
+    // The credential's own secrets, plus the env bearer when that is what
+    // authenticates: a token that never lived in the credential must still
+    // be scrubbed from every error text and stream the request produces.
+    let mut secrets = credential_secrets(credential);
+    let auth = match credential {
+        Credential::ApiKey { key } => VertexAuth::Express {
+            api_key: key.expose(),
+            location,
+            explicit_location,
+        },
+        _ => {
+            let token = vertex_bearer(credential, owner, &context.provider)?;
+            require_vertex_route(&context.provider, project, location)?;
+            secrets.push(Box::from(token));
+            VertexAuth::Bearer {
+                access_token: token,
+                project: project.unwrap_or_default(),
+                location: location.unwrap_or_default(),
+            }
+        }
+    };
+    let oauth = matches!(credential, Credential::OAuth(_));
+    let wire = vertex::build(&VertexRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        auth,
+        image_input: context.entry.image_input,
+    })
+    .map_err(AttemptFailure::Provider)?;
+    google_send(context, &secrets, cancel, wire, oauth, None).await
+}
+
+/// Sends one Google wire and decodes its SSE reply through the shared
+/// decoder, with Google error classification on rejection.
+async fn google_send(
+    context: &StreamContext,
+    secrets: &[Box<str>],
+    cancel: &CancellationToken,
+    wire: google_shared::GoogleWire,
+    oauth: bool,
+    response_id: Option<google_shared::ResponseIdSlot>,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let response = send_google_wire(context, cancel, wire).await?;
+    let Some(response) = response else {
+        return Ok(None);
+    };
+    google_decoded(context, secrets, cancel, response, oauth, response_id).await
+}
+
+async fn send_google_wire(
+    context: &StreamContext,
+    cancel: &CancellationToken,
+    wire: google_shared::GoogleWire,
+) -> Result<Option<reqwest::Response>, AttemptFailure> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(None),
+        result = google_shared::send(
+            context.family,
+            &context.client,
+            wire,
+            &context.base_url,
+            &context.user_agent,
+        ) => result.map(Some).map_err(AttemptFailure::Provider),
+    }
+}
+
+async fn google_decoded(
+    context: &StreamContext,
+    secrets: &[Box<str>],
+    cancel: &CancellationToken,
+    response: reqwest::Response,
+    oauth: bool,
+    response_id: Option<google_shared::ResponseIdSlot>,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    if !response.status().is_success() {
+        return match google_status_failure(
+            response,
+            context.family,
+            &context.provider,
+            &context.model,
+            oauth,
+            secrets,
+            cancel,
+        )
+        .await?
+        {
+            Some(failure) => Err(failure),
+            None => Ok(None),
+        };
+    }
+    Ok(Some(transport_mod::decode_response(
+        response,
+        context.family,
+        &context.provider,
+        &context.model,
+        oauth,
+        None,
+        secrets.to_vec(),
+        response_id,
+    )))
+}
+
+/// Maps one rejected Google response: account exhaustion is terminal
+/// quota through the adapter classifier, a validated account-verification
+/// URL on the Cloud Code Assist flows renders the fixed actionable message,
+/// and everything else rides the shared lifecycle as a response failure.
+/// Quota keeps precedence over verification; the rendered message (including
+/// the JSON-decoded URL) is re-redacted, and the URL is never fetched.
+async fn google_status_failure(
+    response: reqwest::Response,
+    family: Family,
+    provider: &str,
+    model: &str,
+    oauth: bool,
+    secrets: &[Box<str>],
+    cancel: &CancellationToken,
+) -> Result<Option<AttemptFailure>, AttemptFailure> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(String::from);
+    let body = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(None),
+        body = http::read_body(family, response) => body.map_err(AttemptFailure::Provider)?,
+    };
+    let redacted = transport_mod::redact_text(String::from_utf8_lossy(&body).into_owned(), secrets);
+    let (code, message) = google_shared::error_fields(&redacted);
+    let state = RequestState {
+        family,
+        provider,
+        model,
+        oauth,
+        refreshed: false,
+        delivered: false,
+    };
+    let mapped = google_shared::classify_http(status, &redacted, &state);
+    if matches!(mapped, ProviderError::Quota { .. }) {
+        return Ok(Some(AttemptFailure::Provider(mapped)));
+    }
+    // The named reference callers (`google-gemini-cli.ts`, its OAuth
+    // registry, and the Antigravity OAuth registry) render the fixed
+    // account-verification message with `retry your request` and no
+    // email or PII when the structured URL validates; ordinary error
+    // mapping below is untouched.
+    if matches!(family, Family::GoogleGeminiCli | Family::GoogleAntigravity)
+        && let Some(url) = antigravity::validation_url(&redacted)
+    {
+        let message = transport_mod::redact_text(
+            format!(
+                "Account verification required. Visit {url} to continue, then retry your request."
+            ),
+            secrets,
+        );
+        return Ok(Some(AttemptFailure::Response {
+            status,
+            code,
+            message,
+            retry_after,
+        }));
+    }
+    Ok(Some(AttemptFailure::Response {
+        status,
+        code,
+        message,
+        retry_after,
+    }))
 }
 
 /// The Copilot token an API-key credential carries; an OAuth sign-in is

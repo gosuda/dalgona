@@ -471,6 +471,53 @@ pub(crate) const OPENROUTER: ProviderDef = ProviderDef {
     shape: Shape::Plain,
 };
 
+/// Google Gemini over the generative language API.
+///
+/// Key sign-in only (`GEMINI_API_KEY`): the request adapter hardcodes the
+/// Google `x-goog-api-key` header, so the row's key style is a stored-catalog
+/// label with no wire effect. OAuth sign-in is deliberately not offered: the
+/// reference signs in through Google's installed-app OAuth flow, which needs
+/// a third-party client secret dal does not own.
+pub(crate) const GOOGLE: ProviderDef = ProviderDef {
+    id: "google",
+    name: "Google Gemini",
+    family: Family::GoogleGenerativeAi,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://generativelanguage.googleapis.com/v1beta",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::XApiKey,
+        env: &["GEMINI_API_KEY"],
+    }),
+    oauth: None,
+    shape: Shape::Plain,
+};
+
+/// Google Vertex AI.
+///
+/// Key sign-in only (`GOOGLE_CLOUD_API_KEY`, Express mode): the Vertex
+/// adapter hardcodes `x-goog-api-key` for keys and builds its own
+/// `Authorization: Bearer` header from the credential, so the row's key
+/// style is a stored-catalog label with no wire effect. A bearer token can
+/// also come from the captured environment
+/// (`GOOGLE_CLOUD_ACCESS_TOKEN`/`CLOUDSDK_AUTH_ACCESS_TOKEN`); minting and
+/// refreshing one is not offered: the reference mints through Application
+/// Default Credentials, which needs a Google OAuth client dal does not own.
+pub(crate) const GOOGLE_VERTEX: ProviderDef = ProviderDef {
+    id: "google-vertex",
+    name: "Google Vertex AI",
+    family: Family::GoogleVertex,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://aiplatform.googleapis.com",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::XApiKey,
+        env: &["GOOGLE_CLOUD_API_KEY"],
+    }),
+    oauth: None,
+    shape: Shape::Plain,
+};
+
 const VENDOR_ROWS: &[ProviderDef] = &[
     OPENAI,
     OPENAI_CODEX,
@@ -480,6 +527,8 @@ const VENDOR_ROWS: &[ProviderDef] = &[
     GITHUB_COPILOT,
     RADIUS,
     OPENROUTER,
+    GOOGLE,
+    GOOGLE_VERTEX,
 ];
 const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
 

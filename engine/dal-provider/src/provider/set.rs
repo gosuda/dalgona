@@ -508,7 +508,7 @@ impl std::fmt::Debug for ProviderSet {
 /// refuses with `NoCredentials` itself when its own source is empty. The set
 /// and [`Provider::new`] share this one rule.
 pub(super) const fn authenticates_ambiently(family: Family) -> bool {
-    matches!(family, Family::Bedrock)
+    matches!(family, Family::Bedrock | Family::GoogleVertex)
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
