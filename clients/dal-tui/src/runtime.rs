@@ -625,12 +625,14 @@ fn write_exit(
     } else {
         // An unnamed session resumes by its id; a placeholder name resolves to nothing.
         let session = session_id.to_string();
+        let name = exit.name.as_deref().unwrap_or(&session);
+        let token = dal_core::resume_token(name, session_id);
         crate::copy::render(
             crate::copy::ids::EXIT_SAVED,
             &[
                 ("bin", opts.binary),
-                ("name", exit.name.as_deref().unwrap_or(&session)),
-                ("id", &session),
+                ("token", &token),
+                ("name", name),
                 ("n", &exit.messages.to_string()),
             ],
             exit.messages,
@@ -3156,6 +3158,119 @@ mod tests {
                 "the picker closed instead of copying"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_line_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use dal_core::{SessionId, Workspace};
+
+    use crate::term::TermIo;
+
+    const SESSION: &str = "018f0f62-3b00-7000-8000-000000000001";
+
+    /// Keeps every write, so the exit line can be compared byte for byte.
+    #[derive(Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl TermIo for Capture {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_raw(&self) {}
+
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            Ok((80, 24))
+        }
+
+        fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+            let mut buffer = self.0.lock().expect("capture lock");
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn read(&self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn raise_tstp(&self) {}
+    }
+
+    /// Writes the saved-session exit line for `name` and returns the bytes.
+    fn exit_output(name: Option<&str>) -> String {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let root = std::env::temp_dir();
+        let workspace = Workspace::new(root).expect("absolute workspace");
+        let opts = crate::TuiOptions {
+            session: dal_agent::SessionRef::Ephemeral { workspace },
+            screen: crate::Screen::Inline,
+            theme_request: crate::ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "true".into(),
+            color: crate::ColorMode::Never,
+            binary: "dal",
+            env: crate::EnvFacts::default(),
+            rt: runtime.handle().clone(),
+        };
+        let id = SessionId::parse(SESSION).expect("fixed v7 id parses");
+        let exit = crate::TuiExit {
+            session: Some(id),
+            name: name.map(Box::from),
+            messages: 1,
+            ephemeral: false,
+        };
+        let io = Capture::default();
+        let written = super::write_exit(&io, &opts, id, &exit, Vec::new());
+        written.expect("exit line writes");
+        let bytes = std::mem::take(&mut *io.0.lock().expect("capture lock"));
+        String::from_utf8(bytes).expect("exit line is UTF-8")
+    }
+
+    /// Returns the `-r` argument the exit line offers: the text between the
+    /// `-r` flag and the end of the offer. Assertions see the resume argument,
+    /// never the surrounding sentence.
+    fn resume_arg(name: Option<&str>) -> String {
+        const FLAG: &str = " -r ";
+        const TAIL: &str = " to resume";
+        let line = exit_output(name);
+        let start = line.rfind(FLAG).expect("exit line offers -r") + FLAG.len();
+        let rest = &line[start..];
+        let end = rest.find(TAIL).expect("offer ends after the argument");
+        rest[..end].to_owned()
+    }
+
+    /// A bare name resumes as itself.
+    #[test]
+    fn exit_line_offers_a_bare_name_itself() {
+        assert_eq!(resume_arg(Some("demo")), "demo");
+    }
+
+    /// A name with a space resumes as one double-quoted argument.
+    #[test]
+    fn exit_line_quotes_a_spaced_name_into_one_argument() {
+        assert_eq!(resume_arg(Some("my session")), "\"my session\"");
+    }
+
+    /// A name the shell would expand resumes by session id instead.
+    #[test]
+    fn exit_line_offers_the_session_id_for_an_unsafe_name() {
+        assert_eq!(resume_arg(Some("a $b")), SESSION);
+        assert_eq!(resume_arg(Some("demo$(calc)")), SESSION);
+    }
+
+    /// An unnamed session resumes by session id.
+    #[test]
+    fn exit_line_of_an_unnamed_session_resumes_by_id() {
+        assert_eq!(resume_arg(None), SESSION);
     }
 }
 

@@ -529,15 +529,19 @@ fn thinking_matrix() {
     );
 }
 
+const SESSION_ID: &str = "018f0f62-3b00-7000-8000-000000000001";
+
+fn session_id() -> dal_core::SessionId {
+    dal_core::SessionId::parse(SESSION_ID).expect("fixed v7 id parses")
+}
+
 #[test]
 fn name_rules() {
-    assert_eq!(check_name(&"a".repeat(64)).unwrap(), "a".repeat(64));
+    let id = session_id();
+    assert_eq!(check_name(&"a".repeat(64), id).unwrap(), "a".repeat(64));
+    assert_eq!(check_name(&"\u{1F600}".repeat(64), id).unwrap(), SESSION_ID);
     assert_eq!(
-        check_name(&"\u{1F600}".repeat(64)).unwrap(),
-        format!("\"{}\"", "\u{1F600}".repeat(64))
-    );
-    assert_eq!(
-        check_name(&"a".repeat(65)).unwrap_err(),
+        check_name(&"a".repeat(65), id).unwrap_err(),
         triple(
             "The name is too long: it has 65 characters and the limit is 64",
             "names hold at most 64 characters",
@@ -545,15 +549,14 @@ fn name_rules() {
         )
     );
     assert_eq!(
-        check_name("a\tb").unwrap_err(),
+        check_name("a\tb", id).unwrap_err(),
         triple(
             "The name holds a control character",
             "names must be printable text",
             "Type the name again without tabs or line breaks.",
         )
     );
-    assert_eq!(check_name("my session").unwrap(), "\"my session\"");
-    assert_eq!(check_name("my-session_1.x").unwrap(), "my-session_1.x");
+    assert_eq!(check_name("my-session_1.x", id).unwrap(), "my-session_1.x");
 }
 
 #[test]

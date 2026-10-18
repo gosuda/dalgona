@@ -1,7 +1,7 @@
 //! Session-level commands and export formatting.
 use dal_agent::ext::command::CommandCx;
 use dal_core::command::{Command, ErrorTriple, FrontAction, Output, Reply};
-use dal_core::{ApprovalMode, Block, EntryKind, ModelRoute};
+use dal_core::{ApprovalMode, Block, EntryKind, ModelRoute, SessionId, resume_token};
 
 /// Runs `/export`: picks the format, resolves the target, and starts the job.
 ///
@@ -197,23 +197,25 @@ pub(super) async fn name(cx: &CommandCx<'_>, raw: &str) -> Result<Reply, ErrorTr
         };
         return Ok(Reply::Done(Output::Text(line.into())));
     }
-    let quoted = check_name(word)?;
+    let token = check_name(word, cx.view().session.id)?;
     let _ = cx.submit_wait(Command::Rename(word.into())).await;
     Ok(Reply::Done(Output::Text(
-        format!("Session name: {word}. Resume it with dalgon -r {quoted}.").into(),
+        format!("Session name: {word}. Resume it with dalgon -r {token}.").into(),
     )))
 }
 
-/// Validates a `/name` argument and quotes it for the resume hint.
+/// Validates a `/name` argument and returns the token its resume hint prints.
 ///
-/// Returns the name quoted in double quotes when any scalar falls outside
-/// `[A-Za-z0-9._-]`.
+/// The token comes from [`resume_token`]: the name bare, the name in double
+/// quotes when it holds spaces or apostrophes, or the session `id` for any
+/// other name. The `id` form is shell-inert, so a name holding `$`, a backtick,
+/// `"`, `%`, `!`, `\`, or non-ASCII text never reaches the hint as typed.
 ///
 /// # Errors
 ///
 /// Returns the too-long pair past 64 Unicode scalars and the
 /// control-character pair for `U+0000` to `U+001F` and `U+007F`.
-pub(super) fn check_name(word: &str) -> Result<String, ErrorTriple> {
+pub(super) fn check_name(word: &str, id: SessionId) -> Result<String, ErrorTriple> {
     let length = u64::try_from(word.chars().count()).unwrap_or(u64::MAX);
     if length > 64 {
         return Err(super::error_triple(
@@ -232,16 +234,7 @@ pub(super) fn check_name(word: &str) -> Result<String, ErrorTriple> {
             "Type the name again without tabs or line breaks.",
         ));
     }
-    Ok(
-        if word
-            .chars()
-            .all(|scalar| scalar.is_ascii_alphanumeric() || matches!(scalar, '.' | '_' | '-'))
-        {
-            word.to_owned()
-        } else {
-            format!("\"{word}\"")
-        },
-    )
+    Ok(resume_token(word, id))
 }
 
 /// Runs `/session`: returns the session details table from one snapshot.

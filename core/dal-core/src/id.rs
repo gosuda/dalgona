@@ -230,9 +230,65 @@ impl fmt::Display for BlobId {
 
 text_codec!(BlobId);
 
+/// The argument `dalgon -r` takes for a session, safe to paste into a shell.
+///
+/// Three tiers, checked in order:
+///
+/// - A name of only ASCII letters, digits, `.`, `_`, and `-` prints bare.
+/// - A name of those characters plus spaces and apostrophes, and no other
+///   character, prints in double quotes. POSIX shells, fish, `PowerShell`, and
+///   `cmd.exe` read that form as typed: their double-quote expansions are `$`,
+///   backticks, `\`, `"`, `!`, and `%`, and this tier holds none of them.
+/// - Anything else prints `id`, as does an empty name or one that starts with
+///   `-`. A `$` beside a space therefore takes this tier. The canonical
+///   hyphenated `UUIDv7` form holds only hex digits and hyphens, and `-r`
+///   resolves it.
+#[must_use]
+pub fn resume_token(name: &str, id: SessionId) -> String {
+    let bare = |scalar: char| scalar.is_ascii_alphanumeric() || matches!(scalar, '.' | '_' | '-');
+    if name.is_empty() || name.starts_with('-') {
+        id.to_string()
+    } else if name.chars().all(bare) {
+        name.to_owned()
+    } else if name
+        .chars()
+        .all(|scalar| bare(scalar) || matches!(scalar, ' ' | '\''))
+    {
+        format!("\"{name}\"")
+    } else {
+        id.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_token_prints_a_name_only_when_every_listed_shell_reads_it_as_typed() {
+        const ID: &str = "018f0f62-3b00-7000-8000-000000000001";
+        let id = SessionId::parse(ID).expect("fixed v7 id parses");
+        for (name, token) in [
+            ("demo", "demo"),
+            ("my-session_1.x", "my-session_1.x"),
+            ("my session", "\"my session\""),
+            ("o'brien", "\"o'brien\""),
+            ("demo$(calc)", ID),
+            ("a`b", ID),
+            ("foo\"; calc #", ID),
+            ("a $b", ID),
+            ("100%PATH%", ID),
+            ("hi!", ID),
+            ("a\\", ID),
+            ("-rf", ID),
+            ("a|b&c<d>e", ID),
+            ("a\u{201c}; calc #", ID),
+            ("\u{1F600}", ID),
+            ("", ID),
+        ] {
+            assert_eq!(resume_token(name, id), token, "name {name:?}");
+        }
+    }
 
     #[test]
     fn uuid_decoding_accepts_canonical_v7_and_rejects_noncanonical() {

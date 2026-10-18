@@ -373,7 +373,7 @@ pub mod ids {
     pub const SETTINGS_HINT: &str = "arrows select · enter toggles or saves · esc close";
     /// Persisted-session exit line.
     pub const EXIT_SAVED: &str =
-        "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {name} to resume";
+        "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {token} to resume";
     /// Ephemeral-session exit line.
     pub const EXIT_EPHEMERAL: &str = "{bin}: ephemeral session · nothing saved";
     /// Draft discard dialog title.
