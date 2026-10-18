@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -10,16 +10,26 @@ use std::{
 use super::*;
 use super::{
     cache::{CacheError, read_cache_async, write_cache_async},
-    decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
+    decode::{
+        decode_anthropic_page, decode_codex_models, decode_devin_models, decode_mistral_models,
+        decode_ollama_models, decode_openai_models, decode_radius_models,
+    },
     prices::{PRICE_ROWS, PRICE_TIER_ROWS, TierRow, tier_rows_are_sorted_unique},
     resolve::capability_row,
 };
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
     error::ResolveError,
+    family::devin::proto::{
+        ClientModelConfig, GetCliModelConfigsResponse, ModelFeatures, ModelInfo,
+    },
     provider::{AuthStyle, ProviderSettings, Transport},
     thinking::{BeforeRequestPatch, Effort},
 };
+use prost::Message as _;
+
+mod mistral_discovery;
+mod ollama_discovery;
 
 fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
     ProviderEntry {
@@ -1313,6 +1323,762 @@ fn generated_table_remains_sorted_for_binary_search() {
     assert_eq!(price_source().0, "models.dev");
 }
 
+fn devin_config(uid: &str) -> ClientModelConfig {
+    ClientModelConfig {
+        label: format!("Label {uid}"),
+        model_uid: uid.to_owned(),
+        max_tokens: 200_000,
+        ..Default::default()
+    }
+}
+
+fn devin_discovery_body(configs: Vec<ClientModelConfig>) -> Vec<u8> {
+    GetCliModelConfigsResponse {
+        client_model_configs: configs,
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn serve_binary(
+    listener: TcpListener,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> std::thread::JoinHandle<(String, Vec<(String, String)>)> {
+    std::thread::spawn(move || {
+        let mut stream = accept_loopback(&listener);
+        stream
+            .set_nonblocking(false)
+            .expect("make replay socket blocking");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set replay socket read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone replay socket"));
+        let mut request_line = String::new();
+        assert_ne!(
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line"),
+            0
+        );
+        let mut headers = Vec::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line).expect("read request header");
+            if bytes == 0 || line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').expect("header has a colon");
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content length parses");
+            }
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+        }
+        if content_length > 0 {
+            let mut discard = vec![0u8; content_length];
+            reader.read_exact(&mut discard).expect("read request body");
+        }
+        drop(reader);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(head.as_bytes())
+            .expect("write replay head");
+        stream.write_all(&body).expect("write replay body");
+        (request_line, headers)
+    })
+}
+
+#[test]
+fn devin_discovery_maps_wire_facts_and_never_invents_limits() {
+    let provider = provider("my-devin", Family::Devin, "https://server.codeium.com");
+    let mut full = devin_config("uid-full");
+    full.model_info = Some(ModelInfo {
+        max_output_tokens: 4000,
+        model_features: Some(ModelFeatures {
+            supports_images: true,
+            supports_tool_calls: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let mut zero = devin_config("uid-zero");
+    zero.max_tokens = 0;
+    let mut disabled = devin_config("uid-disabled");
+    disabled.disabled = true;
+    let empty = devin_config("   ");
+    let mut duplicate = devin_config("uid-full");
+    duplicate.label = String::from("Second label wins nothing");
+    duplicate.max_tokens = 999;
+    let poisoned = devin_config("a\u{7}b");
+    let mut body = devin_discovery_body(vec![full, zero, disabled, empty, duplicate, poisoned]);
+    body.extend_from_slice(&[0x98, 0x06, 0x01]);
+    let rows = decode_devin_models(&provider, &body).expect("devin rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["uid-full", "uid-zero", "a�b"]
+    );
+    for row in &rows {
+        assert_eq!(row.provider.as_ref(), "my-devin");
+    }
+    assert_eq!(rows[0].display.as_ref(), "Label uid-full");
+    assert_eq!(rows[0].context_window, Some(200_000));
+    assert_eq!(rows[0].max_output, Some(4000));
+    assert!(rows[0].image_input);
+    assert_eq!(rows[0].tool_support, ToolSupport::Any);
+    assert_eq!(rows[1].context_window, None);
+    assert_eq!(rows[1].max_output, None);
+    assert!(!rows[1].image_input);
+}
+
+#[test]
+fn devin_discovery_without_tool_calls_denies_tool_routes() {
+    let provider = provider("my-devin", Family::Devin, "https://server.codeium.com");
+    let mut config = devin_config("uid-plain");
+    config.model_info = Some(ModelInfo {
+        model_features: Some(ModelFeatures {
+            supports_tool_calls: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let rows = decode_devin_models(&provider, &devin_discovery_body(vec![config]))
+        .expect("devin rows decode");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tool_support, ToolSupport::None);
+}
+
+#[test]
+fn ollama_tags_prefer_model_ids_dedupe_and_tolerate_unknown_fields() {
+    let provider = provider("local-ollama", Family::Ollama, "http://localhost:11434");
+    let rows = decode_ollama_models(
+        &provider,
+        br#"{"models":[{"name":"llama3.1"},{"model":"mistral-small","name":"legacy"},{"name":"llama3.1"},{"unknown":"row"},{"model":"","name":""}],"top_unknown":[1,2]}"#,
+    )
+    .expect("ollama rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["llama3.1", "mistral-small"]
+    );
+    for row in &rows {
+        assert_eq!(row.provider.as_ref(), "local-ollama");
+        assert_eq!(row.context_window, None);
+        assert_eq!(row.max_output, None);
+    }
+    let bs = char::from(92u8);
+    let poisoned = format!("{{\"models\":[{{\"name\":\"bad{bs}u0007id\"}}]}}");
+    let rows =
+        decode_ollama_models(&provider, poisoned.as_bytes()).expect("poisoned ollama row decodes");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id.as_ref(), "bad�id");
+}
+
+#[tokio::test]
+async fn devin_fetch_posts_unary_discovery_without_http_auth() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let mut config = devin_config("devin-test-1");
+    config.model_info = Some(ModelInfo {
+        max_output_tokens: 8192,
+        model_features: Some(ModelFeatures {
+            supports_images: true,
+            supports_tool_calls: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let server = serve_binary(
+        listener,
+        devin_discovery_body(vec![config]),
+        "application/proto",
+    );
+    let provider = provider(
+        "my-devin",
+        Family::Devin,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("session-token")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the discovery body");
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(fetched.entries.len(), 1);
+    let entry = &fetched.entries[0];
+    assert_eq!(entry.provider.as_ref(), "my-devin");
+    assert_eq!(entry.id.as_ref(), "devin-test-1");
+    assert_eq!(entry.context_window, Some(200_000));
+    assert_eq!(entry.max_output, Some(8192));
+    assert!(entry.image_input);
+    assert!(
+        request_line.starts_with("POST /exa.api_server_pb.ApiServerService/GetCliModelConfigs "),
+        "{request_line}"
+    );
+    assert_eq!(header(&headers, "content-type"), Some("application/proto"));
+    assert_eq!(header(&headers, "accept"), Some("*/*"));
+    assert_eq!(header(&headers, "connect-protocol-version"), Some("1"));
+    assert_eq!(header(&headers, "authorization"), None);
+}
+
+#[tokio::test]
+async fn devin_fetch_without_an_api_key_is_refused_before_any_request() {
+    let directory = TestDir::new();
+    let port = closed_loopback_port();
+    let provider = provider(
+        "my-devin",
+        Family::Devin,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    let client = reqwest::Client::new();
+    for credential in [Credential::None, oauth(None)] {
+        let fetch = ModelFetch {
+            client: &client,
+            provider: &provider,
+            credential: &credential,
+            cache_dir: directory.path(),
+            user_agent: "dalgon/test",
+            version: "test",
+        };
+        let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+        assert_eq!(fetched.source, CatalogSource::Typed);
+        assert!(
+            matches!(&fetched.live_error, Some(ProviderError::NoCredentials { provider }) if provider == "my-devin"),
+            "{:?}",
+            fetched.live_error
+        );
+    }
+}
+
+#[tokio::test]
+async fn devin_fetch_with_a_malformed_body_falls_back_typed() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, vec![0xFF, 0xFE, 0xFD], "application/proto");
+    let provider = provider(
+        "my-devin",
+        Family::Devin,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("session-token")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    server.join().expect("serve the malformed body");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::Protocol {
+                family: Family::Devin,
+                ..
+            })
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+}
+
+#[tokio::test]
+async fn ollama_fetch_trims_api_suffix_and_lists_tags_without_auth() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let body = br#"{"models":[{"name":"llama3.1"},{"model":"mistral-small","name":"legacy"},{"name":""}],"top_unknown":[1]}"#.to_vec();
+    let server = serve_binary(listener, body, "application/json");
+    let mut provider = provider(
+        "local-ollama",
+        Family::Ollama,
+        &format!("http://127.0.0.1:{port}/api/"),
+    );
+    provider.auth = AuthStyle::None;
+    let credential = Credential::None;
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the tags body");
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(
+        fetched
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_ref())
+            .collect::<Vec<_>>(),
+        ["llama3.1", "mistral-small"]
+    );
+    for entry in &fetched.entries {
+        assert_eq!(entry.provider.as_ref(), "local-ollama");
+    }
+    assert!(request_line.starts_with("GET /api/tags "), "{request_line}");
+    assert_eq!(header(&headers, "authorization"), None);
+    assert_eq!(header(&headers, "x-api-key"), None);
+    assert_eq!(header(&headers, "api-key"), None);
+}
+
+#[tokio::test]
+async fn ollama_fetch_with_a_malformed_body_falls_back_typed() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, b"not json".to_vec(), "application/json");
+    let mut provider = provider(
+        "local-ollama",
+        Family::Ollama,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    provider.auth = AuthStyle::None;
+    let credential = Credential::None;
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the malformed body");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::Protocol {
+                family: Family::Ollama,
+                ..
+            })
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+    assert!(request_line.starts_with("GET /api/tags "), "{request_line}");
+    assert_eq!(header(&headers, "authorization"), None);
+}
+
+#[test]
+fn mistral_cards_map_context_vision_and_tools_without_invented_fields() {
+    let provider = provider("mistral", Family::Mistral, "https://api.mistral.ai/v1");
+    let rows = decode_mistral_models(
+        &provider,
+        br#"{"object":"list","data":[{"id":"mistral-large-latest","capabilities":{"completion_chat":true,"function_calling":true,"vision":true,"future_flag":true},"max_context_length":128000},{"id":"mistral-embed","capabilities":{"completion_chat":false,"function_calling":false},"max_context_length":32768},{"id":"retired","archived":true,"max_context_length":100},{"id":"","max_context_length":50}],"unknown":"x"}"#,
+    )
+    .expect("mistral rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["mistral-large-latest", "mistral-embed"]
+    );
+    for row in &rows {
+        assert_eq!(row.provider.as_ref(), "mistral");
+    }
+    assert_eq!(rows[0].display.as_ref(), "mistral-large-latest");
+    assert_eq!(rows[0].context_window, Some(128_000));
+    assert!(rows[0].image_input);
+    assert_eq!(rows[0].tool_support, ToolSupport::Any);
+    assert_eq!(rows[1].context_window, Some(32_768));
+    assert!(!rows[1].image_input);
+    assert_eq!(rows[1].tool_support, ToolSupport::None);
+}
+
+#[test]
+fn mistral_cards_also_decode_from_a_bare_array() {
+    let provider = provider("mistral", Family::Mistral, "https://api.mistral.ai/v1");
+    let rows = decode_mistral_models(
+        &provider,
+        br#"[{"id":"open-mistral-7b","max_context_length":32768}]"#,
+    )
+    .expect("mistral rows decode");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id.as_ref(), "open-mistral-7b");
+    assert_eq!(rows[0].context_window, Some(32_768));
+    assert_eq!(rows[0].max_output, None);
+    assert!(!rows[0].image_input);
+    assert_eq!(rows[0].tool_support, ToolSupport::Any);
+}
+
+#[tokio::test]
+async fn mistral_fetch_lists_models_with_bearer_auth() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let body = br#"{"object":"list","data":[{"id":"mistral-large-latest","capabilities":{"completion_chat":true,"function_calling":true,"vision":false},"max_context_length":131072}]}"#.to_vec();
+    let server = serve_binary(listener, body, "application/json");
+    let provider = provider(
+        "mistral",
+        Family::Mistral,
+        &format!("http://127.0.0.1:{port}/v1"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the mistral body");
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(fetched.entries.len(), 1);
+    let entry = &fetched.entries[0];
+    assert_eq!(entry.provider.as_ref(), "mistral");
+    assert_eq!(entry.id.as_ref(), "mistral-large-latest");
+    assert_eq!(entry.context_window, Some(131_072));
+    assert!(
+        request_line.starts_with("GET /v1/models "),
+        "{request_line}"
+    );
+    assert_eq!(header(&headers, "authorization"), Some("Bearer test-key"));
+}
+
+#[tokio::test]
+async fn mistral_fetch_with_a_malformed_body_falls_back_typed() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, b"not json".to_vec(), "application/json");
+    let provider = provider(
+        "mistral",
+        Family::Mistral,
+        &format!("http://127.0.0.1:{port}/v1"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    server.join().expect("serve the malformed body");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::Protocol {
+                family: Family::Mistral,
+                ..
+            })
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+}
+
+fn radius_provider(base_url: &str) -> ProviderEntry {
+    provider("radius", Family::PiMessages, base_url)
+}
+
+const RADIUS_CONFIG: &[u8] = br#"{"baseUrl":"https://radius.pi.dev/v1","unknown":1,"models":[
+    {"id":"balanced","name":"Balanced","reasoning":true,
+     "thinkingLevelMap":{"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+     "input":["text","image"],"contextWindow":1048576,"maxTokens":131072,
+     "cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":0}},
+    {"id":"claude-fable-5","name":"Claude Fable 5","reasoning":true,
+     "thinkingLevelMap":{"off":null,"xhigh":"xhigh","max":"max"},
+     "input":["text","image"],"contextWindow":1000000,"maxTokens":128000,
+     "cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5}},
+    {"id":"cheap","name":"Cheap","reasoning":false,"input":["text"],
+     "contextWindow":32768,"maxTokens":8192,"cost":{"input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":0}},
+    {"id":"cheap","name":"Duplicate","reasoning":false,"input":["text"],
+     "contextWindow":1,"maxTokens":1,"cost":{}},
+    {"id":"no-window","name":"No window","reasoning":false,"input":["text"],"maxTokens":1,"cost":{}},
+    {"id":"bad-reasoning","name":"Bad","reasoning":"yes","input":["text"],"contextWindow":1,"maxTokens":1,"cost":{}},
+    {"id":"cost-list","name":"Bad cost","reasoning":false,"input":["text"],"contextWindow":1,"maxTokens":1,"cost":[]},
+    "not an object"
+]}"#;
+
+#[test]
+fn radius_config_maps_limits_thinking_and_price_and_drops_invalid_rows() {
+    let provider = radius_provider("https://radius.pi.dev/v1");
+    let rows = decode_radius_models(&provider, RADIUS_CONFIG).expect("radius rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["balanced", "claude-fable-5", "cheap"],
+        "invalid and duplicate rows are dropped, not errors"
+    );
+    for row in &rows {
+        assert_eq!(row.provider.as_ref(), "radius");
+        assert_eq!(row.listing, Listing::Listed);
+    }
+    let balanced = &rows[0];
+    assert_eq!(balanced.display.as_ref(), "Balanced");
+    assert_eq!(balanced.context_window, Some(1_048_576));
+    assert_eq!(balanced.max_output, Some(131_072));
+    assert!(balanced.image_input);
+    assert_eq!(balanced.tool_support, ToolSupport::Any);
+    let price = balanced.price.as_ref().expect("a flat price");
+    assert_eq!(
+        (
+            price.input,
+            price.cached_input,
+            price.output,
+            price.reasoning
+        ),
+        (3.0, 0.3, 15.0, 15.0)
+    );
+    assert_eq!(price.cache_write, Some(0.0));
+    assert!(price.tiers.is_empty());
+    // A null level is unsupported; the others up to `high` are supported, and
+    // `xhigh` and `max` only when the map names them.
+    match &balanced.thinking {
+        ThinkingSupport::OpenAi {
+            accepted,
+            none_supported,
+        } => {
+            assert_eq!(
+                accepted,
+                &[ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
+            );
+            assert!(!none_supported);
+        }
+        other => panic!("{other:?}"),
+    }
+    match &rows[1].thinking {
+        ThinkingSupport::OpenAi { accepted, .. } => assert_eq!(
+            accepted,
+            &[
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Max,
+            ]
+        ),
+        other => panic!("{other:?}"),
+    }
+    let cheap = &rows[2];
+    assert!(!cheap.image_input);
+    match &cheap.thinking {
+        ThinkingSupport::OpenAi {
+            accepted,
+            none_supported,
+        } => assert!(accepted.is_empty() && *none_supported),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn radius_config_recovers_a_valid_duplicate_after_a_dropped_row() {
+    // A row dropped at the `cost` gate must not mark its id as seen: a later
+    // valid row reusing the id still decodes.
+    let provider = radius_provider("https://radius.pi.dev/v1");
+    let body = br#"{"baseUrl":"https://radius.pi.dev/v1","models":[
+        {"id":"dup","name":"Dropped","reasoning":false,"input":["text"],
+         "contextWindow":1,"maxTokens":1,"cost":[]},
+        {"id":"dup","name":"Kept","reasoning":false,"input":["text"],
+         "contextWindow":4096,"maxTokens":512,
+         "cost":{"input":1,"output":2,"cacheRead":0.1,"cacheWrite":0}}
+    ]}"#;
+    let rows = decode_radius_models(&provider, body).expect("radius rows decode");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id.as_ref(), "dup");
+    assert_eq!(rows[0].display.as_ref(), "Kept");
+    assert_eq!(rows[0].price.as_ref().map(|price| price.input), Some(1.0));
+}
+
+#[test]
+fn radius_config_without_base_url_or_a_models_array_is_a_protocol_error() {
+    let provider = radius_provider("https://radius.pi.dev/v1");
+    for body in [
+        &br#"{"models":[]}"#[..],
+        br#"{"baseUrl":"https://radius.pi.dev/v1"}"#,
+        br#"{"baseUrl":"https://radius.pi.dev/v1","models":{}}"#,
+        br#"{"baseUrl":7,"models":[]}"#,
+        b"not json",
+    ] {
+        assert!(
+            matches!(
+                decode_radius_models(&provider, body),
+                Err(ProviderError::Protocol {
+                    family: Family::PiMessages,
+                    ..
+                })
+            ),
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+#[test]
+fn radius_models_resolve_qualified_and_by_route_without_special_casing() {
+    let provider = radius_provider("https://radius.pi.dev/v1");
+    let rows = decode_radius_models(&provider, RADIUS_CONFIG).expect("radius rows decode");
+    let listed = Catalog::with_sources(vec![(provider.clone(), CatalogSource::Live)], rows);
+    let route = ModelRoute::Api {
+        family: Family::PiMessages,
+        model: "balanced".into(),
+    };
+    let resolved = resolve(&listed, &[], "radius/balanced").expect("a listed row resolves");
+    assert_eq!(resolved.provider.as_ref(), "radius");
+    assert_eq!(resolved.route, route);
+    assert_eq!(resolved.entry.context_window, Some(1_048_576));
+    assert_eq!(
+        resolve_route(&listed, &[], &route)
+            .expect("the route resolves")
+            .route,
+        route
+    );
+    assert_eq!(
+        resolve(&listed, &[], "radius/unlisted")
+            .unwrap_err()
+            .to_string(),
+        "unknown model radius/unlisted",
+        "a listed catalog rejects an unlisted id"
+    );
+
+    let typed = Catalog::with_sources(vec![(provider, CatalogSource::Typed)], Vec::new());
+    let unlisted = ModelRoute::Api {
+        family: Family::PiMessages,
+        model: "claude-opus-5".into(),
+    };
+    let resolved = resolve(&typed, &[], "radius/claude-opus-5").expect("a typed id resolves");
+    assert_eq!(resolved.route, unlisted);
+    assert_eq!(resolved.entry.context_window, None);
+    let by_route = resolve_route(&typed, &[], &unlisted).expect("the family prefix is radius");
+    assert_eq!(by_route.provider.as_ref(), "radius");
+}
+
+#[tokio::test]
+async fn radius_fetch_reads_the_gateway_config_at_the_origin_with_bearer_auth() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, RADIUS_CONFIG.to_vec(), "application/json");
+    // A path on the base never prefixes the config request.
+    let provider = radius_provider(&format!("http://127.0.0.1:{port}/gateway/v1"));
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("radius-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the radius config");
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(
+        fetched
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_ref())
+            .collect::<Vec<_>>(),
+        ["balanced", "claude-fable-5", "cheap"]
+    );
+    assert!(
+        request_line.starts_with("GET /v1/config "),
+        "{request_line}"
+    );
+    assert_eq!(header(&headers, "authorization"), Some("Bearer radius-key"));
+    let cached = read_cache_async(directory.path().join("models.json"))
+        .await
+        .expect("the live rows are cached");
+    assert_eq!(cached.len(), 3);
+}
+
+#[tokio::test]
+async fn radius_fetch_with_a_malformed_body_falls_back_typed() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, br#"{"models":[]}"#.to_vec(), "application/json");
+    let provider = radius_provider(&format!("http://127.0.0.1:{port}/v1"));
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("radius-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    server.join().expect("serve the malformed config");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::Protocol {
+                family: Family::PiMessages,
+                ..
+            })
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+}
+
 #[test]
 fn bedrock_typed_carries_anthropic_contract() {
     let made = provider(
@@ -1358,6 +2124,520 @@ fn bedrock_typed_carries_anthropic_contract() {
     };
     let body = crate::family::bedrock::request_body(&request, &plan);
     assert!(body.is_ok(), "converse accepts catalog thinking: {body:?}");
+}
+
+/// One request the scripted Gemini server answered: the request line and the
+/// lowercased request headers.
+type SeenRequest = (String, Vec<(String, String)>);
+
+/// Answers one request per `replies` entry, in order, each as
+/// `(status, body)`, and returns every request it saw. A client that asks for
+/// more pages than scripted finds the listener closed.
+fn serve_replies(
+    listener: TcpListener,
+    replies: Vec<(u16, Vec<u8>)>,
+) -> std::thread::JoinHandle<Vec<SeenRequest>> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::with_capacity(replies.len());
+        for (status, body) in replies {
+            let mut stream = accept_loopback(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set replay socket read timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone replay socket"));
+            let mut request_line = String::new();
+            assert_ne!(
+                reader
+                    .read_line(&mut request_line)
+                    .expect("read request line"),
+                0
+            );
+            let mut headers = Vec::new();
+            loop {
+                let mut line = String::new();
+                let bytes = reader.read_line(&mut line).expect("read request header");
+                if bytes == 0 || line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').expect("header has a colon");
+                headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+            }
+            drop(reader);
+            let head = format!(
+                "HTTP/1.1 {status} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(head.as_bytes())
+                .expect("write replay head");
+            stream.write_all(&body).expect("write replay body");
+            seen.push((request_line, headers));
+        }
+        seen
+    })
+}
+
+fn gemini_key(key: &str) -> Credential {
+    Credential::ApiKey {
+        key: SecretString::from(String::from(key)),
+    }
+}
+
+fn gemini_provider(base_url: &str) -> ProviderEntry {
+    provider("google", Family::GoogleGenerativeAi, base_url)
+}
+
+/// One refresh of a direct-Gemini provider against `replies`, with every
+/// request the server saw. The base carries a trailing slash on purpose: the
+/// list URL must not double it.
+async fn gemini_refresh(
+    credential: &Credential,
+    replies: Vec<(u16, Vec<u8>)>,
+) -> (CatalogFetch, Vec<SeenRequest>) {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_replies(listener, replies);
+    let provider = gemini_provider(&format!("http://127.0.0.1:{port}/v1beta/"));
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    (fetched, server.join().expect("serve the gemini replies"))
+}
+
+fn gemini_card(name: &str, display: &str, input: u32, output: u32) -> String {
+    format!(
+        r#"{{"name":"{name}","displayName":"{display}","supportedGenerationMethods":["generateContent","countTokens"],"inputTokenLimit":{input},"outputTokenLimit":{output}}}"#
+    )
+}
+
+fn gemini_page(cards: &[String], next: Option<&str>) -> (u16, Vec<u8>) {
+    let token = next.map_or_else(String::new, |token| {
+        format!(r#","nextPageToken":"{token}""#)
+    });
+    (
+        200,
+        format!(r#"{{"models":[{}]{token}}}"#, cards.join(",")).into_bytes(),
+    )
+}
+
+fn gemini_ids(fetched: &CatalogFetch) -> Vec<&str> {
+    fetched
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_ref())
+        .collect()
+}
+
+#[tokio::test]
+async fn gemini_fetch_pages_with_the_key_header_and_never_a_key_in_the_url() {
+    let first = gemini_page(
+        &[
+            gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, 65_536),
+            gemini_card("models/gemini-2.5-flash", "Gemini 2.5 Flash", 1_048_576, 65_536),
+        ],
+        Some("page-2"),
+    );
+    let second = gemini_page(
+        &[
+            gemini_card("models/gemini-1.5-flash", "Gemini 1.5 Flash", 1_000_000, 8_192),
+            gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro again", 1_048_576, 65_536),
+        ],
+        None,
+    );
+    let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![first, second]).await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    assert_eq!(
+        gemini_ids(&fetched),
+        ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.5-pro"],
+        "rows are deduplicated across pages and sorted by id"
+    );
+    for entry in &fetched.entries {
+        assert_eq!(entry.provider.as_ref(), "google");
+    }
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0].0,
+        "GET /v1beta/models?pageSize=100 HTTP/1.1\r\n"
+    );
+    assert_eq!(
+        seen[1].0,
+        "GET /v1beta/models?pageSize=100&pageToken=page-2 HTTP/1.1\r\n"
+    );
+    for (request_line, headers) in &seen {
+        assert_eq!(header(headers, "x-goog-api-key"), Some("test-key"));
+        assert_eq!(header(headers, "authorization"), None);
+        assert!(
+            !request_line.contains("test-key") && !request_line.contains("key="),
+            "the key must never travel in the URL: {request_line}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gemini_fetch_keeps_generate_content_rows_and_maps_limits() {
+    let cards = [
+        gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, 65_536),
+        // Not text generation: an embedding, an image-generation, and an
+        // answer-only model.
+        r#"{"name":"models/text-embedding-004","displayName":"Embedding","supportedGenerationMethods":["embedContent"],"inputTokenLimit":2048}"#.to_owned(),
+        r#"{"name":"models/imagen-3.0-generate","supportedGenerationMethods":["predict"]}"#.to_owned(),
+        r#"{"name":"models/aqa","supportedGenerationMethods":["generateAnswer"]}"#.to_owned(),
+        r#"{"name":"models/no-methods"}"#.to_owned(),
+        // A bare name keeps its id; non-positive limits are unknown, never
+        // zero; a missing display name is the id; no image hint in the id.
+        r#"{"name":"gemma-3-27b-it","supportedGenerationMethods":["generateContent"],"inputTokenLimit":0,"outputTokenLimit":-5}"#.to_owned(),
+        // A blank display name is the id; a limit of the wrong type is unknown.
+        r#"{"name":"models/Gemini-Custom","displayName":"   ","supportedGenerationMethods":["generateContent"],"inputTokenLimit":"big","outputTokenLimit":null}"#.to_owned(),
+        r#"{"name":"models/learnlm-2.0-flash","supportedGenerationMethods":["generateContent"],"inputTokenLimit":1048576}"#.to_owned(),
+        // Terminal control and bidi characters never reach an id or a name.
+        "{\"name\":\"models/vision-model\\u0007x\",\"displayName\":\"Pretty\\u202eName\",\"supportedGenerationMethods\":[\"generateContent\"]}".to_owned(),
+        // Malformed rows are skipped, not fatal.
+        r#"{"name":42,"supportedGenerationMethods":["generateContent"]}"#.to_owned(),
+        r#"{"displayName":"No Name","supportedGenerationMethods":["generateContent"]}"#.to_owned(),
+        r#"{"name":"models/","supportedGenerationMethods":["generateContent"]}"#.to_owned(),
+        r#"{"name":"models/bad-methods","supportedGenerationMethods":"generateContent"}"#.to_owned(),
+        r#"{"name":"models/bad-method-type","supportedGenerationMethods":[1,2]}"#.to_owned(),
+        r#"["models/array-row"]"#.to_owned(),
+        r#""models/string-row""#.to_owned(),
+        "7".to_owned(),
+        "null".to_owned(),
+    ];
+    let (fetched, seen) = gemini_refresh(
+        &gemini_key("test-key"),
+        vec![gemini_page(&cards, None)],
+    )
+    .await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        gemini_ids(&fetched),
+        [
+            "Gemini-Custom",
+            "gemini-2.5-pro",
+            "gemma-3-27b-it",
+            "learnlm-2.0-flash",
+            "vision-model\u{FFFD}x",
+        ]
+    );
+    let pro = &fetched.entries[1];
+    assert_eq!(pro.display.as_ref(), "Gemini 2.5 Pro");
+    assert_eq!(pro.context_window, Some(1_048_576));
+    assert_eq!(pro.max_output, Some(65_536));
+    assert!(pro.image_input);
+    assert_eq!(pro.tool_support, ToolSupport::Any);
+    assert_eq!(pro.price, None);
+
+    let custom = &fetched.entries[0];
+    assert_eq!(custom.display.as_ref(), "Gemini-Custom");
+    assert_eq!(custom.context_window, None);
+    assert_eq!(custom.max_output, None);
+    assert!(custom.image_input, "a gemini id accepts images, any case");
+
+    let gemma = &fetched.entries[2];
+    assert_eq!(gemma.display.as_ref(), "gemma-3-27b-it");
+    assert_eq!(gemma.context_window, None);
+    assert_eq!(gemma.max_output, None);
+    assert!(!gemma.image_input);
+
+    let learnlm = &fetched.entries[3];
+    assert_eq!(learnlm.context_window, Some(1_048_576));
+    assert_eq!(learnlm.max_output, None);
+    assert!(!learnlm.image_input);
+
+    let vision = &fetched.entries[4];
+    assert_eq!(vision.display.as_ref(), "Pretty\u{FFFD}Name");
+    assert!(vision.image_input);
+}
+
+#[tokio::test]
+async fn gemini_discovered_rows_agree_with_typed_rows_on_thinking_and_tools() {
+    let (fetched, _) = gemini_refresh(
+        &gemini_key("test-key"),
+        vec![gemini_page(
+            &[gemini_card("models/gemini-2.5-pro", "Gemini 2.5 Pro", 1_048_576, 65_536)],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    let provider = gemini_provider("https://example.test/v1beta");
+    let typed = resolve(
+        &Catalog::with_sources(vec![(provider, CatalogSource::Typed)], Vec::new()),
+        &[],
+        "google/gemini-2.5-pro",
+    )
+    .expect("a typed gemini id resolves");
+    let live = &fetched.entries[0];
+    let ladder = |support: &ThinkingSupport| match support {
+        ThinkingSupport::OpenAi {
+            accepted,
+            none_supported,
+        } => (accepted.clone(), *none_supported),
+        other => panic!("gemini rows carry {other:?}"),
+    };
+    assert_eq!(ladder(&live.thinking), ladder(&typed.entry.thinking));
+    assert_eq!(live.tool_support, typed.entry.tool_support);
+    assert_eq!(live.temperature_allowed, typed.entry.temperature_allowed);
+}
+
+#[tokio::test]
+async fn gemini_fetch_stops_on_a_repeated_page_token() {
+    let first = gemini_page(
+        &[gemini_card("models/gemini-a", "A", 10, 5)],
+        Some("again"),
+    );
+    let second = gemini_page(
+        &[gemini_card("models/gemini-b", "B", 10, 5)],
+        Some("again"),
+    );
+    let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![first, second]).await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    assert_eq!(gemini_ids(&fetched), ["gemini-a", "gemini-b"]);
+    assert_eq!(seen.len(), 2, "the repeated token is not followed");
+    assert_eq!(
+        seen[1].0,
+        "GET /v1beta/models?pageSize=100&pageToken=again HTTP/1.1\r\n"
+    );
+}
+
+#[tokio::test]
+async fn gemini_fetch_stops_on_a_blank_or_non_string_page_token() {
+    for token in [r#""""#, r#""   ""#, "7", "null", "[]"] {
+        let body = format!(
+            r#"{{"models":[{}],"nextPageToken":{token}}}"#,
+            gemini_card("models/gemini-a", "A", 10, 5)
+        )
+        .into_bytes();
+        let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![(200, body)]).await;
+        assert_eq!(
+            fetched.source,
+            CatalogSource::Live,
+            "token {token}: {:?}",
+            fetched.live_error
+        );
+        assert_eq!(gemini_ids(&fetched), ["gemini-a"], "token {token}");
+        assert_eq!(seen.len(), 1, "token {token} must end pagination");
+    }
+}
+
+#[tokio::test]
+async fn gemini_fetch_reads_at_most_twenty_five_pages() {
+    let replies: Vec<(u16, Vec<u8>)> = (0..25)
+        .map(|page| {
+            gemini_page(
+                &[gemini_card(&format!("models/gemini-{page:02}"), "Page", 10, 5)],
+                Some(&format!("t{page}")),
+            )
+        })
+        .collect();
+    let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), replies).await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    assert_eq!(seen.len(), 25, "a 26th page is never requested");
+    assert_eq!(fetched.entries.len(), 25);
+    assert_eq!(
+        seen[24].0,
+        "GET /v1beta/models?pageSize=100&pageToken=t23 HTTP/1.1\r\n"
+    );
+}
+
+#[tokio::test]
+async fn gemini_fetch_with_a_malformed_body_falls_back_typed() {
+    let bodies: [&[u8]; 5] = [
+        b"<html><body>Bad gateway</body></html>",
+        b"not json",
+        b"[]",
+        br#"{"models":"nope"}"#,
+        br#"{"models":null}"#,
+    ];
+    for body in bodies {
+        let (fetched, seen) = gemini_refresh(&gemini_key("test-key"), vec![(200, body.to_vec())]).await;
+        assert_eq!(fetched.source, CatalogSource::Typed, "{body:?}");
+        assert!(fetched.entries.is_empty());
+        assert!(
+            matches!(
+                &fetched.live_error,
+                Some(ProviderError::Protocol {
+                    family: Family::GoogleGenerativeAi,
+                    ..
+                })
+            ),
+            "{body:?}: {:?}",
+            fetched.live_error
+        );
+        assert_eq!(seen.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn gemini_fetch_with_a_bad_later_page_returns_no_partial_list() {
+    let first = gemini_page(
+        &[gemini_card("models/gemini-a", "A", 10, 5)],
+        Some("page-2"),
+    );
+    let (fetched, seen) = gemini_refresh(
+        &gemini_key("test-key"),
+        vec![first, (200, b"<html>nope</html>".to_vec())],
+    )
+    .await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(fetched.entries.is_empty());
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::Protocol {
+                family: Family::GoogleGenerativeAi,
+                ..
+            })
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+    assert_eq!(seen.len(), 2);
+}
+
+#[tokio::test]
+async fn gemini_fetch_with_a_rejected_status_falls_back_typed() {
+    for status in [401_u16, 403, 429, 503] {
+        let (fetched, seen) = gemini_refresh(
+            &gemini_key("test-key"),
+            vec![(status, br#"{"error":{"code":0,"message":"no"}}"#.to_vec())],
+        )
+        .await;
+        assert_eq!(fetched.source, CatalogSource::Typed, "{status}");
+        assert!(
+            matches!(
+                &fetched.live_error,
+                Some(ProviderError::Status {
+                    family: Family::GoogleGenerativeAi,
+                    status: found,
+                    ..
+                }) if *found == status
+            ),
+            "{status}: {:?}",
+            fetched.live_error
+        );
+        assert_eq!(seen.len(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn gemini_fetch_without_a_usable_key_is_refused_before_any_request() {
+    let port = closed_loopback_port();
+    let provider = gemini_provider(&format!("http://127.0.0.1:{port}/v1beta"));
+    let client = reqwest::Client::new();
+    for credential in [Credential::None, gemini_key(""), gemini_key("  \t")] {
+        let directory = TestDir::new();
+        let fetch = ModelFetch {
+            client: &client,
+            provider: &provider,
+            credential: &credential,
+            cache_dir: directory.path(),
+            user_agent: "dalgon/test",
+            version: "test",
+        };
+        let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+        assert_eq!(fetched.source, CatalogSource::Typed);
+        assert!(fetched.entries.is_empty());
+        assert!(
+            matches!(
+                &fetched.live_error,
+                Some(ProviderError::NoCredentials { provider }) if provider == "google"
+            ),
+            "{:?}",
+            fetched.live_error
+        );
+    }
+    let directory = TestDir::new();
+    let oauth = oauth(None);
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &oauth,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(
+        matches!(
+            &fetched.live_error,
+            Some(ProviderError::InvalidRequest { message }) if message.contains("OAuth")
+        ),
+        "{:?}",
+        fetched.live_error
+    );
+}
+
+#[tokio::test]
+async fn vertex_and_antigravity_list_no_models_and_say_why_while_typed_ids_resolve() {
+    let cases = [
+        (Family::GoogleVertex, "my-vertex", "publisher models"),
+        (Family::GoogleAntigravity, "my-antigravity", "OAuth"),
+        (Family::GoogleGeminiCli, "my-gemini", "gemini CLI"),
+    ];
+    for (family, id, reason) in cases {
+        let directory = TestDir::new();
+        let made = provider(id, family, "http://127.0.0.1:1");
+        let credential = Credential::None;
+        let client = reqwest::Client::new();
+        let fetch = ModelFetch {
+            client: &client,
+            provider: &made,
+            credential: &credential,
+            cache_dir: directory.path(),
+            user_agent: "dalgon/test",
+            version: "test",
+        };
+        let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+        assert_eq!(fetched.source, CatalogSource::Typed, "{family:?}");
+        assert!(fetched.entries.is_empty(), "{family:?}");
+        let Some(ProviderError::InvalidRequest { message }) = &fetched.live_error else {
+            panic!("{family:?}: {:?}", fetched.live_error);
+        };
+        assert!(message.contains(reason), "{family:?}: {message}");
+        assert!(!message.contains("yet"), "{family:?}: {message}");
+        let catalog = Catalog::with_sources(vec![(made, CatalogSource::Typed)], Vec::new());
+        let resolved = resolve(&catalog, &[], &format!("{id}/gemini-2.5-pro"))
+            .expect("the typed fallback serves the family");
+        assert_eq!(resolved.entry.context_window, None, "{family:?}");
+    }
 }
 
 #[tokio::test]

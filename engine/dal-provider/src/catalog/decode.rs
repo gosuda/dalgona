@@ -3,8 +3,9 @@
 //! Decoders tolerate unknown reply fields (external producers evolve) but
 //! never invent limits: unlisted ids fall back to family defaults.
 
-use dal_core::{Family, ThinkingLevel};
+use dal_core::{Family, ModelPrice, RawJson, ThinkingLevel};
 use serde::Deserialize;
+use sonic_rs::{JsonValueTrait, Value};
 
 use super::{
     CatalogEntry, ImageProfile, Listing, ToolSupport,
@@ -14,6 +15,13 @@ use super::{
 };
 use crate::{
     error::ProviderError,
+    family::{
+        devin::decode::{DiscoveredModel, decode_discovery},
+        ollama::{
+            CLOUD_NUM_PREDICT_CAP, Deployment, OllamaShow, cloud_output_capped, decode_tags,
+            thinking_ladder,
+        },
+    },
     provider::ProviderEntry,
     thinking::{Effort, ThinkingSupport},
 };
@@ -179,6 +187,507 @@ pub(crate) fn decode_codex_models(
             })
         })
         .collect()
+}
+
+pub(crate) fn decode_devin_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let models = decode_discovery(bytes)?;
+    models
+        .iter()
+        .map(|model| devin_entry(provider, model))
+        .collect()
+}
+
+fn devin_entry(
+    provider: &ProviderEntry,
+    model: &DiscoveredModel,
+) -> Result<CatalogEntry, ProviderError> {
+    let mut entry = default_entry(provider, &sanitize_identifier(&model.uid));
+    entry.display = sanitize_identifier(&model.label);
+    entry.context_window = positive_tokens(provider.family, model.max_tokens)?;
+    entry.max_output = positive_tokens(provider.family, model.max_output_tokens)?;
+    entry.image_input = model.supports_images;
+    if !model.supports_tool_calls {
+        entry.tool_support = ToolSupport::None;
+    }
+    bind_family_capabilities(&mut entry, provider.family);
+    Ok(entry)
+}
+
+fn positive_tokens(family: Family, value: i32) -> Result<Option<u32>, ProviderError> {
+    if value <= 0 {
+        return Ok(None);
+    }
+    u32::try_from(value).map(Some).map_err(|_| {
+        protocol(
+            family,
+            "devin discovery token count is outside the supported range",
+        )
+    })
+}
+
+pub(crate) fn decode_ollama_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let models = decode_tags(bytes)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for model in &models {
+        let Some(id) = model.wire_id().map(|id| sanitize_identifier(id.trim())) else {
+            continue;
+        };
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let mut entry = default_entry(provider, &id);
+        // `api/tags` spells the same id twice; a display name only exists
+        // when `name` says something the id does not.
+        if let Some(name) = model
+            .name
+            .as_deref()
+            .map(|name| sanitize_identifier(name.trim()))
+            .filter(|name| !name.is_empty() && **name != *id)
+        {
+            entry.display = name;
+        }
+        bind_family_capabilities(&mut entry, provider.family);
+        rows.push(entry);
+    }
+    Ok(rows)
+}
+
+/// Applies one `api/show` probe to a row decoded from `api/tags`.
+///
+/// The trained context window sizes the row when the probe names one. A probe
+/// that lists capabilities decides the rest: `thinking` opens the model's
+/// ladder while a model without it accepts no reasoning level and gets no
+/// `think` member at all; `vision` opens image input; a model without `tools`
+/// takes no tool advertisements. The ladder is what the server reports in
+/// `thinking.values` (named levels, and whether `false` turns reasoning off)
+/// and only when a server reports none does it come from the model id. A probe
+/// that lists no capabilities leaves the row as `api/tags` made it. On the
+/// cloud, the DeepSeek V4 deployments that cap output below their window carry
+/// that cap as their output limit, which `api/show` never reports.
+pub(crate) fn apply_ollama_show(
+    entry: &mut CatalogEntry,
+    show: &OllamaShow,
+    deployment: Deployment,
+) {
+    if let Some(window) = show.context_window {
+        entry.context_window = Some(window);
+    }
+    let thinks = show
+        .reports("thinking")
+        .or_else(|| show.thinking.as_ref().map(|_| true));
+    if let Some(thinks) = thinks {
+        let (accepted, none_supported) = match &show.thinking {
+            _ if !thinks => (Vec::new(), false),
+            Some(values) => values.ladder(),
+            None => (thinking_ladder(deployment, &entry.id).to_vec(), true),
+        };
+        entry.thinking = ThinkingSupport::OpenAi {
+            accepted,
+            none_supported,
+        };
+    }
+    if let Some(sees) = show.reports("vision") {
+        entry.image_input = sees;
+    }
+    if show.reports("tools") == Some(false) {
+        entry.tool_support = ToolSupport::None;
+    }
+    if deployment == Deployment::Cloud && cloud_output_capped(&entry.id) {
+        entry.max_output = Some(
+            entry
+                .context_window
+                .map_or(CLOUD_NUM_PREDICT_CAP, |window| {
+                    window.min(CLOUD_NUM_PREDICT_CAP)
+                }),
+        );
+    }
+}
+
+pub(crate) fn decode_mistral_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let list: MistralList = decode_json(Family::Mistral, bytes, "Mistral model list")?;
+    let cards = match list {
+        MistralList::Array(cards) => cards,
+        MistralList::Object { data } => data,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for card in &cards {
+        let Some(id) = card.id.as_deref().map(|id| sanitize_identifier(id.trim())) else {
+            continue;
+        };
+        if id.is_empty() || card.archived || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let mut entry = default_entry(provider, &id);
+        entry.context_window = mistral_window(card.max_context_length)?;
+        let capabilities = card.capabilities.as_ref();
+        entry.image_input = capabilities.and_then(|flags| flags.vision).unwrap_or(false);
+        if capabilities.and_then(|flags| flags.function_calling) == Some(false) {
+            entry.tool_support = ToolSupport::None;
+        }
+        if let Some(reasoning) = capabilities.and_then(|flags| flags.reasoning) {
+            entry.thinking = mistral_thinking(&id, reasoning);
+        }
+        bind_family_capabilities(&mut entry, provider.family);
+        rows.push(entry);
+    }
+    Ok(rows)
+}
+
+/// The `reasoning_effort` values one Mistral card accepts, from its
+/// `capabilities.reasoning` flag.
+///
+/// The card says only whether a model reasons. The documented adjustable
+/// models take `none` and `high`; the hosted GLM models name their own
+/// ladders (`zai-glm-5-2`: `none`, `high`, `max`; `zai-glm-5-3`: `low`, `high`,
+/// `max`, with no `none`). A model that does not reason accepts no level and
+/// no `reasoning_effort` member at all.
+fn mistral_thinking(id: &str, reasoning: bool) -> ThinkingSupport {
+    use ThinkingLevel::{High, Low, Max};
+    let (accepted, none_supported) = match (reasoning, id) {
+        (false, _) => (Vec::new(), false),
+        (true, id) if id.starts_with("zai-glm-5-3") => (vec![Low, High, Max], false),
+        (true, id) if id.starts_with("zai-glm-5-2") => (vec![High, Max], true),
+        (true, _) => (vec![High], true),
+    };
+    ThinkingSupport::OpenAi {
+        accepted,
+        none_supported,
+    }
+}
+
+fn mistral_window(value: Option<u64>) -> Result<Option<u32>, ProviderError> {
+    let Some(value) = value.filter(|value| *value > 0) else {
+        return Ok(None);
+    };
+    u32::try_from(value).map(Some).map_err(|_| {
+        protocol(
+            Family::Mistral,
+            "mistral max context length is outside the supported range",
+        )
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MistralList {
+    Array(Vec<MistralCard>),
+    Object {
+        #[serde(default)]
+        data: Vec<MistralCard>,
+    },
+}
+
+#[derive(Deserialize)]
+struct MistralCard {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    capabilities: Option<MistralCapabilities>,
+    #[serde(default)]
+    max_context_length: Option<u64>,
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Default, Deserialize)]
+struct MistralCapabilities {
+    function_calling: Option<bool>,
+    vision: Option<bool>,
+    reasoning: Option<bool>,
+}
+
+/// The prefix the Gemini API puts on every model resource name.
+const GEMINI_MODEL_PREFIX: &str = "models/";
+
+/// The one generation method that marks a row as a chat model.
+const GEMINI_GENERATE_CONTENT: &str = "generateContent";
+
+/// Id fragments that mark a Gemini row as accepting images. The list reports
+/// no modality, so the id is the only signal, as in the reference.
+const GEMINI_IMAGE_HINTS: [&str; 3] = ["vision", "image", "gemini"];
+
+/// One page of the direct Gemini model list.
+pub(crate) struct GeminiPage {
+    /// The page's text-generation rows in wire order, not yet merged or sorted.
+    pub(crate) rows: Vec<CatalogEntry>,
+    /// The trimmed, non-blank `nextPageToken`, when the page names one.
+    pub(crate) next_page_token: Option<String>,
+}
+
+/// Decodes one page of the direct Gemini API's `GET models`.
+///
+/// Follows the reference: only a row that lists `generateContent` among its
+/// `supportedGenerationMethods` is a chat model; its id is the resource `name`
+/// without the `models/` prefix, `displayName` names it, and `inputTokenLimit`
+/// and `outputTokenLimit` become the context window and output limit when
+/// positive. A row that is not an object, has no string `name`, or carries a
+/// method list that is not an array of strings is dropped, not an error; a
+/// display name or limit of the wrong type is unknown. The reply must be an
+/// object whose `models`, when present, is an array.
+///
+/// The list reports no thinking support and no price, so a row keeps the
+/// family defaults and is the same row a typed id of the family resolves to; a
+/// price comes from the compiled snapshot at cost time. Images are the one
+/// exception: the list names no modality, so an id that mentions `gemini`,
+/// `vision`, or `image` accepts them, as in the reference.
+pub(crate) fn decode_gemini_page(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<GeminiPage, ProviderError> {
+    // A JSON array would fill the all-default struct below and read as an
+    // empty list, so only an object is a model list.
+    if !bytes.trim_ascii_start().starts_with(b"{") {
+        return Err(protocol(
+            Family::GoogleGenerativeAi,
+            "Gemini model list is not a JSON object",
+        ));
+    }
+    let list: GeminiList = decode_json(Family::GoogleGenerativeAi, bytes, "Gemini model list")?;
+    let next_page_token = list
+        .next_page_token
+        .as_ref()
+        .and_then(JsonValueTrait::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned);
+    Ok(GeminiPage {
+        rows: list
+            .models
+            .iter()
+            .filter_map(|raw| gemini_entry(provider, raw))
+            .collect(),
+        next_page_token,
+    })
+}
+
+fn gemini_entry(provider: &ProviderEntry, raw: &RawJson) -> Option<CatalogEntry> {
+    // `RawJson` holds trimmed text, so a leading `{` means an object: serde
+    // would fill a struct's defaults from a JSON array.
+    if !raw.as_str().starts_with('{') {
+        return None;
+    }
+    let card: GeminiCard = raw.decode_as().ok()?;
+    if !card
+        .methods
+        .as_deref()
+        .is_some_and(|methods| methods.iter().any(|method| method == GEMINI_GENERATE_CONTENT))
+    {
+        return None;
+    }
+    let name = card.name.as_ref().and_then(JsonValueTrait::as_str)?.trim();
+    let id = sanitize_identifier(name.strip_prefix(GEMINI_MODEL_PREFIX).unwrap_or(name));
+    if id.is_empty() {
+        return None;
+    }
+    let mut entry = default_entry(provider, &id);
+    if let Some(display) = card
+        .display_name
+        .as_ref()
+        .and_then(JsonValueTrait::as_str)
+        .map(str::trim)
+        .filter(|display| !display.is_empty())
+    {
+        entry.display = sanitize_identifier(display);
+    }
+    entry.context_window = gemini_limit(card.input_token_limit.as_ref());
+    entry.max_output = gemini_limit(card.output_token_limit.as_ref());
+    entry.image_input = GEMINI_IMAGE_HINTS
+        .iter()
+        .any(|hint| contains_ignore_ascii_case(&id, hint));
+    bind_family_capabilities(&mut entry, provider.family);
+    Some(entry)
+}
+
+/// A token limit when it is a positive integer that fits `u32`; anything else
+/// is unknown, never zero.
+fn gemini_limit(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(JsonValueTrait::as_u64)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .filter(|limit| *limit > 0)
+}
+
+/// Whether `haystack` holds the non-empty `needle`, ignoring ASCII case,
+/// without lowercasing a copy.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+#[derive(Deserialize)]
+struct GeminiList {
+    #[serde(default)]
+    models: Vec<RawJson>,
+    /// Any JSON value: a token of the wrong type ends pagination, not the refresh.
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<Value>,
+}
+
+/// One model resource. Members the decoder reads as loosely typed values stay
+/// [`Value`]s, so a wrong type drops that member, not the row.
+#[derive(Deserialize)]
+struct GeminiCard {
+    #[serde(default)]
+    name: Option<Value>,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<Value>,
+    #[serde(default, rename = "supportedGenerationMethods")]
+    methods: Option<Vec<String>>,
+    #[serde(default, rename = "inputTokenLimit")]
+    input_token_limit: Option<Value>,
+    #[serde(default, rename = "outputTokenLimit")]
+    output_token_limit: Option<Value>,
+}
+
+/// Decodes the pi-messages gateway config (`GET <gateway>/v1/config`) into
+/// catalog rows.
+///
+/// Follows the reference sanitizer: the document needs a string `baseUrl` and
+/// an array `models`, and a model that lacks a string `id` or `name`, a
+/// boolean `reasoning`, an `input` array, an object `cost`, or a numeric
+/// `contextWindow` or `maxTokens` is dropped, not an error. The gateway's
+/// `baseUrl` is not kept: the provider entry already names the endpoint. The
+/// flat `cost` rates (USD per million tokens) become the row price; reasoning
+/// tokens are billed at the output rate, as the gateway counts them inside
+/// `output`. Request-size price tiers are not mapped.
+pub(crate) fn decode_radius_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let config: GatewayConfig =
+        decode_json(Family::PiMessages, bytes, "pi-messages gateway config")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for raw in &config.models {
+        let Ok(model) = raw.decode_as::<GatewayModel>() else {
+            continue;
+        };
+        let id = sanitize_identifier(model.id.trim());
+        if id.is_empty() || seen.contains(id.as_ref()) {
+            continue;
+        }
+        // `RawJson::parse` trims the text, so a leading `{` means an object:
+        // serde would happily fill a struct's defaults from a JSON array.
+        // The cost gate runs before `seen.insert`: a malformed first row must
+        // not suppress a later valid row that reuses the same id.
+        let Some(cost) = model
+            .cost
+            .as_str()
+            .starts_with('{')
+            .then(|| model.cost.decode_as::<GatewayCost>().ok())
+            .flatten()
+        else {
+            continue;
+        };
+        seen.insert(id.to_string());
+        let mut entry = default_entry(provider, &id);
+        entry.display = sanitize_identifier(&model.name);
+        entry.context_window = u32::try_from(model.context_window).ok().filter(|n| *n > 0);
+        entry.max_output = u32::try_from(model.max_tokens).ok().filter(|n| *n > 0);
+        entry.image_input = model.input.iter().any(|kind| kind == "image");
+        entry.thinking = gateway_thinking(&model);
+        entry.price = gateway_price(&cost);
+        bind_family_capabilities(&mut entry, provider.family);
+        rows.push(entry);
+    }
+    Ok(rows)
+}
+
+/// The thinking levels a gateway model accepts.
+///
+/// A model without `reasoning` accepts none. For a reasoning model a level
+/// the `thinkingLevelMap` maps to `null` is unsupported and the others up to
+/// `high` are supported; `xhigh` and `max` are supported only when the map
+/// names them, since the reference decides those from the model family.
+fn gateway_thinking(model: &GatewayModel) -> ThinkingSupport {
+    if !model.reasoning {
+        return ThinkingSupport::OpenAi {
+            accepted: Vec::new(),
+            none_supported: true,
+        };
+    }
+    let map = model.thinking_level_map.as_ref();
+    let mapped = |name: &str| map.and_then(|levels| levels.get(name));
+    let default_on = |name: &str| !matches!(mapped(name), Some(None));
+    let named = |name: &str| matches!(mapped(name), Some(Some(_)));
+    let accepted = [
+        (ThinkingLevel::Minimal, default_on("minimal")),
+        (ThinkingLevel::Low, default_on("low")),
+        (ThinkingLevel::Medium, default_on("medium")),
+        (ThinkingLevel::High, default_on("high")),
+        (ThinkingLevel::Xhigh, named("xhigh")),
+        (ThinkingLevel::Max, named("max")),
+    ]
+    .into_iter()
+    .filter_map(|(level, supported)| supported.then_some(level))
+    .collect();
+    ThinkingSupport::OpenAi {
+        accepted,
+        none_supported: default_on("off"),
+    }
+}
+
+fn gateway_price(cost: &GatewayCost) -> Option<ModelPrice> {
+    let rates = [cost.input, cost.output, cost.cache_read, cost.cache_write];
+    if !rates.iter().all(|rate| rate.is_finite() && *rate >= 0.0) {
+        return None;
+    }
+    Some(ModelPrice {
+        input: cost.input,
+        cached_input: cost.cache_read,
+        output: cost.output,
+        reasoning: cost.output,
+        cache_write: Some(cost.cache_write),
+        tiers: Box::default(),
+    })
+}
+
+#[derive(Deserialize)]
+struct GatewayConfig {
+    /// Required by the reference sanitizer; the provider entry owns the endpoint.
+    #[serde(rename = "baseUrl")]
+    _base_url: String,
+    models: Vec<dal_core::RawJson>,
+}
+
+#[derive(Deserialize)]
+struct GatewayModel {
+    id: String,
+    name: String,
+    reasoning: bool,
+    #[serde(default, rename = "thinkingLevelMap")]
+    thinking_level_map: Option<std::collections::HashMap<String, Option<String>>>,
+    input: Vec<String>,
+    cost: RawJson,
+    #[serde(rename = "contextWindow")]
+    context_window: u64,
+    #[serde(rename = "maxTokens")]
+    max_tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct GatewayCost {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    output: f64,
+    #[serde(default, rename = "cacheRead")]
+    cache_read: f64,
+    #[serde(default, rename = "cacheWrite")]
+    cache_write: f64,
 }
 
 pub(crate) fn decode_anthropic_page(
