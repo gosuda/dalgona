@@ -1101,6 +1101,7 @@ fn exact_priced_model_and_missing_model_have_distinct_costs() {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: None,
+        premium_requests: None,
     };
     assert_eq!(usage.cost_usd(None, Some(&price)), Some(price.input));
     assert!(compiled_price("missing/model").is_none());
@@ -1119,6 +1120,7 @@ fn compiled_price_selects_request_wide_context_tier() {
         reasoning_tokens: None,
         cache_write_tokens: 0,
         cost_usd: None,
+        premium_requests: None,
     };
     assert_eq!(
         at_boundary.cost_usd(None, Some(&price)),

@@ -534,6 +534,7 @@ async fn scripted_usage_and_compaction_keep_their_typed_values() -> TestResult {
         output_tokens: 5,
         reasoning_tokens: Some(2),
         cache_write_tokens: 1,
+        premium_requests: None,
         cost_usd: Some(0.002),
     };
     let raw = RawJson::parse(r#"{"type":"summary","text":"keep raw"}"#)?;
