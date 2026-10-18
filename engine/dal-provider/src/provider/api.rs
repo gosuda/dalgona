@@ -129,7 +129,7 @@ impl Provider {
                 ),
             });
         }
-        if request_mod::is_azure_entry(&entry) {
+        if request_mod::is_azure_entry(&entry) || request_mod::is_copilot_entry(&entry) {
             azure::require_https(&entry.id, entry.transport)?;
         }
         // An entry that authenticates nothing admits the credential-less
@@ -612,7 +612,7 @@ impl Provider {
         // identity headers), and no remote compaction request is built for
         // either, so the plain `/responses/compact` call would reach the
         // wrong surface: history compacts locally instead.
-        if request_mod::is_azure_entry(&http.entry) {
+        if request_mod::is_azure_entry(&http.entry) || request_mod::is_copilot_entry(&http.entry) {
             return Ok(Some(CompactOutcome::Unsupported));
         }
         if http.entry.family == Family::Codex && !matches!(&http.credential, Credential::OAuth(_)) {

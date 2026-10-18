@@ -18,7 +18,7 @@ pub use def::{
     Completion, Device, Hook, KeySpec, OAuthSpec, PROVIDERS, ProviderDef, QueryValue, Redirect,
     find,
 };
-pub(crate) use def::{OPENAI, OPENAI_CODEX};
+pub(crate) use def::{GITHUB_COPILOT, OPENAI, OPENAI_CODEX};
 pub use set::{ProviderIdentity, ProviderSet};
 pub use shape::Shape;
 

@@ -241,6 +241,21 @@ async fn collect(mut stream: EventStream) -> Result<Vec<StreamEvent>, ProviderEr
     Ok(events)
 }
 
+async fn drain_stream(mut stream: EventStream) -> (Vec<StreamEvent>, Option<ProviderError>) {
+    let mut events = Vec::new();
+    let mut failure = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => events.push(event),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    (events, failure)
+}
+
 fn chat_reply() -> String {
     String::from(
         r#"data: {"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
@@ -268,6 +283,14 @@ fn stream_reply(body: String) -> Reply {
         status: 200,
         content_type: "text/event-stream",
         body: body.into_bytes(),
+    }
+}
+
+fn denied_reply() -> Reply {
+    Reply {
+        status: 403,
+        content_type: "text/plain",
+        body: Vec::from(b"denied".as_slice()),
     }
 }
 
@@ -1984,6 +2007,299 @@ async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -
 }
 
 #[tokio::test]
+async fn copilot_chat_denial_resends_with_the_fallback_identity() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) =
+        server("/v1", vec![denied_reply(), stream_reply(chat_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "github-copilot",
+                Family::Chat,
+                base,
+                Some("COPILOT_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("COPILOT_TEST_KEY", "test-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("github-copilot", Family::Chat, "gpt-test"))?;
+    let request = request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 2);
+    let first = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    let second = String::from_utf8_lossy(&captured[1]).to_ascii_lowercase();
+    assert!(first.starts_with("post /v1/chat/completions "), "{first}");
+    assert!(
+        first.contains("authorization: bearer test-token"),
+        "{first}"
+    );
+    assert!(
+        first.contains("copilot-integration-id: copilot-chat"),
+        "{first}"
+    );
+    assert!(first.contains("editor-version: copilot/1.0.82"), "{first}");
+    assert!(
+        second.contains("copilot-integration-id: copilot-developer-cli"),
+        "{second}"
+    );
+    Ok(())
+}
+
+fn resolved_with_premium(
+    provider: &str,
+    family: Family,
+    model: &str,
+    multiplier: Option<f64>,
+) -> ResolvedModel {
+    let mut resolved = resolved(provider, family, model);
+    resolved.entry.premium_multiplier = multiplier;
+    resolved
+}
+
+fn chat_reply_with_usage() -> String {
+    String::from(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\ndata: [DONE]\n\n",
+    )
+}
+
+#[tokio::test]
+async fn copilot_chat_stamps_observed_usage_with_the_entry_multiplier() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) =
+        server("/v1", vec![stream_reply(chat_reply_with_usage())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "github-copilot",
+                Family::Chat,
+                base,
+                Some("COPILOT_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("COPILOT_TEST_KEY", "test-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved_with_premium(
+        "github-copilot",
+        Family::Chat,
+        "gpt-test",
+        Some(2.5),
+    ))?;
+    let request = request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    let usage = events.iter().find_map(|event| match event {
+        StreamEvent::Usage { usage } => Some(usage),
+        _ => None,
+    });
+    let Some(usage) = usage else {
+        return Err(io::Error::other("copilot turn reported no usage").into());
+    };
+    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.cached_input_tokens, 2);
+    assert_eq!(usage.output_tokens, 4);
+    assert_eq!(usage.reasoning_tokens, Some(1));
+    assert_eq!(usage.premium_requests, Some(2.5));
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    server_task.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn copilot_chat_without_wire_usage_completes_with_premium_only_usage() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(chat_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "github-copilot",
+                Family::Chat,
+                base,
+                Some("COPILOT_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("COPILOT_TEST_KEY", "test-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("github-copilot", Family::Chat, "gpt-test"))?;
+    let request = request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    let usage = events.iter().find_map(|event| match event {
+        StreamEvent::Usage { usage } => Some(usage),
+        _ => None,
+    });
+    let Some(usage) = usage else {
+        return Err(io::Error::other("copilot turn reported no usage").into());
+    };
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.output_tokens, 0);
+    assert_eq!(usage.premium_requests, Some(1.0));
+    assert_eq!(usage.cost_usd, None);
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    server_task.abort_all();
+    Ok(())
+}
+
+fn copilot_test_provider(
+    base: String,
+    dir: &TestDir,
+) -> Result<(ProviderSet, Provider), ProviderError> {
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "github-copilot",
+                Family::Chat,
+                base,
+                Some("COPILOT_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("COPILOT_TEST_KEY", "test-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved_with_premium(
+        "github-copilot",
+        Family::Chat,
+        "gpt-test",
+        Some(2.5),
+    ))?;
+    Ok((set, provider))
+}
+
+#[tokio::test]
+async fn copilot_chat_cancelled_or_failed_never_gains_a_completed_count() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(chat_reply())]).await?;
+    let (_set, provider) = copilot_test_provider(base, &dir)?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]),
+            &[],
+            notice_sink(),
+            &cancel,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ProviderError::Transport { .. })),
+        "{result:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
+
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server(
+        "/v1",
+        vec![Reply {
+            status: 500,
+            content_type: "text/plain",
+            body: Vec::from(b"boom".as_slice()),
+        }],
+    )
+    .await?;
+    let (_set2, provider) = copilot_test_provider(base, &dir)?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Chat, "gpt-test", vec![user_text("Say hello.")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let (events, error) = drain_stream(stream).await;
+    assert!(
+        matches!(error, Some(ProviderError::Status { status: 500, .. })),
+        "a failed attempt must end in HTTP 500 status error: {error:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Usage { .. })),
+        "a failed attempt must never yield a completed usage count: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Stop { .. })),
+        "a failed attempt must never yield a stop event: {events:?}"
+    );
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    server_task.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
 async fn azure_chat_uses_deployment_and_api_version() -> TestResult {
     let dir = TestDir::new()?;
     let (base, mut server_task) = server("/v1", vec![stream_reply(chat_reply())]).await?;
@@ -2315,10 +2631,94 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
     Ok(())
 }
 
+#[test]
+fn azure_and_copilot_row_selectors_follow_the_documented_shape() {
+    let shaped = |id: &str, family: Family, auth: AuthStyle| ProviderEntry {
+        auth,
+        ..entry(
+            id,
+            family,
+            String::from("https://example.com/v1"),
+            None,
+            4,
+            Transport::Https,
+        )
+    };
+    let azure = shaped("azure-test", Family::Chat, AuthStyle::ApiKey);
+    assert!(super::request::is_azure_entry(&azure));
+    assert!(!super::request::is_copilot_entry(&azure));
+    let keyed = shaped("plain-test", Family::Chat, AuthStyle::Bearer);
+    assert!(!super::request::is_azure_entry(&keyed));
+    assert!(!super::request::is_copilot_entry(&keyed));
+    // The auth gate is family-scoped: another family keeps its own path
+    // whatever its auth style.
+    let other = shaped("other-test", Family::Mistral, AuthStyle::ApiKey);
+    assert!(!super::request::is_azure_entry(&other));
+
+    let copilot = shaped("github-copilot", Family::Chat, AuthStyle::Bearer);
+    assert!(super::request::is_copilot_entry(&copilot));
+    assert!(!super::request::is_azure_entry(&copilot));
+    let mut pinned = shaped("custom-copilot", Family::Responses, AuthStyle::Bearer);
+    pinned.settings.integration = Some("copilot-chat".into());
+    assert!(super::request::is_copilot_entry(&pinned));
+    let mut hosted = shaped("custom-copilot", Family::Anthropic, AuthStyle::Bearer);
+    hosted.base_url = String::from("https://api.githubcopilot.com").into_boxed_str();
+    assert!(super::request::is_copilot_entry(&hosted));
+}
+
 fn compact_request(model: &str) -> ModelRequest {
     let mut compact = request(Family::Responses, model, vec![user_text("Summarize.")]);
     compact.purpose = Purpose::Compact;
     compact
+}
+
+#[tokio::test]
+async fn azure_and_copilot_routed_entries_compact_locally_without_any_request() -> TestResult {
+    // The `openai` row's remote-compaction capability describes api.openai.com.
+    // Pointed at an Azure or Copilot surface it routes turns through that
+    // adapter, and neither offers the plain `/responses/compact` wire.
+    let shapes: [(&str, fn(&mut ProviderEntry)); 2] = [
+        ("openai", |entry| entry.auth = AuthStyle::ApiKey),
+        ("github-copilot-responses", |_| {}),
+    ];
+    for (id, shape) in shapes {
+        let dir = TestDir::new()?;
+        let (base, mut server_task) = server("/v1", vec![stream_reply(String::new())]).await?;
+        let mut routed = entry(
+            id,
+            Family::Responses,
+            base,
+            Some("ROUTED_KEY"),
+            1,
+            Transport::Https,
+        );
+        shape(&mut routed);
+        let set = ProviderSet::new(
+            &config(vec![routed], 0),
+            identity(),
+            EnvSnapshot::test(&[("ROUTED_KEY", "routed-secret")]),
+            dir.path(),
+            dir.path(),
+        )?;
+        let provider = set.provider(resolved(id, Family::Responses, "gpt-5.4"))?;
+        let outcome = provider
+            .compact(
+                SessionId::new_v7(),
+                &compact_request("gpt-5.4"),
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(outcome, Some(CompactOutcome::Unsupported), "{id}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+                .await
+                .is_err(),
+            "{id} compaction reached the wire"
+        );
+        server_task.abort_all();
+    }
+    Ok(())
 }
 
 #[tokio::test]

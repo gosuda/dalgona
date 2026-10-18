@@ -20,6 +20,7 @@ use crate::{
         anthropic::{AnthropicAuth, AnthropicRequest},
         azure::{self, AzureRequest, AzureSettings},
         codex::CodexRequest,
+        copilot::{self, CopilotKey, CopilotRequest, IdentityRetry, Integration},
         responses::ResponsesRequest,
     },
     http::{self, Exchange},
@@ -113,6 +114,9 @@ pub(crate) async fn stream_attempt(
             message: format!("provider {} is not configured", context.provider),
         })
     })?;
+    if is_copilot_entry(&slot.entry) {
+        return copilot_attempt(&context, &credential, &cancel, &owner, &slot.entry).await;
+    }
     if is_azure_entry(&slot.entry) {
         let parts = azure_parts(&context, &credential, &slot.entry, &owner.env)
             .map_err(AttemptFailure::Provider)?;
@@ -156,6 +160,31 @@ async fn send_parts(
         secrets,
         None,
     )))
+}
+
+/// Whether `entry` routes through the GitHub Copilot proxy.
+///
+/// The rule is the adapter's documented shape (three named providers, the
+/// explicit integration pin, or a Copilot-domain base); the catalog slice
+/// mirrors it verbatim for model listing.
+#[must_use]
+pub(crate) fn is_copilot_entry(entry: &ProviderEntry) -> bool {
+    matches!(
+        entry.id.as_ref(),
+        "github-copilot" | "github-copilot-responses" | "github-copilot-anthropic"
+    ) || entry.settings.integration.is_some()
+        || copilot_domain_base(&entry.base_url)
+}
+
+fn copilot_domain_base(base: &str) -> bool {
+    let Some(host) = url::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "githubcopilot.com" || host.ends_with(".githubcopilot.com")
 }
 
 /// Whether `entry` routes through Azure `OpenAI`: a Chat or Responses row
@@ -209,6 +238,277 @@ fn azure_parts(
         secrets,
         None,
     ))
+}
+
+/// The Copilot token an API-key credential carries; an OAuth sign-in is
+/// refused.
+fn parse_copilot_token(credential: &Credential, provider: &str) -> Result<String, AttemptFailure> {
+    match credential {
+        Credential::ApiKey { key } => Ok(key.expose().to_owned()),
+        Credential::OAuth(_) => Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!("{provider} needs an API key, not an OAuth sign-in"),
+        })),
+        Credential::None => Err(AttemptFailure::Provider(ProviderError::NoCredentials {
+            provider: provider.to_string(),
+        })),
+    }
+}
+
+struct CopilotSession<'a> {
+    context: &'a StreamContext,
+    credential: &'a Credential,
+    cancel: &'a CancellationToken,
+    owner: &'a Arc<ProviderSetInner>,
+    key: &'a CopilotKey,
+}
+
+impl CopilotSession<'_> {
+    async fn resend(
+        &self,
+        next: &Integration,
+        retry: &mut IdentityRetry,
+    ) -> Result<Option<EventStream>, AttemptFailure> {
+        if self.cancel.is_cancelled() {
+            retry.failed(&self.owner.copilot_identities);
+            return Ok(None);
+        }
+        let resent = copilot::build(&copilot_input(self.context, self.key, next))
+            .map_err(AttemptFailure::Provider)?;
+        let dispatch = copilot_dispatch(self.context, resent)?;
+        let CopilotDispatch {
+            family,
+            builder,
+            agent,
+            model,
+            prefix,
+            secret,
+        } = dispatch;
+        let Some(response) = send_stream_wire(family, builder, agent, self.cancel).await? else {
+            retry.failed(&self.owner.copilot_identities);
+            return Ok(None);
+        };
+        if !response.status().is_success() {
+            let Some(failure) = status_failure(
+                response,
+                self.context.family,
+                self.credential,
+                &[],
+                self.cancel,
+            )
+            .await?
+            else {
+                retry.failed(&self.owner.copilot_identities);
+                return Ok(None);
+            };
+            if let AttemptFailure::Response {
+                status,
+                code,
+                message,
+                ..
+            } = &failure
+                && let Some(mapped) =
+                    copilot::failure_error(self.context.family, *status, code.as_deref(), message)
+            {
+                retry.failed(&self.owner.copilot_identities);
+                return Err(AttemptFailure::Provider(mapped));
+            }
+            retry.failed(&self.owner.copilot_identities);
+            return Err(failure);
+        }
+        retry.succeeded(&self.owner.copilot_identities);
+        Ok(Some(copilot_decode(
+            self.context,
+            response,
+            family,
+            &model,
+            prefix.as_deref(),
+            secret,
+        )))
+    }
+}
+
+/// Runs one Copilot turn: the identity negotiation starts from the pin,
+/// the learned identity, or the account default, and a denial resends once
+/// with the fallback identity inside the same attempt.
+///
+/// Quota failures are terminal through the adapter classifier; the decoder
+/// stays the surface family's with replay bound to the catalog model.
+async fn copilot_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let token = parse_copilot_token(credential, &context.provider)?;
+    let key = CopilotKey::parse(&token);
+    let pinned = entry
+        .settings
+        .integration
+        .as_deref()
+        .and_then(Integration::pinned);
+    let mut retry =
+        IdentityRetry::begin(&owner.copilot_identities, &key, &context.base_url, pinned);
+    let wire = copilot::build(&copilot_input(context, &key, retry.integration()))
+        .map_err(AttemptFailure::Provider)?;
+    let dispatch = copilot_dispatch(context, wire)?;
+    let CopilotDispatch {
+        family,
+        builder,
+        agent,
+        model,
+        prefix,
+        secret,
+    } = dispatch;
+    let Some(response) = send_stream_wire(family, builder, agent, cancel).await? else {
+        retry.failed(&owner.copilot_identities);
+        return Ok(None);
+    };
+    if response.status().is_success() {
+        retry.succeeded(&owner.copilot_identities);
+        return Ok(Some(copilot_decode(
+            context,
+            response,
+            family,
+            &model,
+            prefix.as_deref(),
+            secret,
+        )));
+    }
+    let Some(failure) = status_failure(response, context.family, credential, &[], cancel).await?
+    else {
+        retry.failed(&owner.copilot_identities);
+        return Ok(None);
+    };
+    let AttemptFailure::Response {
+        status,
+        code,
+        message,
+        retry_after,
+    } = failure
+    else {
+        retry.failed(&owner.copilot_identities);
+        return Err(failure);
+    };
+    // An identity denial resends once with the fallback identity before any
+    // note or quota mapping runs: a quota code is never a denial, so the
+    // two never compete.
+    let surface = context.family;
+    let next = retry.denied(status, code.as_deref()).cloned();
+    let Some(next) = next else {
+        if let Some(mapped) = copilot::failure_error(surface, status, code.as_deref(), &message) {
+            retry.failed(&owner.copilot_identities);
+            return Err(AttemptFailure::Provider(mapped));
+        }
+        retry.failed(&owner.copilot_identities);
+        return Err(AttemptFailure::Response {
+            status,
+            code,
+            message,
+            retry_after,
+        });
+    };
+    let session = CopilotSession {
+        context,
+        credential,
+        cancel,
+        owner,
+        key: &key,
+    };
+    session.resend(&next, &mut retry).await
+}
+
+/// One lowered Copilot request ready to send, with the decode bindings its
+/// surface family needs.
+struct CopilotDispatch {
+    family: Family,
+    builder: reqwest::RequestBuilder,
+    agent: &'static str,
+    model: Box<str>,
+    prefix: Option<Box<str>>,
+    secret: Box<str>,
+}
+
+fn copilot_dispatch(
+    context: &StreamContext,
+    wire: copilot::CopilotWire,
+) -> Result<CopilotDispatch, AttemptFailure> {
+    let url = wire.endpoint().map_err(AttemptFailure::Provider)?;
+    let dispatch = CopilotDispatch {
+        family: wire.surface.family(),
+        agent: wire.user_agent,
+        model: wire.model.clone(),
+        prefix: wire.prefix.clone(),
+        secret: wire.secret.clone(),
+        builder: wire.into_request(&context.client, url),
+    };
+    Ok(dispatch)
+}
+
+/// Decodes one accepted Copilot response through its surface decoder with
+/// replay bound to the catalog model id.
+///
+/// The decode bindings travel as parts, not as the whole dispatch: the send
+/// already moved the builder out, and the builder is never cloned or rebuilt.
+fn copilot_decode(
+    context: &StreamContext,
+    response: reqwest::Response,
+    family: Family,
+    model: &str,
+    prefix: Option<&str>,
+    secret: Box<str>,
+) -> EventStream {
+    let premium = copilot::premium_requests(
+        copilot::initiator(&context.request),
+        context.entry.premium_multiplier,
+    );
+    let decoded = transport_mod::decode_response(
+        response,
+        family,
+        &context.provider,
+        model,
+        false,
+        prefix,
+        vec![secret],
+        None,
+    );
+    transport_mod::stamp_premium(decoded, premium)
+}
+
+fn copilot_input<'a>(
+    context: &'a StreamContext,
+    key: &'a CopilotKey,
+    integration: &'a Integration,
+) -> CopilotRequest<'a> {
+    CopilotRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        max_output: context.entry.max_output,
+        display_supported: context.entry.display_supported,
+        reasoning_summary: context.entry.supports_reasoning_summaries,
+        base_url: &context.base_url,
+        key,
+        integration,
+    }
+}
+
+async fn send_stream_wire(
+    family: Family,
+    builder: reqwest::RequestBuilder,
+    user_agent: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<reqwest::Response>, AttemptFailure> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(None),
+        result = http::send(
+            family,
+            builder,
+            user_agent,
+            Exchange::Stream,
+            tokio::time::sleep,
+        ) => result.map(Some).map_err(AttemptFailure::Provider),
+    }
 }
 
 /// A built streaming request with its user agent, redaction secrets, and the

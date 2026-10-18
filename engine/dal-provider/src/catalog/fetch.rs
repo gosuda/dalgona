@@ -16,15 +16,19 @@ use super::{
     CatalogEntry, CatalogFetch, CatalogSource, ModelFetch,
     cache::{CacheError, read_cache_async, write_cache_async},
     decode::{
-        apply_ollama_show, decode_anthropic_page, decode_codex_models, decode_devin_models,
-        decode_gemini_page, decode_mistral_models, decode_ollama_models, decode_openai_models,
-        decode_radius_models,
+        apply_ollama_show, decode_anthropic_page, decode_codex_models, decode_copilot_models,
+        decode_devin_models, decode_gemini_page, decode_mistral_models, decode_ollama_models,
+        decode_openai_models, decode_radius_models,
     },
 };
 use crate::{
     auth::credential::Credential,
     error::ProviderError,
     family::{
+        copilot::{
+            CopilotKey, GetWire, decode_endpoint, endpoint_discovery_request, models_request,
+            needs_endpoint_discovery,
+        },
         devin::{
             PATH_DISCOVERY,
             request::{UNARY_HEADERS, discovery_body},
@@ -36,6 +40,7 @@ use crate::{
         pi_messages::CONFIG_PATH as PI_MESSAGES_CONFIG_PATH,
     },
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
+    provider::ProviderEntry,
 };
 
 /// Fetches provider rows, atomically updates `models.json`, and falls back to
@@ -115,6 +120,9 @@ where
     S: Fn(Duration) -> D,
     D: Future<Output = ()>,
 {
+    if is_copilot_entry(fetch.provider) {
+        return fetch_copilot_models(fetch, sleep).await;
+    }
     match fetch.provider.family {
         Family::Chat | Family::Responses => {
             let url = http::endpoint(fetch.provider.family, &fetch.provider.base_url, "models")?;
@@ -561,6 +569,81 @@ where
     }
     let family = fetch.provider.family;
     let response = http::send(family, request.body(body), fetch.user_agent, exchange, sleep).await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ProviderError::Status {
+            family,
+            status: status.as_u16(),
+            message: String::new(),
+        });
+    }
+    http::read_body(family, response).await
+}
+
+fn is_copilot_entry(provider: &ProviderEntry) -> bool {
+    matches!(
+        provider.id.as_ref(),
+        "github-copilot" | "github-copilot-responses" | "github-copilot-anthropic"
+    ) || provider.settings.integration.is_some()
+        || is_copilot_domain(provider.base_url.as_ref())
+}
+
+fn is_copilot_domain(base: &str) -> bool {
+    let host = url::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    host.is_some_and(|host| host == "githubcopilot.com" || host.ends_with(".githubcopilot.com"))
+}
+
+pub(crate) async fn fetch_copilot_models<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let Credential::ApiKey { key } = fetch.credential else {
+        return Err(ProviderError::NoCredentials {
+            provider: fetch.provider.id.to_string(),
+        });
+    };
+    let mut key = CopilotKey::parse(key.expose());
+    if needs_endpoint_discovery(&fetch.provider.base_url, &key) {
+        let discovery = endpoint_discovery_request(&key)?;
+        let body = copilot_get(fetch, discovery, sleep).await?;
+        if let Some(endpoint) = decode_endpoint(&body) {
+            key = key.with_api_endpoint(&endpoint);
+        }
+    }
+    let wire = models_request(&fetch.provider.base_url, &key)?;
+    let body = copilot_get(fetch, wire, sleep).await?;
+    decode_copilot_models(fetch.provider, &body)
+}
+
+async fn copilot_get<S, D>(
+    fetch: &ModelFetch<'_>,
+    wire: GetWire,
+    sleep: &S,
+) -> Result<Vec<u8>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
+    let url = wire.endpoint()?;
+    let user_agent = wire.user_agent;
+    let request = wire.into_request(fetch.client, url);
+    let family = fetch.provider.family;
+    let response = http::send(
+        family,
+        request,
+        user_agent,
+        Exchange::Json {
+            total: NON_STREAM_TOTAL_TIMEOUT,
+        },
+        sleep,
+    )
+    .await?;
     let status = response.status();
     if !status.is_success() {
         return Err(ProviderError::Status {

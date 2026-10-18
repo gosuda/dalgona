@@ -11,8 +11,8 @@ use super::*;
 use super::{
     cache::{CacheError, read_cache_async, write_cache_async},
     decode::{
-        decode_anthropic_page, decode_codex_models, decode_devin_models, decode_mistral_models,
-        decode_ollama_models, decode_openai_models, decode_radius_models,
+        decode_anthropic_page, decode_codex_models, decode_copilot_models, decode_devin_models,
+        decode_mistral_models, decode_ollama_models, decode_openai_models, decode_radius_models,
     },
     prices::{PRICE_ROWS, PRICE_TIER_ROWS, TierRow, tier_rows_are_sorted_unique},
     resolve::capability_row,
@@ -2079,6 +2079,94 @@ async fn radius_fetch_with_a_malformed_body_falls_back_typed() {
     );
 }
 
+fn copilot_fixture() -> &'static [u8] {
+    br#"{"data":[
+        {"id":"gpt-4.1","name":"GPT-4.1","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384},"supports":{"tool_calls":true,"vision":true}}},
+        {"id":"claude-haiku-4.5","name":"Claude Haiku 4.5","capabilities":{"type":"chat","limits":{"max_context_window_tokens":200000,"max_output_tokens":8000},"supports":{"tool_calls":false,"vision":false}}},
+        {"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}},
+        {"id":42}
+    ]}"#
+}
+
+#[test]
+fn copilot_models_map_only_the_provider_surface() {
+    let chat = provider(
+        "github-copilot",
+        Family::Chat,
+        "https://api.githubcopilot.com",
+    );
+    let rows = decode_copilot_models(&chat, copilot_fixture()).expect("copilot rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["gpt-4.1"]
+    );
+    assert_eq!(rows[0].display.as_ref(), "GPT-4.1");
+    assert_eq!(rows[0].provider.as_ref(), "github-copilot");
+    assert_eq!(rows[0].context_window, Some(128_000));
+    assert_eq!(rows[0].max_output, Some(16_384));
+    assert!(rows[0].image_input);
+    assert_eq!(rows[0].tool_support, ToolSupport::Any);
+
+    let anthropic = provider(
+        "github-copilot-anthropic",
+        Family::Anthropic,
+        "https://api.githubcopilot.com",
+    );
+    let rows = decode_copilot_models(&anthropic, copilot_fixture()).expect("copilot rows decode");
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_ref()).collect::<Vec<_>>(),
+        ["claude-haiku-4.5"]
+    );
+    assert_eq!(rows[0].context_window, Some(200_000));
+    assert_eq!(rows[0].max_output, Some(8000));
+    assert!(!rows[0].image_input);
+    assert_eq!(rows[0].tool_support, ToolSupport::None);
+}
+
+#[tokio::test]
+async fn copilot_fetch_lists_account_models_with_cli_identity() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(listener, copilot_fixture().to_vec(), "application/json");
+    let provider = provider(
+        "github-copilot",
+        Family::Chat,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("gho_tok")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(
+        fetched
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_ref())
+            .collect::<Vec<_>>(),
+        ["gpt-4.1"]
+    );
+    assert_eq!(fetched.entries[0].provider.as_ref(), "github-copilot");
+    assert_eq!(fetched.entries[0].context_window, Some(128_000));
+    let (request_line, headers) = server.join().expect("serve the copilot body");
+    assert!(request_line.starts_with("GET /models "), "{request_line}");
+    assert_eq!(header(&headers, "authorization"), Some("Bearer gho_tok"));
+    assert!(header(&headers, "editor-version").is_some());
+}
+
 #[test]
 fn bedrock_typed_carries_anthropic_contract() {
     let made = provider(
@@ -2638,6 +2726,98 @@ async fn vertex_and_antigravity_list_no_models_and_say_why_while_typed_ids_resol
             .expect("the typed fallback serves the family");
         assert_eq!(resolved.entry.context_window, None, "{family:?}");
     }
+}
+
+fn copilot_billing_fixture() -> &'static [u8] {
+    br#"{"data":[
+        {"id":"priced-model","name":"Priced Model","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384},"supports":{"tool_calls":true,"vision":true}},"billing":{"multiplier":3,"token_prices":{"default":{"max_prompt_tokens":64000,"input_price":500,"output_price":2500,"cache_price":50}}}},
+        {"id":"no-cache-leg","name":"No Cache Leg","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384}},"billing":{"token_prices":{"default":{"max_prompt_tokens":64000,"input_price":100,"output_price":200}}}},
+        {"id":"bad-multiplier","name":"Bad Multiplier","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384}},"billing":{"multiplier":-2,"token_prices":{"default":{"max_prompt_tokens":64000,"input_price":100,"output_price":200,"cache_price":10}}}},
+        {"id":"bad-price","name":"Bad Price","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384}},"billing":{"token_prices":{"default":{"max_prompt_tokens":64000,"input_price":-5,"output_price":200,"cache_price":10}}}}
+    ]}"#
+}
+
+#[test]
+fn copilot_live_rows_retain_premium_multiplier_and_flat_price() {
+    let chat = provider(
+        "github-copilot",
+        Family::Chat,
+        "https://api.githubcopilot.com",
+    );
+    let rows =
+        decode_copilot_models(&chat, copilot_billing_fixture()).expect("copilot rows decode");
+    assert_eq!(rows.len(), 4);
+    let priced = &rows[0];
+    assert_eq!(priced.id.as_ref(), "priced-model");
+    assert_eq!(priced.premium_multiplier, Some(3.0));
+    let price = priced.price.as_ref().expect("complete live card is priced");
+    assert_eq!(price.input, 5.0);
+    assert_eq!(price.output, 25.0);
+    assert_eq!(price.cached_input, 0.5);
+    assert_eq!(price.cache_write, None);
+    assert_eq!(price.reasoning, 0.0);
+    assert!(price.tiers.is_empty());
+}
+
+#[test]
+fn copilot_live_rows_leave_unpriced_legs_unknown_and_reject_bad_rates() {
+    let chat = provider(
+        "github-copilot",
+        Family::Chat,
+        "https://api.githubcopilot.com",
+    );
+    let rows =
+        decode_copilot_models(&chat, copilot_billing_fixture()).expect("copilot rows decode");
+    assert_eq!(rows.len(), 4);
+    let bare = &rows[1];
+    assert_eq!(bare.premium_multiplier, None);
+    assert_eq!(
+        bare.price, None,
+        "a non-Haiku card missing its cache leg stays unpriced, never fabricated"
+    );
+
+    let multiplier = &rows[2];
+    assert_eq!(multiplier.premium_multiplier, None);
+    assert!(multiplier.price.is_some());
+
+    let unpriced = &rows[3];
+    assert_eq!(unpriced.premium_multiplier, None);
+    assert_eq!(unpriced.price, None);
+}
+
+fn copilot_haiku_fixture() -> &'static [u8] {
+    br#"{"data":[
+        {"id":"claude-haiku-5.5","name":"Claude Haiku 5.5","capabilities":{"type":"chat","limits":{"max_context_window_tokens":1000000,"max_output_tokens":64000,"max_prompt_tokens":936000},"supports":{"tool_calls":true,"vision":true}},"billing":{"multiplier":1,"token_prices":{"default":{"max_prompt_tokens":200000,"input_price":100,"output_price":300},"long_context":{"max_prompt_tokens":936000,"input_price":200,"output_price":400}}}}
+    ]}"#
+}
+
+#[test]
+fn haiku_cards_missing_wire_cache_legs_keep_pinned_overrides() {
+    let anthropic = provider(
+        "github-copilot-anthropic",
+        Family::Anthropic,
+        "https://api.githubcopilot.com",
+    );
+    let rows =
+        decode_copilot_models(&anthropic, copilot_haiku_fixture()).expect("haiku rows decode");
+    assert_eq!(rows.len(), 2);
+    let (base, sibling) = (&rows[0], &rows[1]);
+    assert_eq!(base.id.as_ref(), "claude-haiku-5.5");
+    assert_eq!(sibling.id.as_ref(), "claude-haiku-5.5-1m");
+    assert_eq!(base.premium_multiplier, Some(1.0));
+    assert_eq!(sibling.premium_multiplier, Some(1.0));
+    let base_price = base.price.as_ref().expect("haiku base is priced");
+    assert_eq!(base_price.input, 1.0);
+    assert_eq!(base_price.output, 3.0);
+    assert_eq!(base_price.cached_input, 0.01);
+    assert_eq!(base_price.cache_write, Some(0.125));
+    assert!(base_price.tiers.is_empty());
+    let long_price = sibling.price.as_ref().expect("haiku sibling is priced");
+    assert_eq!(long_price.input, 2.0);
+    assert_eq!(long_price.output, 4.0);
+    assert_eq!(long_price.cached_input, 0.05);
+    assert_eq!(long_price.cache_write, Some(0.625));
+    assert!(long_price.tiers.is_empty());
 }
 
 #[tokio::test]

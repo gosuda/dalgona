@@ -16,7 +16,7 @@ use crate::{
     },
     catalog::ResolvedModel,
     error::ProviderError,
-    family::azure,
+    family::{azure, copilot::IdentityCache},
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
     scripted::Script,
@@ -68,6 +68,9 @@ pub(super) struct ProviderSetInner {
     pub(super) refresher: Arc<Refresher>,
     pub(super) usage: HashMap<Box<str>, Arc<UsageChecker>>,
     pub(super) scripted: Option<Script>,
+    /// The one Copilot identity negotiation cache of this set; there is no
+    /// process-global instance.
+    pub(super) copilot_identities: IdentityCache,
 }
 
 pub(super) struct ProviderSlot {
@@ -215,6 +218,7 @@ impl ProviderSet {
                 refresher,
                 usage,
                 scripted,
+                copilot_identities: IdentityCache::default(),
             }),
         })
     }

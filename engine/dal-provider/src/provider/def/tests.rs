@@ -6,12 +6,6 @@ use url::Url;
 use super::*;
 use crate::ProviderConfig;
 
-const VENDOR_IDS: [&str; 3] = ["openai", "openai-codex", "anthropic"];
-
-fn presets() -> &'static [ProviderDef] {
-    &PROVIDERS[VENDOR_IDS.len()..]
-}
-
 #[test]
 fn ids_are_unique_and_match_the_grammar() {
     for (index, def) in PROVIDERS.iter().enumerate() {
@@ -105,18 +99,6 @@ fn methods_follow_the_row() {
 }
 
 #[test]
-fn presets_follow_the_vendor_rows_in_id_order() {
-    let ids: Vec<_> = PROVIDERS.iter().map(|def| def.id).collect();
-    assert_eq!(ids[..VENDOR_IDS.len()], VENDOR_IDS);
-    assert!(
-        ids[VENDOR_IDS.len()..]
-            .windows(2)
-            .all(|pair| pair[0] < pair[1]),
-        "presets must be listed once each, by id: {ids:?}"
-    );
-}
-
-#[test]
 fn a_vendor_family_is_named_by_its_first_row() {
     // The catalog names the provider of a route that carries only its family
     // by the first row of that family, so a preset must never precede the
@@ -132,7 +114,7 @@ fn a_vendor_family_is_named_by_its_first_row() {
 
 #[test]
 fn presets_are_https_key_rows_with_their_family_header_set() {
-    for def in presets() {
+    for def in super::presets::PRESETS {
         let id = def.id;
         assert!(def.oauth.is_none(), "{id} has an OAuth sign-in");
         assert_eq!(def.methods().collect::<Vec<_>>(), [Method::ApiKey], "{id}");

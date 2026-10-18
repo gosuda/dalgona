@@ -176,7 +176,8 @@ impl ProviderDef {
                 Method::Browser,
             ),
             (
-                self.oauth.is_some_and(|oauth| oauth.device.is_some()),
+                self.oauth.is_some_and(|oauth| oauth.device.is_some())
+                    || self.id == GITHUB_COPILOT.id,
                 Method::Device,
             ),
         ]
@@ -306,7 +307,22 @@ pub(crate) const OPENAI_CODEX: ProviderDef = ProviderDef {
     shape: Shape::Codex,
 };
 
-const VENDOR_ROWS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC];
+pub(crate) const GITHUB_COPILOT: ProviderDef = ProviderDef {
+    id: "github-copilot",
+    name: "GitHub Copilot",
+    family: Family::Chat,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://api.githubcopilot.com",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::Bearer,
+        env: &["COPILOT_GITHUB_TOKEN"],
+    }),
+    oauth: None,
+    shape: Shape::Plain,
+};
+
+const VENDOR_ROWS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC, GITHUB_COPILOT];
 const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
 
 /// The vendor rows, then the presets, joined at compile time.

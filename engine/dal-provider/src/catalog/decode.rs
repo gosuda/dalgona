@@ -16,6 +16,7 @@ use super::{
 use crate::{
     error::ProviderError,
     family::{
+        copilot::{CopilotModel, Price, Surface, decode_models},
         devin::decode::{DiscoveredModel, decode_discovery},
         ollama::{
             CLOUD_NUM_PREDICT_CAP, Deployment, OllamaShow, cloud_output_capped, decode_tags,
@@ -688,6 +689,59 @@ struct GatewayCost {
     cache_read: f64,
     #[serde(default, rename = "cacheWrite")]
     cache_write: f64,
+}
+
+pub(crate) fn decode_copilot_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let models = decode_models(bytes)?;
+    Ok(copilot_rows(provider, &models))
+}
+
+fn copilot_rows(provider: &ProviderEntry, models: &[CopilotModel]) -> Vec<CatalogEntry> {
+    let surface = Surface::of_family(provider.family);
+    models
+        .iter()
+        .filter(|model| Some(model.surface) == surface)
+        .map(|model| copilot_entry(provider, model))
+        .collect()
+}
+
+fn copilot_entry(provider: &ProviderEntry, model: &CopilotModel) -> CatalogEntry {
+    let mut entry = default_entry(provider, &sanitize_identifier(&model.id));
+    entry.display = sanitize_identifier(&model.name);
+    entry.context_window = model.context_window;
+    entry.max_output = model.max_output;
+    entry.image_input = model.image_input.unwrap_or(false);
+    if model.tool_calls == Some(false) {
+        entry.tool_support = ToolSupport::None;
+    }
+    entry.premium_multiplier = model
+        .premium_multiplier
+        .filter(|multiplier| multiplier.is_finite() && *multiplier >= 0.0);
+    entry.price = model.price.and_then(copilot_price);
+    bind_family_capabilities(&mut entry, provider.family);
+    entry
+}
+
+fn copilot_price(price: Price) -> Option<ModelPrice> {
+    if ![price.input, price.output, price.cache_read]
+        .iter()
+        .all(|rate| rate.is_finite() && *rate >= 0.0)
+    {
+        return None;
+    }
+    Some(ModelPrice {
+        input: price.input,
+        cached_input: price.cache_read,
+        output: price.output,
+        reasoning: 0.0,
+        cache_write: price
+            .cache_write
+            .filter(|rate| rate.is_finite() && *rate >= 0.0),
+        tiers: Box::default(),
+    })
 }
 
 pub(crate) fn decode_anthropic_page(

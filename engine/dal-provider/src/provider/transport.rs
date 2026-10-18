@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use dal_core::Family;
+use dal_core::{Family, Usage};
 use futures::{Stream, StreamExt, future::ready};
 use serde::Deserialize;
 use tokio::sync::OwnedSemaphorePermit;
@@ -337,6 +337,76 @@ pub(crate) async fn acquire_provider_permit(
                 }),
         }
     }
+}
+
+struct PremiumState {
+    stream: EventStream,
+    observed: bool,
+    pending_stop: Option<StreamEvent>,
+}
+
+fn stamped_usage(premium: f64, mut usage: Usage) -> StreamEvent {
+    usage.premium_requests = Some(premium);
+    StreamEvent::Usage { usage }
+}
+
+fn premium_only_usage(premium: f64) -> StreamEvent {
+    StreamEvent::Usage {
+        usage: Usage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(premium),
+            cost_usd: None,
+        },
+    }
+}
+
+/// Stamps the premium count of one completed Copilot attempt onto its stream.
+///
+/// Every observed usage carries the count. A successful stop without an
+/// observed usage gains a premium-only usage immediately before it. Errors
+/// and cuts pass through untouched, so failed or cancelled attempts never
+/// acquire a successful completed count.
+fn stamp_item(
+    mut state: PremiumState,
+    premium: f64,
+    next: Result<StreamEvent, ProviderError>,
+) -> (Result<StreamEvent, ProviderError>, PremiumState) {
+    match next {
+        Err(error) => (Err(error), state),
+        Ok(StreamEvent::Usage { usage }) => {
+            state.observed = true;
+            (Ok(stamped_usage(premium, usage)), state)
+        }
+        Ok(StreamEvent::Stop { reason }) if state.observed => {
+            (Ok(StreamEvent::Stop { reason }), state)
+        }
+        Ok(StreamEvent::Stop { reason }) => {
+            state.observed = true;
+            state.pending_stop = Some(StreamEvent::Stop { reason });
+            (Ok(premium_only_usage(premium)), state)
+        }
+        Ok(event) => (Ok(event), state),
+    }
+}
+
+pub(crate) fn stamp_premium(stream: EventStream, premium: f64) -> EventStream {
+    let state = PremiumState {
+        stream,
+        observed: false,
+        pending_stop: None,
+    };
+    let source = futures::stream::unfold(state, move |mut state| async move {
+        if let Some(stop) = state.pending_stop.take() {
+            return Some((Ok(stop), state));
+        }
+        let next = state.stream.next().await?;
+        Some(stamp_item(state, premium, next))
+    });
+    EventStream::new(source, || {})
 }
 
 pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> EventStream {
