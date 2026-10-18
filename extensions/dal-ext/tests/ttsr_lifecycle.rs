@@ -511,14 +511,6 @@ fn journal_has_before_turn(records: &[Record]) -> bool {
     })
 }
 
-/// How many user text parts of the `index`th captured request equal `text`.
-fn request_user_text_count(requests: &[Vec<String>], index: usize, text: &str) -> usize {
-    requests[index]
-        .iter()
-        .filter(|part| part.as_str() == text)
-        .count()
-}
-
 /// The exact reminder text the lane delivers: the built-in rule rendered
 /// with subject `reply`, byte for byte the texts module's projection.
 fn expected_reminder() -> String {
@@ -645,11 +637,6 @@ async fn lane_fire_uses_the_stream_fire_path_and_reaches_the_model() -> Outcome<
         &*seen.lock().map_err(|_| "lock")?,
         &[SIMILAR[2]],
     )?;
-    // The first request issued after the journal write carries the reminder
-    // text exactly once, as a user part.
-    {
-        let captured = requests.lock().map_err(|_| "lock poisoned")?;
-    }
 
     // Turn 5: the lane stays latched while the streak holds; no second fire.
     run_turn(&agent, &mut subscription, &seen, 5, "cinq").await?;
