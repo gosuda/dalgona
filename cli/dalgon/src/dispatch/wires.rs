@@ -111,19 +111,15 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     // A second signal still closes the host: `close_host` always runs the
     // close to completion and only abandons the quiet poll, so a durable
     // provider credential write is never detached. A later signal during the
-    // quiet wait wins; otherwise the drive's second signal decides the exit.
+    // quiet wait decides the exit status; the run's own failure is still
+    // reported.
     let closed = exit::Ladder::begin().close_host(host).await;
-    if let Some(code) = closed.skipped_by {
-        return ExitCode::from(code);
-    }
-    let result = match outcome {
-        Ok(result) => result,
-        Err(code) => return ExitCode::from(code),
+    let code = match outcome {
+        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
+        Ok(Err(error)) => wire_failure(wire, &error),
+        Err(code) => ExitCode::from(code),
     };
-    match result {
-        Ok(()) => exit::code(exit::ExitKind::Success),
-        Err(error) => wire_failure(wire, &error),
-    }
+    closed.skipped_by.map_or(code, ExitCode::from)
 }
 
 async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Product) -> ExitCode {
@@ -174,19 +170,15 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     // A second signal still closes the host: `close_host` always runs the
     // close to completion and only abandons the quiet poll, so a durable
     // provider credential write is never detached. A later signal during the
-    // quiet wait wins; otherwise the drive's second signal decides the exit.
+    // quiet wait decides the exit status; the run's own failure is still
+    // reported.
     let closed = exit::Ladder::begin().close_host(host).await;
-    if let Some(code) = closed.skipped_by {
-        return ExitCode::from(code);
-    }
-    let result = match outcome {
-        Ok(result) => result,
-        Err(code) => return ExitCode::from(code),
+    let code = match outcome {
+        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
+        Ok(Err(error)) => socket_failure(&path, &data_root, &error),
+        Err(code) => ExitCode::from(code),
     };
-    match result {
-        Ok(()) => exit::code(exit::ExitKind::Success),
-        Err(error) => socket_failure(&path, &data_root, &error),
-    }
+    closed.skipped_by.map_or(code, ExitCode::from)
 }
 
 fn socket_failure(path: &Path, data_root: &Path, error: &LocalSocketError) -> ExitCode {
