@@ -108,12 +108,17 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         }
     })
     .await;
-    // A second signal still closes the host: `close_host` always runs the
-    // close to completion and only abandons the quiet poll, so a durable
-    // provider credential write is never detached. A later signal during the
-    // quiet wait decides the exit status; the run's own failure is still
-    // reported.
-    let closed = exit::Ladder::begin().close_host(host).await;
+    // The host always closes, and the close always runs to completion: only
+    // the quiet poll is ever abandoned, so a durable provider credential write
+    // is never detached. A second signal already seen by `drive` skips the
+    // quiet wait; otherwise a later signal during it decides the exit status.
+    // The run's own failure is reported either way.
+    let ladder = exit::Ladder::begin();
+    let closed = if outcome.is_err() {
+        ladder.close_host_after_quiet_wait(host).await
+    } else {
+        ladder.close_host(host).await
+    };
     let code = match outcome {
         Ok(Ok(())) => exit::code(exit::ExitKind::Success),
         Ok(Err(error)) => wire_failure(wire, &error),
@@ -167,12 +172,17 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         }
     })
     .await;
-    // A second signal still closes the host: `close_host` always runs the
-    // close to completion and only abandons the quiet poll, so a durable
-    // provider credential write is never detached. A later signal during the
-    // quiet wait decides the exit status; the run's own failure is still
-    // reported.
-    let closed = exit::Ladder::begin().close_host(host).await;
+    // The host always closes, and the close always runs to completion: only
+    // the quiet poll is ever abandoned, so a durable provider credential write
+    // is never detached. A second signal already seen by `drive` skips the
+    // quiet wait; otherwise a later signal during it decides the exit status.
+    // The run's own failure is reported either way.
+    let ladder = exit::Ladder::begin();
+    let closed = if outcome.is_err() {
+        ladder.close_host_after_quiet_wait(host).await
+    } else {
+        ladder.close_host(host).await
+    };
     let code = match outcome {
         Ok(Ok(())) => exit::code(exit::ExitKind::Success),
         Ok(Err(error)) => socket_failure(&path, &data_root, &error),

@@ -179,12 +179,17 @@ pub(crate) async fn serve(
         stop: stop.clone(),
     };
     let outcome = run_server(&stop, run, &snapshot).await;
-    // A second signal still closes the host: `close_host` always runs the
-    // close to completion and only abandons the quiet poll, so a durable
-    // provider credential write is never detached. A later signal during the
-    // quiet wait decides the exit status; the run's own failure is still
-    // reported.
-    let closed = exit::Ladder::begin().close_host(closing).await;
+    // The host always closes, and the close always runs to completion: only
+    // the quiet poll is ever abandoned, so a durable provider credential write
+    // is never detached. A second signal already seen by `drive` skips the
+    // quiet wait; otherwise a later signal during it decides the exit status.
+    // The run's own failure is reported either way.
+    let ladder = exit::Ladder::begin();
+    let closed = if outcome.is_err() {
+        ladder.close_host_after_quiet_wait(closing).await
+    } else {
+        ladder.close_host(closing).await
+    };
     let code = match outcome {
         Ok(Ok(code)) => code,
         Ok(Err(error)) => serve_error(error),
