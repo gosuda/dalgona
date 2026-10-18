@@ -171,31 +171,14 @@ pub(crate) async fn serve(
     let stop = CancellationToken::new();
     let snapshot = edge::terminal_snapshot();
     let closing = host.clone();
-    // The stream locks live only as long as the server: the host close that
-    // follows must not hold up other threads that write diagnostics.
-    let outcome = {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        drive(
-            &stop,
-            serve::run(
-                serve::ServeRun {
-                    host,
-                    args: serve_args,
-                    config: serve_config,
-                    data_root,
-                    stop: stop.clone(),
-                },
-                &mut out,
-                &mut err,
-                snapshot.stderr_tty,
-                snapshot.stdout_tty,
-            ),
-        )
-        .await
+    let run = serve::ServeRun {
+        host,
+        args: serve_args,
+        config: serve_config,
+        data_root,
+        stop: stop.clone(),
     };
+    let outcome = run_server(&stop, run, &snapshot).await;
     // A second signal still closes the host: `close_host` always runs the
     // close to completion and only abandons the quiet poll, so a durable
     // provider credential write is never detached. A later signal during the
@@ -212,6 +195,31 @@ pub(crate) async fn serve(
         Ok(code) => code,
         Err(error) => serve_error(error),
     }
+}
+
+/// Runs the server under [`drive`]. The stream locks live only as long as the
+/// server: the host close that follows must not hold up other threads that
+/// write diagnostics.
+async fn run_server(
+    stop: &CancellationToken,
+    run: serve::ServeRun,
+    snapshot: &edge::TerminalSnapshot,
+) -> Result<Result<ExitCode, serve::ServeCommandError>, u8> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let stderr = std::io::stderr();
+    let mut err = stderr.lock();
+    drive(
+        stop,
+        serve::run(
+            run,
+            &mut out,
+            &mut err,
+            snapshot.stderr_tty,
+            snapshot.stdout_tty,
+        ),
+    )
+    .await
 }
 
 /// Writes the unconfigured-plugin diagnostic for `name`.
