@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
-use super::decode::{SERVER_DRAINING, cursor, host_update, protocol_error, session_update};
+use super::decode::{
+    SERVER_DRAINING, cursor, hinted_message, host_update, protocol_error, session_update,
+};
 use super::{RemoteEndpoint, RemoteHostUpdate, backoff};
 use crate::error::WireError;
 use crate::jsonrpc::{Id, Message, decode_jsonrpc, encode_jsonrpc};
@@ -601,10 +603,13 @@ impl Core {
                 self.reply(id, Err(protocol_error(error)));
                 Ok(())
             }
-            Message::Error { id, error } => Err(WireError::Protocol {
-                code: error.code,
-                message: format!("server rejected a frame (id {id:?}): {}", error.message),
-            }),
+            Message::Error { id, error } => {
+                let message = hinted_message(error.message, error.data.as_ref());
+                Err(WireError::Protocol {
+                    code: error.code,
+                    message: format!("server rejected a frame (id {id:?}): {message}"),
+                })
+            }
             Message::Notification { method, params } if method == "session/update" => {
                 self.on_session_update(&params)
             }
@@ -1636,6 +1641,88 @@ mod tests {
         )
         .await
         .expect("the host shed finishes");
+    }
+
+    /// A `data.hint` survives the remote error mapping instead of being
+    /// discarded where [`WireError::Protocol`] can carry it in `message`.
+    #[tokio::test]
+    async fn protocol_error_preserves_hint_in_message() {
+        use crate::jsonrpc::ErrorObject;
+
+        let with_hint = ErrorObject {
+            code: -32008,
+            message: "session held elsewhere".to_owned(),
+            data: Some(sonic_rs::json!({
+                "hint": "the session is open in another process; use --connect <addr> to reach it",
+            })),
+        };
+        let hint = with_hint
+            .data
+            .as_ref()
+            .and_then(|data| data.get("hint"))
+            .and_then(|hint| hint.as_str())
+            .expect("hint present")
+            .to_owned();
+        let error = super::super::decode::protocol_error(with_hint);
+        match error {
+            WireError::Protocol { code, message } => {
+                assert_eq!(code, -32008);
+                assert!(
+                    message.contains(&hint),
+                    "hint survives in message: {message}"
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+        let bare = ErrorObject {
+            code: -32002,
+            message: "missing".to_owned(),
+            data: None,
+        };
+        match super::super::decode::protocol_error(bare) {
+            WireError::Protocol { code, message } => {
+                assert_eq!(code, -32002);
+                assert_eq!(message, "missing");
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+        let contained = ErrorObject {
+            code: -32008,
+            message: "use --connect <addr> to reach it".to_owned(),
+            data: Some(sonic_rs::json!({"hint": "use --connect <addr>"})),
+        };
+        match super::super::decode::protocol_error(contained) {
+            WireError::Protocol { message, .. } => {
+                assert_eq!(
+                    message.matches("use --connect <addr>").count(),
+                    1,
+                    "an already-contained hint is not duplicated: {message}"
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+    }
+
+    /// Permanent upgrade denials stop the reconnect loop while transport loss
+    /// and draining stay retryable.
+    #[test]
+    fn permanent_auth_is_not_unavailable_while_transient_is() {
+        assert!(
+            !super::is_unavailable(&WireError::Auth),
+            "auth must surface instead of retrying forever"
+        );
+        assert!(super::is_unavailable(&WireError::Transport(
+            "lost".to_owned()
+        )));
+        assert!(super::is_unavailable(&WireError::Protocol {
+            code: super::super::decode::SERVER_DRAINING,
+            message: "draining".to_owned(),
+        }));
+        assert!(!super::is_unavailable(&WireError::Protocol {
+            code: -32008,
+            message: "held".to_owned(),
+        }));
+        assert!(!super::is_unavailable(&WireError::Frame));
     }
 
     /// A `401` upgrade denial over real loopback ends `reconnect` with `Auth`

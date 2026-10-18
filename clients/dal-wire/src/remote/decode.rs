@@ -15,11 +15,29 @@ use crate::jsonrpc::ErrorObject;
 /// work and closes its connections shortly after.
 pub(super) const SERVER_DRAINING: i32 = -32009;
 
-/// Maps a JSON-RPC error object to its wire error.
+/// Maps a JSON-RPC error object to its wire error, preserving its `data.hint`.
+///
+/// [`WireError::Protocol`] carries only `code` and `message`, so a string
+/// `data.hint` is folded into the message as `"<message> (<hint>)"`. An
+/// absent, non-string, empty, or already-contained hint leaves the message
+/// unchanged, so existing code matches keep working.
 pub(super) fn protocol_error(error: ErrorObject) -> WireError {
     WireError::Protocol {
         code: error.code,
-        message: error.message,
+        message: hinted_message(error.message, error.data.as_ref()),
+    }
+}
+
+/// Folds a string `data.hint` from an error's `data` into its message.
+pub(super) fn hinted_message(message: String, data: Option<&Value>) -> String {
+    match data
+        .and_then(|data| data.get("hint"))
+        .and_then(|hint| hint.as_str())
+    {
+        Some(hint) if !hint.is_empty() && !message.contains(hint) => {
+            format!("{message} ({hint})")
+        }
+        _ => message,
     }
 }
 
