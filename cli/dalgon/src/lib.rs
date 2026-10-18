@@ -177,20 +177,20 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     let product = match build_once(&factory, startup.data_root.clone(), &startup.config) {
         Ok(product) => product,
         Err(code) => {
-            flush_log(sink.as_ref());
+            flush_log(sink.as_ref(), exit::flush_budget());
             return code;
         }
     };
     let runtime = match tokio_runtime(&startup.vars, factory.binary) {
         Ok(runtime) => runtime,
         Err(code) => {
-            flush_log(sink.as_ref());
+            flush_log(sink.as_ref(), exit::flush_budget());
             return code;
         }
     };
     let code = runtime.block_on(run_command(factory, cli, startup, product));
-    runtime.shutdown_timeout(Duration::from_millis(500));
-    flush_log(sink.as_ref());
+    runtime.shutdown_timeout(exit::runtime_budget());
+    flush_log(sink.as_ref(), exit::flush_budget());
     code
 }
 
@@ -670,16 +670,17 @@ fn open_log_sink(level: Option<edge::LogLevel>, data_root: &Path) -> Option<log:
     }
 }
 
-/// Flushes the process log sink at shutdown, after the runtime has stopped.
+/// Flushes the process log sink at shutdown, after the runtime has stopped,
+/// waiting at most `budget`.
 ///
 /// The drop summary (`dropped <n> log lines`) is appended by the writer when
 /// the count is non-zero; a flush failure is reported on stderr but never
 /// changes the exit code.
-pub(crate) fn flush_log(sink: Option<&log::LogSink>) {
+pub(crate) fn flush_log(sink: Option<&log::LogSink>, budget: Duration) {
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) = sink.flush(log::FLUSH_DEADLINE) {
+    if let Err(error) = sink.flush(budget) {
         let _ = writeln!(
             std::io::stderr().lock(),
             "dalgon: the log did not finish flushing: {error}"
