@@ -220,33 +220,100 @@ pub(crate) fn isolate_wire_streams() -> io::Result<WireStreams> {
     })
 }
 
-/// Waits for one shutdown signal and returns its `128 + signo` exit code.
+/// The process shutdown signals, registered once and awaited repeatedly.
 ///
-/// POSIX watches SIGINT, SIGTERM, and SIGHUP; other platforms watch the
-/// console break event. A signal whose registration fails is skipped.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "process edge: the process edge owns its shutdown signal"
-)]
-pub(crate) async fn shutdown_signal() -> u8 {
-    #[cfg(unix)]
-    {
+/// POSIX watches SIGINT (130), SIGTERM (143), and SIGHUP (129). Windows
+/// watches the console Ctrl+C event (130) and the console close event (129,
+/// the terminal-hangup status). A signal whose registration fails logs one
+/// warning and is skipped: it never fires. A holder keeps one registration
+/// for its whole wait, so a second signal cannot fall into the gap between
+/// two registrations. Create it inside the runtime.
+#[cfg(unix)]
+pub(crate) struct ShutdownSignals {
+    interrupt: Option<tokio::signal::unix::Signal>,
+    terminate: Option<tokio::signal::unix::Signal>,
+    hangup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    pub(crate) fn register() -> Self {
         use tokio::signal::unix::SignalKind;
-        let mut terminate = register_signal(SignalKind::terminate(), "SIGTERM");
-        let mut hangup = register_signal(SignalKind::hangup(), "SIGHUP");
-        tokio::select! {
-            biased;
-            _ = tokio::signal::ctrl_c() => 130,
-            () = wait_for_signal(&mut terminate) => 143,
-            () = wait_for_signal(&mut hangup) => 129,
+        Self {
+            interrupt: register_signal(SignalKind::interrupt(), "SIGINT"),
+            terminate: register_signal(SignalKind::terminate(), "SIGTERM"),
+            hangup: register_signal(SignalKind::hangup(), "SIGHUP"),
         }
     }
-    #[cfg(not(unix))]
-    {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            log_signal_failure("CTRL_C_EVENT", &error);
+
+    /// Waits for the next shutdown signal and returns its `128 + signo`
+    /// exit status.
+    pub(crate) async fn next(&mut self) -> u8 {
+        tokio::select! {
+            biased;
+            () = wait_for_signal(&mut self.interrupt) => 130,
+            () = wait_for_signal(&mut self.terminate) => 143,
+            () = wait_for_signal(&mut self.hangup) => 129,
         }
-        130
+    }
+}
+
+/// The process shutdown signals, registered once and awaited repeatedly.
+///
+/// See the POSIX variant: Windows watches Ctrl+C (130) and the console close
+/// event (129).
+#[cfg(windows)]
+pub(crate) struct ShutdownSignals {
+    interrupt: Option<tokio::signal::windows::CtrlC>,
+    close: Option<tokio::signal::windows::CtrlClose>,
+}
+
+#[cfg(windows)]
+impl ShutdownSignals {
+    pub(crate) fn register() -> Self {
+        Self {
+            interrupt: registered(tokio::signal::windows::ctrl_c(), "CTRL_C_EVENT"),
+            close: registered(tokio::signal::windows::ctrl_close(), "CTRL_CLOSE_EVENT"),
+        }
+    }
+
+    /// Waits for the next shutdown event and returns its `128 + signo`
+    /// exit status.
+    pub(crate) async fn next(&mut self) -> u8 {
+        tokio::select! {
+            biased;
+            () = wait_for_ctrl_c(&mut self.interrupt) => 130,
+            () = wait_for_ctrl_close(&mut self.close) => 129,
+        }
+    }
+}
+
+/// Keeps a registered Windows console event; a failure logs one warning and
+/// skips that event.
+#[cfg(windows)]
+fn registered<T>(result: io::Result<T>, name: &str) -> Option<T> {
+    result
+        .map_err(|error| log_signal_failure(name, &error))
+        .ok()
+}
+
+#[cfg(windows)]
+async fn wait_for_ctrl_c(event: &mut Option<tokio::signal::windows::CtrlC>) {
+    match event {
+        Some(event) => {
+            event.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_ctrl_close(event: &mut Option<tokio::signal::windows::CtrlClose>) {
+    match event {
+        Some(event) => {
+            event.recv().await;
+        }
+        None => std::future::pending().await,
     }
 }
 

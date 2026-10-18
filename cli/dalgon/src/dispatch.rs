@@ -57,12 +57,13 @@ where
     Fut: Future,
 {
     tokio::pin!(future);
+    let mut signals = edge::ShutdownSignals::register();
     let mut signalled = false;
     loop {
         tokio::select! {
             biased;
             done = &mut future => return Ok(done),
-            code = edge::shutdown_signal() => {
+            code = signals.next() => {
                 if signalled {
                     return Err(code);
                 }
