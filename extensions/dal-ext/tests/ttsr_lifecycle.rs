@@ -588,7 +588,10 @@ fn assert_lane_fires(
         let excerpt = field("excerpt")?;
         assert!(!excerpt.is_empty(), "the fire carries a reply excerpt");
         let matched = expected_fires.iter().any(|reply| reply.ends_with(&excerpt));
-        assert!(matched, "the excerpt is a suffix of no firing reply: {excerpt:?}");
+        assert!(
+            matched,
+            "the excerpt is a suffix of no firing reply: {excerpt:?}"
+        );
         let entry: u64 = body
             .get("entry")
             .map(dal_core::RawJson::decode_as)
@@ -1005,14 +1008,12 @@ async fn cancelled_turn_retains_the_fire_until_the_next_one() -> Outcome<()> {
     {
         let captured = requests.lock().map_err(|_| "lock poisoned")?;
         assert_eq!(
-            captured
-                .get(3)
-                .map_or(0, |request| {
-                    request
-                        .iter()
-                        .filter(|part| part.as_str() == expected_reminder())
-                        .count()
-                }),
+            captured.get(3).map_or(0, |request| {
+                request
+                    .iter()
+                    .filter(|part| part.as_str() == expected_reminder())
+                    .count()
+            }),
             0,
             "the cancelled turn's request never carried the text"
         );

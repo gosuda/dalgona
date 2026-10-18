@@ -75,9 +75,8 @@ pub fn resolve_route(
     // error; the prefix already disambiguated the owner at parse time.
     // Families without a canonical owner and dual-owned families without
     // one never retry: the bare error stands.
-    let owner = single_family_owner(catalog, *family).or_else(|| {
-        canonical_family_owner(catalog, *family)
-    });
+    let owner =
+        single_family_owner(catalog, *family).or_else(|| canonical_family_owner(catalog, *family));
     let Some(owner) = owner else {
         return bare;
     };
@@ -163,9 +162,7 @@ fn canonical_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
     catalog
         .providers
         .iter()
-        .find(|(candidate, _)| {
-            candidate.id.as_ref() == owner && candidate.family == owner_family
-        })
+        .find(|(candidate, _)| candidate.id.as_ref() == owner && candidate.family == owner_family)
         .map(|(provider, _)| provider.id.as_ref())
 }
 
