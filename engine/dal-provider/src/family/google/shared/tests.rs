@@ -1856,52 +1856,59 @@ async fn loopback_antigravity_posts_the_cca_envelope() {
     );
 }
 
-#[tokio::test]
-async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
-    use crate::{
-        auth::credential::{Credential, OAuthCredential},
-        lifecycle,
-        stream::EventStream,
-    };
-    use tokio_util::sync::CancellationToken;
-
-    // The first response is the empty-STOP failure; the second carries the
-    // answer. The decoder errors before delivering anything, so the
-    // lifecycle's pre-delivery retry re-requests and the consumer only ever
-    // sees the second response.
-    let empty =
-        sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]);
-    let answer = sse(&[
-        r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
-    ]);
+async fn serve_pair(
+    first: Vec<u8>,
+    second: Vec<u8>,
+) -> (String, Seen, tokio::task::JoinSet<std::io::Result<()>>) {
     let listener = LoopbackListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen: Seen = Arc::default();
     let mut server = tokio::task::JoinSet::new();
     server.spawn(serve_script(
         listener,
-        vec![(200, empty), (200, answer)],
+        vec![(200, first), (200, second)],
         Arc::clone(&seen),
     ));
+    (base, seen, server)
+}
 
-    let request = loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro");
-    let thinking = plan(Some("high"));
-    let client = crate::http::build_client();
-    let attempt = move |_: &Credential, _: &CancellationToken| {
+type AttemptFuture = std::pin::Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Option<crate::stream::EventStream>,
+                    crate::lifecycle::AttemptFailure,
+                >,
+            > + Send,
+    >,
+>;
+
+fn gemini_attempt(
+    request: ModelRequest,
+    thinking: ThinkingPlan,
+    client: reqwest::Client,
+    base: String,
+) -> impl FnMut(
+    &crate::auth::credential::Credential,
+    &tokio_util::sync::CancellationToken,
+) -> AttemptFuture
++ Send
++ 'static {
+    move |_: &crate::auth::credential::Credential, _: &tokio_util::sync::CancellationToken| {
         let (request, thinking, client, base) = (
             request.clone(),
             thinking.clone(),
             client.clone(),
             base.clone(),
         );
-        async move {
+        Box::pin(async move {
             let wire = gemini::build(&gemini::GeminiRequest {
                 request: &request,
                 thinking: &thinking,
                 api_key: "secret-key",
                 image_input: true,
             })
-            .map_err(lifecycle::AttemptFailure::Provider)?;
+            .map_err(crate::lifecycle::AttemptFailure::Provider)?;
             let response = send(
                 Family::GoogleGenerativeAi,
                 &client,
@@ -1910,7 +1917,7 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
                 "dalgon/test",
             )
             .await
-            .map_err(lifecycle::AttemptFailure::Provider)?;
+            .map_err(crate::lifecycle::AttemptFailure::Provider)?;
             let chunks = response
                 .bytes_stream()
                 .map(|chunk| chunk.expect("loopback chunk").to_vec());
@@ -1921,9 +1928,37 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
                 crate::sse::decode_stream(chunks),
                 None,
             );
-            Ok(Some(EventStream::new(events, || {})))
-        }
+            Ok(Some(crate::stream::EventStream::new(events, || {})))
+        })
+    }
+}
+
+#[tokio::test]
+async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
+    use crate::{
+        auth::credential::{Credential, OAuthCredential},
+        lifecycle,
     };
+    use tokio_util::sync::CancellationToken;
+
+    // The first response is the empty-STOP failure; the second carries the
+    // answer. The decoder errors before delivering anything, so the
+    // lifecycle's pre-delivery retry re-requests and the consumer only ever
+    // sees the second response.
+    let (base, seen, mut server) = serve_pair(
+        sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]),
+        sse(&[
+            r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
+        ]),
+    )
+    .await;
+
+    let attempt = gemini_attempt(
+        loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro"),
+        plan(Some("high")),
+        crate::http::build_client(),
+        base,
+    );
     let refresh = |_: OAuthCredential| async {
         Err::<Credential, _>(ProviderError::NoCredentials {
             provider: String::from("google"),
@@ -1948,10 +1983,10 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
         .await
         .expect("server completes")
         .expect("serve ok")
-        .unwrap();
+        .expect("serve script");
 
     assert_eq!(
-        seen.lock().unwrap().len(),
+        seen.lock().expect("server records").len(),
         2,
         "the empty response was re-requested"
     );
