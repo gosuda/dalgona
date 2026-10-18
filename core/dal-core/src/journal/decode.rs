@@ -352,7 +352,48 @@ pub(super) fn usage_member(member: &Member<'_>) -> Result<Option<Usage>, DecodeE
         reasoning_tokens: reasoning,
         cache_write_tokens: cache_write,
         cost_usd,
+        premium_requests: None,
     }))
+}
+
+pub(super) fn opt_premium_requests_member(
+    members: &mut Members<'_>,
+) -> Result<Option<f64>, DecodeError> {
+    let Some(member) = want(members, "premium_requests") else {
+        return Ok(None);
+    };
+    let (offset, raw) = (member.offset, member.value);
+    let value: f64 =
+        sonic_rs::from_slice(raw.as_bytes()).map_err(|error| invalid(offset, error.to_string()))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(invalid(
+            offset,
+            "member `premium_requests` must be a finite nonnegative number",
+        ));
+    }
+    Ok(Some(value))
+}
+
+pub(super) fn usage_with_premium(members: &mut Members<'_>) -> Result<Usage, DecodeError> {
+    let mut usage = usage_member(&need(members, "usage")?)?
+        .ok_or_else(|| invalid(0, "member `usage` must be an object"))?;
+    usage.premium_requests = opt_premium_requests_member(members)?;
+    Ok(usage)
+}
+
+pub(super) fn opt_usage_with_premium(
+    members: &mut Members<'_>,
+) -> Result<Option<Usage>, DecodeError> {
+    let usage = usage_member(&need(members, "usage")?)?;
+    let premium = opt_premium_requests_member(members)?;
+    match (usage, premium) {
+        (Some(mut usage), premium) => {
+            usage.premium_requests = premium;
+            Ok(Some(usage))
+        }
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(invalid(0, "member `premium_requests` needs `usage`")),
+    }
 }
 
 pub(super) fn owner_member(member: &Member<'_>) -> Result<Owner, DecodeError> {

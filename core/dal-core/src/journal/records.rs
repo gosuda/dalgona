@@ -306,6 +306,15 @@ pub enum EncodeError {
     /// lie that no cost was reported.
     #[error("cannot encode a non-finite, negative, or out-of-range cost")]
     InvalidCost,
+    /// A reported premium is non-finite or negative.
+    ///
+    /// [`Usage::premium_requests`] holds the provider-reported premium
+    /// requests consumed; the journal stores the measurement as an
+    /// optional floating-point count. A non-finite or negative premium
+    /// has no valid representation, and writing `null` would lie that
+    /// no premium was reported.
+    #[error("cannot encode a non-finite or negative premium")]
+    InvalidPremium,
     /// A tree record's variant does not match its entry kind.
     ///
     /// `Record::User` must carry `EntryKind::User`, and so on; a mismatch

@@ -208,6 +208,16 @@ pub(super) fn micro_cost(usage: &Usage) -> Result<Option<u64>, EncodeError> {
     Ok(Some(micros as u64))
 }
 
+pub(super) fn checked_premium(usage: &Usage) -> Result<Option<f64>, EncodeError> {
+    let Some(premium) = usage.premium_requests else {
+        return Ok(None);
+    };
+    if !premium.is_finite() || premium < 0.0 {
+        return Err(EncodeError::InvalidPremium);
+    }
+    Ok(Some(premium))
+}
+
 impl Serialize for UsageWire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]

@@ -454,6 +454,7 @@ mod tests {
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
                     cost_usd: None,
+                    premium_requests: None,
                 },
                 context_tokens: 17,
                 context_window: 128_000,

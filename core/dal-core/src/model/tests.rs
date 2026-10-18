@@ -9,6 +9,7 @@ fn priced_usage() -> Usage {
         output_tokens: 1_000_000,
         reasoning_tokens: Some(500_000),
         cache_write_tokens: 100_000,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -98,6 +99,7 @@ fn usage_price_formula_does_not_double_count_cached_or_reasoning_tokens() {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     };
     assert_eq!(zero.cost_usd(None, None), None);
@@ -119,6 +121,7 @@ fn uniform_rate_is_independent_of_cached_split() {
                     output_tokens: u64::from(output),
                     reasoning_tokens: Some(7),
                     cache_write_tokens: 0,
+                    premium_requests: None,
                     cost_usd: None,
                 };
                 assert_eq!(
@@ -128,6 +131,52 @@ fn uniform_rate_is_independent_of_cached_split() {
             }
         }
     }
+}
+
+#[test]
+fn premium_only_usage_is_unreported_but_prices_unknown() {
+    let priced = price(1.0, 0.5, 2.0, 0.25);
+    for premium in [0.0, 2.5] {
+        let usage = Usage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(premium),
+            cost_usd: None,
+        };
+        assert!(usage.is_unreported());
+        assert_eq!(priced.cost_usd(&usage), None);
+        assert_eq!(usage.cost_usd(Some(&priced), None), None);
+    }
+    let reported = Usage {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        premium_requests: Some(2.5),
+        cost_usd: Some(7.25),
+    };
+    assert_eq!(reported.cost_usd(Some(&priced), None), Some(7.25));
+}
+
+#[test]
+fn premium_requests_defaults_when_absent_and_roundtrips_when_present() -> TestResult {
+    let unmeasured = priced_usage();
+    let encoded = sonic_rs::to_string(&unmeasured)?;
+    assert!(!encoded.contains("premium_requests"));
+    assert_eq!(sonic_rs::from_str::<Usage>(&encoded)?, unmeasured);
+    let legacy = r#"{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}"#;
+    assert_eq!(sonic_rs::from_str::<Usage>(legacy)?.premium_requests, None);
+    let measured = Usage {
+        premium_requests: Some(2.5),
+        ..unmeasured
+    };
+    let encoded = sonic_rs::to_string(&measured)?;
+    assert_eq!(sonic_rs::from_str::<Usage>(&encoded)?, measured);
+    Ok(())
 }
 
 #[test]

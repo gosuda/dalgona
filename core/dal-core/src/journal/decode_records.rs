@@ -1,8 +1,8 @@
 use super::decode::{
     blocks_member, bool_member, entry_id_member, i32_member, invalid, is_null, json_member,
     model_id_member, model_route_members, need, object_members, opt_entry_id_member,
-    opt_raw_json_member, opt_text_member, owner_member, parts_member, purpose_member,
-    raw_json_member, text_member, u64_member, usage_member, want,
+    opt_raw_json_member, opt_text_member, opt_usage_with_premium, owner_member, parts_member,
+    purpose_member, raw_json_member, text_member, u64_member, usage_with_premium, want,
 };
 use super::scan::{Member, Members};
 use super::{
@@ -538,7 +538,7 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                 at: json_member(&need(members, "at")?)?,
                 turn: json_member(&need(members, "turn")?)?,
                 stop: turn_end_stop_member(&need(members, "stop")?)?,
-                usage: usage_member(&need(members, "usage")?)?,
+                usage: opt_usage_with_premium(members)?,
                 changes: json_member(&need(members, "changes")?)?,
             }),
             "rule_fired" => Ok(Record::RuleFired {
@@ -671,8 +671,7 @@ fn decode_effects(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                 at: json_member(&need(members, "at")?)?,
                 who: owner_member(&need(members, "who")?)?,
                 purpose: purpose_member(&need(members, "purpose")?)?,
-                usage: usage_member(&need(members, "usage")?)?
-                    .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
+                usage: usage_with_premium(members)?,
             }),
             _ => unreachable!("the tag filter above admits only this group's kinds"),
         }
@@ -697,8 +696,7 @@ pub(super) fn decode_entry_kind(
                 api: json_member(&need(members, "api")?)?,
                 model,
                 content: blocks_member(&need(members, "content")?)?,
-                usage: usage_member(&need(members, "usage")?)?
-                    .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
+                usage: usage_with_premium(members)?,
                 stop: assistant_stop_member(&need(members, "stop")?)?,
                 route,
                 replay: want(members, "replay")
@@ -738,7 +736,7 @@ pub(super) fn decode_entry_kind(
             first_kept: opt_entry_id_member(&need(members, "first_kept")?, "first_kept")?,
             tokens_before: u64_member(&need(members, "tokens_before")?, "tokens_before")?,
             replay: opt_raw_json_member(&need(members, "replay")?, "replay")?,
-            usage: usage_member(&need(members, "usage")?)?,
+            usage: opt_usage_with_premium(members)?,
             parts: want(members, "parts")
                 .map(|member| parts_member(&member))
                 .transpose()?

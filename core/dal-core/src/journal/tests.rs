@@ -81,6 +81,7 @@ fn assistant_entry(model: &str, route: Option<AssistantRoute>) -> Entry {
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
             route,
@@ -423,6 +424,7 @@ fn turn_end_with_cost(cost_usd: f64) -> Record {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: Some(cost_usd),
+            premium_requests: None,
         }),
         changes: Vec::new(),
     }
@@ -1062,6 +1064,7 @@ fn invalid_cost_is_rejected_not_nulled() -> Result<(), Box<dyn std::error::Error
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: Some(f64::NAN),
+            premium_requests: None,
         }),
         changes: Vec::new(),
     };
@@ -1432,6 +1435,7 @@ fn assistant_with_replay(content: Vec<Block>, replay: Option<RawJson>) -> Record
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
             route: None,
@@ -1500,6 +1504,7 @@ fn present_replay_payloads_survive_byte_for_byte() -> Result<(), Box<dyn std::er
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
             route: None,
@@ -1612,4 +1617,223 @@ fn tool_call_without_replay_writes_no_replay_member() -> Result<(), Box<dyn std:
         }
     );
     Ok(())
+}
+fn usage_with_premium(premium_requests: Option<f64>) -> Usage {
+    Usage {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        cost_usd: None,
+        premium_requests,
+    }
+}
+
+fn premium_fixture_at() -> jiff::Timestamp {
+    "2026-09-25T10:16:02.000Z"
+        .parse()
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+}
+
+fn assistant_with_premium(premium_requests: Option<f64>) -> Record {
+    let mut entry = assistant_entry("m", None);
+    if let EntryKind::Assistant { usage, .. } = &mut entry.kind {
+        usage.premium_requests = premium_requests;
+    }
+    Record::Assistant(entry)
+}
+
+fn inferred_with_premium(premium_requests: Option<f64>) -> Record {
+    Record::Inferred {
+        at: premium_fixture_at(),
+        who: Owner::Core,
+        purpose: InferredPurpose::Synthetic {
+            id: "dalgona/fusion".into(),
+        },
+        usage: usage_with_premium(premium_requests),
+    }
+}
+
+fn compaction_entry(usage: Option<Usage>) -> Record {
+    Record::Compaction(Entry {
+        id: EntryId::new(nz(58)),
+        parent: Some(EntryId::new(nz(57))),
+        at: premium_fixture_at(),
+        kind: EntryKind::Compaction {
+            summary: None,
+            first_kept: None,
+            tokens_before: 1,
+            replay: None,
+            usage,
+            parts: Vec::new(),
+            parts_tokens: 0,
+        },
+    })
+}
+
+fn compaction_with_premium(premium_requests: Option<f64>) -> Record {
+    compaction_entry(Some(usage_with_premium(premium_requests)))
+}
+
+fn compaction_without_usage() -> Record {
+    compaction_entry(None)
+}
+
+fn turn_end_with_premium(premium_requests: Option<f64>) -> Record {
+    Record::TurnEnd {
+        at: premium_fixture_at(),
+        turn: TurnId::new(nz(1)),
+        stop: TurnEndStop::Done,
+        usage: Some(usage_with_premium(premium_requests)),
+        changes: Vec::new(),
+    }
+}
+
+fn decoded_premium(line: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    Ok(match decode(line.as_bytes())?.record {
+        Record::Assistant(entry) => match entry.kind {
+            EntryKind::Assistant { usage, .. } => usage.premium_requests,
+            _ => return Err("expected an assistant entry".into()),
+        },
+        Record::Inferred { usage, .. } => usage.premium_requests,
+        Record::Compaction(entry) => match entry.kind {
+            EntryKind::Compaction { usage, .. } => usage.and_then(|inner| inner.premium_requests),
+            _ => return Err("expected a compaction entry".into()),
+        },
+        Record::TurnEnd { usage, .. } => usage.and_then(|inner| inner.premium_requests),
+        _ => return Err("expected a usage record".into()),
+    })
+}
+
+#[test]
+fn premium_requests_round_trip_each_record_family() -> Result<(), Box<dyn std::error::Error>> {
+    for record in [
+        assistant_with_premium(Some(2.5)),
+        inferred_with_premium(Some(2.5)),
+        compaction_with_premium(Some(2.5)),
+        turn_end_with_premium(Some(2.5)),
+    ] {
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(line.contains("\"premium_requests\":2.5"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_none_preserves_legacy_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    for record in [
+        assistant_with_premium(None),
+        inferred_with_premium(None),
+        compaction_with_premium(None),
+        compaction_without_usage(),
+        turn_end_with_premium(None),
+    ] {
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(!line.contains("premium_requests"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_absent_decodes_to_none() -> Result<(), Box<dyn std::error::Error>> {
+    for line in [
+        assistant_line("m", None),
+        "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-25T10:16:02.000Z\",\"who\":\"core\",\"purpose\":{\"synthetic\":{\"id\":\"dalgona/fusion\"}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}\n".to_string(),
+        "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}\n".to_string(),
+        "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":null}\n".to_string(),
+        "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"changes\":[]}\n".to_string(),
+    ] {
+        assert_eq!(decoded_premium(&line)?, None, "{line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_float_boundary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        0.0,
+        -0.0,
+        0.000_000_4,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        1.0,
+        f64::from_bits(1.0_f64.to_bits() + 1),
+        0.1,
+        1.0 / 3.0,
+        f64::MAX,
+    ];
+    for value in cases {
+        let record = turn_end_with_premium(Some(value));
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(line.contains("\"premium_requests\":"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+        assert_eq!(decoded_premium(&line)?, Some(value));
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_encode_rejects_invalid_values() {
+    for premium in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.000_001] {
+        assert!(
+            matches!(
+                encode(&turn_end_with_premium(Some(premium))),
+                Err(EncodeError::InvalidPremium)
+            ),
+            "{premium}"
+        );
+    }
+}
+
+#[test]
+fn premium_decode_rejects_invalid_members() {
+    let base = assistant_line("m", None);
+    for raw in [
+        "\"1\"",
+        "\"2.5\"",
+        "-1",
+        "-0.000001",
+        "-0.5",
+        "true",
+        "false",
+        "null",
+        "1e400",
+        "1e500",
+        "9e999",
+    ] {
+        let line = base.replace(
+            "\"stop\":\"done\"}",
+            &format!("\"stop\":\"done\",\"premium_requests\":{raw}}}"),
+        );
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+    // The nested usage object stays closed: premium rides top-level only.
+    let nested = base.replace(
+        "\"cost_micro_usd\":null",
+        "\"cost_micro_usd\":null,\"premium_requests\":1.0",
+    );
+    assert!(matches!(
+        decode(nested.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn premium_without_optional_usage_is_rejected() {
+    let compaction = "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":null,\"premium_requests\":1.0}\n";
+    assert!(matches!(
+        decode(compaction.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+    let turn_end = "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":null,\"changes\":[],\"premium_requests\":1.0}\n";
+    assert!(matches!(
+        decode(turn_end.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
 }

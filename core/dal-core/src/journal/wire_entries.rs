@@ -123,6 +123,8 @@ pub(super) struct AssistantWire<'a> {
     pub(super) route: Option<AssistantRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) replay: Option<&'a RawJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) premium_requests: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -238,6 +240,8 @@ pub(super) struct CompactionWire<'a> {
     pub(super) parts: Option<JournalPartsWire<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) parts_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) premium_requests: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -302,6 +306,8 @@ pub(super) struct TurnEndWire<'a> {
     pub(super) stop: TurnEndStopWire<'a>,
     pub(super) usage: Option<UsageWire<'a>>,
     pub(super) changes: &'a [FileChange],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) premium_requests: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -465,4 +471,6 @@ pub(super) struct InferredWire<'a> {
     pub(super) who: OwnerWire<'a>,
     pub(super) purpose: PurposeWire<'a>,
     pub(super) usage: UsageWire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) premium_requests: Option<f64>,
 }

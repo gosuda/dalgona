@@ -37,6 +37,15 @@ pub struct Usage {
     pub reasoning_tokens: Option<u64>,
     /// Input tokens written to cache, already counted as uncached input.
     pub cache_write_tokens: u64,
+    /// Premium requests consumed, when the provider measured them.
+    ///
+    /// `None` means the provider reported no premium measurement: an
+    /// aggregate containing such a response is unknown, never zero.
+    /// `Some(0.0)` is a measured zero. A premium-only response carries no
+    /// token or cost measurement, so local pricing leaves it unknown even
+    /// when a price exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premium_requests: Option<f64>,
     /// Provider-supplied USD cost, if reported.
     pub cost_usd: Option<f64>,
 }
@@ -134,6 +143,9 @@ impl ModelPrice {
     /// cache writes; cache writes use the tier's separate rate when present,
     /// otherwise that tier's input rate.
     ///
+    /// A premium-only response carries no token measurement, so it stays
+    /// unknown even when a price exists.
+    ///
     /// Returns `None` for negative or non-finite rates, cache-counter
     /// underflow, or a non-finite computed total.
     #[must_use]
@@ -142,6 +154,9 @@ impl ModelPrice {
         reason = "token counters need conversion to USD rates; floating-point rounding is inherent to the price representation"
     )]
     pub fn cost_usd(&self, usage: &Usage) -> Option<f64> {
+        if usage.is_unreported() && usage.premium_requests.is_some() {
+            return None;
+        }
         let (input, cached_input, cache_write, output, reasoning) =
             self.rates_for(usage.input_tokens);
         let valid_rate = |rate: f64| rate.is_finite() && rate >= 0.0;
@@ -233,6 +248,7 @@ mod tests {
             output_tokens: 100,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.000_299));
@@ -277,6 +293,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 101,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.001_212));
@@ -291,6 +308,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 201,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.00402));
@@ -305,6 +323,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.0001));
@@ -319,9 +338,44 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 100,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.0016));
+    }
+
+    #[test]
+    fn premium_only_usage_stays_unknown_even_with_a_price() {
+        let price = price();
+        for premium in [0.0, 1.5] {
+            let usage = Usage {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                premium_requests: Some(premium),
+                cost_usd: None,
+            };
+            assert!(usage.is_unreported());
+            assert_eq!(price.cost_usd(&usage), None);
+            assert_eq!(usage.cost_usd(Some(&price), None), None);
+        }
+    }
+
+    #[test]
+    fn premium_alongside_tokens_still_prices_tokens() {
+        let price = price();
+        let usage = Usage {
+            input_tokens: 99,
+            cached_input_tokens: 0,
+            output_tokens: 100,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(2.0),
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.000_299));
     }
 }
 /// A provider-neutral inference request.

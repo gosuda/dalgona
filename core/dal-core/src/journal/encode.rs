@@ -1,6 +1,6 @@
 use super::wire::{
     AnswerWire, AssistantBlocksWire, AssistantStopWire, JobOutcomeWire, JournalPartsWire,
-    OwnerWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire, encode_json,
+    OwnerWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire, checked_premium, encode_json,
 };
 use super::wire_entries::{
     AllowAlwaysWire, ApprovalWire, ArchiveWire, AssistantWire, BeforeRequestMutWire, BootWire,
@@ -19,6 +19,8 @@ use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteEr
 /// Returns [`EncodeError::Json`] when a member fails to serialize,
 /// [`EncodeError::InvalidCost`] when a usage member carries a reported
 /// cost no integer micro-dollar count can hold,
+/// [`EncodeError::InvalidPremium`] when a usage member carries a non-finite
+/// or negative premium request count,
 /// [`EncodeError::InvalidRoute`] when a model record's or an assistant
 /// route's synthetic or harness id breaks its grammar,
 /// [`EncodeError::NullReplay`] when an assistant entry replay holds an
@@ -126,6 +128,7 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 stop: AssistantStopWire(stop),
                 route: *route,
                 replay: replay.as_ref(),
+                premium_requests: checked_premium(usage)?,
             })
         }
         Record::ToolResult(entry) => {
@@ -247,6 +250,10 @@ fn encode_context_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 usage: usage.as_ref().map(UsageWire::new).transpose()?,
                 parts: (!parts.is_empty()).then_some(JournalPartsWire(parts)),
                 parts_tokens: (!parts.is_empty()).then_some(*parts_tokens),
+                premium_requests: match usage {
+                    Some(usage) => checked_premium(usage)?,
+                    None => None,
+                },
             })
         }
         Record::BranchSummary(entry) => {
@@ -332,6 +339,10 @@ fn encode_turn_end(record: &Record) -> Result<Vec<u8>, EncodeError> {
         stop: TurnEndStopWire(stop),
         usage: usage.as_ref().map(UsageWire::new).transpose()?,
         changes,
+        premium_requests: match usage {
+            Some(usage) => checked_premium(usage)?,
+            None => None,
+        },
     })
 }
 
@@ -531,6 +542,7 @@ fn encode_effects(record: &Record) -> Result<Vec<u8>, EncodeError> {
             who: OwnerWire(who),
             purpose: PurposeWire(purpose),
             usage: UsageWire::new(usage)?,
+            premium_requests: checked_premium(usage)?,
         }),
         _ => unreachable!("the encode_body index routes only encode_effects kinds here"),
     }

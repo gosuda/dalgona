@@ -52,6 +52,7 @@ fn usage(tokens: u64) -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -3755,6 +3756,7 @@ fn turn_end_sums_usage_across_tool_rounds() {
             output_tokens: 2,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         })
     );
@@ -3850,6 +3852,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 3,
             reasoning_tokens: Some(4),
             cache_write_tokens: 1,
+            premium_requests: Some(0.5),
             cost_usd: Some(0.5),
         })
         .unwrap();
@@ -3859,9 +3862,10 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             input_tokens: 15,
             cached_input_tokens: 2,
             output_tokens: 4,
-            reasoning_tokens: None,
+            reasoning_tokens: Some(4),
             cache_write_tokens: 1,
-            cost_usd: None,
+            premium_requests: Some(0.5),
+            cost_usd: Some(0.5),
         })
     );
     let mut known = super::types::TurnTotals::default();
@@ -3872,6 +3876,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 1,
             reasoning_tokens: Some(4),
             cache_write_tokens: 1,
+            premium_requests: Some(0.5),
             cost_usd: Some(0.5),
         })
         .unwrap();
@@ -3882,6 +3887,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 1,
             reasoning_tokens: Some(6),
             cache_write_tokens: 1,
+            premium_requests: Some(0.25),
             cost_usd: Some(0.25),
         })
         .unwrap();
@@ -3893,6 +3899,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 2,
             reasoning_tokens: Some(10),
             cache_write_tokens: 2,
+            premium_requests: Some(0.75),
             cost_usd: Some(0.75),
         })
     );
@@ -3932,6 +3939,72 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             },
         ]
     );
+}
+
+#[test]
+fn turn_premium_measured_zero_stays_known_while_missing_is_unknown() {
+    let measured = |premium| Usage {
+        premium_requests: Some(premium),
+        ..usage(1)
+    };
+    let mut totals = super::types::TurnTotals::default();
+    totals.add_usage(measured(0.0)).unwrap();
+    totals.add_usage(measured(0.0)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        Some(0.0)
+    );
+    totals.add_usage(measured(1.5)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        Some(1.5)
+    );
+    totals.add_usage(usage(1)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        None
+    );
+}
+
+#[test]
+fn turn_premium_rejects_invalid_and_overflowing_measurements() {
+    for premium in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut totals = super::types::TurnTotals::default();
+        let rejected = totals.add_usage(Usage {
+            premium_requests: Some(premium),
+            ..usage(1)
+        });
+        assert!(
+            matches!(rejected, Err(Rejection::Invalid { .. })),
+            "premium {premium:?} is rejected"
+        );
+        assert_eq!(
+            totals.usage().and_then(|usage| usage.premium_requests),
+            Some(0.0),
+            "a rejected premium measurement leaves the prior total folded"
+        );
+    }
+    let mut totals = super::types::TurnTotals::default();
+    totals
+        .add_usage(Usage {
+            premium_requests: Some(f64::MAX),
+            ..usage(1)
+        })
+        .unwrap();
+    assert!(
+        totals
+            .add_usage(Usage {
+                premium_requests: Some(f64::MAX),
+                ..usage(1)
+            })
+            .is_err(),
+        "a premium sum that stops being finite is rejected"
+    );
+}
+
+#[test]
+fn zero_usage_carries_no_premium_measurement() {
+    assert_eq!(super::helpers::zero_usage().premium_requests, None);
 }
 
 #[test]

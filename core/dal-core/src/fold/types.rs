@@ -597,33 +597,37 @@ pub(super) struct QuestionRef {
 /// journals and every file change in its tool results folds into these totals,
 /// and `end_turn` writes them into `Record::TurnEnd`. Keep the summation rules
 /// in sync with the validator when either side changes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct TurnTotals {
-    seen: bool,
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    output_tokens: u64,
-    reasoning_tokens: u64,
-    reasoning_known: bool,
-    cache_write_tokens: u64,
-    cost_usd: f64,
-    cost_known: bool,
+    usage: Option<KnownUsage>,
     changes: Vec<FileChange>,
 }
 
-impl Default for TurnTotals {
+/// The parts of one usage-bearing record the open turn still knows.
+///
+/// Missing members stay unknown after the fold, so a later measured member
+/// does not imply the absent members were zero.
+#[derive(Clone, Debug, PartialEq)]
+struct KnownUsage {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: Option<u64>,
+    cache_write_tokens: u64,
+    premium_requests: Option<f64>,
+    cost_usd: Option<f64>,
+}
+
+impl Default for KnownUsage {
     fn default() -> Self {
         Self {
-            seen: false,
             input_tokens: 0,
             cached_input_tokens: 0,
             output_tokens: 0,
-            reasoning_tokens: 0,
-            reasoning_known: true,
+            reasoning_tokens: Some(0),
             cache_write_tokens: 0,
-            cost_usd: 0.0,
-            cost_known: true,
-            changes: Vec::new(),
+            premium_requests: Some(0.0),
+            cost_usd: Some(0.0),
         }
     }
 }
@@ -636,34 +640,56 @@ impl TurnTotals {
 
     /// Folds one usage report into the open turn's totals.
     ///
+    /// A missing premium measurement makes the turn's premium total unknown;
+    /// a measured zero stays a known zero. Only finite nonnegative premium
+    /// measurements fold into the known sum.
+    ///
     /// # Errors
     ///
-    /// Returns [`Rejection::Invalid`] when a token total overflows `u64` or
-    /// the cost total stops being finite.
+    /// Returns [`Rejection::Invalid`] when a token total overflows `u64`,
+    /// the cost total stops being finite, or a premium measurement is
+    /// negative, non-finite, or sums to a non-finite total.
     pub(super) fn add_usage(&mut self, usage: Usage) -> Result<(), Rejection> {
-        self.seen = true;
-        self.input_tokens = checked_add(self.input_tokens, usage.input_tokens)?;
-        self.cached_input_tokens =
-            checked_add(self.cached_input_tokens, usage.cached_input_tokens)?;
-        self.output_tokens = checked_add(self.output_tokens, usage.output_tokens)?;
-        match usage.reasoning_tokens {
-            Some(reasoning) => {
-                self.reasoning_tokens = checked_add(self.reasoning_tokens, reasoning)?;
-            }
-            None => self.reasoning_known = false,
+        let total = self.usage.get_or_insert_with(KnownUsage::default);
+        total.input_tokens = checked_add(total.input_tokens, usage.input_tokens)?;
+        total.cached_input_tokens =
+            checked_add(total.cached_input_tokens, usage.cached_input_tokens)?;
+        total.output_tokens = checked_add(total.output_tokens, usage.output_tokens)?;
+        if let Some(reasoning) = usage.reasoning_tokens {
+            let known = total.reasoning_tokens.unwrap_or_default();
+            total.reasoning_tokens = Some(checked_add(known, reasoning)?);
+        } else {
+            total.reasoning_tokens = None;
         }
-        self.cache_write_tokens = checked_add(self.cache_write_tokens, usage.cache_write_tokens)?;
-        match usage.cost_usd {
-            Some(cost) => {
-                let total = self.cost_usd + cost;
-                if !total.is_finite() {
-                    return Err(Rejection::Invalid {
-                        reason: "turn usage cost total overflows".into(),
-                    });
-                }
-                self.cost_usd = total;
+        total.cache_write_tokens = checked_add(total.cache_write_tokens, usage.cache_write_tokens)?;
+        if let Some(premium) = usage.premium_requests {
+            if !(premium.is_finite() && premium >= 0.0) {
+                return Err(Rejection::Invalid {
+                    reason: "turn usage premium measurement is invalid".into(),
+                });
             }
-            None => self.cost_known = false,
+            let known = total.premium_requests.unwrap_or_default();
+            let premium_total = known + premium;
+            if !premium_total.is_finite() {
+                return Err(Rejection::Invalid {
+                    reason: "turn usage premium total overflows".into(),
+                });
+            }
+            total.premium_requests = Some(premium_total);
+        } else {
+            total.premium_requests = None;
+        }
+        if let Some(cost) = usage.cost_usd {
+            let known = total.cost_usd.unwrap_or_default();
+            let cost_total = known + cost;
+            if !cost_total.is_finite() {
+                return Err(Rejection::Invalid {
+                    reason: "turn usage cost total overflows".into(),
+                });
+            }
+            total.cost_usd = Some(cost_total);
+        } else {
+            total.cost_usd = None;
         }
         Ok(())
     }
@@ -693,13 +719,14 @@ impl TurnTotals {
     /// Returns the open turn's summed usage, or `None` when the turn journaled
     /// no usage-bearing record.
     pub(super) fn usage(&self) -> Option<Usage> {
-        self.seen.then_some(Usage {
-            input_tokens: self.input_tokens,
-            cached_input_tokens: self.cached_input_tokens,
-            output_tokens: self.output_tokens,
-            reasoning_tokens: self.reasoning_known.then_some(self.reasoning_tokens),
-            cache_write_tokens: self.cache_write_tokens,
-            cost_usd: self.cost_known.then_some(self.cost_usd),
+        self.usage.as_ref().map(|usage| Usage {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            premium_requests: usage.premium_requests,
+            cost_usd: usage.cost_usd,
         })
     }
 
