@@ -5942,3 +5942,109 @@ async fn openrouter_streams_responses_by_default_and_chat_only_when_the_env_name
     }
     Ok(())
 }
+
+
+#[tokio::test]
+async fn dispatch_verify_oauth_only_none_refuses_before_network() -> TestResult {
+    // Adapted from the supplied Droid bind/turn smoke: admission now refuses
+    // both OAuth-only families. Accept observes the first network effect,
+    // rather than waiting for a server task to finish a whole HTTP exchange.
+    for family in [Family::Droid, Family::GoogleAntigravity] {
+        for auth in [AuthStyle::None, AuthStyle::Bearer] {
+            let dir = TestDir::new()?;
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let mut row = entry(
+                "factory-droid",
+                family,
+                format!("http://{}", listener.local_addr()?),
+                None,
+                1,
+                Transport::Https,
+            );
+            row.auth = auth;
+            let set = ProviderSet::new(
+                &config(vec![row.clone()], 0),
+                identity(),
+                EnvSnapshot::test(&[]),
+                dir.path(),
+                dir.path(),
+            )?;
+            let cancel = CancellationToken::new();
+            assert!(!set.credential_source_available("factory-droid", &cancel).await?);
+            assert!(!set.provider_readiness(&cancel).await?[0].ready);
+            assert!(matches!(
+                set.provider(resolved("factory-droid", family, "model")),
+                Err(ProviderError::NoCredentials { provider }) if provider == "factory-droid"
+            ));
+            // Also exercise direct construction, which otherwise bypasses
+            // the set's credential resolver for a caller-supplied None.
+            assert!(matches!(
+                Provider::new(
+                    resolved("factory-droid", family, "model"),
+                    row,
+                    Credential::None,
+                    &reqwest::Client::new(),
+                    &set,
+                ),
+                Err(ProviderError::NoCredentials { provider }) if provider == "factory-droid"
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                    .await
+                    .is_err(),
+                "refused {family:?} admission must never connect"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResult {
+    for family in [Family::Droid, Family::GoogleAntigravity] {
+        let dir = TestDir::new()?;
+        let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
+        store.set("factory-droid", stored_login("admission-only-access"))?;
+        store.store()?;
+        let mut row = entry(
+            "factory-droid",
+            family,
+            String::from("http://127.0.0.1:1"),
+            None,
+            1,
+            Transport::Https,
+        );
+        row.auth = AuthStyle::Bearer;
+        let set = ProviderSet::new(
+            &config(vec![row.clone()], 0), identity(), EnvSnapshot::test(&[]),
+            dir.path(), dir.path(),
+        )?;
+        assert!(set.credential_source_available("factory-droid", &CancellationToken::new()).await?);
+        assert!(set.provider(resolved("factory-droid", family, "model")).is_ok());
+        // Explicit none still disables the stored login; do not silently
+        // recover it as a new credential source to admit an unusable row.
+        row.auth = AuthStyle::None;
+        let disabled = ProviderSet::new(
+            &config(vec![row], 0), identity(), EnvSnapshot::test(&[]),
+            dir.path(), dir.path(),
+        )?;
+        assert!(matches!(disabled.credential("factory-droid")?, Credential::None));
+        assert!(matches!(disabled.provider(resolved("factory-droid", family, "model")),
+            Err(ProviderError::NoCredentials { .. })));
+    }
+    for family in [Family::Chat, Family::Ollama, Family::GoogleGeminiCli] {
+        let dir = TestDir::new()?;
+        let mut row = entry(
+            "local-admission", family, String::from("http://127.0.0.1:1"),
+            None, 1, Transport::Https,
+        );
+        row.auth = AuthStyle::None;
+        let set = ProviderSet::new(
+            &config(vec![row], 0), identity(), EnvSnapshot::test(&[]),
+            dir.path(), dir.path(),
+        )?;
+        assert!(set.credential_source_available("local-admission", &CancellationToken::new()).await?);
+        assert!(set.provider(resolved("local-admission", family, "model")).is_ok());
+    }
+    Ok(())
+}

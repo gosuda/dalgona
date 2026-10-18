@@ -10,7 +10,7 @@ use dal_core::{Family, ModelInfo, ModelRequest, ModelRoute, Purpose, SessionId, 
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AuthStyle, ProviderEntry, Transport};
-use super::set::{ProviderSet, ProviderSetInner, authenticates_ambiently};
+use super::set::{ProviderSet, ProviderSetInner, accepts_only_oauth, authenticates_ambiently};
 use crate::family::cursor::{decode as cursor_decode, lower as cursor_lower};
 use crate::run::{HostToolResult, ProviderRun};
 use crate::{
@@ -134,7 +134,8 @@ impl Provider {
         if request_mod::is_azure_entry(&entry) || request_mod::is_copilot_entry(&entry) {
             azure::require_https(&entry.id, entry.transport)?;
         }
-        // An entry that authenticates nothing admits the credential-less
+        // OAuth-only adapters still require a sign-in when auth is disabled.
+        // Other entries that authenticate nothing admit the credential-less
         // row; every other style still refuses to build without one. Bedrock
         // also admits it: the AWS chain in `aws_resolver` owns Bedrock auth
         // (bearer-or-SigV4 per attempt), never the bound credential. Vertex
@@ -142,7 +143,7 @@ impl Provider {
         // the pre-minted bearer token from the captured environment and
         // refuses with `NoCredentials` itself when there is none.
         if matches!(&credential, Credential::None)
-            && entry.auth != AuthStyle::None
+            && (accepts_only_oauth(entry.family) || entry.auth != AuthStyle::None)
             && !authenticates_ambiently(entry.family)
         {
             return Err(ProviderError::NoCredentials {

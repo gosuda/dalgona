@@ -827,7 +827,7 @@ pub(super) const fn authenticates_ambiently(family: Family) -> bool {
 
 /// Whether a family's adapter accepts only a stored OAuth login and refuses
 /// an API key: Droid (`droid::require_bearer`) and Antigravity.
-const fn accepts_only_oauth(family: Family) -> bool {
+pub(super) const fn accepts_only_oauth(family: Family) -> bool {
     matches!(family, Family::Droid | Family::GoogleAntigravity)
 }
 
