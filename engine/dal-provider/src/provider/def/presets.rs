@@ -225,6 +225,16 @@ pub(super) const PRESETS: &[ProviderDef] = &[
         "https://api.minimaxi.com/anthropic",
         &["MINIMAX_CODE_CN_API_KEY"],
     ),
+    // Native Mistral conversations (`POST <base>/conversations`), never Chat
+    // Completions: turns travel as typed `inputs` entries.
+    key_row(
+        "mistral",
+        "Mistral",
+        Family::Mistral,
+        "https://api.mistral.ai/v1",
+        AuthStyle::Bearer,
+        &["MISTRAL_API_KEY"],
+    ),
     chat(
         "moonshot",
         "Moonshot (Kimi API)",

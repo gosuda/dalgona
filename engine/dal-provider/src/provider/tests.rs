@@ -336,6 +336,12 @@ fn stored_oauth(dir: &TestDir, id: &str, access: &str) -> Result<(), Box<dyn Err
     Ok(())
 }
 
+fn mistral_reply() -> String {
+    String::from(
+        "data: {\"type\":\"conversation.response.started\",\"conversation_id\":\"conv-1\"}\n\ndata: {\"type\":\"message.output.delta\",\"content\":\"Hello\"}\n\ndata: {\"type\":\"conversation.response.done\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+    )
+}
+
 fn devin_jwt_reply(token: &str) -> Vec<u8> {
     GetUserJwtResponse {
         user_jwt: token.to_owned(),
@@ -2104,6 +2110,118 @@ async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -
     for header in ["authorization:", "x-api-key:", "api-key:"] {
         assert!(!head.contains(header), "{header} reached the wire: {head}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mistral_conversations_stream_over_sse() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(mistral_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "mistral-test",
+                Family::Mistral,
+                base,
+                Some("MISTRAL_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("MISTRAL_TEST_KEY", "mistral-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("mistral-test", Family::Mistral, "mistral-test"))?;
+    let request = request(
+        Family::Mistral,
+        "mistral-test",
+        vec![user_text("Say hello.")],
+    );
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(
+        events.iter().find_map(|event| match event {
+            StreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        }),
+        Some(usage) if usage.input_tokens == 7 && usage.output_tokens == 3
+    ));
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /v1/conversations "), "{head}");
+    assert!(
+        head.contains("authorization: bearer mistral-secret"),
+        "{head}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mistral_cancelled_before_start_sends_nothing() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("/v1", vec![stream_reply(mistral_reply())]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "mistral-test",
+                Family::Mistral,
+                base,
+                Some("MISTRAL_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("MISTRAL_TEST_KEY", "mistral-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("mistral-test", Family::Mistral, "mistral-test"))?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = provider
+        .open(
+            SessionId::new_v7(),
+            &request(
+                Family::Mistral,
+                "mistral-test",
+                vec![user_text("Say hello.")],
+            ),
+            &[],
+            notice_sink(),
+            &cancel,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ProviderError::Transport { .. })),
+        "{result:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
     Ok(())
 }
 
