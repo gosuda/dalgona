@@ -436,3 +436,30 @@ async fn websocket_upgrade_denials_map_to_auth_while_other_failures_stay_transie
         "authenticated 401 must map to Auth, got {error:?}"
     );
 }
+
+/// A saturated [`MemoryTransport`](crate::transport::MemoryTransport) pair
+/// preserves FIFO framing under backpressure with its single-slot credits.
+#[tokio::test]
+async fn memory_transport_pair_preserves_fifo_under_saturation() {
+    use crate::transport::MemoryTransport;
+
+    const FRAMES: usize = 2048;
+    let (mut transport, peer) = MemoryTransport::pair(1);
+    let send = async {
+        for index in 0..FRAMES {
+            let frame = format!("frame-{index:04}");
+            peer.send_frame(frame).await.expect("peer sends");
+        }
+    };
+    let receive = async {
+        let mut seen = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            seen.push(transport.read_frame().await.expect("transport frames"));
+        }
+        seen
+    };
+    let ((), seen) = tokio::join!(send, receive);
+    for (index, frame) in seen.iter().enumerate() {
+        assert_eq!(frame, &format!("frame-{index:04}"), "FIFO order holds");
+    }
+}

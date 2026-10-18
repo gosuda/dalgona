@@ -175,6 +175,16 @@ pub(super) struct SubState {
     pub(super) resync: bool,
 }
 
+/// Per-subscription queued updates before the client sheds to its gap contract.
+///
+/// Mirrors the server pump bound `rpc/subs.rs:24 QUEUE_CAP` (1024). A session
+/// queue that would exceed it is cleared and marked `resync`, so the next
+/// `next()` repaints from `session/view` instead of claiming continuity over
+/// dropped deltas; a host queue is cleared to a single `Reconnected` gap
+/// signal. FIFO order, `(gen, seq)` dedupe, and exact-epoch retire/relink are
+/// unchanged. This is a shared contract value, not a new knob.
+const REMOTE_QUEUE_CAP: usize = 1024;
+
 impl Shared {
     /// Connects once, without retrying, and initializes the connection.
     pub(super) async fn connect(
@@ -642,6 +652,11 @@ impl Core {
         if sub.last.is_some_and(|last| pair <= last) {
             return Ok(());
         }
+        if sub.queue.len() >= REMOTE_QUEUE_CAP {
+            sub.queue.clear();
+            sub.resync = true;
+            return Ok(());
+        }
         sub.last = Some(pair);
         sub.queue.push_back(Arc::new(Update {
             r#gen: pair.0,
@@ -657,6 +672,11 @@ impl Core {
             return Ok(());
         };
         if let Some((_, queue)) = self.state().host_sub.as_mut() {
+            if queue.len() >= REMOTE_QUEUE_CAP {
+                queue.clear();
+                queue.push_back(RemoteHostUpdate::Reconnected);
+                return Ok(());
+            }
             queue.push_back(update);
         }
         Ok(())
@@ -802,6 +822,9 @@ async fn establish(
     if core.state().host_sub.is_some() {
         request(core, &mut transport, "host/subscribe", sonic_rs::json!({})).await?;
         if let Some((_, queue)) = core.state().host_sub.as_mut() {
+            if queue.len() >= REMOTE_QUEUE_CAP {
+                queue.clear();
+            }
             queue.push_back(RemoteHostUpdate::Reconnected);
         }
     }
@@ -1483,6 +1506,136 @@ mod tests {
         .await
         .expect("the renewal finishes");
         assert_eq!(flags, (true, 0));
+    }
+
+    /// A session queue that would exceed its cap sheds to a repaint instead of
+    /// silently dropping a delta while claiming continuity.
+    ///
+    /// Real [`Core`] state with real `session/update` params over a real
+    /// [`MemoryTransport`](crate::transport::MemoryTransport) frame path: 1024
+    /// updates queue in FIFO order, the 1025th clears the queue, flags
+    /// `resync`, and drops its own delta. The next `next()` must repaint from
+    /// the view instead of delivering a gapped tail.
+    #[tokio::test]
+    async fn session_queue_sheds_to_resync_at_cap_without_silent_continuity() {
+        use crate::transport::MemoryTransport;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (listener, endpoint) = bind(dir.path()).expect("bind socket");
+        let server = async {
+            Peer::initialized(&listener).await.expect("accept client");
+        };
+        let client = async {
+            let conn = Connection::connect(endpoint, None).await.expect("connect");
+            let waiting = session(WAITING).expect("session id");
+            subscribe(&conn, waiting, NonZeroU64::new(5).expect("nonzero seq"));
+            let (mut transport, peer) = MemoryTransport::pair(1);
+            for seq in 6..(6 + super::REMOTE_QUEUE_CAP as u64) {
+                let params = sonic_rs::json!({
+                    "sessionId": WAITING,
+                    "gen": 1,
+                    "seq": seq,
+                    "update": {"type": "remote_test_marker"},
+                });
+                let frame = sonic_rs::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": params,
+                });
+                let text = sonic_rs::to_string(&frame).expect("encode update");
+                peer.send_frame(text.clone()).await.expect("peer sends");
+                let line = transport.read_frame().await.expect("transport frames");
+                assert_eq!(line, text, "memory transport preserves framing");
+                conn.core.dispatch(&line).expect("dispatch update");
+            }
+            {
+                let state = conn.core.state();
+                let sub = state.subs.get(&waiting).expect("subscription lives");
+                assert!(!sub.resync, "no shed before the cap");
+                assert_eq!(sub.queue.len(), super::REMOTE_QUEUE_CAP);
+                let (r#gen, seq) = sub.last.expect("cursor advanced");
+                assert_eq!(
+                    (r#gen.get(), seq.get()),
+                    (1, 5 + super::REMOTE_QUEUE_CAP as u64)
+                );
+            }
+            let overflow = sonic_rs::json!({
+                "sessionId": WAITING,
+                "gen": 1,
+                "seq": 6 + super::REMOTE_QUEUE_CAP as u64,
+                "update": {"type": "remote_test_marker"},
+            });
+            conn.core
+                .on_session_update(&overflow)
+                .expect("overflow sheds");
+            let state = conn.core.state();
+            let sub = state.subs.get(&waiting).expect("subscription lives");
+            assert!(sub.resync, "overflow flags a repaint");
+            assert!(
+                sub.queue.is_empty(),
+                "overflow drops its own delta with the gap"
+            );
+            let (r#gen, seq) = sub.last.expect("cursor kept at the pre-gap high mark");
+            assert_eq!(
+                (r#gen.get(), seq.get()),
+                (1, 5 + super::REMOTE_QUEUE_CAP as u64),
+                "shed never advances past a dropped delta"
+            );
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async { tokio::join!(server, client) }),
+        )
+        .await
+        .expect("the shed finishes");
+    }
+
+    /// A host queue that would exceed its cap collapses to one `Reconnected`
+    /// gap signal instead of silently dropping lifecycle updates.
+    #[tokio::test]
+    async fn host_queue_sheds_to_single_reconnected_at_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (listener, endpoint) = bind(dir.path()).expect("bind socket");
+        let server = async {
+            Peer::initialized(&listener).await.expect("accept client");
+        };
+        let client = async {
+            let conn = Connection::connect(endpoint, None).await.expect("connect");
+            {
+                let mut state = conn.core.state();
+                let fence = state.next_fence();
+                state.host_sub = Some((fence, VecDeque::new()));
+            }
+            for _ in 0..super::REMOTE_QUEUE_CAP {
+                let params = sonic_rs::json!({
+                    "update": {"type": "session_removed", "sessionId": WAITING},
+                });
+                conn.core.on_host_update(&params).expect("queue update");
+            }
+            {
+                let state = conn.core.state();
+                let (_, queue) = state.host_sub.as_ref().expect("host sub lives");
+                assert_eq!(queue.len(), super::REMOTE_QUEUE_CAP);
+            }
+            let params = sonic_rs::json!({
+                "update": {"type": "session_removed", "sessionId": OTHER},
+            });
+            conn.core.on_host_update(&params).expect("overflow sheds");
+            let state = conn.core.state();
+            let (_, queue) = state.host_sub.as_ref().expect("host sub lives");
+            assert_eq!(queue.len(), 1, "overflow collapses to one gap signal");
+            assert!(
+                matches!(queue[0], RemoteHostUpdate::Reconnected),
+                "got {:?}",
+                queue[0]
+            );
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async { tokio::join!(server, client) }),
+        )
+        .await
+        .expect("the host shed finishes");
     }
 
     /// A `401` upgrade denial over real loopback ends `reconnect` with `Auth`
