@@ -12,6 +12,8 @@ mod anthropic;
 mod chat;
 #[path = "replay/codex.rs"]
 mod codex;
+#[path = "replay/google.rs"]
+mod google;
 #[path = "support/replay_server.rs"]
 mod replay_server;
 #[path = "replay/responses.rs"]
