@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const QUIET_WAIT: Duration = Duration::from_secs(3);
 
 /// Pause between quiet checks while an extension is still busy.
-const QUIET_RECHECK: Duration = Duration::from_millis(50);
+pub(crate) const QUIET_RECHECK: Duration = Duration::from_millis(50);
 
 /// A prompt positional that the edge could not turn into message content.
 #[derive(Debug, Error)]
