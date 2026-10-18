@@ -17,8 +17,8 @@ use dal_core::ext::{
 use dal_core::{
     AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, Answer, ArtifactFile,
     CallId, EntryId, FetchRequest, FetchResponse, Inference, JobId, JobStateView, JobStatus,
-    JobsOp, JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
-    SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
+    JobsOp, JobsReply, ModelRequest, Notice, PrivateEffect, Question, RawJson, RunOutput,
+    RunRequest, SessionId, SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -752,6 +752,10 @@ impl Services for Host {
     }
 
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 

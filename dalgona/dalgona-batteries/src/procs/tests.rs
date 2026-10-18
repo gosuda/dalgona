@@ -106,6 +106,9 @@ impl dal_agent::ext::Services for JobsHost {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         unavailable()
     }

@@ -12,8 +12,9 @@ use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
     AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
     Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson, RedirectPolicy,
-    Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Owner, Part, PrivateEffect,
+    RawJson, RedirectPolicy, Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp,
+    TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -55,6 +56,19 @@ pub(crate) struct BackendDeps {
 
 fn record_session_closed() -> ServiceError {
     ServiceError::failed(None, "the session closed before the record was journaled.")
+}
+
+/// Derives the owning extension identity from the host-minted caller.
+///
+/// The only input is the host-minted [`crate::ext::Caller`]; no layer
+/// accepts a caller-supplied owner, so same-name extensions under different
+/// origins stay disjoint by construction. Origin text renders through the
+/// single shared renderer.
+pub(crate) fn private_owner_of(caller: &crate::ext::Caller) -> Owner {
+    Owner::Extension {
+        name: caller.ext().as_str().into(),
+        origin: crate::ext::services::origin_text_shared(caller.origin()).into(),
+    }
 }
 
 /// Encodes the durable start policy of one child session: its tool
@@ -917,6 +931,25 @@ impl SessionBackend for Backend {
 
     fn ext_records(&self) -> Arc<[ExtRecord]> {
         self.shared.ext_records()
+    }
+    /// Returns the terminal private-effect facts the calling extension owns,
+    /// oldest first, from the published terminal index; never waits on the
+    /// actor.
+    ///
+    /// The owner is derived here from the host-minted caller at the filter
+    /// site. The predicate runs inside the shared lock over the shared
+    /// payloads; only owner-matched payloads are mapped to rows outside it.
+    fn private_outcomes(&self, who: &crate::ext::Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        let owner = private_owner_of(who);
+        let rows = self
+            .shared
+            .private_terminal_select(|terminal| terminal.who == owner);
+        Box::pin(async move {
+            Ok(rows
+                .iter()
+                .map(|terminal| PrivateEffect::from(terminal.as_ref()))
+                .collect())
+        })
     }
     fn blob_put(&self, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         Box::pin(async move {

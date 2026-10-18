@@ -14,8 +14,8 @@ use std::sync::{
 };
 
 use dal_core::{
-    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, Seq, Session,
-    ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
+    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, PrivateTerminal,
+    Seq, Session, ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
 };
 
 use super::projection::{Projection, SnapshotArgs};
@@ -30,6 +30,18 @@ use crate::ext::{ExtRecord, SessionInstalls, WatchFactory};
 struct ExtSnap {
     key: Option<(Option<EntryId>, usize)>,
     rows: Arc<[ExtRecord]>,
+}
+
+/// The published private terminal outcomes in End journal order.
+///
+/// Position `i` always corresponds to fold terminal index `i`: terminals are
+/// appended once and never rewritten, so a read between advances observes
+/// the same allocations.
+struct PrivatePub {
+    /// How many fold terminals have been published so far.
+    published: usize,
+    /// One shared payload per published terminal, in source order.
+    terminal: Vec<Arc<PrivateTerminal>>,
 }
 /// Per-session setup products, keyed by validated extension owner name.
 struct SetupState {
@@ -55,6 +67,7 @@ pub(crate) enum ChildPromptPolicy {
 pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
     ext: Mutex<ExtSnap>,
+    private: Mutex<PrivatePub>,
     setup: Mutex<SetupState>,
     rule_seeds: Mutex<Arc<[GateSeed]>>,
     can_interrupt_stream: AtomicBool,
@@ -112,6 +125,10 @@ impl Shared {
             ext: Mutex::new(ExtSnap {
                 key: None,
                 rows: Arc::from([]),
+            }),
+            private: Mutex::new(PrivatePub {
+                published: 0,
+                terminal: Vec::new(),
             }),
             setup: Mutex::new(SetupState {
                 owners: BTreeSet::new(),
@@ -206,8 +223,13 @@ impl Shared {
     }
 
     /// Refreshes fold-owned promotion and always-allowed sets on every call,
-    /// then republishes current-leaf extension records when the fold's leaf
-    /// or record count moved since the last publication.
+    /// publishes newly settled private terminals, then republishes
+    /// current-leaf extension records when the fold's leaf or record count
+    /// moved since the last publication.
+    ///
+    /// The private publication runs before the extension-record memo guard:
+    /// a private-End-only advance moves neither leaf nor ext length, so any
+    /// placement after that early return would serve stale live reads.
     ///
     /// The actor is the only caller; readers get immutable snapshots and
     /// never wait on the actor, so a hook awaiting the actor cannot block a
@@ -218,6 +240,7 @@ impl Shared {
         self.sync_rule_seeds(fold);
         self.can_interrupt_stream
             .store(fold.can_interrupt_stream(), Ordering::Release);
+        self.sync_private(fold);
         let key = (fold.leaf_entry(), fold.ext_len());
         {
             let mut snap = self
@@ -353,6 +376,51 @@ impl Shared {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .rows,
         )
+    }
+
+    /// Publishes every fold terminal not yet shared, oldest first.
+    ///
+    /// Relies on the append-only invariant: the published cursor never
+    /// exceeds the fold terminal length. The live fold only grows, and
+    /// `restore_fold` replays the same session, so the cursor stays valid.
+    ///
+    /// Each terminal payload is cloned into its `Arc` exactly once per
+    /// session lifetime, on first publication (including repair terminals at
+    /// open). Unchanged state costs one lock plus a length compare with no
+    /// allocation.
+    pub(crate) fn sync_private(&self, fold: &Session) {
+        let mut published = self
+            .private
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fresh = fold.private_terminals_since(published.published);
+        if fresh.is_empty() {
+            return;
+        }
+        published
+            .terminal
+            .extend(fresh.iter().map(|terminal| Arc::new(terminal.clone())));
+        published.published += fresh.len();
+    }
+
+    /// Returns the shared payloads matching `pred`, oldest first.
+    ///
+    /// Only matching `Arc`s are cloned (pointer copies, no payload bytes);
+    /// the lock is released before the caller clones any payload. The
+    /// predicate is supplied by the backend call site, so filtering stays
+    /// backend-owned.
+    pub(crate) fn private_terminal_select(
+        &self,
+        pred: impl Fn(&PrivateTerminal) -> bool,
+    ) -> Vec<Arc<PrivateTerminal>> {
+        self.private
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal
+            .iter()
+            .filter(|terminal| pred(terminal.as_ref()))
+            .cloned()
+            .collect()
     }
 
     /// Applies one update kind, publishes it, and offers it to subscribers.

@@ -12,9 +12,9 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentReport, AgentStart, AgentsOp, AgentsReply, Answer, Budget, CallId, ContextItem, EntryId,
     FetchRequest, FetchResponse, HandleStatus, Inference, JobsOp, JobsReply, ModelPrice,
-    ModelRequest, ModelRoute, Name, Notice, OnError, Origin, Part, Purpose, Question,
-    RequestParams, RunOutput, RunRequest, ScopeSpec, ServiceSet, SessionId, SidecarOp, StateError,
-    StateOp, StateRecord, Stop, TurnOp, TurnOpReply, Usage,
+    ModelRequest, ModelRoute, Name, Notice, OnError, Origin, Part, PrivateEffect, Purpose,
+    Question, RequestParams, RunOutput, RunRequest, ScopeSpec, ServiceSet, SessionId, SidecarOp,
+    StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply, Usage,
 };
 use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent};
 use futures::channel::{mpsc, oneshot};
@@ -179,6 +179,9 @@ impl Services for Held {
         never!()
     }
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+        never!()
+    }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
         never!()
     }
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

@@ -687,6 +687,10 @@ impl Services for NeverServices {
         unreachable!("replacement test does not use services")
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unreachable!("replacement test does not use services")
+    }
+
     fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         unreachable!("replacement test does not use services")
     }

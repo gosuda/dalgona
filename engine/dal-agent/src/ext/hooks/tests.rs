@@ -32,8 +32,8 @@ use crate::ext::{RawValue, ToolOutcome};
 use dal_core::ext::{McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Notice, Question, RunOutput, RunRequest, SidecarOp, TurnOp,
-    TurnOpReply,
+    JobsReply, ModelRequest, Notice, PrivateEffect, Question, RunOutput, RunRequest, SidecarOp,
+    TurnOp, TurnOpReply,
 };
 use dal_provider::EventStream;
 struct NoSvcs;
@@ -138,6 +138,9 @@ impl Services for NoSvcs {
         unreachable!("hooks tests never call services")
     }
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+        unreachable!("hooks tests never call services")
+    }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
         unreachable!("hooks tests never call services")
     }
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

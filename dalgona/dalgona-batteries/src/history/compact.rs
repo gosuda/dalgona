@@ -360,8 +360,9 @@ mod boundary_tests {
     use dal_core::ext::McpDeclaration;
     use dal_core::{
         AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-        JobsReply, McpRequest, McpResponse, ModelRequest, Notice, Question, RawJson, RunOutput,
-        RunRequest, SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility,
+        JobsReply, McpRequest, McpResponse, ModelRequest, Notice, PrivateEffect, Question, RawJson,
+        RunOutput, RunRequest, SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+        Visibility,
     };
 
     use super::known_letters;
@@ -473,6 +474,9 @@ mod boundary_tests {
         fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
             let records = self.records.iter().cloned().map(Box::new).collect();
             Box::pin(async move { Ok(records) })
+        }
+        fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+            unavailable()
         }
         fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
             unavailable()

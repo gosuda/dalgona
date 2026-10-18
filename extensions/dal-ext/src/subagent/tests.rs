@@ -103,6 +103,10 @@ impl Services for FakeServices {
         Box::pin(async { Err(ServiceError::Declined) })
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async { Err(ServiceError::Declined) })
+    }
+
     fn add_session_tools(
         &self,
         _who: &Caller,

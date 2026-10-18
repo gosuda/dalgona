@@ -273,8 +273,8 @@ mod unauthorized_recovery {
     };
     use dal_core::{
         AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-        JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
-        SidecarOp, TurnOp, TurnOpReply,
+        JobsReply, ModelRequest, Notice, PrivateEffect, Question, RawJson, RunOutput, RunRequest,
+        SessionId, SidecarOp, TurnOp, TurnOpReply,
         ext::{
             McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
         },
@@ -441,6 +441,10 @@ mod unauthorized_recovery {
         }
 
         fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+            unavailable()
+        }
+
+        fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
             unavailable()
         }
     }

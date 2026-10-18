@@ -18,8 +18,8 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, Visibility};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, AssistantPart, BlobId, CallId, ContextItem, EntryId, Family,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, ModelRoute, Notice,
-    Part, Question, RawJson, ReplaySource, RequestParams, RunOutput, RunRequest, SessionId,
-    SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+    Part, PrivateEffect, Question, RawJson, ReplaySource, RequestParams, RunOutput, RunRequest,
+    SessionId, SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
 };
 use dal_ext::Font;
 use tokio::sync::Semaphore;
@@ -1416,6 +1416,9 @@ impl Services for CountingServices {
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
         let records = self.records.iter().cloned().map(Box::new).collect();
         Box::pin(async move { Ok(records) })
+    }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        unavailable()
     }
     fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         let digest = *blake3::hash(&bytes).as_bytes();

@@ -26,6 +26,11 @@
 //!   session actor before it answers; `records` reads the caller's own rows
 //!   on the current leaf path from the actor's published snapshot. No other
 //!   extension's rows are visible.
+//! - `private_outcomes` is an own-data read like `records`: no inject check
+//!   and no grant. The host-minted caller goes to the backend verbatim, which
+//!   derives the owner from it, filters the published terminal index, and
+//!   never waits on the actor. Only the calling extension's terminal
+//!   private-effect facts come back; the raw arguments never do.
 //!
 //! The run-output mapping leaves `stderr_tail` empty until the process
 //! layer exposes a separate stderr tail.
@@ -51,9 +56,9 @@ use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, DenyReason, EntryId, FetchRequest, FetchResponse,
-    Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview, Question,
-    Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError, StateNs,
-    StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview,
+    PrivateEffect, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
+    StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -439,7 +444,7 @@ impl SessionServices {
         let secs = crate::broker::default_timeout(&question).as_secs();
         let owner = Owner::Extension {
             name: who.ext.as_str().into(),
-            origin: origin_name(who.origin).into(),
+            origin: origin_text_shared(who.origin).into(),
         };
         let deadline = Instant::now() + crate::broker::default_timeout(&question);
         let (request, waiter) = {
@@ -591,7 +596,13 @@ pub const MCP_UNAVAILABLE_TEXT: &str =
 /// next to it.
 pub const SIDECAR_EPHEMERAL_TEXT: &str = "sidecar is unavailable for ephemeral sessions";
 
-fn origin_name(origin: Origin) -> &'static str {
+/// Renders one extension origin to its owner text.
+///
+/// This is the single Origin-to-text renderer shared by the synthetic write
+/// path's owner mint and the private-outcomes read filter: two renderers is
+/// a silent-empty-read divergence risk, since owner equality would fail if
+/// either drifted.
+pub(crate) fn origin_text_shared(origin: Origin) -> &'static str {
     match origin {
         Origin::Bundled => "bundled",
         Origin::User => "user",
@@ -715,7 +726,7 @@ impl Services for SessionServices {
                 }
                 let owner = Owner::Extension {
                     name: who.ext.as_str().into(),
-                    origin: origin_name(who.origin).into(),
+                    origin: origin_text_shared(who.origin).into(),
                 };
                 let deadline = Instant::now() + self.ask_timeout;
                 let (request, answer) = self.broker.open(owner, question, turn, deadline);
@@ -988,6 +999,15 @@ impl Services for SessionServices {
                 .map(|record| Box::new(record.body.clone()))
                 .collect())
         })
+    }
+
+    fn private_outcomes(&self, who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        // Forward-only: no owner construction and no filtering here, so no
+        // inject check and no grant either — an own-data read like
+        // `records`, `history_texts`, and `scheme`. Derivation and filtering
+        // are backend-owned.
+        let who = who.clone();
+        Box::pin(async move { self.backend.private_outcomes(&who).await })
     }
 
     fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

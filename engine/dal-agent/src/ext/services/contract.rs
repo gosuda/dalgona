@@ -8,9 +8,9 @@
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, ModelRoute, Name, Notice, Question, Request, RunOutput, RunRequest,
-    SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
-    Visibility, Workspace,
+    JobsReply, ModelRequest, ModelRoute, Name, Notice, PrivateEffect, Question, Request, RunOutput,
+    RunRequest, SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord, TurnOp,
+    TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use std::collections::HashMap;
@@ -231,6 +231,18 @@ pub trait Services: Send + Sync + 'static {
     ///
     /// Never fails today; the signature keeps the service future shape.
     fn records(&self, who: &Caller, kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>>;
+    /// Returns the terminal private-effect facts the calling extension owns,
+    /// oldest first, from the published terminal index; never waits on the
+    /// actor.
+    ///
+    /// An own-data read like [`Services::records`]: no inject check, no
+    /// grant, no new capability. The backend derives the owner from the
+    /// host-minted caller at the filter site.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ServiceError`] when the service has no session backend.
+    fn private_outcomes(&self, who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>>;
     /// Publishes bytes under their durable BLAKE3 content digest.
     ///
     /// This Rust-only service is capability-free. The digest is acknowledged
@@ -289,6 +301,9 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
     /// extensions, in journal order. Reads a published snapshot, never the
     /// actor, so a hook that the actor is waiting on can still read.
     fn ext_records(&self) -> Arc<[ExtRecord]>;
+    /// Returns the terminal private-effect facts owned by the caller-derived
+    /// owner, oldest first, from the published terminal index.
+    fn private_outcomes(&self, caller: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>>;
     /// Publishes bytes under the session's durable content-addressed key.
     fn blob_put(&self, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]>;
     /// Reads a session blob by its raw BLAKE3 digest; missing content is `None`.

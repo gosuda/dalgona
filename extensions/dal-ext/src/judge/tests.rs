@@ -213,6 +213,14 @@ impl Services for FakeServices {
         Box::pin(async move { Err(FakeServices::failing("judge fake never reads history")) })
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async move {
+            Err(FakeServices::failing(
+                "judge fake never reads private outcomes",
+            ))
+        })
+    }
+
     fn add_session_tools(
         &self,
         _who: &Caller,

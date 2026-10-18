@@ -179,6 +179,10 @@ impl Services for Host {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unavailable()
+    }
+
     fn ask(&self, _who: &Caller, question: Question) -> ServiceFuture<'_, Option<Answer>> {
         locked(&self.questions).push(question);
         let next = locked(&self.answers).pop_front();

@@ -199,6 +199,13 @@ impl dal_agent::ext::Services for FakeReviewServices {
         unavailable()
     }
 
+    fn private_outcomes(
+        &self,
+        _who: &dal_agent::ext::Caller,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unavailable()
+    }
+
     fn blob_put(
         &self,
         _who: &dal_agent::ext::Caller,

@@ -434,6 +434,9 @@ impl Services for NoServices {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         unused()
     }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unused()
+    }
     fn add_session_tools(
         &self,
         _who: &Caller,

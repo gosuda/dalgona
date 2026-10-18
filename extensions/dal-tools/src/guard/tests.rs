@@ -1223,6 +1223,10 @@ impl Services for ScriptedHost {
         self.stray("history_texts")
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        self.stray("private_outcomes")
+    }
+
     fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         self.stray("agents")
     }

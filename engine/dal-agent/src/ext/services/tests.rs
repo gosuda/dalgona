@@ -15,10 +15,12 @@ use std::time::Duration;
 use dal_core::SkillRecord;
 use dal_core::ext::{McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerDecl};
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
-    JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ResolutionCause, ScopeSpec, Service, ServiceSet, SessionId, SidecarName,
-    SidecarOp, Site, StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
+    AgentsOp, AgentsReply, Answer, ApprovalMode, Budget, CallId, ClientId, DenyReason, EntryId,
+    Gen, Inference, JobId, JobsOp, JobsReply, JournalPart, Mode, ModelRequest, ModelRoute, Name,
+    OnError, Origin, Owner, PrivateEffect, PrivateEffectId, PrivateLoopId, PrivateOutcome, Purpose,
+    Question, RawJson, Record, RequestParams, ResolutionCause, ScopeSpec, Service, ServiceSet,
+    Session, SessionId, SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord,
+    ThinkingLevel, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -37,6 +39,8 @@ use crate::ext::tool::{Approved, ToolCxRuntime};
 use crate::ext::{Extension, ExtensionBuilder};
 use crate::ext::{Scope, ScopeError};
 use crate::proc::Proc;
+use crate::session::backend::private_owner_of;
+use crate::session::shared::Shared;
 
 /// One canned reply per backend operation, in call order.
 #[derive(Default)]
@@ -44,6 +48,7 @@ struct FakeBackend {
     agents_reply: Mutex<Option<AgentsReply>>,
     jobs_reply: Mutex<Option<JobsReply>>,
     turn_reply: Mutex<Option<TurnOpReply>>,
+    private_outcomes_reply: Mutex<Vec<PrivateEffect>>,
     sidecar_value: Mutex<Option<Vec<u8>>>,
     infer_reply: Mutex<Option<Inference>>,
     seen_env: Mutex<Vec<String>>,
@@ -70,6 +75,10 @@ impl SessionBackend for FakeBackend {
 
     fn ext_records(&self) -> Arc<[crate::ext::ExtRecord]> {
         Arc::from(self.rows.lock().unwrap().clone())
+    }
+    fn private_outcomes(&self, _caller: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        let rows = self.private_outcomes_reply.lock().unwrap().clone();
+        Box::pin(async move { Ok(rows) })
     }
     fn blob_put(&self, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         let digest = *blake3::hash(&bytes).as_bytes();
@@ -2048,4 +2057,271 @@ async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
             .is_none(),
         "the slot must reopen after the settle"
     );
+}
+
+/// Mints a host-shaped caller for private-outcome reads: the authority under
+/// test is the (name, origin) pair, never the inject set.
+fn private_caller(name: &str, origin: Origin) -> Caller {
+    Caller::new(
+        name.parse::<Name>().unwrap(),
+        origin,
+        ServiceSet::from_names(["ask"]).unwrap(),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Handler,
+        Some(turn()),
+    )
+    .with_test_digest()
+}
+
+fn private_shared() -> Shared {
+    Shared::new(
+        false,
+        Gen::new(std::num::NonZeroU64::MIN),
+        ThinkingLevel::Medium,
+        ApprovalMode::Ask,
+        Mode::Normal,
+    )
+}
+
+/// Reads exactly the way [`crate::session::backend::Backend::private_outcomes`]
+/// does — owner derived from the real caller exactly as the backend does,
+/// predicate inside the shared lock and mapping outside — but over the
+/// test's own real `Shared`, since a full backend needs host state no unit
+/// test can mint.
+fn read_private(shared: &Shared, caller: &Caller) -> Vec<PrivateEffect> {
+    let owner = private_owner_of(caller);
+    shared
+        .private_terminal_select(|terminal| terminal.who == owner)
+        .iter()
+        .map(|terminal| PrivateEffect::from(terminal.as_ref()))
+        .collect()
+}
+
+/// One settled loop journal: birth, one start, one end.
+fn private_settled_loop(
+    owner: Owner,
+    round: u32,
+    name: &str,
+) -> (PrivateLoopId, PrivateEffectId, Vec<Record>) {
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let loop_id = PrivateLoopId::new_v7();
+    let token = PrivateEffectId::new_v7();
+    let records = vec![
+        Record::PrivateLoop {
+            at,
+            r#loop: loop_id,
+            who: owner.clone(),
+            turn: Some(turn()),
+        },
+        Record::PrivateStart {
+            at,
+            r#loop: loop_id,
+            token,
+            who: owner,
+            turn: Some(turn()),
+            round,
+            call: CallId::new("wire-call-1"),
+            name: name.into(),
+            args: RawJson::parse(r#"{"n":1}"#).unwrap(),
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: loop_id,
+            token,
+            outcome: PrivateOutcome::Settled {
+                is_error: false,
+                parts: vec![JournalPart::Text { text: "ok".into() }],
+            },
+        },
+    ];
+    (loop_id, token, records)
+}
+
+#[test]
+fn private_outcomes_return_only_the_calling_owner_terminals() {
+    let user_caller = private_caller("focus", Origin::User);
+    let bundled_caller = private_caller("focus", Origin::Bundled);
+    let stranger_caller = private_caller("stranger", Origin::User);
+    let user_owner = private_owner_of(&user_caller);
+    let bundled_owner = private_owner_of(&bundled_caller);
+    let (user_loop, user_token, mut records) = private_settled_loop(user_owner, 2, "tool-a");
+    let (bundled_loop, bundled_token, mut bundled_records) =
+        private_settled_loop(bundled_owner, 0, "tool-b");
+    records.append(&mut bundled_records);
+    // A hand-journaled core-owned row is fail-closed: no extension reads it.
+    let core_loop = PrivateLoopId::new_v7();
+    let core_token = PrivateEffectId::new_v7();
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    records.extend([
+        Record::PrivateLoop {
+            at,
+            r#loop: core_loop,
+            who: Owner::Core,
+            turn: None,
+        },
+        Record::PrivateStart {
+            at,
+            r#loop: core_loop,
+            token: core_token,
+            who: Owner::Core,
+            turn: None,
+            round: 0,
+            call: CallId::new("core-call"),
+            name: "core-tool".into(),
+            args: RawJson::parse("null").unwrap(),
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: core_loop,
+            token: core_token,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ]);
+    let (fold, _) = Session::replay(records, at).expect("private records replay");
+    let shared = private_shared();
+    shared.sync_ext(&fold);
+
+    // The index holds every terminal; each owner reads only its own.
+    assert_eq!(
+        shared.private_terminal_select(|_| true).len(),
+        3,
+        "both owner terminals plus the core row publish"
+    );
+    let user_rows = read_private(&shared, &user_caller);
+    assert_eq!(user_rows.len(), 1, "user/focus reads only its terminal");
+    let row = &user_rows[0];
+    assert_eq!(row.r#loop, user_loop);
+    assert_eq!(row.token, user_token);
+    assert_eq!(row.turn, Some(turn()));
+    assert_eq!(row.round, 2);
+    assert_eq!(&*row.name, "tool-a");
+    assert!(
+        matches!(
+            &row.outcome,
+            PrivateOutcome::Settled { is_error: false, parts }
+            if parts == &vec![JournalPart::Text { text: "ok".into() }]
+        ),
+        "settled payload survives the shared Arc: {:?}",
+        row.outcome
+    );
+    let bundled_rows = read_private(&shared, &bundled_caller);
+    assert_eq!(
+        bundled_rows.len(),
+        1,
+        "same name under bundled origin reads only its own"
+    );
+    assert_eq!(bundled_rows[0].r#loop, bundled_loop);
+    assert_eq!(bundled_rows[0].token, bundled_token);
+    assert!(
+        read_private(&shared, &stranger_caller).is_empty(),
+        "a third owner reads nothing"
+    );
+}
+
+#[test]
+fn private_end_only_advance_publishes_without_a_leaf_move() {
+    let caller = private_caller("focus", Origin::User);
+    let owner = private_owner_of(&caller);
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let (_, _, mut records) = private_settled_loop(owner.clone(), 0, "tool-a");
+    let (fold_a, _) = Session::replay(records.clone(), at).expect("first replay");
+    let shared = private_shared();
+    shared.sync_ext(&fold_a);
+    assert_eq!(read_private(&shared, &caller).len(), 1);
+
+    let (_, _, mut second) = private_settled_loop(owner, 1, "tool-b");
+    records.append(&mut second);
+    let (fold_b, _) = Session::replay(records, at).expect("second replay");
+    // The staleness-trap condition: settling a private row moves neither the
+    // leaf nor the ext length, so a publication placed after the sync_ext
+    // memo early-return would stay stuck at one row.
+    assert_eq!(fold_b.leaf_entry(), fold_a.leaf_entry());
+    assert_eq!(fold_b.ext_len(), fold_a.ext_len());
+    shared.sync_ext(&fold_b);
+    let rows = read_private(&shared, &caller);
+    assert_eq!(rows.len(), 2, "the End-only advance still publishes");
+    assert_eq!(&*rows[0].name, "tool-a");
+    assert_eq!(
+        &*rows[1].name, "tool-b",
+        "terminal order follows End journal order"
+    );
+}
+
+#[test]
+fn private_unfinished_effect_never_publishes_a_settled_row() {
+    let caller = private_caller("focus", Origin::User);
+    let owner = private_owner_of(&caller);
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let loop_id = PrivateLoopId::new_v7();
+    let token = PrivateEffectId::new_v7();
+    // A Start with no End: the effect never settled (failed append, crash
+    // before the End write). Replay honestly repairs it to Indeterminate —
+    // but no Settled row may ever appear for it.
+    let (fold, _) = Session::replay(
+        [
+            Record::PrivateLoop {
+                at,
+                r#loop: loop_id,
+                who: owner.clone(),
+                turn: Some(turn()),
+            },
+            Record::PrivateStart {
+                at,
+                r#loop: loop_id,
+                token,
+                who: owner,
+                turn: Some(turn()),
+                round: 3,
+                call: CallId::new("wire-call-9"),
+                name: "tool-a".into(),
+                args: RawJson::parse(r#"{"n":9}"#).unwrap(),
+            },
+        ],
+        at,
+    )
+    .expect("unfinished private loop replays");
+    assert_eq!(
+        fold.private_terminal_len(),
+        1,
+        "the Start itself publishes nothing; only the repair terminal exists"
+    );
+    let shared = private_shared();
+    shared.sync_ext(&fold);
+    let rows = read_private(&shared, &caller);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].r#loop, loop_id);
+    assert_eq!(rows[0].token, token);
+    assert_eq!(rows[0].round, 3);
+    assert!(
+        matches!(rows[0].outcome, PrivateOutcome::Indeterminate),
+        "an unfinished effect reads Indeterminate, never Settled: {:?}",
+        rows[0].outcome
+    );
+}
+
+#[tokio::test]
+async fn private_outcomes_forward_needs_no_inject_or_grant() {
+    let fx = fixture(Duration::from_secs(30));
+    let loop_id = PrivateLoopId::new_v7();
+    fx.backend
+        .private_outcomes_reply
+        .lock()
+        .unwrap()
+        .push(PrivateEffect {
+            r#loop: loop_id,
+            token: PrivateEffectId::new_v7(),
+            turn: Some(turn()),
+            round: 0,
+            name: "tool-a".into(),
+            outcome: PrivateOutcome::Indeterminate,
+        });
+    // An empty inject set: an own-data read must not consult grants.
+    let who = caller("focus", &[], Some(turn()));
+    let rows = fx
+        .services
+        .private_outcomes(&who)
+        .await
+        .expect("private outcomes forward");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].r#loop, loop_id);
 }
