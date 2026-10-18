@@ -21,6 +21,7 @@ use crate::{
         bedrock::auth::AwsCredentialResolver,
         copilot::IdentityCache,
         gitlab::{DirectAccessCache, workflow::WorkflowSessions},
+        google::{antigravity::AntigravitySession, shared::ResponseIdSlot},
     },
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
@@ -59,6 +60,15 @@ pub struct ProviderSet {
     pub(super) inner: Arc<ProviderSetInner>,
 }
 
+/// One Antigravity conversation: the envelope state the join owns per dal
+/// session, plus the slot the stream decoder reports response ids through
+/// for the next request's labels.
+#[derive(Default)]
+pub(super) struct AntigravitySlot {
+    pub(super) session: AntigravitySession,
+    pub(super) response: ResponseIdSlot,
+}
+
 pub(super) struct ProviderSetInner {
     pub(super) config: ProviderConfig,
     pub(super) identity: ProviderIdentity,
@@ -93,6 +103,9 @@ pub(super) struct ProviderSetInner {
     /// boundary. Present only when a `google-gemini-cli` provider is
     /// configured.
     pub(super) gemini_policy: Option<PathBuf>,
+    /// One Antigravity conversation per dal session, seeded from the
+    /// session id; cleared by [`ProviderSet::end_session`].
+    pub(super) antigravity: Mutex<HashMap<SessionId, AntigravitySlot>>,
 }
 
 pub(super) struct ProviderSlot {
@@ -275,6 +288,7 @@ impl ProviderSet {
                 gitlab_grants,
                 gitlab_workflows: WorkflowSessions::default(),
                 gemini_policy,
+                antigravity: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -474,6 +488,7 @@ impl ProviderSet {
         self.inner.ws.end_session(session);
         self.inner.gitlab_workflows.end_session(session);
         drop(lock(&self.inner.notices).remove(session));
+        drop(lock(&self.inner.antigravity).remove(session));
     }
 }
 

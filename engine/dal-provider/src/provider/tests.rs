@@ -348,6 +348,12 @@ fn google_reply() -> String {
     )
 }
 
+fn google_cca_reply() -> String {
+    String::from(
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]},\"finishReason\":\"STOP\"}]}}\n\n",
+    )
+}
+
 fn ollama_reply() -> String {
     String::from(
         "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n{\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":10,\"eval_count\":5}\n",
@@ -2832,6 +2838,354 @@ async fn google_vertex_without_project_location_refuses_before_any_request() -> 
             .is_err()
     );
     server_task.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn google_antigravity_posts_the_cca_envelope() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+    let mut antigravity_entry = entry(
+        "factory-droid",
+        Family::GoogleAntigravity,
+        base,
+        None,
+        1,
+        Transport::Https,
+    );
+    antigravity_entry.settings.project = Some("cca-proj".into());
+    stored_oauth(&dir, "factory-droid", "ya29-test")?;
+    let set = ProviderSet::new(
+        &config(vec![antigravity_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(
+        "factory-droid",
+        Family::GoogleAntigravity,
+        "gemini-3-flash-agent",
+    ))?;
+    let request = request(
+        Family::GoogleAntigravity,
+        "gemini-3-flash-agent",
+        vec![user_text("Say hello.")],
+    );
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hi"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        head.starts_with("post /v1internal:streamgeneratecontent?alt=sse "),
+        "{head}"
+    );
+    assert!(head.contains("authorization: bearer ya29-test"), "{head}");
+    assert!(head.contains("user-agent: antigravity/hub/"), "{head}");
+    assert!(
+        String::from_utf8_lossy(request_body(&captured[0])).contains("cca-proj"),
+        "the envelope names the configured project"
+    );
+    Ok(())
+}
+
+/// The stream context of one Antigravity turn, built directly so the
+/// failover loop can run over loopback endpoints (a configured base is a
+/// single candidate, and the unconfigured pair names real Google hosts).
+fn antigravity_failover_context() -> super::request::StreamContext {
+    let model = "gemini-3-flash-agent";
+    super::request::StreamContext {
+        family: Family::GoogleAntigravity,
+        provider: "google-antigravity".into(),
+        base_url: "".into(),
+        auth: AuthStyle::None,
+        model: model.into(),
+        entry: resolved("google-antigravity", Family::GoogleAntigravity, model).entry,
+        request: request(Family::GoogleAntigravity, model, vec![user_text("Say hello.")]),
+        thinking: crate::thinking::ThinkingPlan {
+            level: ThinkingLevel::Off,
+            wire: crate::thinking::WireThinking::OpenAi { effort: None },
+            temperature: None,
+            notices: Vec::new(),
+        },
+        session: SessionId::new_v7(),
+        client: reqwest::Client::new(),
+        user_agent: "dalgon/test".into(),
+    }
+}
+
+/// The Cloud Code Assist wire the failover loop re-sends to each endpoint;
+/// the loop supplies the base.
+fn cca_failover_wire() -> Result<crate::family::google::shared::GoogleWire, ProviderError> {
+    Ok(crate::family::google::shared::GoogleWire {
+        path: String::from("v1internal:streamGenerateContent?alt=sse"),
+        base_override: None,
+        headers: vec![("authorization", String::from("Bearer ya29-test"))],
+        user_agent: None,
+        body: br#"{"request":{}}"#.to_vec(),
+        fallback: None,
+    })
+}
+
+async fn run_antigravity_failover(
+    bases: &[String],
+    cancel: &CancellationToken,
+) -> Result<Option<EventStream>, crate::lifecycle::AttemptFailure> {
+    let context = antigravity_failover_context();
+    let slot = crate::family::google::shared::ResponseIdSlot::default();
+    super::request::antigravity_failover(&context, &[], cancel, bases, cca_failover_wire, &slot)
+        .await
+}
+
+fn json_reply(status: u16, body: &str) -> Reply {
+    Reply {
+        status,
+        content_type: "application/json",
+        body: body.as_bytes().to_vec(),
+    }
+}
+const CCA_QUOTA_EXHAUSTED: &str = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota will reset at midnight","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}"#;
+
+/// Whether the loopback server behind `task` was never contacted.
+async fn never_contacted(task: &mut tokio::task::JoinSet<io::Result<Vec<Vec<u8>>>>) -> bool {
+    tokio::time::timeout(Duration::from_millis(50), task.join_next())
+        .await
+        .is_err()
+}
+
+#[tokio::test]
+async fn antigravity_terminal_quota_never_fails_over() -> TestResult {
+    let (first, mut first_task) = server("", vec![json_reply(429, CCA_QUOTA_EXHAUSTED)]).await?;
+    let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+    let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+    assert!(
+        matches!(
+            result,
+            Err(crate::lifecycle::AttemptFailure::Provider(
+                ProviderError::Quota { .. }
+            ))
+        ),
+        "terminal quota is the attempt's failure"
+    );
+    first_task.join_next().await.expect("first answered")??;
+    assert!(never_contacted(&mut second_task).await, "quota failed over");
+    second_task.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_client_errors_never_fail_over() -> TestResult {
+    for status in [400, 401, 403, 404] {
+        let (first, mut first_task) = server("", vec![json_reply(status, "{}")]).await?;
+        let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+        let result =
+            run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        match result {
+            Err(crate::lifecycle::AttemptFailure::Response { status: seen, .. }) => {
+                assert_eq!(seen, status);
+            }
+            Ok(_) => return Err(io::Error::other(format!("{status} was served")).into()),
+            Err(other) => {
+                return Err(io::Error::other(format!("{status}: {other:?}")).into());
+            }
+        }
+        first_task.join_next().await.expect("first answered")??;
+        assert!(
+            never_contacted(&mut second_task).await,
+            "{status} failed over"
+        );
+        second_task.abort_all();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_still_fails_over_on_a_transport_error() -> TestResult {
+    // A refused connection (the port is closed) is a pre-header transport
+    // failure; the next endpoint serves the stream.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        format!("http://{}", listener.local_addr()?)
+    };
+    let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+    let result = run_antigravity_failover(&[closed, second], &CancellationToken::new()).await;
+    assert!(matches!(result, Ok(Some(_))), "transport failover regressed");
+    second_task.join_next().await.expect("second answered")??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_cancellation_returns_at_once_without_trying_the_next_endpoint() -> TestResult {
+    let (first, mut first_task) = server("", vec![json_reply(503, "{}")]).await?;
+    let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = run_antigravity_failover(&[first, second], &cancel).await;
+    assert!(matches!(result, Ok(None)));
+    assert!(never_contacted(&mut first_task).await);
+    assert!(never_contacted(&mut second_task).await);
+    first_task.abort_all();
+    second_task.abort_all();
+    Ok(())
+}
+
+async fn antigravity_error_text(status: u16, body: Vec<u8>) -> String {
+    let dir = TestDir::new().expect("temp dir");
+    let (base, _server) = server(
+        "",
+        vec![Reply {
+            status,
+            content_type: "application/json",
+            body,
+        }],
+    )
+    .await
+    .expect("loopback");
+    let mut antigravity_entry = entry(
+        "factory-droid",
+        Family::GoogleAntigravity,
+        base,
+        None,
+        1,
+        Transport::Https,
+    );
+    antigravity_entry.settings.project = Some("cca-proj".into());
+    stored_oauth(&dir, "factory-droid", "ya29-test").expect("oauth");
+    let set = ProviderSet::new(
+        &config(vec![antigravity_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )
+    .expect("provider set");
+    open_error_text(
+        &set,
+        "factory-droid",
+        Family::GoogleAntigravity,
+        "gemini-3-flash-agent",
+        vec![user_text("Say hello.")],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn google_antigravity_validation_required_yields_account_verification() -> TestResult {
+    let url = "https://accounts.example.com/verify/abc";
+    let body = format!(
+        "complete your verification {{\"error\":{{\"code\":400,\"status\":\"FAILED_PRECONDITION\",\"message\":\"verification needed\",\"details\":[{{\"reason\":\"VALIDATION_REQUIRED\",\"metadata\":{{\"validation_url\":\"{url}\"}}}}]}}}}"
+    );
+    let text = antigravity_error_text(400, body.into_bytes()).await;
+    assert!(text.contains("retry your request"), "{text}");
+    assert!(text.contains(url), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn google_antigravity_quota_precedes_validation() -> TestResult {
+    // Quota signals win even when a validation URL rides along: the failure
+    // stays typed quota instead of becoming account verification.
+    let body = "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"quota will reset at midnight\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"QUOTA_EXHAUSTED\"},{\"reason\":\"VALIDATION_REQUIRED\",\"metadata\":{\"validation_url\":\"https://accounts.example.com/verify/abc\"}}]}}";
+    let dir = TestDir::new()?;
+    let (base, _server) = server(
+        "",
+        vec![Reply {
+            status: 429,
+            content_type: "application/json",
+            body: body.as_bytes().to_vec(),
+        }],
+    )
+    .await?;
+    let mut antigravity_entry = entry(
+        "factory-droid",
+        Family::GoogleAntigravity,
+        base,
+        None,
+        1,
+        Transport::Https,
+    );
+    antigravity_entry.settings.project = Some("cca-proj".into());
+    stored_oauth(&dir, "factory-droid", "ya29-test")?;
+    let set = ProviderSet::new(
+        &config(vec![antigravity_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(
+        "factory-droid",
+        Family::GoogleAntigravity,
+        "gemini-3-flash-agent",
+    ))?;
+    let request = request(
+        Family::GoogleAntigravity,
+        "gemini-3-flash-agent",
+        vec![user_text("Say hello.")],
+    );
+    let error = match provider
+        .open(
+            SessionId::new_v7(),
+            &request,
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(stream) => match collect(stream).await {
+            Err(error) => error,
+            Ok(events) => panic!("quota must fail, got success: {events:?}"),
+        },
+    };
+    assert!(matches!(error, ProviderError::Quota { .. }), "{error:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn google_antigravity_non_validation_errors_never_become_verification() -> TestResult {
+    // A plain documentation link is not account verification.
+    let text = antigravity_error_text(
+        400,
+        "{\"error\":{\"code\":400,\"status\":\"FAILED_PRECONDITION\",\"message\":\"see https://docs.example.com/quota for limits\"}}"
+            .as_bytes()
+            .to_vec(),
+    )
+    .await;
+    assert!(!text.contains("retry your request"), "{text}");
+
+    // Untrusted validation URLs never become verification either: a wrong
+    // scheme, embedded userinfo, and a decoded control character.
+    for url in [
+        "http://accounts.example.com/verify",
+        "https://user:pass@accounts.example.com/",
+        "https://accounts.example.com/\\u0001",
+    ] {
+        let body = format!(
+            "{{\"error\":{{\"code\":400,\"status\":\"FAILED_PRECONDITION\",\"message\":\"verification needed\",\"details\":[{{\"reason\":\"VALIDATION_REQUIRED\",\"metadata\":{{\"validation_url\":\"{url}\"}}}}]}}}}"
+        );
+        let text = antigravity_error_text(400, body.into_bytes()).await;
+        assert!(!text.contains("retry your request"), "{url}: {text}");
+        assert!(!text.contains("user:pass"), "{url}: {text}");
+    }
     Ok(())
 }
 

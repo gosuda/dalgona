@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::api::Http;
 use super::config::{AuthStyle, ProviderEntry};
-use super::set::ProviderSetInner;
+use super::set::{ProviderSetInner, lock};
 use crate::{
     auth::credential::{AuthStore, Credential, EnvSnapshot, OAuthCredential},
     catalog::{CatalogEntry, ResolvedModel},
@@ -44,7 +44,7 @@ use crate::{
             workflow::{self as gitlab_workflow, WorkflowScope, WorkflowTurn},
         },
         google::{
-            antigravity,
+            antigravity::{self, AntigravityRequest},
             gemini::{self, GeminiRequest},
             gemini_cli::{self, CliRequest},
             shared as google_shared,
@@ -185,7 +185,7 @@ pub(crate) async fn stream_attempt(
         Family::GitLab => gitlab_attempt(&context, &credential, &cancel, &owner).await,
         Family::Devin => devin_attempt(&context, &credential, &cancel).await,
         Family::Droid => droid_attempt(&context, &credential, &cancel).await,
-        Family::GoogleGenerativeAi | Family::GoogleVertex => {
+        Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
             google_attempt(&context, &credential, &cancel, &owner, &slot.entry).await
         }
         _ => {
@@ -703,6 +703,11 @@ pub(crate) fn droid_default_upstream(model: &str) -> &'static str {
     }
 }
 
+/// The Antigravity client version the `User-Agent` carries, captured from
+/// the real client (the backend gates on the version, like Devin's pinned
+/// CLI identity).
+const ANTIGRAVITY_CLIENT_VERSION: &str = "2.19.1";
+
 /// The default `x-api-provider` per Droid model id, transcribed from the
 /// first entry of each `upstream-rotation` in the pinned Factory registry.
 /// Region narrowing (`region-upstreams-eu/us`) is not applied: the stream
@@ -1145,7 +1150,8 @@ async fn droid_attempt(
 }
 
 /// Runs one Google turn: the surface lowers its wire, the shared transport
-/// sends it, and the reply decodes as SSE through the shared decoder.
+/// sends it (with the Antigravity endpoint failover before the first byte),
+/// and the reply decodes as SSE through the shared decoder.
 async fn google_attempt(
     context: &StreamContext,
     credential: &Credential,
@@ -1190,6 +1196,9 @@ async fn google_attempt(
         }
         Family::GoogleVertex => {
             vertex_attempt(context, credential, cancel, owner, entry).await
+        }
+        Family::GoogleAntigravity => {
+            google_antigravity_attempt(context, credential, cancel, owner, entry).await
         }
         _ => Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
             message: String::from("not a Google request"),
@@ -1330,6 +1339,129 @@ async fn vertex_attempt(
     })
     .map_err(AttemptFailure::Provider)?;
     google_send(context, &secrets, cancel, wire, oauth, None).await
+}
+
+async fn google_antigravity_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let access_token = match credential {
+        Credential::OAuth(oauth) => oauth.access_token.expose().to_owned(),
+        Credential::ApiKey { .. } => {
+            return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+                message: format!(
+                    "{} needs an OAuth sign-in, not an API key",
+                    context.provider
+                ),
+            }));
+        }
+        Credential::None => {
+            return Err(AttemptFailure::Provider(ProviderError::NoCredentials {
+                provider: context.provider.to_string(),
+            }));
+        }
+    };
+    let project = entry.settings.project.as_deref().unwrap_or("");
+    if project.is_empty() {
+        return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!(
+                "{} needs a project in its provider settings",
+                context.provider
+            ),
+        }));
+    }
+    let wire_model = context.request.model.id().to_owned();
+    let model_enum = antigravity::wire_profile(&wire_model).and_then(|profile| profile.model_enum);
+    let used_claude = google_shared::is_claude_model(&wire_model);
+    let (envelope, response_slot) = {
+        let mut conversations = lock(&owner.antigravity);
+        let slot = conversations.entry(context.session).or_default();
+        slot.session.seed_session_id(context.session.to_string());
+        if let Ok(mut seen) = slot.response.lock()
+            && let Some(id) = seen.take()
+        {
+            slot.session.note_response_id(id);
+        }
+        (
+            slot.session.envelope(model_enum, used_claude),
+            slot.response.clone(),
+        )
+    };
+    let claude_thinking = matches!(context.thinking.wire, WireThinking::Anthropic { .. });
+    let input = AntigravityRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        access_token: &access_token,
+        project,
+        wire_model: &wire_model,
+        client_version: ANTIGRAVITY_CLIENT_VERSION,
+        envelope: &envelope,
+        claude_thinking,
+        image_input: context.entry.image_input,
+    };
+    let configured = context.base_url.trim();
+    let endpoints = if configured.is_empty() {
+        antigravity::endpoints(None)
+    } else {
+        antigravity::endpoints(Some(&context.base_url))
+    };
+    antigravity_failover(
+        context,
+        &credential_secrets(credential),
+        cancel,
+        &endpoints,
+        || antigravity::build(&input),
+        &response_slot,
+    )
+    .await
+}
+
+/// Sends one Antigravity wire to each endpoint in turn and returns the first
+/// stream, failing over before any stream byte is delivered.
+///
+/// Endpoint selection stays with the caller (`antigravity::endpoints`); this
+/// owns only the failover rule, so a test can drive it with loopback
+/// endpoints.
+pub(super) async fn antigravity_failover<F>(
+    context: &StreamContext,
+    secrets: &[Box<str>],
+    cancel: &CancellationToken,
+    endpoints: &[String],
+    build: F,
+    response_slot: &google_shared::ResponseIdSlot,
+) -> Result<Option<EventStream>, AttemptFailure>
+where
+    F: Fn() -> Result<google_shared::GoogleWire, ProviderError>,
+{
+    let mut last_failure: Option<AttemptFailure> = None;
+    for endpoint in endpoints {
+        let mut wire = build().map_err(AttemptFailure::Provider)?;
+        wire.base_override = Some(endpoint.clone());
+        match send_google_wire(context, cancel, wire).await {
+            Ok(Some(response)) => {
+                return google_decoded(
+                    context,
+                    secrets,
+                    cancel,
+                    response,
+                    true,
+                    Some(response_slot.clone()),
+                )
+                .await;
+            }
+            Ok(None) => return Ok(None),
+            Err(failure) => last_failure = Some(failure),
+        }
+    }
+    Err(last_failure.unwrap_or_else(|| {
+        AttemptFailure::Provider(ProviderError::Transport {
+            family: Family::GoogleAntigravity,
+            reason: String::from("the antigravity endpoints answered nothing"),
+        })
+    }))
 }
 
 /// Sends one Google wire and decodes its SSE reply through the shared
