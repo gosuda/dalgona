@@ -8,6 +8,7 @@ pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod devin;
 pub(crate) mod droid;
+pub(crate) mod gitlab;
 pub(crate) mod google;
 pub(crate) mod mistral;
 pub(crate) mod ollama;
