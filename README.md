@@ -37,7 +37,7 @@ cargo build --release --locked -p dalgon -p dalgona
 export PATH="$PWD/target/release:$PATH"
 ```
 
-The binaries land in `target/release/`: `dalgon` with `dal` and `dl`, plus `dalgona` with `dg`. The `export` line assumes POSIX `sh`; PowerShell needs different syntax to extend `PATH`.
+The binaries land in `target/release/` (`dalgon` with `dal` and `dl`, plus `dalgona` with `dg`), assuming the default Cargo target directory (`CARGO_TARGET_DIR` and `--target-dir` move it). The `export` line assumes POSIX `sh`; PowerShell needs different syntax to extend `PATH`.
 
 Supported platforms are Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published. Configuration and data use per-OS roots; on POSIX defaults these are `~/.config/dal/` and `~/.local/share/dal/`, and dalgona uses its own family directories. Plugins need no toolchain.
 
@@ -109,33 +109,32 @@ dalgona
 
 ```sh
 dalgon -p "Summarize the staged diff"
-dalgon --json "Summarize the staged diff"
+dalgon --json -o reply.md "Summarize the staged diff"
 dalgon -c -p "Continue with the next file"
 dalgon -r my-session -p "Resume and finish"
 ```
 
-These need a configured model; without one dalgon reports the missing model and how to set it. Print mode runs one turn and waits up to 3 seconds for extension status to go quiet. JSON mode writes one result line only after every status kind is quiet. Common run flags are `-m` for model, `--thinking`, `--mode`, `-n` for name, `-C` for workspace directory, and `--no-session` to skip saving.
+These need a configured model; without one dalgon reports the missing model and how to set it. Print mode runs one turn and waits up to 3 seconds for extension status to go quiet. JSON mode writes one JSON result or error line on stdout (with the stop reason, not the assistant text) only after every status kind is quiet; pair it with `-o FILE` to save the assistant message. Common run flags are `-m` for model, `--thinking`, `--mode`, `-n` for name, `-C` for workspace directory, and `--no-session` to skip saving.
 
 ### Control sessions and safety
 
 ```sh
-dalgon --approval ask
-dalgon --approval edits
-dalgon --approval all
-dalgon --sandbox
+dalgon -p --approval ask "Inspect the build script"
+dalgon -p --approval edits "Format and update the changelog"
+dalgon -p --approval edits --sandbox "Run the test suite"
 ```
 
-The default asks before every `patch` and every `exec`. `edits` approves edits without asking and still asks for `exec`. `all` approves every call; use it only inside an external sandbox. When no controller can answer, dal denies and says why. `--sandbox` runs `exec` children through the platform helper with workspace, temporary, cache, and `sandbox_writable` roots writable. `dalgon serve` binds loopback only unless `--public` is given with a token from `dalgon serve token`.
+Pass `--approval` and `--sandbox` as run modifiers on a TUI or headless invocation (without a prompt, bare `dalgon --approval ...` starts the TUI on a terminal and fails on a pipe). The default `ask` asks before every `patch` and every `exec`. `edits` approves edits without asking and still asks for `exec`. `all` approves every call and is only for runs already confined by an external sandbox; the built-in `--sandbox` sets no network restriction, so it is not that confinement. When no controller can answer, dal denies and says why. `--sandbox` runs `exec` children through the platform helper with workspace, temporary, cache, and `sandbox_writable` roots writable. `dalgon serve` binds loopback only unless `--public` is given with a token from `dalgon serve token`.
 
 ### Manage plugins
 
 ```sh
 dalgon plugin list
-dalgon plugin grant quality
-dalgon plugin revoke quality
+dalgona plugin grant quality
+dalgona plugin revoke quality
 ```
 
-Plugins load from the data root only, never from the workspace. `list` shows configured plugins and persistent grants. `grant` and `revoke` change the stored grant; session grants end with their sessions.
+User plugins load from the data root only, never from the workspace, and must be listed in `plugins` in `dal.toml` before `dalgon plugin grant <name>` can grant them. In `dalgona`, bundled batteries such as `quality` are already registered (`dalgon` alone rejects `dalgon plugin grant quality` as not configured). `list` shows configured plugins and persistent grants. `grant` and `revoke` change the stored grant; session grants end with their sessions.
 
 ### Serve and integrate
 
@@ -206,14 +205,16 @@ No `CONTRIBUTING.md` is checked in.
 
 Work from the repository root. It holds one Cargo workspace and one `Cargo.lock`. Use the latest stable Rust toolchain.
 
-Run the checked-in gates before review:
+Mirror the dal CI lane before review (`.github/workflows/dal.yml`):
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
+cargo clippy --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-features --locked
 cargo deny --locked check
 ```
+
+The dal lane excludes the dalgona packages; the dalgona lane (`.github/workflows/dalgona.yml`) covers `dalgona`, `dalgona-batteries`, and `dalgona-gates` the same way, so match the scope to your change. `AGENTS.md` lists the merge gates. The timing-lane stress budgets (`DAL_TIMING_BUDGETS`) run only on schedule or manual dispatch, not on every push.
 
 Regenerate the dal manual after doc changes with the `docs-gen` command recorded in `AGENTS.md`. Keep Linux, macOS, and Windows behavior in mind. Do not publish a crate, create or push a tag, create a release, or run a release workflow without explicit approval.
 
