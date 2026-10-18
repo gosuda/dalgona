@@ -1498,6 +1498,162 @@ fn stream_end_reserves_failed_calls_for_each_stop() {
 }
 
 #[test]
+fn cancel_partial_without_a_route_is_refused_before_reminders_clear() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::StreamReminder {
+            turn,
+            rule: "route".into(),
+            text: "route reminder".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(session.active_model(), None, "no request has started yet");
+    assert_eq!(session.turn_flags.pending_reminders.len(), 1);
+    let before = session.clone();
+    let refused = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: Some(PartialResponse {
+                content: vec![Block::Text {
+                    text: "cut off".into(),
+                    replay: None,
+                }],
+                usage: usage(1),
+            }),
+        },
+    );
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused cancel dropped the reminders");
+}
+
+#[test]
+fn cancel_reserves_every_failed_call_result_before_changing_anything() {
+    let calls = [("first", "read_file"), ("second", "read_file")];
+    // The cancel event and the cancel command end the turn the same way.
+    let cancel = |turn, form: usize| match form {
+        0 => Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+        _ => Event::Command {
+            cmd: Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            },
+            by: client(),
+        },
+    };
+    for form in 0..2 {
+        let mut session = session();
+        let turn = begin(&mut session);
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &calls, 1));
+        // One free entry id for two failed results.
+        session.next_entry = Some(entry(u64::MAX));
+        let before = session.clone();
+        let refused = send(&mut session, cancel(turn, form));
+        assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+        assert_eq!(session, before, "refused cancel form {form} journaled a result");
+
+        // One free entry id for one failed result is enough.
+        let mut session = self::session();
+        let turn = begin(&mut session);
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &calls[..1], 1));
+        session.next_entry = Some(entry(u64::MAX));
+        send(&mut session, cancel(turn, form)).unwrap();
+        assert!(matches!(session.phase(), Phase::Idle));
+    }
+}
+
+/// A turn whose only call is dispatched and started, so its settlement is the
+/// last one and runs the boundary.
+fn with_one_started_call() -> (Session, TurnId) {
+    let mut session = session();
+    let turn = begin(&mut session);
+    stream_result(
+        &mut session,
+        turn,
+        inference(Stop::EndTurn, &[("only", "read_file")], 1),
+    );
+    let resolved = resolved_call("only", "read_file", false, Ok(ToolClass::Read));
+    send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![resolved],
+            answerer_attached: false,
+        },
+    )
+    .unwrap();
+    send(
+        &mut session,
+        Event::CallStarted {
+            turn,
+            call: CallId::new("only"),
+        },
+    )
+    .unwrap();
+    (session, turn)
+}
+
+#[test]
+fn the_last_settling_call_reserves_the_boundary_entries_it_runs() {
+    let settle = |turn| Event::Settled {
+        turn,
+        call: CallId::new("only"),
+        outcome: SettledOutcome::Ok {
+            text: "ok".into(),
+            data: None,
+        },
+        elapsed_ms: None,
+    };
+    // A queued steer is journaled at the boundary: two entries, one id left.
+    let (mut session, turn) = with_one_started_call();
+    send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "steer".into(),
+        },
+    )
+    .unwrap();
+    session.next_entry = Some(entry(u64::MAX));
+    let before = session.clone();
+    let refused = send(&mut session, settle(turn));
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused settle journaled its result");
+
+    // With nothing queued the result is the only entry, and the last id fits it.
+    let (mut session, turn) = with_one_started_call();
+    session.next_entry = Some(entry(u64::MAX));
+    send(&mut session, settle(turn)).unwrap();
+}
+
+#[test]
+fn resolved_reserves_every_failed_call_result_before_changing_anything() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let calls = [("a", "read_file"), ("b", "read_file")];
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &calls, 1));
+    // One free entry id for two failed results.
+    session.next_entry = Some(entry(u64::MAX));
+    let before = session.clone();
+    let failed = |call| resolved_call(call, "read_file", false, Err(ResolveError::Unknown));
+    let refused = send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![failed("a"), failed("b")],
+            answerer_attached: false,
+        },
+    );
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused resolve journaled one result");
+}
+
+#[test]
 fn stream_end_reserves_truncation_boundary_inputs() {
     let mut session = session();
     let turn = begin(&mut session);

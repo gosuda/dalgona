@@ -381,6 +381,10 @@ pub enum Event {
         /// The turn or job to cancel.
         scope: CancelScope,
         /// Stream content retained by the actor, if a turn stream was active.
+        ///
+        /// Non-empty content needs the request's model route, set by
+        /// [`Event::RequestStarted`] or [`Event::StreamEnded`]; without one
+        /// the cancel is refused and the session is left unchanged.
         partial: Option<PartialResponse>,
     },
     /// One visible provider-stream delta.

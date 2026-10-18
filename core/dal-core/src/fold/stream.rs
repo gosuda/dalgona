@@ -494,18 +494,18 @@ impl Session {
         }
         let mut planned = Vec::new();
         let mut promotes = Vec::new();
+        let mut failures = Vec::new();
         for item in &expected {
             let mut matching = calls.iter().filter(|call| call.call == item.call);
             let Some(call) = matching.next() else {
                 continue;
             };
             if matching.next().is_some() {
-                let text = duplicate_call_failure(call);
-                self.result_entry(item, text, true, None, now, emit)?;
+                failures.push((item, duplicate_call_failure(call)));
                 continue;
             }
             if let Some(text) = resolution_failure(call) {
-                self.result_entry(item, text, true, None, now, emit)?;
+                failures.push((item, text));
                 continue;
             }
             let Ok(class) = &call.result else {
@@ -517,6 +517,17 @@ impl Session {
                 class: class.clone(),
             });
             promotes.push(call.promoted);
+        }
+        // Reserve every entry before the first is written: one failed result
+        // per failure, and the boundary when no call is left to dispatch.
+        let boundary = if planned.is_empty() {
+            self.boundary_entries()
+        } else {
+            0
+        };
+        self.reserve_entries(failures.len() + boundary)?;
+        for (item, text) in failures {
+            self.result_entry(item, text, true, None, now, emit)?;
         }
         let units = plan(&planned, &self.policy(answerer_attached));
         let pending = planned

@@ -89,7 +89,7 @@ impl Session {
                 call,
                 extension,
                 outcome,
-            } => self.preflight_guard(*turn, call.is_some(), extension.is_some(), outcome),
+            } => self.preflight_guard(*turn, call.as_ref(), extension.is_some(), outcome),
             Event::StreamRetry { turn, reminder } => {
                 self.preflight_stream_entries(*turn, usize::from(reminder.is_some()))
             }
@@ -107,9 +107,10 @@ impl Session {
             } => self.preflight_stream_end(*turn, result, partial.as_ref()),
             Event::Cancel {
                 scope: CancelScope::Turn(turn),
-                ..
-            } => self.preflight_cancel(*turn),
+                partial,
+            } => self.preflight_cancel(*turn, partial.as_ref()),
             Event::Settled { turn, call, .. } => self.preflight_settled(*turn, call),
+            Event::Boundary { turn } => self.preflight_boundary(*turn),
             Event::Inferred { usage, .. } if matches!(&self.phase, Phase::Running { .. }) => {
                 self.turn_totals.check_usage(*usage)
             }
@@ -121,6 +122,61 @@ impl Session {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Checks that `count` entry ids remain.
+    pub(super) fn reserve_entries(&self, count: usize) -> Result<(), Rejection> {
+        let count = u64::try_from(count).map_err(|_| invalid("too many entries"))?;
+        self.entries_available(count)
+    }
+
+    /// The entries `boundary` journals for a turn standing at its boundary:
+    /// the queued steer, the suppressed rule injects, the finished-jobs
+    /// reminder, and the pending reminders a turn ending there delivers.
+    ///
+    /// An upper bound: pending reminders count even when the boundary goes on
+    /// to open another round, so a refusal can only be early, never late.
+    pub(super) fn boundary_entries(&self) -> usize {
+        let flags = &self.turn_flags;
+        let ending = flags.pending_reminders.len();
+        let steer = usize::from(self.steers_queued() > 0);
+        if flags.end_after_boundary && steer == 0 {
+            return ending;
+        }
+        steer + flags.pending_suppressed.len() + usize::from(!self.ended_jobs.is_empty()) + ending
+    }
+
+    fn preflight_boundary(&self, turn: TurnId) -> Result<(), Rejection> {
+        match &self.phase {
+            Phase::Running {
+                turn: active,
+                stage: TurnStage::Boundary,
+                ..
+            } if *active == turn => self.reserve_entries(self.boundary_entries()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks the entries a blocked call journals: its failed result, and the
+    /// boundary when it was the last call pending.
+    fn preflight_block(&self, turn: TurnId, call: &CallId) -> Result<(), Rejection> {
+        let Phase::Running {
+            turn: active,
+            stage: TurnStage::Dispatching { pending },
+            ..
+        } = &self.phase
+        else {
+            return Ok(());
+        };
+        if *active != turn || !pending.iter().any(|item| item.call == *call) {
+            return Ok(());
+        }
+        let boundary = if pending.len() == 1 {
+            self.boundary_entries()
+        } else {
+            0
+        };
+        self.reserve_entries(1 + boundary)
     }
 
     /// Checks that `count` entry ids remain, so a transition that journals
@@ -181,22 +237,25 @@ impl Session {
     pub(super) fn preflight_guard(
         &self,
         turn: TurnId,
-        has_call: bool,
+        call: Option<&CallId>,
         has_extension: bool,
         outcome: &HookOutcome,
     ) -> Result<(), Rejection> {
         match outcome.event() {
             HookEvent::BeforeTurn => {
-                let reminder = u64::from(
+                let reminder = usize::from(
                     matches!(outcome.verdict(), HookVerdict::BeforeTurn(Some(text)) if !text.is_empty()),
                 );
+                // `begin_turn` journals the reminder, then runs the boundary.
                 match &self.phase {
                     Phase::Settling {
                         follow_up: Some((next_turn, _)),
                         ..
-                    } if *next_turn == turn => self.entries_available(1 + reminder),
-                    Phase::Opening { turn: active, .. } if *active == turn && reminder == 1 => {
-                        self.entries_available(1)
+                    } if *next_turn == turn => {
+                        self.reserve_entries(1 + reminder + self.boundary_entries())
+                    }
+                    Phase::Opening { turn: active, .. } if *active == turn => {
+                        self.reserve_entries(reminder + self.boundary_entries())
                     }
                     _ => Ok(()),
                 }
@@ -204,14 +263,17 @@ impl Session {
             HookEvent::ToolCall if matches!(&self.phase, Phase::Running { turn: active, stage: TurnStage::Dispatching { .. }, .. } if *active == turn) => {
                 match outcome.verdict() {
                     HookVerdict::ToolCall(ToolCallVerdict::Block { .. })
-                        if !has_call || !has_extension =>
+                        if call.is_none() || !has_extension =>
                     {
                         Err(invalid(
                             "tool-call block requires call and extension identities",
                         ))
                     }
-                    HookVerdict::ToolCall(ToolCallVerdict::Rewrite { .. }) if !has_call => {
+                    HookVerdict::ToolCall(ToolCallVerdict::Rewrite { .. }) if call.is_none() => {
                         Err(invalid("tool-call rewrite requires a call identity"))
+                    }
+                    HookVerdict::ToolCall(ToolCallVerdict::Block { .. }) => {
+                        call.map_or(Ok(()), |call| self.preflight_block(turn, call))
                     }
                     _ => Ok(()),
                 }
@@ -385,13 +447,20 @@ impl Session {
         self.entries_available(count)
     }
 
-    pub(super) fn preflight_cancel(&self, turn: TurnId) -> Result<(), Rejection> {
+    pub(super) fn preflight_cancel(
+        &self,
+        turn: TurnId,
+        partial: Option<&PartialResponse>,
+    ) -> Result<(), Rejection> {
         match &self.phase {
-            Phase::Opening { turn: active, .. } | Phase::Running { turn: active, .. }
-                if *active == turn =>
-            {
-                Ok(())
-            }
+            // An opening turn has no stream: the cancel returns to idle and
+            // never reads the partial.
+            Phase::Opening { turn: active, .. } if *active == turn => Ok(()),
+            Phase::Running {
+                turn: active,
+                stage,
+                ..
+            } if *active == turn => self.preflight_cancel_entries(stage, partial),
             Phase::Settling { turn: active, .. } if *active == turn => Err(wrong_turn(
                 Expect::After(turn),
                 TurnState::Settling { turn: *active },
@@ -402,6 +471,32 @@ impl Session {
             )),
             _ => Err(wrong_turn(Expect::After(turn), TurnState::Idle)),
         }
+    }
+
+    /// Checks what cancelling a running turn journals before the cancel
+    /// changes anything: the partial response (its model route, its usage, its
+    /// entry) and one failed result per call the turn still owes.
+    fn preflight_cancel_entries(
+        &self,
+        stage: &TurnStage,
+        partial: Option<&PartialResponse>,
+    ) -> Result<(), Rejection> {
+        let journaled = partial.filter(|partial| !partial.content.is_empty());
+        if let Some(partial) = journaled {
+            if self.active_model.is_none() || self.active_family.is_none() {
+                return Err(invalid(
+                    "partial assistant content has no active model route",
+                ));
+            }
+            self.turn_totals.check_usage(partial.usage)?;
+        }
+        // `end_turn` fails every call `unsettled_calls` names; count the same
+        // list so the reservation cannot drift from what the cancel journals.
+        let count = unsettled_call_count(stage, partial)
+            .checked_add(usize::from(journaled.is_some()))
+            .ok_or_else(|| invalid("too many cancel entries"))?;
+        let count = u64::try_from(count).map_err(|_| invalid("too many cancel entries"))?;
+        self.entries_available(count)
     }
 
     pub(super) fn preflight_settled(&self, turn: TurnId, call: &CallId) -> Result<(), Rejection> {
@@ -415,7 +510,13 @@ impl Session {
                     .iter()
                     .any(|item| item.call == *call && item.started) =>
             {
-                self.entries_available(1)
+                // The last call to settle also runs the boundary.
+                let boundary = if pending.len() == 1 {
+                    self.boundary_entries()
+                } else {
+                    0
+                };
+                self.reserve_entries(1 + boundary)
             }
             Phase::Running { turn: active, .. } if *active == turn => {
                 Err(invalid("tool result was not pending"))
@@ -502,6 +603,18 @@ impl Session {
             Command::MoveLeaf(id) if !self.tree.entries.contains_key(id) => {
                 Err(invalid("unknown entry id"))
             }
+            // Any other phase is refused or handled by `cancel` before it
+            // changes anything; a running turn needs its entries reserved.
+            Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            } => match &self.phase {
+                Phase::Running {
+                    turn: active,
+                    stage,
+                    ..
+                } if active == turn => self.preflight_cancel_entries(stage, None),
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }
