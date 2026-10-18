@@ -505,6 +505,7 @@ pub async fn dispatch_input(
     for hook in hooks {
         let input = InputEvent {
             content: current.clone(),
+            model: event.model.clone(),
         };
         match settle(hook.call(input, cx.mint(deadline)), cx.cancel, deadline).await {
             Ok(InputVerdict::Continue) => {}

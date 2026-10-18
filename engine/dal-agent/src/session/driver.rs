@@ -13,8 +13,9 @@ use std::time::Duration;
 use dal_core::ext::{BeforeRequest, Channel, TurnEnd};
 use dal_core::{
     BlobId, CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryKind, EntryView, Family,
-    Gen, InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq,
-    Part, Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
+    Gen,
+    InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq, Part,
+    Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
     StreamChannel, StreamEvent, ToolResultEvent, TurnId, Usage, Visibility, Workspace,
 };
 use tokio::sync::{Mutex, oneshot};
@@ -33,7 +34,7 @@ use crate::ext::overlay::{Overlay, TurnTools};
 use crate::ext::prompt::{PromptOrder, PromptSection, SectionCx};
 use crate::ext::services::SessionBackend;
 use crate::ext::{Caller, CallerKind, Services, ToolDescription};
-use crate::host::HostState;
+use crate::host::{HostShared, HostState};
 use crate::jobs::JobTable;
 use crate::session::actor::{DriverPorts, TurnBatch, TurnWork, WatchOutcome};
 use crate::session::backend::Backend;
@@ -698,91 +699,114 @@ struct ResolvedRequest {
     entry: dal_provider::CatalogEntry,
 }
 
+/// Resolves a requested route through the catalog, caching it for commands.
+/// `provider` is the provider an earlier round of the same turn resolved.
+async fn resolve_requested(
+    shared: &HostShared,
+    route: &ModelRoute,
+    provider: Option<&str>,
+) -> Result<ResolvedRequest, Box<str>> {
+    match (route, provider) {
+        (ModelRoute::Api { model, .. }, Some(provider)) => {
+            resolve_reference(shared, &format!("{provider}/{model}"), None).await
+        }
+        _ => {
+            resolve_reference(
+                shared,
+                &crate::host::ops::request_reference(route),
+                Some(route),
+            )
+            .await
+        }
+    }
+}
+
+/// Resolves the configured default model.
+async fn resolve_default(shared: &HostShared) -> Result<ResolvedRequest, Box<str>> {
+    resolve_reference(shared, shared.config.model().unwrap_or(""), None).await
+}
+
+/// Resolves `reference`, or the model `route` names when one is given.
+async fn resolve_reference(
+    shared: &HostShared,
+    reference: &str,
+    route: Option<&ModelRoute>,
+) -> Result<ResolvedRequest, Box<str>> {
+    if reference.is_empty() {
+        return Err("no model configured: set dal.toml [models] default.".into());
+    }
+    if let Some(found) = synthetic(shared, reference) {
+        return Ok(ResolvedRequest {
+            family: Family::Chat,
+            provider: found.provider(),
+            entry: found.entry(),
+            route: found.route(),
+        });
+    }
+    let catalog = shared
+        .providers
+        .catalog()
+        .await
+        .map_err(|error| format!("provider catalog unavailable: {error}").into_boxed_str())?;
+    shared.cache_catalog(catalog.clone());
+    let aliases: Vec<(Box<str>, Box<str>)> = shared
+        .config
+        .aliases()
+        .iter()
+        .map(|(name, target)| (name.clone(), target.clone()))
+        .collect();
+    let resolved = match route {
+        Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
+        None => dal_provider::resolve(&catalog, &aliases, reference),
+    }
+    .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
+    Ok(ResolvedRequest {
+        family: api_family(&resolved.route).unwrap_or(Family::Chat),
+        provider: resolved.provider.clone(),
+        entry: resolved.entry.clone(),
+        route: resolved.route,
+    })
+}
+
+/// Resolves a registered synthetic model; harness ids never match.
+fn synthetic(shared: &HostShared, reference: &str) -> Option<crate::ext::synthetic::Found> {
+    if reference.starts_with("dalgon/") {
+        return None;
+    }
+    crate::ext::synthetic::find(shared, reference)
+}
+
+/// The model a turn opening will request, described as `before_request`
+/// hooks see it: the route the session selected, else the configured default,
+/// resolved by the same functions the request itself uses. `None` when the
+/// route does not resolve.
+pub(crate) async fn opening_model(
+    shared: &HostShared,
+    requested: Option<&ModelRoute>,
+) -> Option<ModelInfo> {
+    let resolved = match requested {
+        Some(route) => resolve_requested(shared, route, None).await,
+        None => resolve_default(shared).await,
+    }
+    .ok()?;
+    Some(model_info_for(
+        &resolved.entry,
+        &resolved.route,
+        shared.config.thinking(),
+    ))
+}
+
 impl Driver {
     /// Resolves the request route through the catalog, caching it for commands.
     async fn resolve_model(&self, turn: TurnId) -> Result<ResolvedRequest, Box<str>> {
         let Some(route) = self.turn_model(turn) else {
-            return self.resolve_default_model().await;
+            return resolve_default(&self.deps.host.shared).await;
         };
         let provider = self
             .turns
             .get(&turn)
             .and_then(|state| state.provider.as_deref());
-        match (&route, provider) {
-            (ModelRoute::Api { model, .. }, Some(provider)) => {
-                self.resolve_reference(&format!("{provider}/{model}"), None)
-                    .await
-            }
-            _ => {
-                self.resolve_reference(&crate::host::ops::request_reference(&route), Some(&route))
-                    .await
-            }
-        }
-    }
-
-    async fn resolve_default_model(&self) -> Result<ResolvedRequest, Box<str>> {
-        let reference = self
-            .deps
-            .host
-            .shared
-            .config
-            .model()
-            .unwrap_or("")
-            .to_owned();
-        self.resolve_reference(&reference, None).await
-    }
-
-    /// Resolves `reference`, or the model `route` names when one is given.
-    async fn resolve_reference(
-        &self,
-        reference: &str,
-        route: Option<&ModelRoute>,
-    ) -> Result<ResolvedRequest, Box<str>> {
-        if reference.is_empty() {
-            return Err("no model configured: set dal.toml [models] default.".into());
-        }
-        if let Some(found) = self.synthetic(reference) {
-            return Ok(ResolvedRequest {
-                family: Family::Chat,
-                provider: found.provider(),
-                entry: found.entry(),
-                route: found.route(),
-            });
-        }
-        let providers = &self.deps.host.shared.providers;
-        let catalog = providers
-            .catalog()
-            .await
-            .map_err(|error| format!("provider catalog unavailable: {error}").into_boxed_str())?;
-        self.deps.host.shared.cache_catalog(catalog.clone());
-        let aliases: Vec<(Box<str>, Box<str>)> = self
-            .deps
-            .host
-            .shared
-            .config
-            .aliases()
-            .iter()
-            .map(|(name, target)| (name.clone(), target.clone()))
-            .collect();
-        let resolved = match route {
-            Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
-            None => dal_provider::resolve(&catalog, &aliases, reference),
-        }
-        .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
-        Ok(ResolvedRequest {
-            family: api_family(&resolved.route).unwrap_or(Family::Chat),
-            provider: resolved.provider.clone(),
-            entry: resolved.entry.clone(),
-            route: resolved.route,
-        })
-    }
-
-    /// Resolves a registered synthetic model; harness ids never match.
-    fn synthetic(&self, reference: &str) -> Option<crate::ext::synthetic::Found> {
-        if reference.starts_with("dalgon/") {
-            return None;
-        }
-        crate::ext::synthetic::find(&self.deps.host.shared, reference)
+        resolve_requested(&self.deps.host.shared, &route, provider).await
     }
 
     /// Returns the turn's active route, when the actor snapshotted one.
@@ -1547,7 +1571,7 @@ impl Driver {
                 entry.context_window.map(u64::from),
             ));
         }
-        let resolved = self.resolve_default_model().await?;
+        let resolved = resolve_default(&self.deps.host.shared).await?;
         Ok((
             resolved.route,
             resolved.entry.image_profile,

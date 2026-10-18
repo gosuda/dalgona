@@ -327,6 +327,7 @@ impl Hook<InputEvent, InputVerdict> for TextHook {
 fn text_event(text: &str) -> InputEvent {
     InputEvent {
         content: vec![Part::Text { text: text.into() }],
+        model: None,
     }
 }
 

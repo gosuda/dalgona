@@ -923,6 +923,7 @@ impl Fixture {
                     content: vec![dal_core::Part::Text {
                         text: "work".into(),
                     }],
+                    model: None,
                 },
                 HookCx::for_test(self.host.clone(), self.session, None),
             )

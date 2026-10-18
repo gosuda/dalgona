@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::control::ControlCell;
-use super::driver::WatchDelivery;
+use super::driver::{WatchDelivery, opening_model};
 use super::shared::Shared;
 use super::status::{STATUS_POLL, sweep};
 use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
@@ -822,13 +822,18 @@ impl Actor {
             effects,
             asks,
             policy: self.fold.policy(self.answerer_attached()),
-            model: self
-                .fold
-                .requested_model()
-                .cloned()
-                .or_else(|| self.fold.active_model().cloned()),
+            model: self.requested_route(),
             family: self.fold.active_family(),
         }
+    }
+
+    /// The route the next request names: the one the caller selected, else
+    /// the route of the live turn. `None` leaves the host default.
+    fn requested_route(&self) -> Option<ModelRoute> {
+        self.fold
+            .requested_model()
+            .or_else(|| self.fold.active_model())
+            .cloned()
     }
 
     /// Reports whether a frontend can answer approval questions.
@@ -1927,14 +1932,31 @@ impl Actor {
     /// order and returns the final parts. Transforms feed the next hook and
     /// the first stopping extension ends the fold. A share that would leave
     /// non-empty input without parts is refused with one notice and keeps
-    /// the running content, as a failed hook does.
+    /// the running content, as a failed hook does. Every hook sees the model
+    /// the request will resolve (`opening_model`), so a hook can adapt its
+    /// content to the model's capabilities before anything is journaled.
     async fn fold_input_hooks(
         &mut self,
         scope: &HookScope<'_>,
         generation: &Generation,
         turn: TurnId,
-        mut content: Vec<Part>,
+        content: Vec<Part>,
     ) -> Vec<Part> {
+        let hooked = hook_fanout(generation, Some(turn))
+            .any(|(index, ..)| !generation.inputs(index).is_empty());
+        let model = if hooked {
+            let shared = Arc::clone(&self.host.shared);
+            let requested = self.requested_route();
+            // Boxed: the resolution future would otherwise push this fold
+            // (and its `drive_opening` caller) over the `large_future` cap.
+            Box::pin(
+                self.pump_opening(async move { opening_model(&shared, requested.as_ref()).await }),
+            )
+            .await
+        } else {
+            None
+        };
+        let mut event = InputEvent { content, model };
         for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
             let cx = scope.cx(&caller, Some(turn));
             let step = self
@@ -1943,24 +1965,22 @@ impl Actor {
                     &cx,
                     matches!(extension.origin(), Origin::Builtin),
                     generation.inputs(index),
-                    &InputEvent {
-                        content: content.clone(),
-                    },
+                    &event,
                 ))
                 .await;
             for notice in step.notices {
                 self.notice(turn, "hook.input", &notice);
             }
-            if step.content.is_empty() && !content.is_empty() {
+            if step.content.is_empty() && !event.content.is_empty() {
                 self.notice(turn, "hook.input", &input_failed_notice(extension.name()));
             } else {
-                content = step.content;
+                event.content = step.content;
             }
             if step.stop {
                 break;
             }
         }
-        content
+        event.content
     }
 
     /// Feeds the folded input content to the fold as one `Input` guard.
