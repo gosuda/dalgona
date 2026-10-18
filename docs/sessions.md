@@ -1,6 +1,6 @@
 # Sessions, history, and compaction
 
-Sessions live under the data root. Use `-c` to continue a session or `-r` to resume one. Names label sessions. Use `/tree`, `/fork`, and `/clone` to inspect or change branches. Use `/export` to write a shareable file. Read an entry at `session://<id>/<entry>`. `--no-session` runs without saving.
+Sessions live under the data root. Use `-c` to continue a session or `-r` to resume one. Names label sessions. Exit lines and `/name` print the `-r` argument in the exact form the shell accepts; names that are unsafe to paste degrade to the session id. Use `/tree`, `/fork`, and `/clone` to inspect or change branches. Use `/export` to write a shareable file. Read an entry at `session://<id>/<entry>`. `--no-session` runs without saving.
 
 Child sessions also write a `dal-agent` `child_policy` record with their inherited approval mode and tool allowlist; an absent tool list means unrestricted access. Session replay requires at most one policy record; duplicate or conflicting records fail replay.
 

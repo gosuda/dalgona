@@ -14,7 +14,7 @@ Built-in commands, in registry order. Plugin commands appear after these with th
 | /share |  | not in dalgon: use /export |
 | /bug |  | not in dalgon: use /export and /session |
 | /copy |  | copy the last reply to the clipboard |
-| /name | [name] | set or show the session name |
+| /name | [name] | set or show the session name. The confirmation prints a resume token after the name: `Resume it with dalgon -r <token>.` The token is the name itself when it is shell-safe (letters, digits, `.`, `_`, `-` bare; spaces and apostrophes in double quotes), otherwise the session id. Paste it as shown; anything the shell would expand or split always arrives as the id. |
 | /session |  | show session details and usage |
 | /changelog |  | show what changed in each version |
 | /hotkeys |  | show keyboard shortcuts |
