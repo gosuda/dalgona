@@ -11,7 +11,7 @@ use super::compiled_temperature;
 use super::{Catalog, CatalogEntry, CatalogSource, Listing, ResolvedModel, ToolSupport};
 use crate::{
     error::ResolveError,
-    provider::{OPENAI, PROVIDERS, ProviderEntry},
+    provider::{OPENAI, ProviderEntry},
     thinking::ThinkingSupport,
 };
 
@@ -68,10 +68,11 @@ pub fn resolve_route(
     let prefix = match family {
         Family::Chat => "openai-chat",
         Family::Responses => "openai-responses",
-        Family::Codex | Family::Anthropic => PROVIDERS
-            .iter()
-            .find(|def| def.family == *family)
-            .map_or("", |def| def.id),
+        // Every other family retries under the catalog's single configured
+        // owner for that family, or not at all. The static provider table is
+        // never consulted: it cannot see custom ids and it guesses among
+        // shared families.
+        _ => single_family_owner(catalog, family).unwrap_or(""),
     };
     match resolve(catalog, aliases, &format!("{prefix}/{model}"))
         .ok()
@@ -119,6 +120,23 @@ fn resolve_expanded(
         return resolve_bare(catalog, reference, family);
     }
     resolve_bare(catalog, reference, family)
+}
+
+/// The catalog's only configured provider serving `family`, when exactly one does.
+///
+/// Route retry must never guess among several same-family providers: `ollama`
+/// and `ollama-cloud` share a family but not an endpoint, so a family-wide
+/// guess would bind cloud ids to the local row. It must also not prefer a
+/// built-in row the catalog does not configure. Zero or several owners mean no
+/// retry and the bare error stands.
+fn single_family_owner<'a>(catalog: &'a Catalog, family: &Family) -> Option<&'a str> {
+    let mut owners = catalog
+        .providers
+        .iter()
+        .filter(|(provider, _)| provider.family == *family)
+        .map(|(provider, _)| provider.id.as_ref());
+    let only = owners.next()?;
+    owners.next().is_none().then_some(only)
 }
 
 /// Maps a family-qualified route prefix to the provider that serves it.
@@ -366,6 +384,31 @@ fn default_thinking(family: Family) -> ThinkingSupport {
             ],
             none_supported: true,
         },
-        Family::Anthropic => ThinkingSupport::UnknownAdaptive,
+        // Bedrock speaks the Converse wire with the Anthropic thinking
+        // fragment (`additionalModelRequestFields.thinking`); an OpenAI
+        // effort has no member there and `bedrock::request_body` rejects it
+        // as `ForeignThinking`. Typed Bedrock rows therefore carry the
+        // Anthropic contract, matching the Anthropic family default.
+        Family::Anthropic | Family::Bedrock => ThinkingSupport::UnknownAdaptive,
+        Family::Cursor
+        | Family::Devin
+        | Family::Droid
+        | Family::GitLab
+        | Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleGeminiCli
+        | Family::GoogleAntigravity
+        | Family::Ollama
+        | Family::PiMessages => ThinkingSupport::OpenAi {
+            accepted: Vec::new(),
+            none_supported: true,
+        },
+        // `reasoning_effort: none` only exists on the models that reason, and
+        // a card says whether one does; a row without that knowledge sends no
+        // reasoning control at all instead of one the model may reject.
+        Family::Mistral => ThinkingSupport::OpenAi {
+            accepted: Vec::new(),
+            none_supported: false,
+        },
     }
 }

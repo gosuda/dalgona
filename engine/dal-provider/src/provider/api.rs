@@ -48,6 +48,14 @@ pub enum Provider {
     Codex(Http),
     /// Anthropic Messages.
     Anthropic(Http),
+    /// Every other HTTP-backed family (Bedrock, Cursor, Devin, Droid, GitLab,
+    /// the Google HTTPS surfaces, Mistral, Ollama, `pi-messages`): one general
+    /// variant whose request family drives the dispatch in [`Provider::open`].
+    Http(Http),
+    /// `google-gemini-cli`: a credential-less local subprocess, never HTTP.
+    /// It drives `gemini_cli::spawn().into_events()` instead of `http::send`,
+    /// so it stays out of the HTTP catalog, refresh, and decode paths.
+    GeminiCli(Http),
     /// Deterministic provider steps for tests and headless replay.
     Scripted(crate::scripted::Script),
 }
@@ -134,7 +142,7 @@ impl Provider {
                 message: String::from("this provider family requires an API-key credential"),
             });
         }
-        let provider = Self::from_family(
+        Ok(Self::from_family(
             *family,
             Http {
                 resolved,
@@ -144,16 +152,30 @@ impl Provider {
                 user_agent: owner.inner.user_agent.clone(),
                 owner: Arc::downgrade(&owner.inner),
             },
-        );
-        Ok(provider)
+        ))
     }
 
+    /// Binds each family to its provider variant. Every family is named, so
+    /// a new `Family` must choose its variant here instead of falling into
+    /// an existing codec's path.
     fn from_family(family: Family, http: Http) -> Self {
         match family {
             Family::Chat => Self::Chat(http),
             Family::Responses => Self::Responses(http),
             Family::Codex => Self::Codex(http),
             Family::Anthropic => Self::Anthropic(http),
+            Family::Bedrock
+            | Family::Cursor
+            | Family::Devin
+            | Family::Droid
+            | Family::GitLab
+            | Family::GoogleGenerativeAi
+            | Family::GoogleVertex
+            | Family::GoogleAntigravity
+            | Family::Mistral
+            | Family::Ollama
+            | Family::PiMessages => Self::Http(http),
+            Family::GoogleGeminiCli => Self::GeminiCli(http),
         }
     }
 
@@ -162,8 +184,12 @@ impl Provider {
             Self::Chat(http)
             | Self::Responses(http)
             | Self::Codex(http)
-            | Self::Anthropic(http) => Some(http),
-            Self::Scripted(_) => None,
+            | Self::Anthropic(http)
+            | Self::Http(http) => Some(http),
+            // The subprocess family is never HTTP-backed: its turn drives
+            // the child, so the HTTP catalog, refresh, and decode paths
+            // below stay unreachable for it.
+            Self::GeminiCli(_) | Self::Scripted(_) => None,
         }
     }
 
@@ -318,7 +344,20 @@ impl Provider {
                 }))
                 .await?
             }
-            Family::Chat | Family::Anthropic => {
+            Family::Chat
+            | Family::Anthropic
+            | Family::Bedrock
+            | Family::Cursor
+            | Family::Devin
+            | Family::Droid
+            | Family::GitLab
+            | Family::GoogleGenerativeAi
+            | Family::GoogleVertex
+            | Family::GoogleGeminiCli
+            | Family::GoogleAntigravity
+            | Family::Mistral
+            | Family::Ollama
+            | Family::PiMessages => {
                 return Err(ProviderError::InvalidRequest {
                     message: String::from("this provider family has no WebSocket transport"),
                 });

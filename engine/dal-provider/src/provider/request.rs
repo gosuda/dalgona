@@ -103,9 +103,17 @@ pub(crate) async fn stream_attempt(
             }
         };
     }
+    let parts = build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
+    send_parts(&context, &credential, &cancel, parts).await
+}
 
-    let (request, user_agent, secrets, replay_prefix) =
-        build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
+async fn send_parts(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    parts: StreamRequestParts,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let (request, user_agent, secrets, replay_prefix) = parts;
     let response = tokio::select! {
         biased;
         () = cancel.cancelled() => return Ok(None),
@@ -118,9 +126,7 @@ pub(crate) async fn stream_attempt(
         ) => response.map_err(AttemptFailure::Provider)?,
     };
     if !response.status().is_success() {
-        return match status_failure(response, context.family, &credential, &secrets, &cancel)
-            .await?
-        {
+        return match status_failure(response, context.family, credential, &secrets, cancel).await? {
             Some(failure) => Err(failure),
             None => Ok(None),
         };
@@ -130,9 +136,10 @@ pub(crate) async fn stream_attempt(
         context.family,
         &context.provider,
         &context.model,
-        matches!(&credential, Credential::OAuth(_)),
+        matches!(credential, Credential::OAuth(_)),
         replay_prefix.as_deref(),
         secrets,
+        None,
     )))
 }
 
@@ -187,6 +194,92 @@ pub(crate) fn build_stream_request(
         Family::Codex => Err(ProviderError::InvalidRequest {
             message: String::from("Codex requests use the dedicated HTTPS adapter"),
         }),
+        Family::Bedrock => Err(ProviderError::InvalidRequest {
+            message: String::from("Bedrock requests use the dedicated Converse adapter"),
+        }),
+        Family::Cursor => Err(ProviderError::InvalidRequest {
+            message: String::from("Cursor requests use the dedicated run adapter"),
+        }),
+        Family::Devin => Err(ProviderError::InvalidRequest {
+            message: String::from("Devin requests use the dedicated Connect adapter"),
+        }),
+        Family::Droid => Err(ProviderError::InvalidRequest {
+            message: String::from("Droid requests use the dedicated proxy adapter"),
+        }),
+        Family::GitLab => Err(ProviderError::InvalidRequest {
+            message: String::from("GitLab requests use the dedicated Duo adapter"),
+        }),
+        Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
+            Err(ProviderError::InvalidRequest {
+                message: String::from("Google requests use the dedicated GenerateContent adapter"),
+            })
+        }
+        Family::GoogleGeminiCli => Err(ProviderError::InvalidRequest {
+            message: String::from("Gemini CLI requests use the dedicated subprocess adapter"),
+        }),
+        Family::Mistral => {
+            let body = family::mistral::request_body(&context.request, &context.thinking).map_err(
+                |error| ProviderError::InvalidRequest {
+                    message: error.to_string(),
+                },
+            )?;
+            let url = http::endpoint(
+                route_family,
+                &context.base_url,
+                family::mistral::ENDPOINT_PATH,
+            )?;
+            let mut request = context.client.post(url);
+            if let Some((header, value)) =
+                optional_auth_header(context.auth, credential, route_family, &context.provider)?
+            {
+                request = request.header(header, value);
+            }
+            Ok((request.body(body), user_agent, secrets, None))
+        }
+        Family::Ollama => {
+            let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
+            let policy = family::ollama::WirePolicy::for_model(
+                deployment,
+                &context.model,
+                &context.entry.thinking,
+            );
+            let body = family::ollama::request_body(&context.request, &context.thinking, policy)
+                .map_err(|error| ProviderError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+            let base = family::ollama::trim_api_suffix(&context.base_url);
+            let url = http::endpoint(route_family, base, family::ollama::ENDPOINT_PATH)?;
+            let mut request = context.client.post(url);
+            if let Some((header, value)) =
+                optional_auth_header(context.auth, credential, route_family, &context.provider)?
+            {
+                request = request.header(header, value);
+            }
+            Ok((request.body(body), user_agent, secrets, None))
+        }
+        Family::PiMessages => {
+            let body = family::pi_messages::request_body(
+                &context.request,
+                &context.provider,
+                &context.thinking,
+            )
+            .map_err(|error| ProviderError::InvalidRequest {
+                message: error.to_string(),
+            })?;
+            let url = http::endpoint(
+                route_family,
+                &context.base_url,
+                family::pi_messages::ENDPOINT_PATH,
+            )?;
+            let (header, value) =
+                auth_header(context.auth, credential, route_family, &context.provider)?;
+            Ok((
+                context.client.post(url).header(header, value).body(body),
+                user_agent,
+                secrets,
+                None,
+            ))
+        }
         Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
 }
@@ -432,6 +525,26 @@ pub(crate) async fn compact_attempt(
             )
             .await
         }
+        // Every other family names its own wire for turns but has no remote
+        // compaction endpoint; each is listed so a new family forces a
+        // decision here instead of falling into this refusal.
+        Family::Bedrock
+        | Family::Cursor
+        | Family::Devin
+        | Family::Droid
+        | Family::GitLab
+        | Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleGeminiCli
+        | Family::GoogleAntigravity
+        | Family::Mistral
+        | Family::Ollama
+        | Family::PiMessages => Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!(
+                "{} compaction has no remote adapter",
+                crate::error::family_label(context.family)
+            ),
+        })),
     }
 }
 

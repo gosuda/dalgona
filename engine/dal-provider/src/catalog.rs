@@ -163,7 +163,19 @@ impl ToolSupport {
             Self::ChatWhenNoReasoning => match family {
                 Family::Chat => matches!(thinking, ThinkingLevel::Off),
                 Family::Responses | Family::Codex => true,
-                Family::Anthropic => false,
+                Family::Anthropic
+                | Family::Bedrock
+                | Family::Cursor
+                | Family::Devin
+                | Family::Droid
+                | Family::GitLab
+                | Family::GoogleGenerativeAi
+                | Family::GoogleVertex
+                | Family::GoogleGeminiCli
+                | Family::GoogleAntigravity
+                | Family::Mistral
+                | Family::Ollama
+                | Family::PiMessages => false,
             },
         }
     }

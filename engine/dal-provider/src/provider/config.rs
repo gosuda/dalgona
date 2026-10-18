@@ -571,6 +571,18 @@ const fn api_name(family: Family) -> &'static str {
         Family::Responses => "openai_responses",
         Family::Codex => "openai_codex",
         Family::Anthropic => "anthropic",
+        Family::Bedrock => "bedrock",
+        Family::Cursor => "cursor",
+        Family::Devin => "devin",
+        Family::Droid => "droid",
+        Family::GitLab => "gitlab",
+        Family::GoogleGenerativeAi => "google-generative-ai",
+        Family::GoogleVertex => "google-vertex",
+        Family::GoogleGeminiCli => "google-gemini-cli",
+        Family::GoogleAntigravity => "google-antigravity",
+        Family::Mistral => "mistral",
+        Family::Ollama => "ollama",
+        Family::PiMessages => "pi-messages",
     }
 }
 
@@ -641,6 +653,18 @@ fn parse_api(name: &str, value: &str) -> Result<Family, ProviderConfigError> {
         "openai_chat" => Ok(Family::Chat),
         "openai_responses" => Ok(Family::Responses),
         "anthropic" => Ok(Family::Anthropic),
+        "bedrock" => Ok(Family::Bedrock),
+        "cursor" => Ok(Family::Cursor),
+        "devin" => Ok(Family::Devin),
+        "droid" => Ok(Family::Droid),
+        "gitlab" => Ok(Family::GitLab),
+        "google-generative-ai" => Ok(Family::GoogleGenerativeAi),
+        "google-vertex" => Ok(Family::GoogleVertex),
+        "google-gemini-cli" => Ok(Family::GoogleGeminiCli),
+        "google-antigravity" => Ok(Family::GoogleAntigravity),
+        "mistral" => Ok(Family::Mistral),
+        "ollama" => Ok(Family::Ollama),
+        "pi-messages" => Ok(Family::PiMessages),
         _ => Err(ProviderConfigError::UnknownApi {
             name: name.to_owned().into_boxed_str(),
             value: value.to_owned().into_boxed_str(),
@@ -707,6 +731,8 @@ fn validate_transport(
     family: Family,
     transport: Transport,
 ) -> Result<(), ProviderConfigError> {
+    // Only Responses and Codex define a WebSocket transport; every other
+    // family speaks HTTPS only (or, for Gemini CLI, a local subprocess).
     if transport == Transport::Websocket && !matches!(family, Family::Responses | Family::Codex) {
         return Err(ProviderConfigError::TransportMismatch {
             name: name.to_owned().into_boxed_str(),

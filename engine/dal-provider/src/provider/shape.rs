@@ -26,7 +26,24 @@ impl Shape {
     #[must_use]
     pub const fn of_family(family: Family) -> Self {
         match family {
-            Family::Chat | Family::Responses => Self::Plain,
+            // These families have no dedicated header shape, so `Shape::headers`
+            // builds the plain set for them; an adapter that builds its own
+            // headers does not consult it. Every one is named, so a new family
+            // must choose a shape here.
+            Family::Chat
+            | Family::Responses
+            | Family::Bedrock
+            | Family::Cursor
+            | Family::Devin
+            | Family::Droid
+            | Family::GitLab
+            | Family::GoogleGenerativeAi
+            | Family::GoogleVertex
+            | Family::GoogleGeminiCli
+            | Family::GoogleAntigravity
+            | Family::Mistral
+            | Family::Ollama
+            | Family::PiMessages => Self::Plain,
             Family::Anthropic => Self::Claude,
             Family::Codex => Self::Codex,
         }

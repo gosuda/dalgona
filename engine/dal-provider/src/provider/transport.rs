@@ -17,7 +17,10 @@ use crate::{
         refresh::{RefreshReason, Refresher},
     },
     error::{ProviderError, UsageCheckReason},
-    family,
+    family::{
+        self,
+        google::shared::{ResponseIdSlot, decode_events as decode_google_events},
+    },
     provider::{ProviderDef, ProviderEntry},
     stream::{EventStream, StreamEvent},
 };
@@ -68,6 +71,22 @@ pub(crate) fn first_line(input: &str, max_bytes: usize) -> String {
     line[..end].to_owned()
 }
 
+/// A single-error stream for a family whose responses never reach the SSE
+/// decoder: its own adapter owns the wire and decodes it itself, so no
+/// request path hands such a response to [`decode_response`].
+fn dedicated_decoder(
+    family: Family,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> {
+    Box::pin(futures::stream::iter([
+        Result::<StreamEvent, ProviderError>::Err(ProviderError::InvalidRequest {
+            message: format!(
+                "{} responses decode through their own adapter",
+                crate::error::family_label(family)
+            ),
+        }),
+    ]))
+}
+
 pub(crate) fn decode_response(
     response: reqwest::Response,
     family: Family,
@@ -76,6 +95,7 @@ pub(crate) fn decode_response(
     oauth: bool,
     replay_prefix: Option<&str>,
     secrets: Vec<Box<str>>,
+    response_id: Option<ResponseIdSlot>,
 ) -> EventStream {
     let read_failure: Arc<Mutex<Option<ProviderError>>> = Arc::default();
     let chunks = response
@@ -94,6 +114,25 @@ pub(crate) fn decode_response(
                 }
             })
         });
+    // Bedrock event-stream frames, Devin Connect frames, and Ollama NDJSON
+    // records are byte grammars, not SSE: they decode straight off the chunk
+    // stream, ahead of the SSE wrap.
+    if matches!(family, Family::Bedrock | Family::Devin | Family::Ollama) {
+        let decoded: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> =
+            match family {
+                Family::Bedrock => {
+                    Box::pin(family::bedrock::decode_stream(chunks, provider, model))
+                }
+                Family::Devin => Box::pin(family::devin::decode::decode_chunks(
+                    chunks, provider, model,
+                )),
+                _ => Box::pin(family::ollama::decode_stream(
+                    chunks,
+                    family::ollama::OllamaDecoder::new(),
+                )),
+            };
+        return guard_errors(decoded, read_failure, secrets);
+    }
     let events = crate::sse::decode_stream(chunks);
     let decoded: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> =
         match family {
@@ -112,7 +151,44 @@ pub(crate) fn decode_response(
                 oauth,
                 replay_prefix,
             )),
+            // Bedrock, Devin and Ollama decoded ahead of the SSE wrap above;
+            // Cursor owns its run transport, Droid the proxy lifecycle
+            // (`family::droid::open`), GitLab its proxy and workflow
+            // adapters, and Gemini CLI its subprocess. None of them hands a
+            // response to this function.
+            Family::Bedrock
+            | Family::Devin
+            | Family::Ollama
+            | Family::Droid
+            | Family::Cursor
+            | Family::GitLab
+            | Family::GoogleGeminiCli => dedicated_decoder(family),
+            Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
+                Box::pin(decode_google_events(
+                    family,
+                    provider,
+                    model,
+                    events,
+                    response_id,
+                ))
+            }
+            Family::Mistral => Box::pin(family::mistral::decode_events(
+                events,
+                family::mistral::MistralDecoder::new(provider, model),
+            )),
+            Family::PiMessages => Box::pin(family::pi_messages::decode_events(
+                events,
+                family::pi_messages::PiMessagesDecoder::new(provider, model),
+            )),
         };
+    guard_errors(decoded, read_failure, secrets)
+}
+
+fn guard_errors(
+    decoded: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+    read_failure: Arc<Mutex<Option<ProviderError>>>,
+    secrets: Vec<Box<str>>,
+) -> EventStream {
     // A body read failure ends the byte source, so the decoder would report
     // it as a cut (or as a protocol error for a half-read frame); the transport
     // failure is the retryable truth.

@@ -56,7 +56,7 @@ impl Drop for TestDir {
 struct Reply {
     status: u16,
     content_type: &'static str,
-    body: String,
+    body: Vec<u8>,
 }
 
 async fn server(
@@ -124,7 +124,7 @@ async fn write_reply(socket: &mut TcpStream, reply: Reply) -> io::Result<()> {
         reply.body.len()
     );
     socket.write_all(headers.as_bytes()).await?;
-    socket.write_all(reply.body.as_bytes()).await?;
+    socket.write_all(&reply.body).await?;
     socket.flush().await
 }
 
@@ -267,7 +267,7 @@ fn stream_reply(body: String) -> Reply {
     Reply {
         status: 200,
         content_type: "text/event-stream",
-        body,
+        body: body.into_bytes(),
     }
 }
 
@@ -364,6 +364,18 @@ fn tool_reply(family: Family, wire: &str) -> String {
         Family::Anthropic => format!(
             "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"stop_reason\":null,\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"{wire}\",\"input\":{{}}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"tool_use\"}},\"usage\":{{\"output_tokens\":1}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
         ),
+        Family::Bedrock
+        | Family::Cursor
+        | Family::Devin
+        | Family::Droid
+        | Family::GitLab
+        | Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleGeminiCli
+        | Family::GoogleAntigravity
+        | Family::Mistral
+        | Family::Ollama
+        | Family::PiMessages => panic!("no tool-call reply fixture for {family:?}"),
     }
 }
 
@@ -679,7 +691,7 @@ async fn gated_server(body: String) -> io::Result<GatedServer> {
                         Reply {
                             status: 200,
                             content_type: "text/event-stream",
-                            body,
+                            body: body.into_bytes(),
                         },
                     )
                     .await?;
@@ -893,7 +905,8 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
             Reply {
                 status: 401,
                 content_type: "application/json",
-                body: String::from(r#"{"error":{"type":"invalid_token","message":"expired"}}"#),
+                body: String::from(r#"{"error":{"type":"invalid_token","message":"expired"}}"#)
+                    .into_bytes(),
             },
             stream_reply(responses_reply()),
         ],
@@ -906,7 +919,8 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
             content_type: "application/json",
             body: String::from(
                 r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
-            ),
+            )
+            .into_bytes(),
         }],
     )
     .await?;
@@ -1103,6 +1117,7 @@ async fn a_two_hundred_that_is_not_an_sse_stream_never_ends_in_stop() {
                 false,
                 None,
                 Vec::new(),
+                None,
             ))
             .await;
             assert!(
@@ -1137,6 +1152,7 @@ async fn a_body_read_failure_mid_stream_is_a_retryable_transport_error_at_any_cu
             false,
             None,
             Vec::new(),
+            None,
         ))
         .await;
         assert_eq!(
@@ -1535,7 +1551,7 @@ async fn preset_model_lists_ask_with_the_header_set_of_their_family() -> TestRes
     let listing = |body: &str| Reply {
         status: 200,
         content_type: "application/json",
-        body: body.to_owned(),
+        body: body.as_bytes().to_vec(),
     };
     let (chat_base, mut chat_asked) = server(
         "/v1",
@@ -1875,6 +1891,70 @@ fn responses_wire_refuses_secrets_it_cannot_carry_and_keeps_keyless_https() {
         login.auth_header,
         Some(("authorization", String::from("Bearer stored-access")))
     );
+}
+
+#[test]
+fn family_labels_are_non_empty_and_stable_for_every_variant() {
+    // Every Family variant resolves through family_label; the only shared
+    // label is the documented Chat|Responses "openai" pair. The exhaustive
+    // match below breaks when a new variant joins, forcing this list and
+    // error.rs to move together.
+    let families = [
+        Family::Chat,
+        Family::Responses,
+        Family::Codex,
+        Family::Anthropic,
+        Family::Bedrock,
+        Family::Cursor,
+        Family::Devin,
+        Family::Droid,
+        Family::GitLab,
+        Family::GoogleGenerativeAi,
+        Family::GoogleVertex,
+        Family::GoogleGeminiCli,
+        Family::GoogleAntigravity,
+        Family::Mistral,
+        Family::Ollama,
+        Family::PiMessages,
+    ];
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for family in families {
+        let label = crate::error::family_label(family);
+        assert!(!label.is_empty(), "{family:?} has an empty label");
+        assert!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
+            "{family:?} label {label:?} is not stable lowercase"
+        );
+        let expected = match family {
+            Family::Chat | Family::Responses => "openai",
+            Family::Codex => "codex",
+            Family::Anthropic => "anthropic",
+            Family::Bedrock => "bedrock",
+            Family::Cursor => "cursor",
+            Family::Devin => "devin",
+            Family::Droid => "droid",
+            Family::GitLab => "gitlab",
+            Family::GoogleGenerativeAi => "google-generative-ai",
+            Family::GoogleVertex => "google-vertex",
+            Family::GoogleGeminiCli => "google-gemini-cli",
+            Family::GoogleAntigravity => "google-antigravity",
+            Family::Mistral => "mistral",
+            Family::Ollama => "ollama",
+            Family::PiMessages => "pi-messages",
+        };
+        assert_eq!(label, expected, "{family:?}");
+        *seen.entry(label).or_insert(0) += 1;
+    }
+    for (label, count) in &seen {
+        if *label == "openai" {
+            assert_eq!(*count, 2, "the openai label covers Chat and Responses only");
+        } else {
+            assert_eq!(*count, 1, "label {label:?} must be unique");
+        }
+    }
+    assert_eq!(seen.len(), 15, "sixteen variants share fifteen labels");
 }
 
 #[tokio::test]

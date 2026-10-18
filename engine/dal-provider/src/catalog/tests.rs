@@ -18,7 +18,7 @@ use crate::{
     auth::credential::{OAuthCredential, SecretString},
     error::ResolveError,
     provider::{AuthStyle, ProviderSettings, Transport},
-    thinking::Effort,
+    thinking::{BeforeRequestPatch, Effort},
 };
 
 fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
@@ -142,6 +142,118 @@ fn route_resolution_retries_an_unlisted_id_under_its_family_provider() {
         "unknown model gpt-6",
         "a listed catalog still rejects an id it does not list",
     );
+}
+
+#[test]
+fn route_retry_serves_every_family_through_its_single_owner() {
+    let cases = [
+        (
+            Family::Bedrock,
+            "my-bedrock",
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+        ),
+        (Family::Cursor, "my-cursor", "https://api.cursor.com"),
+        (Family::Devin, "my-devin", "https://server.codeium.com"),
+        (
+            Family::Droid,
+            "factory-droid",
+            "https://api.factory.ai",
+        ),
+        (Family::GitLab, "gitlab-duo", "https://gitlab.com"),
+        (
+            Family::GoogleGenerativeAi,
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ),
+        (
+            Family::GoogleVertex,
+            "google-vertex",
+            "https://aiplatform.googleapis.com",
+        ),
+        (Family::GoogleGeminiCli, "my-gemini", "http://127.0.0.1:1"),
+        (
+            Family::GoogleAntigravity,
+            "my-antigravity",
+            "http://127.0.0.1:1",
+        ),
+    ];
+    for (family, id, base) in cases {
+        let typed = Catalog::with_sources(vec![(provider(id, family, base), CatalogSource::Typed)], Vec::new());
+        let route = ModelRoute::Api {
+            family,
+            model: "some-new-id".into(),
+        };
+        assert!(
+            resolve(&typed, &[], "some-new-id").is_err(),
+            "{id}: bare id stays unknown on a typed catalog",
+        );
+        let resolved = resolve_route(&typed, &[], &route)
+            .unwrap_or_else(|error| panic!("{id}: single owner serves a typed id: {error:?}"));
+        assert_eq!(resolved.provider.as_ref(), id);
+        assert_eq!(resolved.route, route);
+        let cached = Catalog::with_sources(
+            vec![(provider(id, family, base), CatalogSource::Cache)],
+            vec![row(id, "known-model", Some(10_000))],
+        );
+        assert_eq!(
+            resolve_route(&cached, &[], &route).unwrap_err().to_string(),
+            "unknown model some-new-id",
+            "{id}: a listed catalog still rejects an id it does not list",
+        );
+    }
+}
+
+#[test]
+fn route_retry_never_guesses_among_same_family_providers() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("ollama", Family::Ollama, "http://127.0.0.1:11434"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("ollama-cloud", Family::Ollama, "https://ollama.com"),
+                CatalogSource::Typed,
+            ),
+        ],
+        Vec::new(),
+    );
+    let route = ModelRoute::Api {
+        family: Family::Ollama,
+        model: "gpt-oss:120b".into(),
+    };
+    assert!(
+        resolve(&catalog, &[], "ollama-cloud/gpt-oss:120b").is_ok(),
+        "qualified cloud id resolves",
+    );
+    assert_eq!(
+        resolve_route(&catalog, &[], &route).unwrap_err().to_string(),
+        "unknown model gpt-oss:120b",
+        "two same-family owners mean no family-prefix guess",
+    );
+}
+
+#[test]
+fn route_retry_uses_the_catalogs_only_owner_including_custom_ids() {
+    for (id, base) in [
+        ("ollama", "http://127.0.0.1:11434"),
+        ("my-ollama", "http://10.0.0.9:11434"),
+    ] {
+        let typed =
+            Catalog::with_sources(vec![(provider(id, Family::Ollama, base), CatalogSource::Typed)], Vec::new());
+        let route = ModelRoute::Api {
+            family: Family::Ollama,
+            model: "some-new-id".into(),
+        };
+        assert!(
+            resolve(&typed, &[], "some-new-id").is_err(),
+            "{id}: bare id stays unknown on a typed catalog",
+        );
+        let resolved = resolve_route(&typed, &[], &route)
+            .unwrap_or_else(|error| panic!("{id}: single owner serves a typed id: {error:?}"));
+        assert_eq!(resolved.provider.as_ref(), id);
+        assert_eq!(resolved.route, route);
+    }
 }
 
 #[test]
@@ -1199,6 +1311,53 @@ fn generated_table_remains_sorted_for_binary_search() {
             .all(|pair| pair[0].model < pair[1].model)
     );
     assert_eq!(price_source().0, "models.dev");
+}
+
+#[test]
+fn bedrock_typed_carries_anthropic_contract() {
+    let made = provider(
+        "my-bedrock",
+        Family::Bedrock,
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+    );
+    let catalog = Catalog::with_sources(vec![(made, CatalogSource::Typed)], Vec::new());
+    let resolved = resolve(&catalog, &[], "my-bedrock/anthropic.claude-sonnet-4-5:0")
+        .expect("bedrock typed id resolves");
+    assert!(matches!(
+        resolved.entry.thinking,
+        ThinkingSupport::UnknownAdaptive
+    ));
+    let limits = crate::thinking::RequestLimits {
+        max_tokens: 0,
+        max_output: 2048,
+        temperature_allowed: false,
+    };
+    let plan = crate::thinking::plan(
+        dal_core::ThinkingLevel::Off,
+        &BeforeRequestPatch::default(),
+        &resolved.entry.thinking,
+        limits,
+    );
+    assert!(matches!(
+        plan.wire,
+        crate::thinking::WireThinking::Anthropic { .. }
+    ));
+    let request = dal_core::ModelRequest {
+        purpose: dal_core::Purpose::Turn,
+        model: resolved.route,
+        system: "".into(),
+        tools: Vec::new().into(),
+        context: Vec::new().into(),
+        params: dal_core::RequestParams {
+            thinking: dal_core::ThinkingLevel::Off,
+            effort: None,
+            temperature: None,
+            max_output_tokens: None,
+        },
+        cache_key: None,
+    };
+    let body = crate::family::bedrock::request_body(&request, &plan);
+    assert!(body.is_ok(), "converse accepts catalog thinking: {body:?}");
 }
 
 #[tokio::test]
