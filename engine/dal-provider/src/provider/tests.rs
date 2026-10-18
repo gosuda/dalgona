@@ -1596,7 +1596,32 @@ async fn preset_model_lists_ask_with_the_header_set_of_their_family() -> TestRes
 }
 
 #[test]
-fn preset_rows_keep_the_strict_config_contract() {
+fn preset_api_overrides_decode_like_the_named_provider_path() {
+    // A preset with an explicit `api` decodes the way the named-provider
+    // path did before the row existed: the named family wins, the new
+    // family's header default applies, and the row keeps its endpoint
+    // default, key material, and key-only sign-in.
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new("/tmp/dal-provider-preset-test"),
+        "",
+        Some("[providers.deepseek]\napi = 'anthropic'\n"),
+    )
+    .expect("test dal.toml parses");
+    let decoded =
+        ProviderConfig::from_config(&config).expect("a preset keeps an explicit api override");
+    let route = decoded
+        .providers
+        .iter()
+        .find(|provider| &*provider.id == "deepseek")
+        .expect("deepseek decoded");
+    assert_eq!(route.family, Family::Anthropic);
+    assert_eq!(route.auth, AuthStyle::XApiKey);
+    assert_eq!(&*route.base_url, "https://api.deepseek.com");
+    assert!(route.key_env.is_none());
+    assert_eq!(route.def.map(|row| row.id), Some("deepseek"));
+    assert_eq!(route.shape(), Shape::Claude);
+
     let refusal = |toml: &str| {
         let config = Config::load(
             ConfigProduct::Dalgon,
@@ -1610,10 +1635,6 @@ fn preset_rows_keep_the_strict_config_contract() {
             .to_string()
     };
     assert_eq!(
-        refusal("[providers.deepseek]\napi = 'anthropic'\n"),
-        "providers.deepseek.api conflicts with its fixed family"
-    );
-    assert_eq!(
         refusal("[providers.minimax]\ntransport = 'websocket'\n"),
         "providers.minimax: transport websocket needs api openai_responses."
     );
@@ -1621,4 +1642,12 @@ fn preset_rows_keep_the_strict_config_contract() {
         refusal("[providers.xai]\nbogus = 1\n"),
         "providers.xai.bogus: unknown key"
     );
+}
+
+/// The error of a lowering that had to refuse, for wire types without `Debug`.
+fn refusal<T>(result: Result<T, ProviderError>) -> ProviderError {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("the wire was built for an entry that must refuse it"),
+    }
 }
