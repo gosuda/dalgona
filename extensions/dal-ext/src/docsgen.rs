@@ -81,7 +81,8 @@ struct PageSpec {
 /// Generates the complete Rust module for one manual.
 ///
 /// Reads without following symlinks, normalizes CRLF, checks budgets, and
-/// emits pages in byte order.
+/// emits pages in byte order. Scanned source links stop at recognized escaped
+/// whitespace and string delimiters.
 ///
 /// # Errors
 /// Returns all errors in stable file and line order.
@@ -917,6 +918,7 @@ fn own_scheme_links(line: &str, scheme: &str) -> Vec<String> {
                         | b'}'
                         | b'|'
                 )
+                && !escaped_source_delimiter(bytes, end)
             {
                 end += 1;
             }
@@ -932,6 +934,13 @@ fn own_scheme_links(line: &str, scheme: &str) -> Vec<String> {
         cursor = separator + marker.len();
     }
     found
+}
+
+fn escaped_source_delimiter(bytes: &[u8], index: usize) -> bool {
+    matches!(
+        &bytes[index..],
+        [b'\\', b'n' | b'r' | b't' | b'"' | b'\'', ..]
+    )
 }
 
 /// Returns whether `page` matches the lowercase, slash-separated page grammar.

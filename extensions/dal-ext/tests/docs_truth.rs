@@ -344,19 +344,41 @@ fn generator_utf8_error() {
 fn generator_link_errors() {
     let guard = tempfile_guard::Guard::new();
     let dir = guard.dir().join("docs");
+    let source = guard.dir().join("references.rs");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("pages"), "a user docs 100\n").unwrap();
+    std::fs::write(dir.join("a.md"), "# Aye\n").unwrap();
     std::fs::write(
-        dir.join("a.md"),
-        format!("# Aye\n\nSee {SCHEME}://missing-page.\n"),
+        &source,
+        format!(
+            r#"const _: &str = "{SCHEME}://a.\n {SCHEME}://a.\r {SCHEME}://a.\t {SCHEME}://a.\" {SCHEME}://a.\'";
+"#
+        ),
     )
     .unwrap();
     let args = GenArgs {
         scheme: Scheme::Dal,
         dir: dir.clone(),
         examples: None,
-        scan: vec![dir],
+        scan: vec![guard.dir().to_path_buf()],
     };
+    generate(&args).expect("valid source delimiters end the URI");
+
+    std::fs::write(&source, format!(r#"const _: &str = "{SCHEME}://a\q.";"#)).unwrap();
+    let malformed = generate(&args).expect_err("malformed escape stays in the URI");
+    assert!(
+        malformed
+            .iter()
+            .any(|e| e.to_string().contains("is not a page")),
+        "malformed link error, got {malformed:?}"
+    );
+
+    std::fs::write(&source, "const _: &str = \"no links\";\n").unwrap();
+    std::fs::write(
+        dir.join("a.md"),
+        format!("# Aye\n\nSee {SCHEME}://missing-page.\n"),
+    )
+    .unwrap();
     let errors = generate(&args).expect_err("link fails");
     assert!(
         errors
