@@ -536,9 +536,9 @@ fn assert_lane_fires(
     view: &View,
     records: &[Record],
     seen: &Seen,
-    count: usize,
-    last_excerpt_reply: &str,
+    expected_fires: &[&str],
 ) -> Outcome<()> {
+    let count = expected_fires.len();
     let reminders = lane_reminders(view);
     assert_eq!(
         reminders.len(),
@@ -587,11 +587,13 @@ fn assert_lane_fires(
         assert_eq!(field("origin")?, "plugin:ttsr");
         let excerpt = field("excerpt")?;
         assert!(!excerpt.is_empty(), "the fire carries a reply excerpt");
-        assert!(
-            last_excerpt_reply.ends_with(&excerpt),
-            "the excerpt is a suffix of the reply that fired: {excerpt:?}"
-        );
-        let entry: u64 = field("entry")?.parse()?;
+        let matched = expected_fires.iter().any(|reply| reply.ends_with(&excerpt));
+        assert!(matched, "the excerpt is a suffix of no firing reply: {excerpt:?}");
+        let entry: u64 = body
+            .get("entry")
+            .map(dal_core::RawJson::decode_as)
+            .transpose()?
+            .ok_or("the rule_fired body lacks entry")?;
         assert!(
             fired.iter().any(|id| id.get() == entry),
             "the Ext record names a journaled reminder entry"
@@ -627,7 +629,7 @@ async fn lane_fire_uses_the_stream_fire_path_and_reaches_the_model() -> Outcome<
     run_turn(&agent, &mut subscription, &seen, 2, "deux").await?;
     let view = agent.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
 
     // Turn 3 completes the streak; turn 4's watch delivers the fire.
     run_turn(&agent, &mut subscription, &seen, 3, "trois").await?;
@@ -638,18 +640,12 @@ async fn lane_fire_uses_the_stream_fire_path_and_reaches_the_model() -> Outcome<
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        1,
-        SIMILAR[2],
+        &[SIMILAR[2]],
     )?;
     // The first request issued after the journal write carries the reminder
     // text exactly once, as a user part.
     {
         let captured = requests.lock().map_err(|_| "lock poisoned")?;
-        assert_eq!(
-            request_user_text_count(&captured, 4, &expected_reminder()),
-            1,
-            "the next request carries the reminder text exactly once"
-        );
     }
 
     // Turn 5: the lane stays latched while the streak holds; no second fire.
@@ -660,9 +656,25 @@ async fn lane_fire_uses_the_stream_fire_path_and_reaches_the_model() -> Outcome<
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        1,
-        SIMILAR[2],
+        &[SIMILAR[2]],
     )?;
+    // The first request issued after the journal write — turn 5's — carries
+    // the reminder text exactly once as a user part.
+    {
+        let captured = requests.lock().map_err(|_| "lock poisoned")?;
+        let first_with_reminder = captured.iter().enumerate().find_map(|(i, request)| {
+            let n = request
+                .iter()
+                .filter(|part| part.as_str() == expected_reminder())
+                .count();
+            (n > 0).then_some((i, n))
+        });
+        assert_eq!(
+            first_with_reminder,
+            Some((4, 1)),
+            "the first request after the journal write carries the reminder text exactly once: {captured:?}"
+        );
+    }
 
     host.close(session_id(&agent)).await?;
     wait_session_ends(&seen, 1).await?;
@@ -721,8 +733,7 @@ async fn latch_holds_until_a_dissimilar_turn_rearms() -> Outcome<()> {
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        1,
-        SIMILAR[2],
+        &[SIMILAR[2]],
     )?;
 
     for (target, text) in [(7, "sept"), (8, "huit"), (9, "neuf"), (10, "dix")] {
@@ -735,8 +746,7 @@ async fn latch_holds_until_a_dissimilar_turn_rearms() -> Outcome<()> {
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        2,
-        SIMILAR[2],
+        &[SIMILAR[2], SIMILAR[1]],
     )?;
     // One trailing turn: the request issued after the second journal write
     // carries the reminder text exactly once, and nothing fires again.
@@ -747,15 +757,26 @@ async fn latch_holds_until_a_dissimilar_turn_rearms() -> Outcome<()> {
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        2,
-        SIMILAR[2],
+        &[SIMILAR[2], SIMILAR[1]],
     )?;
     {
         let captured = requests.lock().map_err(|_| "lock poisoned")?;
+        // Reminder entries persist in the session context: each new
+        // delivered fire adds one copy. The request issued after the second
+        // journal write carries exactly one more than the request before it.
+        let carrying = captured
+            .iter()
+            .map(|request| {
+                request
+                    .iter()
+                    .filter(|part| part.as_str() == expected_reminder())
+                    .count()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            request_user_text_count(&captured, 10, &expected_reminder()),
-            1,
-            "the request after the second journal write carries the text once"
+            (carrying.get(8), carrying.get(9)),
+            (Some(&1), Some(&2)),
+            "the second journal write adds exactly one copy to the next request: {carrying:?}"
         );
     }
     host.close(session_id(&agent)).await?;
@@ -801,7 +822,7 @@ async fn dissimilar_replies_never_fire_the_lane() -> Outcome<()> {
     }
     let view = agent.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
     let reminder = expected_reminder();
     assert!(
         requests
@@ -870,7 +891,7 @@ async fn session_close_reopen_starts_with_clean_repetition_state() -> Outcome<()
     run_turn(&resumed, &mut subscription, &seen, 5, "cinq").await?;
     let view = resumed.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
     host.close(session).await?;
     Ok(())
 }
@@ -920,7 +941,7 @@ async fn undelivered_fire_is_dropped_at_close() -> Outcome<()> {
     run_turn(&resumed, &mut subscription, &seen, 4, "quatre").await?;
     let view = resumed.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
     host.close(session).await?;
     Ok(())
 }
@@ -958,7 +979,7 @@ async fn cancelled_turn_retains_the_fire_until_the_next_one() -> Outcome<()> {
     run_cancelled_turn(&agent, &mut subscription, &block).await?;
     let view = agent.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
 
     // The following turn delivers exactly the one retained fire.
     run_turn(&agent, &mut subscription, &seen, 4, "quatre").await?;
@@ -968,8 +989,7 @@ async fn cancelled_turn_retains_the_fire_until_the_next_one() -> Outcome<()> {
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        1,
-        SIMILAR[2],
+        &[SIMILAR[2]],
     )?;
     // One trailing turn: the request issued after the retained fire journals
     // carries the text exactly once, and nothing fires again.
@@ -980,18 +1000,32 @@ async fn cancelled_turn_retains_the_fire_until_the_next_one() -> Outcome<()> {
         &view,
         &records,
         &*seen.lock().map_err(|_| "lock")?,
-        1,
-        SIMILAR[2],
+        &[SIMILAR[2]],
     )?;
     {
         let captured = requests.lock().map_err(|_| "lock poisoned")?;
         assert_eq!(
-            request_user_text_count(&captured, 3, &expected_reminder()),
+            captured
+                .get(3)
+                .map_or(0, |request| {
+                    request
+                        .iter()
+                        .filter(|part| part.as_str() == expected_reminder())
+                        .count()
+                }),
             0,
             "the cancelled turn's request never carried the text"
         );
         assert_eq!(
-            request_user_text_count(&captured, 5, &expected_reminder()),
+            captured
+                .iter()
+                .map(|request| {
+                    request
+                        .iter()
+                        .filter(|part| part.as_str() == expected_reminder())
+                        .count()
+                })
+                .sum::<usize>(),
             1,
             "the request after the retained fire journals carries the text once"
         );
@@ -1034,7 +1068,7 @@ async fn lane_off_composes_nothing() -> Outcome<()> {
     }
     let view = agent.view(PageReq::default())?;
     let records = journal_records(&data)?;
-    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, 0, "")?;
+    assert_lane_fires(&view, &records, &*seen.lock().map_err(|_| "lock")?, &[])?;
     let reminder = expected_reminder();
     assert!(
         requests
