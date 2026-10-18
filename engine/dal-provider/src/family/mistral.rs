@@ -38,7 +38,10 @@
 //! id the server assigned (kept, since the neutral grammar has no slot for
 //! it); `message.output.delta` content becomes text and reasoning deltas;
 //! `function.call.delta` opens one call per `output_index` with the native
-//! `tool_call_id` and streams its argument fragments; server-side
+//! `tool_call_id` and streams its argument fragments; a delta without an
+//! `output_index` resumes the open call its id names, opens the next slot
+//! for an unseen id, or continues the call that last spoke (the chat
+//! decoder's unkeyed rule); server-side
 //! `tool.execution.*` and `agent.handoff.*` events and any unknown type are
 //! ignored; requests dalgon builds stay strict.
 //!
@@ -605,8 +608,12 @@ pub(crate) struct MistralDecoder {
     provider: Box<str>,
     model: Box<str>,
     budget: StreamBudget,
-    /// Open calls by `output_index`; iteration order is index order.
+    /// Open calls by slot (`output_index`, or the resolved slot of a delta
+    /// without one); iteration order is index order.
     calls: BTreeMap<u64, OpenCall>,
+    /// The slot of the call that last spoke on the stream; the resume
+    /// target of a call delta without an index or an id.
+    spoken: Option<u64>,
     /// The last non-null usage.
     usage: Option<Usage>,
     /// The conversation id the server assigned to this response.
@@ -626,6 +633,7 @@ impl MistralDecoder {
             model: model.into(),
             budget: StreamBudget::default(),
             calls: BTreeMap::new(),
+            spoken: None,
             usage: None,
             conversation_id: None,
             emitted: false,
@@ -638,7 +646,8 @@ impl MistralDecoder {
     /// `[DONE]` finishes the response. An event dispatches on its JSON
     /// `type`: `conversation.response.started` records the conversation id,
     /// `message.output.delta` content becomes text and reasoning deltas,
-    /// `function.call.delta` opens its `output_index` with its
+    /// `function.call.delta` opens its `output_index` (or the slot the
+    /// unkeyed rule resolves for a delta without one) with its
     /// `tool_call_id` and name (later ones for an open index are ignored)
     /// and appends its argument fragments as raw bytes, and
     /// `conversation.response.done` finishes with its usage. Unknown event
@@ -772,7 +781,11 @@ impl MistralDecoder {
         delta: FunctionDelta,
         out: &mut Vec<StreamEvent>,
     ) -> Result<(), ProviderError> {
-        let index = delta.output_index.unwrap_or(0);
+        let index = match delta.output_index {
+            Some(index) => index,
+            None => self.unkeyed_index(delta.tool_call_id.as_deref()),
+        };
+        self.spoken = Some(index);
         let call = match self.calls.entry(index) {
             MapEntry::Occupied(open) => open.into_mut(),
             MapEntry::Vacant(slot) => {
@@ -803,6 +816,27 @@ impl MistralDecoder {
             });
         }
         Ok(())
+    }
+
+    /// Resolves the slot of a call delta that arrived without an
+    /// `output_index`: a known id resumes its own call wherever it was
+    /// opened, an unseen id opens the slot after the highest open one, and
+    /// a delta with neither continues the call that last spoke; with
+    /// nothing open that is slot 0, where opening refuses a keyless delta
+    /// exactly as it does for a keyed one. This mirrors the chat decoder's
+    /// `unkeyed_index` rule; the chat slot type is private to its module,
+    /// so the rule is restated here rather than shared.
+    fn unkeyed_index(&self, id: Option<&str>) -> u64 {
+        let id = id.filter(|id| !id.is_empty());
+        if let Some(id) = id
+            && let Some((index, _)) = self.calls.iter().find(|(_, call)| call.id.as_str() == id)
+        {
+            return *index;
+        }
+        if id.is_some() {
+            return self.calls.keys().next_back().map_or(0, |last| *last + 1);
+        }
+        self.spoken.unwrap_or(0)
     }
 
     /// Emits the terminal group. Calls close in `output_index` order; empty

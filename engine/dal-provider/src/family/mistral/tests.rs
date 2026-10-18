@@ -482,6 +482,72 @@ fn turn_decodes_text_reasoning_and_fragmented_arguments() {
 }
 
 #[test]
+fn two_unindexed_calls_keep_distinct_ids_and_fragmented_arguments() {
+    // Two `function.call.delta` events without an `output_index` name two
+    // distinct calls: the second opens the next slot instead of merging
+    // into slot zero. A keyless fragment continues the call that last
+    // spoke, and a fragment naming the first id resumes it in place.
+    let datas = [
+        r#"{"type":"function.call.delta","id":"u1","name":"search","tool_call_id":"a1b2c3d4e","arguments":"{\"q"}"#,
+        r#"{"type":"function.call.delta","id":"u2","name":"lookup","tool_call_id":"f5e6d7c8b","arguments":"{\"k"}"#,
+        r#"{"type":"function.call.delta","id":"u3","arguments":"\":\"v\"}"}"#,
+        r#"{"type":"function.call.delta","id":"u4","tool_call_id":"a1b2c3d4e","arguments":"\":\"cats\"}"}"#,
+        r#"{"type":"conversation.response.done","usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}"#,
+    ];
+    let mut expected = vec![
+        StreamEvent::ToolCallStarted {
+            id: "a1b2c3d4e".into(),
+            name: "search".into(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "a1b2c3d4e".into(),
+            fragment: r#"{"q"#.as_bytes().to_vec(),
+        },
+        StreamEvent::ToolCallStarted {
+            id: "f5e6d7c8b".into(),
+            name: "lookup".into(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "f5e6d7c8b".into(),
+            fragment: r#"{"k"#.as_bytes().to_vec(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "f5e6d7c8b".into(),
+            fragment: r#"":"v"}"#.as_bytes().to_vec(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "a1b2c3d4e".into(),
+            fragment: r#"":"cats"}"#.as_bytes().to_vec(),
+        },
+    ];
+    expected.extend(done(
+        vec![
+            ToolCall {
+                id: "a1b2c3d4e".into(),
+                name: "search".into(),
+                args: ToolArgs::Parsed(raw(r#"{"q":"cats"}"#)),
+            },
+            ToolCall {
+                id: "f5e6d7c8b".into(),
+                name: "lookup".into(),
+                args: ToolArgs::Parsed(raw(r#"{"k":"v"}"#)),
+            },
+        ],
+        Usage {
+            input_tokens: 9,
+            output_tokens: 4,
+            ..NO_USAGE
+        },
+        StopReason::ToolUse,
+    ));
+    for named in [false, true] {
+        let (events, error) = run(&datas, named);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(events, expected, "named {named}");
+    }
+}
+
+#[test]
 fn the_started_event_records_the_conversation_id() {
     let mut decoder = MistralDecoder::new("mistral", "mistral-medium-latest");
     let mut out = Vec::new();
