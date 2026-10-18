@@ -245,6 +245,11 @@ impl Session {
     ) {
         let compaction = self.should_compact();
         let compactor_missing = compaction.is_none() && self.threshold_compaction_due();
+        // The decision above compared the measured count against the live
+        // route; the notice must read it before that route is cleared, or a
+        // session whose requested model is a reference reports the trigger
+        // as unmeasured.
+        let measured = self.measured_context_tokens();
         self.active_model = None;
         self.active_family = None;
         if let Some(reason) = compaction {
@@ -261,7 +266,7 @@ impl Session {
             emit.updates.push(compaction_started_notice(
                 Some(turn),
                 reason,
-                self.measured_context_tokens(),
+                measured,
                 window,
             ));
             effects.push(Effect::Compact {

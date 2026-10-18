@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- The automatic compaction notice at a tool-round boundary now reports the
+  measured context size that triggered it (`Compacting context (threshold, 85
+  percent of the window).`). It read the usage after the round's route was
+  cleared, so a session whose requested model is a `provider/model` reference,
+  such as the configured default, always reported `usage or context window is
+  unavailable` even when measured usage drove the decision.
 - Save private-effect receipts on fresh persistent sessions before acknowledging
   them, without requiring an earlier user turn or sidecar write. Ephemeral
   sessions remain memory-only.
