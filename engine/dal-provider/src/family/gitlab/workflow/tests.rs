@@ -953,6 +953,14 @@ fn start_frame_ignores_text_tool_and_message_replay() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two-session loopback fixture covers park, end, resume, and restart"
+)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the loopback server detaches one handler task per accepted connection"
+)]
 async fn loopback_end_session_drops_only_its_parked_workflows() {
     let rest = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rest_base = format!("http://{}", rest.local_addr().unwrap());
