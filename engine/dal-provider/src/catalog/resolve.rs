@@ -68,14 +68,17 @@ pub fn resolve_route(
         return bare;
     }
     // Every family retries under the catalog's single configured owner for
-    // that family, or not at all. The static provider table is never
-    // consulted: it cannot see custom ids and it guesses among shared
-    // families. Explicit openai-chat and openai-responses references stay
-    // valid through family_provider, but the retry itself uses the census
-    // owner so a lone custom Chat or Responses owner serves typed routes and
-    // dual owners never silently pick the canonical row. Zero or several
-    // owners return the bare error without a degenerate probe.
-    let Some(owner) = single_family_owner(catalog, *family) else {
+    // that family when there is one; a lone custom Chat or Responses owner
+    // serves typed routes without guessing. When several owners share the
+    // family, a family whose route prefix already names a canonical owner
+    // (openai-chat, openai-responses) retries there instead of the bare
+    // error; the prefix already disambiguated the owner at parse time.
+    // Families without a canonical owner and dual-owned families without
+    // one never retry: the bare error stands.
+    let owner = single_family_owner(catalog, *family).or_else(|| {
+        canonical_family_owner(catalog, *family)
+    });
+    let Some(owner) = owner else {
         return bare;
     };
     if model.is_empty() {
@@ -146,7 +149,29 @@ fn single_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
     owners.next().is_none().then_some(only)
 }
 
+/// The configured catalog entry for the family's canonical owner, when the
+/// route grammar names one. `openai-responses` and `openai-chat` both bind
+/// to `openai`; the family check rejects a custom `openai` row that no
+/// longer serves the requested family.
+fn canonical_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
+    let prefix = match family {
+        Family::Chat => "openai-chat",
+        Family::Responses => "openai-responses",
+        _ => return None,
+    };
+    let (owner, owner_family) = family_provider(prefix)?;
+    catalog
+        .providers
+        .iter()
+        .find(|(candidate, _)| {
+            candidate.id.as_ref() == owner && candidate.family == owner_family
+        })
+        .map(|(provider, _)| provider.id.as_ref())
+}
+
 /// Maps a family-qualified route prefix to the provider that serves it.
+/// `openai-chat` resolves to the `openai` row when that row serves the Chat
+/// family; the family filter rejects a custom `openai` rebind.
 fn family_provider(prefix: &str) -> Option<(&'static str, Family)> {
     match prefix {
         "openai-responses" => Some((OPENAI.id, Family::Responses)),
