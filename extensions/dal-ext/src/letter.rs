@@ -4,14 +4,18 @@
 //! SIL Open Font License, Version 1.1 (full text in `OFL-1.1.txt`).
 //! Upstream: <https://unifoundry.com/unifont>/
 //! Copyright (C) 1998-2026 Roman Czyborra, Paul Hardy, Qianqian Fang, Andrew Miller, Johnnie Weaver, David Corbett, Ælla Chiana Moskopp, Rebecca Bettencourt, Minseo Lee, Ho-Seok Ee, et al.
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use dal_agent::error::SchemeError;
 use dal_agent::ext::{
-    BoxFuture, Doc, Extension, ExtensionBuilder, Hook, HookCx, HookError, RawValue, SchemeCx,
-    SchemeResolver,
+    BoxFuture, Doc, Extension, ExtensionBuilder, Hook, HookCx, HookError, ObserveHook, RawValue,
+    SchemeCx, SchemeResolver,
 };
-use dal_core::{BlobId, InputEvent, InputVerdict, Part, RegistrationError, ServiceSet, SessionId};
+use dal_core::ext::SessionEnd;
+use dal_core::{
+    BlobId, InputEvent, InputVerdict, Notice, Part, RegistrationError, ServiceSet, SessionId,
+};
 use serde::{Deserialize, Serialize};
 
 mod budget;
@@ -183,6 +187,30 @@ pub fn render_failed_notice(skill: &str, plugin: &str) -> String {
     format!("letter '{skill}' from plugin '{plugin}' fell back to text: render failed.")
 }
 
+/// Renders the notice for an input whose model does not read images: no
+/// letter is drawn or stored and the input stays ordinary text.
+#[must_use]
+pub fn no_image_model_notice() -> &'static str {
+    "letter: the model does not read images; skill letters were not attached."
+}
+
+/// Renders the notice for an input whose model did not resolve, so its image
+/// support is unknown: the hook never attaches images blind.
+#[must_use]
+pub fn unknown_model_notice() -> &'static str {
+    "letter: the model's image support is unknown; skill letters were not attached."
+}
+
+/// Renders the notice for a failed letter hook, carrying the failure text
+/// the host's fixed `hook input failed` notice drops.
+#[must_use]
+pub fn not_persisted_notice(cause: &str) -> String {
+    format!(
+        "letter: skill letters were not persisted: {}.",
+        cause.trim_end_matches('.')
+    )
+}
+
 impl SkillLetterRecord {
     /// Validates strict record bounds: `v == 1`, `kind == Skill`, canonical id
     /// in `1..=20`, `cell == [8, 16]`, `width <= 784`, `height <= 1392`.
@@ -336,19 +364,48 @@ impl SchemeResolver for LetterResolver {
     }
 }
 
-/// First-input hook: validates the letter assembly is computable and returns
-/// the input unchanged.
+/// Record kind for image-delivery markers. The session actor journals one
+/// marker in the same batch as any admitted user entry that carries image
+/// parts; its digests name every admitted image, letter or otherwise. The
+/// actor cannot import this crate, so its literal must stay byte-equal to
+/// this: the letter tests pin the round trip.
+const DELIVERED_KIND: &str = "letter_delivered";
+
+/// One delivery marker: the image digests a single admitted user entry
+/// carried. Markers are advisory, so undecodable rows are skipped and a
+/// missing marker only re-attaches images; corrupt letter rows still fail
+/// the read.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LetterDelivered {
+    v: u8,
+    digests: Vec<BlobId>,
+}
+
+/// First-input hook: persists the first-prompt letter set through the host
+/// services seam, then delivers its images with the running content.
 ///
-/// Blob and record persistence belong to the host actor, which calls the
-/// pure [`letters`], [`crate::skills::section`], and [`image_parts`] seams
-/// once for the first user prompt and withholds the provider request until
-/// its store batch is durable. This hook therefore emits the fallback
-/// diagnostics and returns [`InputVerdict::Continue`], keeping the running
-/// content; it never returns image parts for blobs it cannot persist.
+/// Blobs and records go through `cx.services` (`blob_put`, `append_record`),
+/// whose futures resolve only once durable; the hook never touches journal
+/// or blob paths directly. Delivery returns [`InputVerdict::Transform`] with
+/// the admitted images followed by the running parts, so the folded `User`
+/// record and the provider request carry the same final parts. An empty
+/// assembly, empty input, a frozen set, or a model that does not read images
+/// returns [`InputVerdict::Continue`]: the input stays ordinary text.
+/// Freezing rests on delivery markers, not on records alone: a stored set
+/// whose images never reached an admitted request is re-attached on the next
+/// input, so each letter is delivered in exactly one admitted request.
 #[derive(Debug, Clone)]
 struct FirstInputHook {
     registry: Arc<crate::skills::SkillRegistry>,
     font: Arc<Font>,
+    /// Sessions already told that their model gets no letters, so the notice
+    /// appears once per open session rather than on every input.
+    told: Arc<Mutex<HashSet<SessionId>>>,
+    /// The letter assembly, drawn once: it is a pure function of the
+    /// immutable registry and font, so later inputs reuse it instead of
+    /// re-encoding up to twenty PNGs.
+    memo: Arc<OnceLock<LetterAssembly>>,
 }
 
 impl Hook<InputEvent, InputVerdict> for FirstInputHook {
@@ -357,50 +414,183 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
         input: InputEvent,
         cx: HookCx,
     ) -> BoxFuture<'static, Result<InputVerdict, HookError>> {
-        let registry = Arc::clone(&self.registry);
-        let font = Arc::clone(&self.font);
-        Box::pin(
-            async move { handle_first_input(cx.session, input.content, registry, font, cx).await },
-        )
+        let hook = self.clone();
+        Box::pin(async move { hook.handle(input, cx).await })
     }
 }
 
-/// Validates the first-prompt letter assembly, emits fallback diagnostics,
-/// and leaves the input unchanged for host-owned persistence.
-///
-/// Returns [`InputVerdict::Continue`]: there are no image parts to add, so
-/// there is no content to replace. A future capture step with a blob seam
-/// would return `Transform` with admitted images followed by these parts.
-///
-/// # Errors
-///
-/// Returns [`HookError::Cancelled`] when the turn is cancelled and
-/// [`HookError::Failed`] when the font table fails to parse.
-#[expect(
-    clippy::unused_async,
-    reason = "hook boundary keeps the async shape of sibling handlers"
-)]
-pub async fn handle_first_input(
-    session: SessionId,
-    user_parts: Vec<Part>,
-    registry: Arc<crate::skills::SkillRegistry>,
-    font: Arc<Font>,
-    cx: HookCx,
-) -> Result<InputVerdict, HookError> {
-    debug_assert_eq!(session, cx.session);
-    let _ = user_parts;
-    if cx.cancel.is_cancelled() {
-        return Err(HookError::Cancelled);
+/// Forgets a closed session's text-only notice state.
+#[derive(Debug, Clone)]
+struct ForgetSession(Arc<Mutex<HashSet<SessionId>>>);
+
+impl ObserveHook<SessionEnd> for ForgetSession {
+    fn call(&self, input: SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&input.session);
+        Box::pin(std::future::ready(Ok(())))
     }
-    let registry = &*registry;
-    let assembly = match letters(registry, &font) {
-        Ok(assembly) => assembly,
-        Err(error) => {
-            return Err(HookError::Failed {
-                message: error.to_string().into(),
-            });
+}
+
+impl FirstInputHook {
+    /// Runs [`Self::first_input`] and, on a failure, publishes the failure
+    /// text as one `letter` notice before the host's fixed `hook input
+    /// failed` notice, which carries no cause.
+    async fn handle(self, input: InputEvent, cx: HookCx) -> Result<InputVerdict, HookError> {
+        let verdict = self.first_input(input, &cx).await;
+        if let Err(HookError::Failed { message }) = &verdict {
+            notify(&cx, not_persisted_notice(message));
         }
-    };
+        verdict
+    }
+
+    /// Draws the letter assembly once per loaded registry.
+    fn drawn(&self) -> &LetterAssembly {
+        self.memo
+            .get_or_init(|| letters(&self.registry, &self.font).unwrap_or_default())
+    }
+
+    /// Persists any missing tail of the first-prompt letter assembly and
+    /// delivers the admitted images ahead of the running input.
+    ///
+    /// Stored records say what exists; delivery markers say what reached an
+    /// admitted request. An empty store draws, persists, and attaches the
+    /// whole assembly. A stored set that positionally matches is a strict
+    /// prefix with two readings: a partial batch, which never produced a
+    /// transform and so was never delivered, is completed and attached; a
+    /// delivered prefix whose registry grew afterwards stays frozen, so the
+    /// frozen set never changes and no delivered image is sent twice. A full
+    /// positional match with no marker means the opening was dropped after
+    /// persisting, so the images are attached without persisting again.
+    /// Any other stored set (a mismatch, extra or duplicate rows) wins and
+    /// freezes. A model that is not known to read images stores and attaches
+    /// nothing. Records land before the returned `Transform`, so the model
+    /// never sees an image without its record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HookError::Cancelled`] when the turn is cancelled and the
+    /// service text when a record read, blob write, or record write fails,
+    /// or when a stored row is well-formed but outside the admitted bounds
+    /// (the fold keeps the running content with one notice; a failed write
+    /// leaves a prefix the next turn completes, while a corrupt row fails
+    /// every turn until it is fixed). A font failure degrades to an
+    /// empty assembly, so every description stays text.
+    async fn first_input(&self, input: InputEvent, cx: &HookCx) -> Result<InputVerdict, HookError> {
+        if cx.cancel.is_cancelled() {
+            return Err(HookError::Cancelled);
+        }
+        let InputEvent { content, model } = input;
+        let marked = self
+            .registry
+            .iter()
+            .filter(|skill| skill.letter2image)
+            .count();
+        if content.is_empty() || marked == 0 {
+            return Ok(InputVerdict::Continue);
+        }
+        if !model.as_ref().is_some_and(|model| model.caps.image_input) {
+            let stored = stored_letters(cx).await?;
+            let text = if model.is_some() {
+                no_image_model_notice()
+            } else {
+                unknown_model_notice()
+            };
+            return Ok(self.skip(cx, &stored, text));
+        }
+        let stored = stored_letters(cx).await?;
+        let assembly = self.drawn();
+        if assembly.chunks.is_empty() {
+            if stored.is_empty() {
+                log_fallbacks(assembly);
+            }
+            return Ok(InputVerdict::Continue);
+        }
+        if stored.is_empty() {
+            log_fallbacks(assembly);
+            persist_tail(cx, &assembly.chunks).await?;
+            return Ok(transform(assembly, content));
+        }
+        let matched = matched_prefix(&stored, assembly);
+        if stored.len() > matched {
+            return Ok(InputVerdict::Continue);
+        }
+        // Past the mismatch freeze `matched` equals `stored.len()`: a full
+        // match re-attaches without persisting, a strict prefix completes
+        // its tail first, and a delivered set in either shape freezes.
+        if delivered(cx, &stored).await? {
+            return Ok(InputVerdict::Continue);
+        }
+        if matched < assembly.chunks.len() {
+            persist_tail(cx, &assembly.chunks[matched..]).await?;
+        }
+        Ok(transform(assembly, content))
+    }
+
+    /// Passes the input through as plain text. A session with no stored set
+    /// is told why once; a stored set needs no explanation.
+    fn skip(&self, cx: &HookCx, stored: &[SkillLetterRecord], text: &str) -> InputVerdict {
+        if stored.is_empty()
+            && self
+                .told
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(cx.session)
+        {
+            notify(cx, text.to_owned());
+        }
+        InputVerdict::Continue
+    }
+}
+
+/// Returns the admitted images followed by the running parts, so the folded
+/// `User` record and the provider request carry the same final parts.
+fn transform(assembly: &LetterAssembly, content: Vec<Part>) -> InputVerdict {
+    let mut parts = image_parts(&assembly.chunks);
+    parts.extend(content);
+    InputVerdict::Transform(parts)
+}
+
+/// Reports whether every stored letter's image reached an admitted request:
+/// each stored PNG digest appears in this leaf path's delivery markers. The
+/// actor journals one marker in the same batch as any admitted user entry
+/// that carries image parts, so markers never exist for a dropped opening.
+async fn delivered(cx: &HookCx, stored: &[SkillLetterRecord]) -> Result<bool, HookError> {
+    let bodies = cx
+        .services
+        .records(&cx.caller, DELIVERED_KIND)
+        .await
+        .map_err(failed)?;
+    let mut digests = Vec::new();
+    for body in &bodies {
+        let Ok(marker) = body.decode_as::<LetterDelivered>() else {
+            continue;
+        };
+        if marker.v != 1 {
+            continue;
+        }
+        digests.extend(marker.digests);
+    }
+    Ok(stored
+        .iter()
+        .all(|record| digests.contains(&record.png_blob)))
+}
+
+/// Publishes one `letter` notice on the hook's turn.
+fn notify(cx: &HookCx, text: String) {
+    cx.services.notify(
+        &cx.caller,
+        Notice {
+            turn: cx.turn,
+            kind: "letter".into(),
+            text: text.into(),
+        },
+    );
+}
+
+/// Logs one diagnostic per marked skill whose description stays plain text.
+fn log_fallbacks(assembly: &LetterAssembly) {
     for fallback in &assembly.fallbacks {
         let notice = match fallback.reason {
             FallbackReason::Undrawable => undrawable_notice(
@@ -415,12 +605,142 @@ pub async fn handle_first_input(
         };
         tracing::info!("{notice}");
     }
-    Ok(InputVerdict::Continue)
+}
+
+/// Maps any service, serialization, or record failure to its hook error.
+fn failed(error: impl std::fmt::Display) -> HookError {
+    HookError::Failed {
+        message: error.to_string().into(),
+    }
+}
+
+/// Reads this session's stored letter records: decoded, validated, and in
+/// ascending id order. A body that does not decode fails the read, and so
+/// does a well-formed body outside the admitted bounds: the failure lands
+/// before any blob or record write, so a corrupt row can never hide behind
+/// a freshly persisted duplicate id. Valid rows are preserved untouched;
+/// nothing is migrated or deleted.
+async fn stored_letters(cx: &HookCx) -> Result<Vec<SkillLetterRecord>, HookError> {
+    let bodies = cx
+        .services
+        .records(&cx.caller, "letter")
+        .await
+        .map_err(failed)?;
+    let mut admitted: Vec<(u8, SkillLetterRecord)> = Vec::with_capacity(bodies.len());
+    for body in &bodies {
+        let record = decode_record(body).map_err(failed)?;
+        let Some(number) = record.validated() else {
+            return Err(failed(format!(
+                "letter record '{}' failed validation",
+                record.id
+            )));
+        };
+        admitted.push((number, record));
+    }
+    admitted.sort_by_key(|(number, _)| *number);
+    Ok(admitted.into_iter().map(|(_, record)| record).collect())
+}
+
+/// Counts the stored strict prefix of `assembly`: records matched
+/// positionally on identity, geometry, and source digest. The first gap,
+/// duplicate, or mismatch ends the prefix; any stored row beyond it makes
+/// the stored set a mismatch, which the caller freezes instead of extending.
+fn matched_prefix(stored: &[SkillLetterRecord], assembly: &LetterAssembly) -> usize {
+    stored
+        .iter()
+        .zip(&assembly.chunks)
+        .take_while(|(record, chunk)| record_matches_chunk(record, chunk))
+        .count()
+}
+
+/// Reports whether a stored record carries exactly `chunk`: same identity,
+/// geometry, byte length, and source digest. The source digest implies the
+/// PNG bytes (`draw` is pure over font and source), so the frozen path skips
+/// rehashing megabyte images on every turn.
+fn record_matches_chunk(record: &SkillLetterRecord, chunk: &LetterChunk) -> bool {
+    record.id.as_ref() == chunk.id.as_ref()
+        && record.skill.as_ref() == chunk.skill.as_ref()
+        && record.plugin.as_ref() == chunk.plugin.as_ref()
+        && record.png_bytes == u64::try_from(chunk.png.len()).unwrap_or(u64::MAX)
+        && record.width == chunk.width
+        && record.height == chunk.height
+        && record.cell == chunk.cell
+        && record.source_blob == BlobId::from_bytes(chunk.source_text.as_bytes())
+}
+
+/// Persists the missing tail of the letter set in two phases: every PNG and
+/// source blob and every strict record body first, then the records in one
+/// uninterrupted run.
+///
+/// Blobs are content-addressed and harmless without a record, so a
+/// cancellation or failure while they are written leaves no record: the set
+/// stays `Empty` and the next input repeats the idempotent puts. The records
+/// are the commit point. Each future resolves only once durable, and
+/// cancellation is checked once before the first record and never between
+/// records, so a cancel cannot split the set. Only a journal failure or a
+/// crash inside the run leaves a strict prefix, which the next input
+/// completes from the persisted rows instead of duplicating ids.
+async fn persist_tail(cx: &HookCx, tail: &[LetterChunk]) -> Result<(), HookError> {
+    let mut bodies = Vec::with_capacity(tail.len());
+    for chunk in tail {
+        if cx.cancel.is_cancelled() {
+            return Err(HookError::Cancelled);
+        }
+        let png_id = BlobId::from_bytes(chunk.png.as_ref());
+        let source_id = BlobId::from_bytes(chunk.source_text.as_bytes());
+        let stored_png = cx
+            .services
+            .blob_put(&cx.caller, chunk.png.as_ref().to_vec())
+            .await
+            .map_err(failed)?;
+        if stored_png != *png_id.as_bytes() {
+            return Err(HookError::Failed {
+                message: "letter PNG blob digest mismatch".into(),
+            });
+        }
+        let stored_source = cx
+            .services
+            .blob_put(&cx.caller, chunk.source_text.as_bytes().to_vec())
+            .await
+            .map_err(failed)?;
+        if stored_source != *source_id.as_bytes() {
+            return Err(HookError::Failed {
+                message: "letter source blob digest mismatch".into(),
+            });
+        }
+        let record = SkillLetterRecord {
+            v: 1,
+            id: chunk.id.clone(),
+            kind: LetterKind::Skill,
+            skill: chunk.skill.clone(),
+            plugin: chunk.plugin.clone(),
+            png_blob: png_id,
+            source_blob: source_id,
+            png_bytes: u64::try_from(chunk.png.len()).unwrap_or(u64::MAX),
+            width: chunk.width,
+            height: chunk.height,
+            cell: chunk.cell,
+        };
+        let text = sonic_rs::to_string(&record).map_err(failed)?;
+        bodies.push(RawValue::parse(&text).map_err(failed)?);
+    }
+    if cx.cancel.is_cancelled() {
+        return Err(HookError::Cancelled);
+    }
+    for body in bodies {
+        cx.services
+            .append_record(&cx.caller, "letter", Box::new(body))
+            .await
+            .map_err(failed)?;
+    }
+    Ok(())
 }
 
 /// Builds the `letter` extension: the `letter` scheme plus the first-input
-/// hook. Image blobs and letter records are persisted by the host actor
-/// through the pure assembly seams; this extension never opens the store.
+/// hook. Image blobs and letter records are persisted by the hook through
+/// the host services seam (`blob_put`, `append_record`) only when the turn's
+/// model reads images; the extension never touches journal or blob paths
+/// directly.
 ///
 /// # Errors
 ///
@@ -431,12 +751,55 @@ pub fn extension(
 ) -> Result<Extension, RegistrationError> {
     let font = Arc::new(Font::embedded());
     let resolver = LetterResolver::new();
-    let hook = FirstInputHook { registry, font };
+    let told = Arc::new(Mutex::new(HashSet::new()));
+    let hook = FirstInputHook {
+        registry,
+        font,
+        told: Arc::clone(&told),
+        memo: Arc::new(OnceLock::new()),
+    };
     ExtensionBuilder::new("letter", "0.1.0", ServiceSet::EMPTY)?
         .scheme("letter", Arc::new(resolver))
         .on_input(hook)
+        .on_session_end_lossless(ForgetSession(told))
         .build()
 }
 
+/// First-input handling as a standalone entry point: the same handling the
+/// `letter` extension's input hook runs, with fresh per-call notice and draw
+/// state. Extension-driven turns should prefer the extension, whose hook
+/// keeps the once-per-session notice state and the drawn assembly across
+/// inputs; direct callers get one notice per call and draw once per call
+/// instead.
+///
+/// It takes the whole [`InputEvent`] rather than bare parts because the
+/// capability gate needs the turn's resolved model; callers without a
+/// resolved route pass `model: None` and always take the text-only path,
+/// never a blind attach.
+///
+/// # Errors
+///
+/// Returns [`HookError::Cancelled`] when the turn is cancelled.
+/// Returns [`HookError::Failed`] if a record read, blob write, or record write fails.
+pub async fn handle_first_input(
+    session: SessionId,
+    input: InputEvent,
+    registry: Arc<crate::skills::SkillRegistry>,
+    font: Arc<Font>,
+    cx: HookCx,
+) -> Result<InputVerdict, HookError> {
+    debug_assert_eq!(session, cx.session);
+    FirstInputHook {
+        registry,
+        font,
+        told: Arc::new(Mutex::new(HashSet::new())),
+        memo: Arc::new(OnceLock::new()),
+    }
+    .handle(input, cx)
+    .await
+}
+
+#[cfg(test)]
+mod hook_tests;
 #[cfg(test)]
 mod tests;
