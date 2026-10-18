@@ -679,14 +679,17 @@ mod tests {
     }
 
     /// One actor port, broker, and inbox: the handle's cell is wired to the
-    /// same inbox the tests drain.
+    /// same inbox the tests drain. The receivers stay alive for the caller;
+    /// a dropped receiver turns every `tx` send into `SessionClosed`.
     fn fixture() -> (
         SessionHandle,
         std::sync::Arc<Broker>,
         std::sync::Arc<ResolutionInbox>,
+        mpsc::Receiver<ActorRequest>,
+        mpsc::Receiver<ActorRequest>,
     ) {
-        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL);
-        let (opening_tx, _opening_rx) = mpsc::channel(COMMAND_CHANNEL);
+        let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
+        let (opening_tx, opening_rx) = mpsc::channel(COMMAND_CHANNEL);
         let broker = std::sync::Arc::new(Broker::new());
         let inbox = std::sync::Arc::new(ResolutionInbox::new(std::sync::Arc::clone(&broker)));
         let handle = SessionHandle::new(
@@ -698,7 +701,7 @@ mod tests {
             ))),
             std::sync::Arc::clone(&inbox),
         );
-        (handle, broker, inbox)
+        (handle, broker, inbox, rx, opening_rx)
     }
 
     fn open_turnless(broker: &Broker, prompt: &str, turn: impl Into<Option<TurnId>>) -> RequestId {
@@ -717,7 +720,7 @@ mod tests {
     /// the inbox bypasses the mailbox entirely and never sheds.
     #[tokio::test]
     async fn a_full_mailbox_keeps_every_withdrawal_claim() {
-        let (handle, broker, inbox) = fixture();
+        let (handle, broker, inbox, _rx, _opening_rx) = fixture();
         for _ in 0..COMMAND_CHANNEL {
             handle
                 .work(actor::TurnWork::TaskFailed {
@@ -746,7 +749,7 @@ mod tests {
     /// contributing one claim, stay under the derived bound in debug.
     #[tokio::test]
     async fn armed_slots_withdrawal_claims_fit_the_derived_bound() {
-        let (_handle, broker, inbox) = fixture();
+        let (_handle, broker, inbox, _, _) = fixture();
         let mut ids = Vec::new();
         for n in 0..=MAX_OPEN_ASKS {
             ids.push(open_turnless(&broker, &format!("ask {n}?"), None));
@@ -767,7 +770,7 @@ mod tests {
     /// deadline has not passed claims nothing yet.
     #[tokio::test(start_paused = true)]
     async fn expiry_claims_carry_the_unattended_probe() {
-        let (_handle, broker, inbox) = fixture();
+        let (_handle, broker, inbox, _, _) = fixture();
         let attended = open_turnless(&broker, "attended?", None);
         let unattended = open_turnless(&broker, "unattended?", None);
         let early = open_turnless(&broker, "early?", None);
@@ -803,7 +806,7 @@ mod tests {
     /// unreported ones for `report_opened`; a second cancel adds nothing.
     #[tokio::test]
     async fn cancel_turn_claims_reported_and_parks_unreported_once() {
-        let (_handle, broker, inbox) = fixture();
+        let (_handle, broker, inbox, _, _) = fixture();
         let turn = TurnId::new(std::num::NonZeroU64::new(7).unwrap());
         let first = open_turnless(&broker, "first?", turn);
         let second = open_turnless(&broker, "second?", turn);
@@ -843,7 +846,7 @@ mod tests {
     /// returns withdrawals first.
     #[tokio::test]
     async fn close_fences_claims_and_returns_the_remainder() {
-        let (_handle, broker, inbox) = fixture();
+        let (_handle, broker, inbox, _, _) = fixture();
         let turn = TurnId::new(std::num::NonZeroU64::new(9).unwrap());
         let withdrawn = open_turnless(&broker, "withdrawn?", None);
         let cancelled = open_turnless(&broker, "cancelled?", turn);
@@ -869,7 +872,7 @@ mod tests {
     /// Settlement is one-shot per drained claim, in both directions.
     #[tokio::test]
     async fn settlement_marks_are_recorded_once_per_claim() {
-        let (_handle, broker, inbox) = fixture();
+        let (_handle, broker, inbox, _, _) = fixture();
         let id = open_turnless(&broker, "settled?", None);
         inbox.withdraw(id, None);
         let claim = inbox.take().expect("the claim");
