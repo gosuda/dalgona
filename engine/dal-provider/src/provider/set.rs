@@ -311,6 +311,48 @@ impl ProviderSet {
         })
     }
 
+    /// Replaces the HTTP client for one named provider before any shared
+    /// references or [`Provider`] handles are created.
+    ///
+    /// # Pre-use condition
+    ///
+    /// Must be called before creating [`Provider`] handles or cloning any shared
+    /// references to this [`ProviderSet`]. The internal set structure must be
+    /// uniquely owned; once shared, replacement fails.
+    ///
+    /// # Scope
+    ///
+    /// Replaces only the inference HTTP client for the named provider slot.
+    /// Catalog discovery clients, credentials, caches, and transport for other
+    /// providers are not changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] if this [`ProviderSet`] is already
+    /// shared (provider handles or cloned references exist), or if `provider_id`
+    /// does not name a configured provider.
+    #[cfg(feature = "test-support")]
+    pub fn set_test_client(
+        &mut self,
+        provider_id: &str,
+        client: reqwest::Client,
+    ) -> Result<(), ProviderError> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from(
+                "cannot configure test client on shared ProviderSet; call set_test_client before creating provider handles or sharing references",
+            ),
+        })?;
+        let slot =
+            inner
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| ProviderError::InvalidRequest {
+                    message: format!("provider {provider_id} is not configured"),
+                })?;
+        slot.client = client.into();
+        Ok(())
+    }
+
     /// Resolves one provider's credential from auth.json and the captured
     /// environment snapshot. The process environment is never read here.
     ///
