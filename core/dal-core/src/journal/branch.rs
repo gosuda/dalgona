@@ -96,6 +96,13 @@ pub fn branch(
     let mut path: Vec<EntryId> = Vec::new();
     let mut cursor = cutoff;
     while let Some(id) = cursor {
+        if path.contains(&id) {
+            // A parent cycle has no finite path: stop at the first revisit so
+            // the projection terminates with the reachable acyclic prefix.
+            // `BranchError` is matched exhaustively downstream, so a corrupt
+            // journal truncates here instead of growing a new error variant.
+            break;
+        }
         path.push(id);
         cursor = index.get(&id).and_then(|entry| entry.parent);
     }
