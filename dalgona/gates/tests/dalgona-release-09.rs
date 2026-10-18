@@ -21,6 +21,24 @@ const NATIVE_TARGETS: [&str; 6] = [
     "aarch64-pc-windows-msvc",
 ];
 
+/// The dalgona product version read from its own manifest, so the release
+/// tag tracks independent dalgona bumps instead of this gates crate's
+/// version. Mirrors the oracle in dalgona-alias-01.rs.
+fn dalgona_product_version() -> support::TestResult<String> {
+    let manifest =
+        std::fs::read_to_string(support::repo_root().join("dalgona/dalgona/Cargo.toml"))?;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(version) = line.strip_prefix("version = ") {
+            let version = version.trim().trim_matches('"');
+            if !version.is_empty() {
+                return Ok(version.to_owned());
+            }
+        }
+    }
+    Err("dalgona/dalgona/Cargo.toml carries no version line".into())
+}
+
 /// The runner's own host triple, read from `cargo -vV` the same way
 /// cargo-dist derives its native build target, so the gate always selects
 /// and checks the current native lane instead of a hard-coded row.
@@ -48,7 +66,7 @@ fn dalgona_native_archive_has_only_binaries_metadata_and_man_pages() -> support:
         NATIVE_TARGETS.contains(&target.as_str()),
         "the runner triple {target} is not one of the six native release lanes"
     );
-    let tag = format!("dalgona-v{}", env!("CARGO_PKG_VERSION"));
+    let tag = format!("dalgona-v{}", dalgona_product_version()?);
     let build = support::run_command(
         Command::new("dist")
             .args([
@@ -132,4 +150,19 @@ fn dalgona_native_archive_has_only_binaries_metadata_and_man_pages() -> support:
     }
     assert_eq!(members, expected);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_oracle_reads_the_dalgona_manifest() -> support::TestResult<()> {
+        let version = dalgona_product_version()?;
+        assert!(
+            version.split('.').count() >= 2,
+            "oracle version is not dotted: {version}"
+        );
+        Ok(())
+    }
 }
