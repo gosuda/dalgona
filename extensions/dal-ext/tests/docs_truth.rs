@@ -360,7 +360,7 @@ fn generator_link_errors() {
         scheme: Scheme::Dal,
         dir: dir.clone(),
         examples: None,
-        scan: vec![guard.dir().to_path_buf()],
+        scan: vec![guard.dir().clone()],
     };
     generate(&args).expect("valid source delimiters end the URI");
 
