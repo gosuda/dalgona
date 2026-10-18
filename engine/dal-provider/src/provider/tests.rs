@@ -14,6 +14,14 @@ use crate::{
     catalog::{CatalogEntry, CatalogSource, ResolvedModel},
     compact::{CompactOutcome, CompactedHistory},
     error::ProviderError,
+    family::devin::{
+        connect::frame_message,
+        proto::{
+            AssignModelRequest, AssignModelResponse, ClientModelConfig, GetChatMessageRequest,
+            GetChatMessageResponse, GetCliModelConfigsResponse, GetUserJwtRequest,
+            GetUserJwtResponse, ModelAssignment, ModelInfo, stop_reason,
+        },
+    },
     stream::{EventStream, NoticeSink, StreamEvent},
     thinking::ThinkingSupport,
 };
@@ -21,6 +29,7 @@ use dal_core::{
     Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
     Purpose, RawJson, RequestParams, SessionId, ThinkingLevel, Usage,
 };
+use prost::Message as _;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -286,6 +295,14 @@ fn stream_reply(body: String) -> Reply {
     }
 }
 
+fn proto_reply(body: Vec<u8>) -> Reply {
+    Reply {
+        status: 200,
+        content_type: "application/proto",
+        body,
+    }
+}
+
 fn denied_reply() -> Reply {
     Reply {
         status: 403,
@@ -317,6 +334,35 @@ fn stored_oauth(dir: &TestDir, id: &str, access: &str) -> Result<(), Box<dyn Err
     )?;
     auth.store()?;
     Ok(())
+}
+
+fn devin_jwt_reply(token: &str) -> Vec<u8> {
+    GetUserJwtResponse {
+        user_jwt: token.to_owned(),
+        custom_api_server_url: String::new(),
+    }
+    .encode_to_vec()
+}
+
+fn devin_assign_reply() -> Vec<u8> {
+    AssignModelResponse {
+        assignment: Some(ModelAssignment {
+            assignment_jwt: String::from("assign-1"),
+            model_uid: String::from("devin-serve-1"),
+            ..Default::default()
+        }),
+    }
+    .encode_to_vec()
+}
+
+fn devin_chat_reply() -> Vec<u8> {
+    let message = GetChatMessageResponse {
+        message_id: String::from("m1"),
+        delta_text: String::from("Hello"),
+        stop_reason: stop_reason::STOP_PATTERN,
+        ..Default::default()
+    };
+    frame_message(&message.encode_to_vec(), 0)
 }
 
 #[tokio::test]
@@ -2009,6 +2055,40 @@ fn family_labels_are_non_empty_and_stable_for_every_variant() {
     }
     assert_eq!(seen.len(), 15, "sixteen variants share fifteen labels");
 }
+fn devin_discovery_reply(uid: &str, router: bool) -> Vec<u8> {
+    GetCliModelConfigsResponse {
+        client_model_configs: vec![ClientModelConfig {
+            label: String::from(uid),
+            model_uid: String::from(uid),
+            model_info: Some(ModelInfo {
+                is_model_router: router,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn decode_chat_body(captured: &[u8]) -> Result<GetChatMessageRequest, Box<dyn Error>> {
+    let body = request_body(captured);
+    assert!(body.len() > 5, "the chat call carries a framed body");
+    assert_eq!(
+        body[0], 1,
+        "the chat call rides one compressed Connect frame"
+    );
+    let len = u32::from_be_bytes(
+        body[1..5]
+            .try_into()
+            .map_err(|_| io::Error::other("the chat frame carries its big-endian length"))?,
+    ) as usize;
+    assert_eq!(len, body.len() - 5);
+    let mut gz = flate2::read::GzDecoder::new(&body[5..]);
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut gz, &mut raw)?;
+    Ok(GetChatMessageRequest::decode(raw.as_slice())?)
+}
 
 #[tokio::test]
 async fn a_keyless_llamacpp_row_streams_chat_without_an_authorization_header() -> TestResult {
@@ -2268,6 +2348,249 @@ async fn pi_messages_cancelled_before_start_sends_nothing() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn devin_router_turn_flows_jwt_assign_chat() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server(
+        "",
+        vec![
+            proto_reply(devin_jwt_reply("jwt-1")),
+            proto_reply(devin_discovery_reply("adaptive", true)),
+            proto_reply(devin_assign_reply()),
+            proto_reply(devin_chat_reply()),
+        ],
+    )
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "devin-test",
+                Family::Devin,
+                base,
+                Some("DEVIN_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("DEVIN_TEST_KEY", "session-token-abc")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("devin-test", Family::Devin, "adaptive"))?;
+    let request = request(Family::Devin, "adaptive", vec![user_text("Route me.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 4);
+
+    let auth_head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(
+        auth_head.starts_with("post /exa.auth_pb.authservice/getuserjwt "),
+        "{auth_head}"
+    );
+    assert!(
+        auth_head.contains("content-type: application/proto"),
+        "{auth_head}"
+    );
+    let auth = GetUserJwtRequest::decode(request_body(&captured[0]))?;
+    assert_eq!(
+        auth.metadata.expect("auth metadata").api_key,
+        "devin-session-token$session-token-abc"
+    );
+
+    let assign_head = String::from_utf8_lossy(&captured[2]).to_ascii_lowercase();
+    assert!(
+        assign_head.starts_with("post /exa.api_server_pb.apiserverservice/assignmodel "),
+        "{assign_head}"
+    );
+    let assign = AssignModelRequest::decode(request_body(&captured[2]))?;
+    assert_eq!(assign.model_router_uid, "adaptive");
+    assert_ne!(assign.cascade_id, "");
+
+    let chat_head = String::from_utf8_lossy(&captured[3]).to_ascii_lowercase();
+    assert!(
+        chat_head.starts_with("post /exa.api_server_pb.apiserverservice/getchatmessage "),
+        "{chat_head}"
+    );
+    assert!(
+        chat_head.contains("content-type: application/connect+proto"),
+        "{chat_head}"
+    );
+    let chat = decode_chat_body(&captured[3])?;
+    assert_eq!(chat.chat_model_uid, "devin-serve-1");
+    assert_eq!(chat.model_assignment_jwt.as_deref(), Some("assign-1"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn devin_serving_turn_chats_directly_without_assignment() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server(
+        "",
+        vec![
+            proto_reply(devin_jwt_reply("jwt-1")),
+            proto_reply(devin_discovery_reply("adaptive", true)),
+            proto_reply(devin_chat_reply()),
+        ],
+    )
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "devin-test",
+                Family::Devin,
+                base,
+                Some("DEVIN_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("DEVIN_TEST_KEY", "session-token-abc")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("devin-test", Family::Devin, "devin-direct-1"))?;
+    let request = request(
+        Family::Devin,
+        "devin-direct-1",
+        vec![user_text("Answer directly.")],
+    );
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    // Discovery lists only the router, so the serving uid chats directly:
+    // auth, discovery, chat, and no assignment call.
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 3);
+    let chat = decode_chat_body(&captured[2])?;
+    assert_eq!(chat.chat_model_uid, "devin-direct-1");
+    assert!(chat.model_assignment_jwt.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn devin_401_falls_back_to_the_raw_key() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server(
+        "",
+        vec![
+            Reply {
+                status: 401,
+                content_type: "application/json",
+                body: Vec::from(b"{}".as_slice()),
+            },
+            proto_reply(devin_jwt_reply("jwt-1")),
+            proto_reply(devin_discovery_reply("adaptive", true)),
+            proto_reply(devin_assign_reply()),
+            proto_reply(devin_chat_reply()),
+        ],
+    )
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "devin-test",
+                Family::Devin,
+                base,
+                Some("DEVIN_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("DEVIN_TEST_KEY", "session-token-abc")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("devin-test", Family::Devin, "adaptive"))?;
+    let request = request(Family::Devin, "adaptive", vec![user_text("Route me.")]);
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request,
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 5);
+    let retry = GetUserJwtRequest::decode(request_body(&captured[1]))?;
+    assert_eq!(
+        retry.metadata.expect("retry metadata").api_key,
+        "session-token-abc",
+        "the 401 retry carries the raw key without the session prefix"
+    );
+    Ok(())
+}
+
+async fn devin_failure_of(response: reqwest::Response, key: &str) -> (u16, Option<String>, String) {
+    let credential = Credential::ApiKey {
+        key: crate::auth::credential::SecretString::from(key),
+    };
+    let failure = super::request::status_failure(
+        response,
+        Family::Devin,
+        &credential,
+        &[],
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("status_failure errored"))
+    .expect("not cancelled");
+    match failure {
+        crate::lifecycle::AttemptFailure::Response {
+            status,
+            code,
+            message,
+            ..
+        } => (status, code, message),
+        other @ crate::lifecycle::AttemptFailure::Provider(_) => {
+            panic!("expected a response failure, got {other:?}")
+        }
+    }
+}
+
 /// The surfaced text of a turn the loopback server rejects: either `open`
 /// refuses or the event stream carries the failure.
 async fn open_error_text(
@@ -2297,6 +2620,123 @@ async fn open_error_text(
             Ok(events) => panic!("expected an error, got success: {events:?}"),
         },
     }
+}
+
+async fn devin_chat_error_text(chat: Reply) -> String {
+    let dir = TestDir::new().expect("temp dir");
+    let (base, _server) = server(
+        "",
+        vec![
+            proto_reply(devin_jwt_reply("jwt-1")),
+            proto_reply(devin_discovery_reply("adaptive", true)),
+            chat,
+        ],
+    )
+    .await
+    .expect("loopback");
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "devin-test",
+                Family::Devin,
+                base,
+                Some("DEVIN_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("DEVIN_TEST_KEY", "session-token-abc")]),
+        dir.path(),
+        dir.path(),
+    )
+    .expect("provider set");
+    open_error_text(
+        &set,
+        "devin-test",
+        Family::Devin,
+        "devin-direct-1",
+        vec![user_text("Answer directly.")],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn devin_failures_surface_safe_detail_and_refuse_untrusted_bodies() {
+    // A safe JSON detail is unwrapped, whitespace-collapsed, and bounded by
+    // the helper's own cap rather than the generic first line.
+    let (status, _, message) = devin_failure_of(
+        reply(
+            400,
+            "application/json",
+            br#"{"error":{"message":"  upstream blew   up "}}"#.to_vec(),
+        ),
+        "k",
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(message, "upstream blew up");
+
+    // A long safe detail survives intact: 500 e-acutes are 500 UTF-16 units,
+    // inside the helper's bound and far past the generic 300-byte cut.
+    let long = format!(r#"{{"message":"{}"}}"#, "é".repeat(500));
+    let (_, _, message) =
+        devin_failure_of(reply(400, "application/json", long.into_bytes()), "k").await;
+    assert_eq!(message.len(), 1000);
+    assert!(message.chars().all(|c| c == 'é'));
+
+    // Proxy HTML and control-carrying bodies never surface: the typed status
+    // is preserved behind the generic fallback.
+    for (content_type, body) in [
+        ("text/html", b"<html>proxy refused</html>".as_slice()),
+        (
+            "application/json",
+            b"{\"error\":{\"message\":\"bad\x07detail\"}}".as_slice(),
+        ),
+    ] {
+        let (status, _, message) =
+            devin_failure_of(reply(400, content_type, body.to_vec()), "k").await;
+        assert_eq!(status, 400);
+        assert_eq!(message, "devin request failed", "{content_type}");
+    }
+
+    // An escaped credential stays redacted after JSON unescaping.
+    let (_, _, message) = devin_failure_of(
+        reply(
+            400,
+            "application/json",
+            br#"{"error":{"message":"bad key sk\u002dsecret-123"}}"#.to_vec(),
+        ),
+        "sk-secret-123",
+    )
+    .await;
+    assert!(!message.contains("sk-secret-123"), "{message}");
+}
+
+#[tokio::test]
+async fn devin_chat_error_surfaces_its_safe_detail_over_loopback() -> TestResult {
+    let text = devin_chat_error_text(Reply {
+        status: 400,
+        content_type: "application/json",
+        body: br#"{"error":{"message":"  upstream blew   up "}}"#.to_vec(),
+    })
+    .await;
+    assert!(text.contains("upstream blew up"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn devin_chat_html_error_never_echoes_markup_over_loopback() -> TestResult {
+    let text = devin_chat_error_text(Reply {
+        status: 400,
+        content_type: "text/html",
+        body: b"<html>proxy refused</html>".to_vec(),
+    })
+    .await;
+    assert!(!text.contains("<html"), "{text}");
+    assert!(!text.contains("proxy refused"), "{text}");
+    Ok(())
 }
 
 #[tokio::test]
@@ -2981,6 +3421,41 @@ async fn azure_environment_never_replaces_an_explicit_default_or_a_non_azure_row
         ],
     )?;
     assert_prepared_base(&blank, "openai", default);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keyless_devin_refuses_before_any_request() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server_task) = server("", vec![proto_reply(devin_jwt_reply("jwt-1"))]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "devin-test",
+                Family::Devin,
+                base,
+                None,
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let result = set.provider(resolved("devin-test", Family::Devin, "adaptive"));
+    assert!(
+        matches!(&result, Err(ProviderError::NoCredentials { provider }) if provider == "devin-test"),
+        "{result:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), server_task.join_next())
+            .await
+            .is_err()
+    );
+    server_task.abort_all();
     Ok(())
 }
 

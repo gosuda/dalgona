@@ -26,6 +26,18 @@ use crate::{
         },
         codex::CodexRequest,
         copilot::{self, CopilotKey, CopilotRequest, IdentityRetry, Integration},
+        devin::{
+            PATH_ASSIGN, PATH_AUTH, PATH_CHAT, PATH_DISCOVERY,
+            connect::{ConnectError, decode_unary},
+            decode::decode_discovery,
+            history::router_prompt,
+            proto::{AssignModelResponse, GetUserJwtResponse},
+            request::{
+                CHAT_HEADERS, CONNECT_USER_AGENT, DevinChatInput, UNARY_HEADERS, assign_body,
+                chat_frame, discovery_body, error_detail, normalize_session_token, user_jwt_body,
+                user_jwt_fallback_body,
+            },
+        },
         droid::{self, DroidRequest, RoutePolicy},
         gitlab::{
             self,
@@ -33,7 +45,7 @@ use crate::{
         },
         responses::ResponsesRequest,
     },
-    http::{self, Exchange},
+    http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
     lifecycle::AttemptFailure,
     stream::{EventStream, NoticeSink},
     thinking::{
@@ -163,6 +175,7 @@ pub(crate) async fn stream_attempt(
     match context.family {
         Family::Bedrock => Box::pin(bedrock_attempt(&context, &credential, &cancel, &owner)).await,
         Family::GitLab => gitlab_attempt(&context, &credential, &cancel, &owner).await,
+        Family::Devin => devin_attempt(&context, &credential, &cancel).await,
         Family::Droid => droid_attempt(&context, &credential, &cancel).await,
         _ => {
             let parts =
@@ -731,6 +744,300 @@ fn azure_parts(
         secrets,
         None,
     ))
+}
+
+/// Runs one Devin turn: `GetUserJwt`, `AssignModel`, then one
+/// `GetChatMessage` stream.
+///
+/// Auth follows the adapter's two-key ladder: the session-token form first,
+/// the raw key once on a 401. A server-directed base override replaces the
+/// entry base for the calls after it. Assignment resolves the route's
+/// router uid to its serving uid; a failed assignment fails the turn, never
+/// falls back. The chat body goes out gzipped in one Connect frame and its
+/// reply decodes as raw byte chunks, never SSE.
+async fn devin_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let api_key = match credential {
+        Credential::ApiKey { key } => key.expose().to_owned(),
+        Credential::OAuth(_) => {
+            return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+                message: format!("{} does not accept an OAuth credential", context.provider),
+            }));
+        }
+        Credential::None => {
+            return Err(AttemptFailure::Provider(ProviderError::NoCredentials {
+                provider: context.provider.to_string(),
+            }));
+        }
+    };
+    let router_uid = context.request.model.id().to_owned();
+
+    let Some((wire_key, jwt, base)) =
+        devin_auth_exchange(context, credential, &api_key, cancel).await?
+    else {
+        return Ok(None);
+    };
+
+    // 2. Resolve the route through the adapter's own discovery: only a row
+    // the server marks as a router (and never a composite) earns an
+    // `AssignModel` call; every other uid chats directly.
+    let discovery_url =
+        http::endpoint(Family::Devin, &base, PATH_DISCOVERY).map_err(AttemptFailure::Provider)?;
+    let discovery_response = devin_unary(
+        &context.client,
+        discovery_url,
+        UNARY_HEADERS,
+        discovery_body(&wire_key),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(discovery_response) = discovery_response else {
+        return Ok(None);
+    };
+    let discovery_bytes = devin_body(discovery_response, credential, cancel).await?;
+    let Some(discovery_bytes) = discovery_bytes else {
+        return Ok(None);
+    };
+    let rows = decode_discovery(&discovery_bytes).map_err(AttemptFailure::Provider)?;
+    let routed = rows
+        .iter()
+        .find(|row| row.uid == router_uid)
+        .is_some_and(|row| row.is_model_router && row.harness_count == 0);
+
+    let cascade_id = context.session.to_string();
+    let (chat_model_uid, assignment_jwt) = if routed {
+        let assign_url =
+            http::endpoint(Family::Devin, &base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
+        let assign_response = devin_unary(
+            &context.client,
+            assign_url,
+            UNARY_HEADERS,
+            assign_body(
+                &wire_key,
+                &router_uid,
+                &cascade_id,
+                router_prompt(&context.request),
+            ),
+            &context.user_agent,
+            cancel,
+        )
+        .await?;
+        let Some(assign_response) = assign_response else {
+            return Ok(None);
+        };
+        let assign_bytes = devin_body(assign_response, credential, cancel).await?;
+        let Some(assign_bytes) = assign_bytes else {
+            return Ok(None);
+        };
+        let assigned: AssignModelResponse = decode_unary(&assign_bytes, "AssignModelResponse")
+            .map_err(|err| devin_protocol(&err))?;
+        let assignment = assigned
+            .assignment
+            .filter(|assignment| {
+                !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
+            })
+            .ok_or_else(|| {
+                AttemptFailure::Provider(ProviderError::InvalidRequest {
+                    message: String::from("devin assignment did not resolve a serving model"),
+                })
+            })?;
+        (assignment.model_uid, Some(assignment.assignment_jwt))
+    } else {
+        (router_uid, None)
+    };
+
+    let execution_id = Uuid::new_v4().to_string();
+    // The server's own ceiling for the resolved serving uid wins over the
+    // catalog row; the caller's explicit cap wins over both.
+    let discovered_max = rows
+        .iter()
+        .find(|row| row.uid == chat_model_uid)
+        .and_then(|row| u32::try_from(row.max_output_tokens).ok())
+        .filter(|max| *max > 0);
+    let max_tokens = context
+        .request
+        .params
+        .max_output_tokens
+        .or(discovered_max)
+        .or(context.entry.max_output)
+        .unwrap_or(4096);
+    let frame = chat_frame(&DevinChatInput {
+        request: &context.request,
+        api_key: &wire_key,
+        user_jwt: &jwt.user_jwt,
+        cascade_id: &cascade_id,
+        execution_id: &execution_id,
+        chat_model_uid: &chat_model_uid,
+        assignment_jwt: assignment_jwt.as_deref(),
+        max_tokens,
+        parallel_tool_calls: false,
+        temperature: context.thinking.temperature.map(f64::from),
+        top_p: None,
+        stop_sequences: &[],
+    })
+    .map_err(AttemptFailure::Provider)?;
+    let chat_url =
+        http::endpoint(Family::Devin, &base, PATH_CHAT).map_err(AttemptFailure::Provider)?;
+    let mut request = context.client.post(chat_url);
+    for (name, value) in CHAT_HEADERS {
+        request = request.header(name, value);
+    }
+    let chat_response = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(None),
+        result = http::send(
+            Family::Devin,
+            request.body(frame),
+            CONNECT_USER_AGENT,
+            Exchange::Bytes {
+                accept: "*/*",
+                total: None,
+            },
+            tokio::time::sleep,
+        ) => result.map_err(AttemptFailure::Provider)?,
+    };
+    // The session JWT and the assignment JWT ride the chat body, so an error
+    // or frame that echoes either is redacted like the API key itself.
+    let mut secrets = credential_secrets(credential);
+    secrets.push(Box::from(jwt.user_jwt.as_str()));
+    secrets.extend(assignment_jwt.as_deref().map(Box::<str>::from));
+    if !chat_response.status().is_success() {
+        return match status_failure(chat_response, Family::Devin, credential, &secrets, cancel)
+            .await?
+        {
+            Some(failure) => Err(failure),
+            None => Ok(None),
+        };
+    }
+    Ok(Some(transport_mod::decode_response(
+        chat_response,
+        Family::Devin,
+        &context.provider,
+        &context.model,
+        false,
+        None,
+        secrets,
+        None,
+    )))
+}
+
+/// Sends one Devin unary call and returns its response head, whatever the
+/// status. Cancellation returns `None` before or during the send.
+async fn devin_unary(
+    client: &reqwest::Client,
+    url: url::Url,
+    headers: [(&str, &str); 3],
+    body: Vec<u8>,
+    user_agent: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<reqwest::Response>, AttemptFailure> {
+    let mut request = client.post(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(None),
+        result = http::send(
+            Family::Devin,
+            request.body(body),
+            user_agent,
+            Exchange::Bytes {
+                accept: "application/proto",
+                total: Some(NON_STREAM_TOTAL_TIMEOUT),
+            },
+            tokio::time::sleep,
+        ) => result.map(Some).map_err(AttemptFailure::Provider),
+    }
+}
+
+/// Reads one Devin unary body: a rejected response becomes the failure the
+/// lifecycle classifies, cancellation returns `None`.
+async fn devin_body(
+    response: reqwest::Response,
+    credential: &Credential,
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<u8>>, AttemptFailure> {
+    if !response.status().is_success() {
+        return match status_failure(response, Family::Devin, credential, &[], cancel).await? {
+            Some(failure) => Err(failure),
+            None => Ok(None),
+        };
+    }
+    http::read_body(Family::Devin, response)
+        .await
+        .map(Some)
+        .map_err(AttemptFailure::Provider)
+}
+
+async fn devin_auth_exchange(
+    context: &StreamContext,
+    credential: &Credential,
+    api_key: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<(String, GetUserJwtResponse, Box<str>)>, AttemptFailure> {
+    let auth_url = http::endpoint(Family::Devin, &context.base_url, PATH_AUTH)
+        .map_err(AttemptFailure::Provider)?;
+    let auth_response = devin_unary(
+        &context.client,
+        auth_url,
+        UNARY_HEADERS,
+        user_jwt_body(api_key),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(auth_response) = auth_response else {
+        return Ok(None);
+    };
+    let (wire_key, auth_response) = if auth_response.status().as_u16() == 401 {
+        let retry_url = http::endpoint(Family::Devin, &context.base_url, PATH_AUTH)
+            .map_err(AttemptFailure::Provider)?;
+        let retry = devin_unary(
+            &context.client,
+            retry_url,
+            UNARY_HEADERS,
+            user_jwt_fallback_body(api_key),
+            &context.user_agent,
+            cancel,
+        )
+        .await?;
+        let Some(retry) = retry else {
+            return Ok(None);
+        };
+        (api_key.to_owned(), retry)
+    } else {
+        (normalize_session_token(api_key), auth_response)
+    };
+    let auth_bytes = devin_body(auth_response, credential, cancel).await?;
+    let Some(auth_bytes) = auth_bytes else {
+        return Ok(None);
+    };
+    let jwt: GetUserJwtResponse =
+        decode_unary(&auth_bytes, "GetUserJwtResponse").map_err(|err| devin_protocol(&err))?;
+    if jwt.user_jwt.is_empty() {
+        return Err(AttemptFailure::Provider(ProviderError::Protocol {
+            family: Family::Devin,
+            detail: String::from("devin session exchange returned no token"),
+        }));
+    }
+    let base: Box<str> = if jwt.custom_api_server_url.trim().is_empty() {
+        context.base_url.clone()
+    } else {
+        jwt.custom_api_server_url.as_str().into()
+    };
+    Ok(Some((wire_key, jwt, base)))
+}
+
+fn devin_protocol(error: &ConnectError) -> AttemptFailure {
+    AttemptFailure::Provider(ProviderError::Protocol {
+        family: Family::Devin,
+        detail: error.to_string(),
+    })
 }
 
 /// Runs one Droid turn through the proxy lifecycle: the wire lowers the
@@ -1328,6 +1635,12 @@ pub(crate) fn build_anthropic_wire(
     family::anthropic::build(&request, auth)
 }
 
+/// Maps one rejected response the way its family requires: Devin bodies go
+/// through the family's bounded detail sanitizer (untrusted markup and
+/// control text fall back to a fixed message), everything else rides the
+/// shared first-line mapping. Status, code, and retry classification are
+/// preserved on every path; cancellation returns `None` before or during
+/// the body read.
 pub(crate) async fn status_failure(
     response: reqwest::Response,
     family: Family,
@@ -1341,6 +1654,13 @@ pub(crate) async fn status_failure(
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(String::from);
+    // The content type is header metadata: capture it before the body read
+    // consumes the response, or the Devin sanitizer cannot refuse proxy HTML.
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(String::from);
     let body = tokio::select! {
         biased;
         () = cancel.cancelled() => return Ok(None),
@@ -1350,6 +1670,15 @@ pub(crate) async fn status_failure(
         .into_iter()
         .chain(extra_secrets.iter().cloned())
         .collect();
+    if family == Family::Devin {
+        return Ok(Some(devin_failure(
+            status,
+            content_type.as_deref(),
+            &body,
+            &secrets,
+            retry_after,
+        )));
+    }
     let body = transport_mod::redact_text(String::from_utf8_lossy(&body).into_owned(), &secrets);
     let (code, message) = transport_mod::error_fields(&body);
     // JSON escapes decode in `error_fields`, so a secret written as `\u002d`
@@ -1360,6 +1689,39 @@ pub(crate) async fn status_failure(
         message: transport_mod::redact_text(message, &secrets),
         retry_after,
     }))
+}
+
+/// The fixed message for Devin bodies the sanitizer refuses: it carries no
+/// body text at all, so proxied markup and control bytes never surface.
+const DEVIN_GENERIC_ERROR: &str = "devin request failed";
+
+/// Maps one rejected Devin response: the sanitizer's bounded safe detail
+/// when the redacted body carries one, else the generic fallback. The body
+/// arrives already bounded by the transport read ceiling and the detail by
+/// the sanitizer's own cap, so no extra truncation here: cutting mid-JSON
+/// would break envelope unwrapping and lose the code. Status, code, and
+/// retry classification are preserved either way, and the surfaced detail
+/// is re-redacted after JSON unescaping so an escaped credential never
+/// appears.
+fn devin_failure(
+    status: u16,
+    content_type: Option<&str>,
+    body: &[u8],
+    secrets: &[Box<str>],
+    retry_after: Option<String>,
+) -> AttemptFailure {
+    let redacted = transport_mod::redact_text(String::from_utf8_lossy(body).into_owned(), secrets);
+    let (code, _) = transport_mod::error_fields(&redacted);
+    let message = error_detail(redacted.as_bytes(), content_type).map_or_else(
+        || String::from(DEVIN_GENERIC_ERROR),
+        |detail| transport_mod::redact_text(detail, secrets),
+    );
+    AttemptFailure::Response {
+        status,
+        code: code.map(|code| transport_mod::redact_text(code, secrets)),
+        message,
+        retry_after,
+    }
 }
 
 pub(crate) async fn compact_attempt(
