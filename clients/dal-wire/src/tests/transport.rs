@@ -1,7 +1,36 @@
+use std::time::Duration;
+
 use futures::{StreamExt, stream};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::transport::{MAX_FRAME_BYTES, ReadFrameError, StdioTransport, Transport};
+
+/// The serve loops poll `read_frame` beside other events and drop it when one
+/// fires. A read dropped midway must leave the received part of its line for
+/// the next read, whichever byte the drop falls on.
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_read_keeps_the_part_of_the_line_it_took() {
+    let (mut input, reader) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, tokio::io::sink()));
+    let mut frames = Vec::new();
+
+    for byte in "ab\r\n{\"id\":1}\n\nlast".bytes() {
+        input.write_all(&[byte]).await.expect("send one byte");
+        if let Ok(frame) =
+            tokio::time::timeout(Duration::from_millis(1), transport.read_frame()).await
+        {
+            frames.push(frame.expect("a complete frame"));
+        }
+    }
+    drop(input);
+
+    assert_eq!(frames, ["ab", r#"{"id":1}"#]);
+    assert_eq!(transport.read_frame().await, Ok("last".to_owned()));
+    assert_eq!(
+        transport.read_frame().await,
+        Err(ReadFrameError::EndOfInput)
+    );
+}
 
 #[tokio::test]
 async fn cr_blank_final_frame_reads_each_nonempty_line() {
@@ -233,6 +262,100 @@ async fn websocket_oversized_message_ends_without_a_close_frame() {
         None | Some(Err(_)) => {}
         Some(Ok(frame)) => panic!("an oversized message must end without a reply, got {frame:?}"),
     }
+}
+
+/// Fragments that are each within the frame limit still add up to one
+/// message. A client holds the same message cap as a server and drops a
+/// connection whose message outgrows it.
+#[tokio::test]
+async fn websocket_client_ends_the_connection_when_a_message_outgrows_the_cap() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+    use tokio_tungstenite::tungstenite::{Bytes, Message};
+
+    use crate::transport::WebSocketTransport;
+
+    let fragment = Bytes::from(vec![b'x'; MAX_FRAME_BYTES / 2 + 1]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let address = listener.local_addr().expect("listener address");
+    let url = format!("ws://{address}/");
+    let url = url::Url::parse(&url).expect("socket url");
+
+    // This peer applies the library defaults, so it sends what the cap forbids.
+    let serve = async {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete the handshake");
+        socket
+            .send(Message::Text("within the cap".into()))
+            .await
+            .expect("send a small message");
+        let first = Frame::message(fragment.clone(), OpCode::Data(Data::Text), false);
+        let last = Frame::message(fragment, OpCode::Data(Data::Continue), true);
+        // The client ends the connection partway, so these sends may fail.
+        let _ = socket.send(Message::Frame(first)).await;
+        let _ = socket.send(Message::Frame(last)).await;
+        socket
+    };
+    let receive = async {
+        let mut client = WebSocketTransport::connect(url).await.expect("connect");
+        assert_eq!(client.read_frame().await, Ok("within the cap".to_owned()));
+        assert!(
+            matches!(client.read_frame().await, Err(ReadFrameError::Closed)),
+            "a message past the cap must end the connection, not be delivered"
+        );
+    };
+    let (_socket, ()) = tokio::time::timeout(
+        Duration::from_secs(30),
+        Box::pin(async { tokio::join!(serve, receive) }),
+    )
+    .await
+    .expect("the oversized message ends the connection");
+}
+
+/// Closing a line transport shuts the write half down even while another
+/// handle to the writer is alive, so the peer sees the end of the stream.
+#[tokio::test(start_paused = true)]
+async fn close_ends_the_peer_stream_while_a_writer_handle_lives() {
+    let (writer_side, mut peer) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    writer.write_frame("last").await.expect("a frame writes");
+    transport.close().await;
+
+    let mut seen = Vec::new();
+    let end = tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut seen)).await;
+    assert!(end.is_ok(), "the peer sees the end of the stream");
+    assert_eq!(seen, b"last\n");
+    let late = writer.write_frame("late").await;
+    assert!(late.is_err(), "a closed transport takes no more frames");
+}
+
+/// A write that is stalled on its peer holds the writer. Close must not wait
+/// for it: the serve loops close while handlers that still own the writer are
+/// alive, and a stalled peer would otherwise hold the close forever.
+#[tokio::test(start_paused = true)]
+async fn close_does_not_wait_for_a_write_in_flight() {
+    // Nothing reads the peer, so the write fills the pipe and stalls.
+    let (writer_side, _stalled_peer) = tokio::io::duplex(16);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    let frame = "x".repeat(1024);
+
+    let mut write = std::pin::pin!(writer.write_frame(&frame));
+    let close = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), transport.close()).await
+    };
+    let closed = tokio::select! {
+        _ = &mut write => panic!("the write cannot finish while nothing reads"),
+        closed = close => closed,
+    };
+    assert!(closed.is_ok(), "close returns while a write is stalled");
 }
 
 /// A `401`/`403` upgrade denial over real loopback maps to `Auth` and is

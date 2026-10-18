@@ -4,9 +4,9 @@
 //! same method table, schema, limits, auth, and connection lifetime as RPC.
 //! Binary frames close the connection with code 1003; oversized messages
 //! close the transport without a close frame, per the pinned
-//! `tokio-tungstenite` limit semantics. Token-bearing headers and
-//! subprotocols never enter logs. Disconnection leaves sessions and turns
-//! running.
+//! `tokio-tungstenite` limit semantics. Servers and clients apply the same
+//! message cap. Token-bearing headers and subprotocols never enter logs.
+//! Disconnection leaves sessions and turns running.
 //!
 //! One driver task per connection owns both socket halves and keeps the
 //! connection alive: it pings the peer every `PING_INTERVAL` and closes the
@@ -149,12 +149,12 @@ impl WebSocketTransport {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(WS_FRAME_CAP))
-            .max_frame_size(Some(WS_FRAME_CAP));
-        let socket =
-            tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, Some(config))
-                .await;
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            io,
+            Role::Server,
+            Some(frame_cap_config()),
+        )
+        .await;
         let (sink, stream) = socket.split();
         Self::halves(Box::pin(stream), Box::pin(sink))
     }
@@ -204,18 +204,19 @@ impl WebSocketTransport {
     where
         R: IntoClientRequest + Unpin,
     {
-        let (socket, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|error| match &error {
-                WsError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
-                    tracing::debug!(
-                        status = %response.status(),
-                        "websocket upgrade denied; not retrying"
-                    );
-                    WireError::Auth
-                }
-                _ => WireError::Transport(format!("websocket connect failed: {error}")),
-            })?;
+        let (socket, _) =
+            tokio_tungstenite::connect_async_with_config(request, Some(frame_cap_config()), false)
+                .await
+                .map_err(|error| match &error {
+                    WsError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
+                        tracing::debug!(
+                            status = %response.status(),
+                            "websocket upgrade denied; not retrying"
+                        );
+                        WireError::Auth
+                    }
+                    _ => WireError::Transport(format!("websocket connect failed: {error}")),
+                })?;
         let (sink, stream) = socket.split();
         Ok(Self::halves(Box::pin(stream), Box::pin(sink)))
     }
@@ -268,6 +269,14 @@ impl WebSocketTransport {
         self.writer.shutdown_sink().await;
         self.tasks.shutdown().await;
     }
+}
+
+/// The message limits both ends of a connection apply: a larger message ends
+/// the connection instead of growing the read buffer.
+fn frame_cap_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(WS_FRAME_CAP))
+        .max_frame_size(Some(WS_FRAME_CAP))
 }
 
 /// The connection driver: the only owner of the socket halves.
