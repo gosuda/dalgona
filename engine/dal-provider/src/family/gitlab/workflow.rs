@@ -67,6 +67,8 @@ use crate::{
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod support;
 
 /// The workflow definition every dal run uses.
 const DEFINITION: &str = "ambient";
@@ -215,6 +217,23 @@ type SessionMap = HashMap<(SessionId, Box<str>), Session>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkflowSessions {
     inner: Arc<Mutex<SessionMap>>,
+}
+
+impl WorkflowSessions {
+    /// Drops every parked workflow row belonging to `session`, closing its
+    /// sockets. Parked sockets are solely owned by their rows (a live turn
+    /// took its row out of the table), so removing a row drops its transport
+    /// and the peer observes the close; nothing is detached while a writer
+    /// still holds it. This mirrors `WsSessions::end_session`.
+    ///
+    /// No workflow stop is sent: stopping is an async REST call and this runs
+    /// in the synchronous `ProviderSet::end_session` path. A turn still
+    /// driving the session keeps its own socket and stops its workflow
+    /// through its driver teardown, and the next turn for the ended session
+    /// starts fresh. Rows of other sessions are untouched.
+    pub(crate) fn end_session(&self, session: &SessionId) {
+        lock(&self.inner).retain(|(owner, _), _| owner != session);
+    }
 }
 
 struct Session {

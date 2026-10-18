@@ -9,12 +9,10 @@ use dal_core::{
 };
 use futures::{SinkExt, StreamExt};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+use tokio::net::TcpListener;
 
 use super::*;
+use super::support::{RestCounts, action_frame, rest_router, test_timeouts};
 use crate::{
     error::ProviderError,
     http,
@@ -494,103 +492,13 @@ fn usage_reports_the_chat_agent_first() {
     assert_eq!(decoder.context_used, Some(40));
 }
 
-// --- Loopback driver tests ------------------------------------------------
-
-#[derive(Debug, Default)]
-struct RestCounts {
-    creates: usize,
-    stops: Vec<String>,
-    direct_access: usize,
-    ws_base: String,
-}
-
-async fn read_http(tcp: &mut tokio::net::TcpStream) -> (String, String, Vec<u8>) {
-    let mut head = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        AsyncReadExt::read_exact(tcp, &mut byte).await.unwrap();
-        head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
-        }
-    }
-    let head_text = String::from_utf8_lossy(&head).into_owned();
-    let mut lines = head_text.lines();
-    let start = lines.next().unwrap_or_default().to_owned();
-    let len = head_text
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if !name.trim().eq_ignore_ascii_case("content-length") {
-                return None;
-            }
-            value.trim().parse::<usize>().ok()
-        })
-        .unwrap_or(0);
-    let mut body = vec![0u8; len];
-    AsyncReadExt::read_exact(tcp, &mut body).await.unwrap();
-    (start, head_text, body)
-}
-
-async fn reply(tcp: &mut tokio::net::TcpStream, status: &str, body: &str) {
-    let head = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
-    );
-    AsyncWriteExt::write_all(tcp, head.as_bytes())
-        .await
-        .unwrap();
-    AsyncWriteExt::write_all(tcp, body.as_bytes())
-        .await
-        .unwrap();
-}
-
-async fn rest_router(listener: TcpListener, counts: Arc<Mutex<RestCounts>>) {
-    loop {
-        let Ok((mut tcp, _)) = listener.accept().await else {
-            return;
-        };
-        let counts = Arc::clone(&counts);
-        let (start, _, _) = read_http(&mut tcp).await;
-        let mut parts = start.split_whitespace();
-        let method = parts.next().unwrap_or_default().to_owned();
-        let path = parts.next().unwrap_or_default().to_owned();
-        let ws_base = lock(&counts).ws_base.clone();
-        let body = if method == "PUT" {
-            r"{}".to_owned()
-        } else if path.starts_with("/api/v4/groups/") && path.contains("/projects") {
-            r#"[{"id":11,"path_with_namespace":"g/p"}]"#.to_owned()
-        } else if path.starts_with("/api/v4/ai/duo_workflows/direct_access") {
-            lock(&counts).direct_access += 1;
-            format!(r#"{{"duo_workflow_service":{{"token":"wtok","base_url":"{ws_base}"}}}}"#)
-        } else if path.starts_with("/api/v4/ai/duo_workflows/workflows/") && method == "PATCH" {
-            let id = path.rsplit('/').next().unwrap_or_default().to_owned();
-            lock(&counts).stops.push(id);
-            r"{}".to_owned()
-        } else if path.starts_with("/api/v4/ai/duo_workflows/workflows") {
-            let mut counts = lock(&counts);
-            counts.creates += 1;
-            format!(r#"{{"id":"w-{}"}}"#, counts.creates)
-        } else if path.starts_with("/api/graphql") {
-            r#"{"data":{"aiChatAvailableModels":{"pinnedModel":null}}}"#.to_owned()
-        } else {
-            r"{}".to_owned()
-        };
-        reply(&mut tcp, "200 OK", &body).await;
-    }
-}
+// The loopback rig (router, counts, timeouts, action frames) lives in
+// super::support so the provider-set boundary test can share it.
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn test_timeouts() -> Timeouts {
-    Timeouts {
-        rest: std::time::Duration::from_secs(5),
-        idle: std::time::Duration::from_millis(100),
-    }
 }
 
 fn test_turn<'a>(
@@ -691,12 +599,6 @@ async fn loopback_turn_streams_text_to_a_terminal_stop() {
     assert_eq!(counts.stops, [] as [String; 0]);
     drop(counts);
     servers.abort_all();
-}
-
-fn action_frame(id: &str) -> String {
-    format!(
-        r#"{{"action":{{"name":"runMCPTool","requestID":"{id}","args":{{"name":"read","args":{{"q":"x"}}}}}}}}"#
-    )
 }
 
 #[tokio::test]
@@ -910,4 +812,179 @@ fn start_frame_ignores_text_tool_and_message_replay() {
     let laden = frame(payload);
     assert_eq!(laden, frame(|| None));
     assert!(!laden.contains("REPLAY-MARKER"), "{laden}");
+}
+
+#[tokio::test]
+async fn loopback_end_session_drops_only_its_parked_workflows() {
+    let rest = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rest_base = format!("http://{}", rest.local_addr().unwrap());
+    let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_base = format!("http://{}", ws.local_addr().unwrap());
+    let counts = Arc::new(Mutex::new(RestCounts::default()));
+    lock(&counts).ws_base = ws_base;
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(rest_router(rest, Arc::clone(&counts)));
+    // Three connections serve two parked turns and one fresh resume; each
+    // handler routes on the START frame it reads, so accept order is free.
+    servers.spawn(async move {
+        loop {
+            let Ok((tcp, _)) = ws.accept().await else {
+                return;
+            };
+            let closed_tx = closed_tx.clone();
+            tokio::spawn(async move {
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let start = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                assert!(start.contains("\"startRequest\""));
+                let text =
+                    |body: &str| tokio_tungstenite::tungstenite::Message::Text(body.into());
+                if start.contains("\"workflowID\":\"w-1\"") {
+                    // Session A parks on an action; ending its session must
+                    // terminate this socket together with its row.
+                    socket.send(text(&action_frame("r-a"))).await.unwrap();
+                    while socket.next().await.is_some() {}
+                    let _ = closed_tx.send("a");
+                } else if start.contains("\"workflowID\":\"w-2\"") {
+                    // Session B parks, then resumes on this same socket.
+                    socket.send(text(&action_frame("r-b"))).await.unwrap();
+                    let answer = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                    assert!(answer.contains("\"requestID\":\"r-b\""));
+                    assert!(answer.contains("file text B"));
+                    socket
+                        .send(text(
+                            r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"b2\",\"content\":\"b used it\"}]}}"}}"#,
+                        ))
+                        .await
+                        .unwrap();
+                    socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
+                    while socket.next().await.is_some() {}
+                } else {
+                    // Session A's fresh resume after its rows were dropped.
+                    socket
+                        .send(text(
+                            r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"a3\",\"content\":\"a fresh\"}]}}"}}"#,
+                        ))
+                        .await
+                        .unwrap();
+                    socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
+                    while socket.next().await.is_some() {}
+                }
+            });
+        }
+    });
+    let cancel = CancellationToken::new();
+    let session_a = SessionId::new_v7();
+    let session_b = SessionId::new_v7();
+    let sessions = WorkflowSessions::default();
+    let client = http::build_client();
+    let scope = WorkflowScope {
+        root_namespace_id: "42".into(),
+        namespace_path: Some("g".into()),
+        project_id: Some("11".into()),
+        project_path: None,
+        workflow_definition: None,
+    };
+    let tool_call = |id: &str| ContextItem::Assistant {
+        source: ReplaySource {
+            family: Family::GitLab,
+            model: "duo-agent".into(),
+        },
+        parts: vec![AssistantPart::ToolCall {
+            call: CallId::new(id),
+            name: "read".into(),
+            args: raw(r#"{"q":"x"}"#),
+            replay: None,
+        }],
+        replay: None,
+    };
+    // Two sessions park one workflow each.
+    for (session, id, go) in [
+        (session_a, "r-a", "go A"),
+        (session_b, "r-b", "go B"),
+    ] {
+        let model_request = request(vec![user(go), tool_call(id)]);
+        let turn = test_turn(&model_request, &scope, &cancel, &rest_base, session);
+        let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
+        let (events, error) = drain(stream).await;
+        assert!(error.is_none());
+        assert!(
+            matches!(
+                events.last(),
+                Some(StreamEvent::Stop {
+                    reason: StopReason::ToolUse
+                })
+            )
+        );
+    }
+    assert_eq!(lock(&sessions.inner).len(), 2);
+    // Ending session A removes only its rows and terminates its socket.
+    sessions.end_session(&session_a);
+    assert_eq!(lock(&sessions.inner).len(), 1);
+    assert!(
+        lock(&sessions.inner)
+            .keys()
+            .all(|(owner, _)| owner != &session_a)
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed_rx.recv())
+            .await
+            .expect("session A's socket stays open after end_session"),
+        Some("a")
+    );
+    // Session B still resumes on its live socket with no fresh workflow.
+    let result_b = ContextItem::ToolResult {
+        call: CallId::new("r-b"),
+        name: "read".into(),
+        is_error: false,
+        parts: vec![text_part("file text B")],
+    };
+    let resumed_b = request(vec![user("go B"), tool_call("r-b"), result_b]);
+    let turn = test_turn(&resumed_b, &scope, &cancel, &rest_base, session_b);
+    let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
+    let (events, error) = drain(stream).await;
+    assert!(error.is_none());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "b used it"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Stop {
+            reason: StopReason::EndTurn
+        })
+    ));
+    // Session A, its rows gone, starts a fresh workflow for its tool result.
+    let result_a = ContextItem::ToolResult {
+        call: CallId::new("r-a"),
+        name: "read".into(),
+        is_error: false,
+        parts: vec![text_part("file text A")],
+    };
+    let resumed_a = request(vec![user("go A"), tool_call("r-a"), result_a]);
+    let turn = test_turn(&resumed_a, &scope, &cancel, &rest_base, session_a);
+    let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
+    let (events, error) = drain(stream).await;
+    assert!(error.is_none());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "a fresh"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(StreamEvent::Stop {
+            reason: StopReason::EndTurn
+        })
+    ));
+    let counts = lock(&counts);
+    assert_eq!(counts.creates, 3);
+    assert_eq!(counts.stops, [] as [String; 0]);
+    drop(counts);
+    assert_eq!(lock(&sessions.inner).len(), 0);
+    // A second end is idempotent and never touches other sessions.
+    sessions.end_session(&session_a);
+    sessions.end_session(&session_b);
+    servers.abort_all();
 }
