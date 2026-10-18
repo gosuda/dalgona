@@ -1375,6 +1375,10 @@ fn decode_an_empty_object_is_missing_version_not_trailing_bytes() {
     assert!(matches!(decode(b"{}"), Err(DecodeError::MissingVersion)));
     // A truncated line still fails as malformed.
     assert!(matches!(decode(b"{"), Err(DecodeError::Invalid { .. })));
+    assert!(matches!(
+        decode(b"{\"v\":3,\"type\":42,\"garbage\":[}"),
+        Err(DecodeError::Invalid { .. })
+    ));
 }
 
 #[test]

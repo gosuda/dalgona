@@ -300,8 +300,14 @@ pub fn scan_head(line: &[u8]) -> Option<ScannedHead> {
 
 /// Decodes one complete journal line.
 ///
-/// The `"v"` member is validated before anything else; `"type"` must then
-/// name a format-1 kind. Members the record does not declare are dropped
+/// The line must first scan as one JSON object: malformed JSON, a duplicate
+/// `"v"` member, and trailing bytes stay [`DecodeError::Invalid`]. Once the
+/// envelope scans, the `"v"` member is validated before `"type"` and the
+/// payload, so an unsupported version reports
+/// [`DecodeError::UnsupportedVersion`] even when the type is duplicated,
+/// missing, or malformed, or the payload would also fail. `"type"` must
+/// then name a kind this format reads.
+/// Members the record does not declare are dropped
 /// so a reader survives fields a later format adds; the closed nested
 /// payloads (`usage`, parts, blocks, `who`, `purpose`, `answer`, `from`,
 /// `outcome`, `stop`) still reject unknown members, and `cost_usd` inside
