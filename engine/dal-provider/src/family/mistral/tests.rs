@@ -1,0 +1,821 @@
+use dal_core::{CallId, ModelToolSpec, Purpose, ReplaySource, RequestParams, ThinkingLevel};
+use futures::executor::block_on;
+
+use super::*;
+use crate::sse::SseEvent;
+
+fn raw(text: &str) -> RawJson {
+    RawJson::parse(text).unwrap()
+}
+
+fn replay_source() -> ReplaySource {
+    ReplaySource {
+        family: Family::Mistral,
+        model: "mistral-medium-latest".into(),
+    }
+}
+
+fn png() -> Part {
+    Part::Image {
+        mime: "image/png".into(),
+        bytes: b"\x89PNG".as_slice().into(),
+    }
+}
+
+fn text(value: &str) -> Part {
+    Part::Text { text: value.into() }
+}
+
+fn plan(effort: Option<&'static str>, temperature: Option<f32>) -> ThinkingPlan {
+    ThinkingPlan {
+        level: ThinkingLevel::High,
+        wire: WireThinking::OpenAi { effort },
+        temperature,
+        notices: Vec::new(),
+    }
+}
+
+fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest {
+    ModelRequest {
+        purpose: Purpose::Turn,
+        model: ModelRoute::Api {
+            family: Family::Mistral,
+            model: "mistral-medium-latest".into(),
+        },
+        system: "Be concise.".into(),
+        tools: tools.into(),
+        context: context.into(),
+        params: RequestParams {
+            thinking: ThinkingLevel::High,
+            effort: None,
+            temperature: None,
+            max_output_tokens: None,
+        },
+        cache_key: Some("0190-session".into()),
+    }
+}
+
+fn tool(name: &str, description: &str, parameters: &str) -> ModelToolSpec {
+    ModelToolSpec {
+        name: name.into(),
+        description: description.into(),
+        parameters: raw(parameters),
+        grammar: None,
+        defer_loading: false,
+    }
+}
+
+fn body_text(request: &ModelRequest, thinking: &ThinkingPlan) -> String {
+    String::from_utf8(request_body(request, thinking).unwrap()).unwrap()
+}
+
+#[test]
+fn request_body_matches_the_member_order_byte_for_byte() {
+    let mut request = request(
+        vec![tool(
+            "search",
+            "Search the web.",
+            r#"{"type":"object","properties":{"q":{"type":"string"}}}"#,
+        )],
+        vec![
+            ContextItem::User {
+                parts: vec![text("Find cats"), png()],
+            },
+            ContextItem::Assistant {
+                source: replay_source(),
+                replay: None,
+                parts: vec![
+                    AssistantPart::Thinking {
+                        text: "search first".into(),
+                        replay: None,
+                    },
+                    AssistantPart::Text {
+                        text: "On it.".into(),
+                        replay: None,
+                    },
+                    AssistantPart::ToolCall {
+                        // Nine alphanumerics already: the wire id is the call id.
+                        call: CallId::new("a1b2c3d4e"),
+                        name: "search".into(),
+                        args: raw(r#"{"q":  "cats"}"#),
+                        replay: None,
+                    },
+                ],
+            },
+            ContextItem::ToolResult {
+                call: CallId::new("a1b2c3d4e"),
+                name: "search".into(),
+                is_error: false,
+                parts: vec![text("two cats"), png()],
+            },
+        ],
+    );
+    request.params.max_output_tokens = Some(512);
+    let expected = concat!(
+        r#"{"model":"mistral-medium-latest","inputs":["#,
+        r#"{"type":"message.input","role":"user","content":["#,
+        r#"{"type":"text","text":"Find cats"},"#,
+        r#"{"type":"image_url","image_url":"data:image/png;base64,iVBORw=="}]},"#,
+        r#"{"type":"message.output","role":"assistant","content":["#,
+        r#"{"type":"thinking","thinking":[{"type":"text","text":"search first"}]},"#,
+        r#"{"type":"text","text":"On it."}]},"#,
+        r#"{"type":"function.call","tool_call_id":"a1b2c3d4e","name":"search","#,
+        r#""arguments":{"q":  "cats"}},"#,
+        r#"{"type":"function.result","tool_call_id":"a1b2c3d4e","result":"two cats"},"#,
+        r#"{"type":"message.input","role":"user","content":["#,
+        r#"{"type":"text","text":"Images from tool call a1b2c3d4e."},"#,
+        r#"{"type":"image_url","image_url":"data:image/png;base64,iVBORw=="}]}],"#,
+        r#""instructions":"Be concise.","#,
+        r#""tools":[{"type":"function","function":{"name":"search","description":"Search the web.","#,
+        r#""parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],"#,
+        r#""stream":true,"store":false,"#,
+        r#""completion_args":{"temperature":0.7,"max_tokens":512,"tool_choice":"auto","#,
+        r#""reasoning_effort":"high"}}"#,
+    );
+    assert_eq!(
+        body_text(&request, &plan(Some("high"), Some(0.7))),
+        expected
+    );
+    // Two builds of the same request are equal byte for byte.
+    assert_eq!(
+        request_body(&request, &plan(Some("high"), Some(0.7))),
+        request_body(&request, &plan(Some("high"), Some(0.7)))
+    );
+}
+
+#[test]
+fn request_body_without_tools_system_or_counts_sends_only_inputs() {
+    let mut request = request(Vec::new(), Vec::new());
+    request.system = "".into();
+    assert_eq!(
+        body_text(&request, &plan(None, None)),
+        r#"{"model":"mistral-medium-latest","inputs":[],"stream":true,"store":false}"#
+    );
+}
+
+/// Parses a request body and returns the `completion_args` member spellings
+/// `(reasoning_effort, tool_choice)`; `None` for a member the body omits.
+fn completion_members(body: &str) -> (Option<String>, Option<String>) {
+    let parsed: sonic_rs::Value = sonic_rs::from_str(body).expect("the body is valid JSON");
+    let args = parsed
+        .get("completion_args")
+        .expect("completion_args is present");
+    let member = |name: &str| {
+        args.get(name)
+            .map(|value| value.as_str().expect("a string member").to_owned())
+    };
+    (member("reasoning_effort"), member("tool_choice"))
+}
+
+#[test]
+fn reasoning_effort_spells_the_conversations_ladder() {
+    let mut request = request(
+        vec![tool("search", "Search.", r#"{"type":"object"}"#)],
+        Vec::new(),
+    );
+    request.system = "".into();
+    for (effort, spelled) in [
+        ("none", "none"),
+        ("minimal", "low"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "high"),
+        ("max", "max"),
+    ] {
+        let body = body_text(&request, &plan(Some(effort), None));
+        assert_eq!(
+            completion_members(&body),
+            (Some(spelled.to_owned()), Some("auto".to_owned())),
+            "effort {effort}: {body}"
+        );
+    }
+    // A spelling the ladder does not know, or no effort at all, omits the
+    // member while keeping the rest of `completion_args`.
+    for effort in [Some("ludicrous"), None] {
+        let body = body_text(&request, &plan(effort, None));
+        assert_eq!(
+            completion_members(&body),
+            (None, Some("auto".to_owned())),
+            "effort {effort:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_effort_without_other_arguments_omits_completion_args() {
+    let mut request = request(Vec::new(), Vec::new());
+    request.system = "".into();
+    let body = body_text(&request, &plan(Some("ludicrous"), None));
+    let parsed: sonic_rs::Value = sonic_rs::from_str(&body).expect("the body is valid JSON");
+    assert!(parsed.get("completion_args").is_none(), "{body}");
+    assert!(!body.contains("reasoning_effort"), "{body}");
+}
+
+#[test]
+fn consecutive_user_entries_coalesce_into_one_input() {
+    let request = request(
+        Vec::new(),
+        vec![
+            ContextItem::User {
+                parts: vec![text("first")],
+            },
+            ContextItem::User {
+                parts: vec![text("second")],
+            },
+        ],
+    );
+    let body = body_text(&request, &plan(None, None));
+    assert_eq!(
+        body.matches(r#""type":"message.input""#).count(),
+        1,
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""text":"first"},{"type":"text","text":"second""#),
+        "{body}"
+    );
+}
+
+#[test]
+fn request_body_rejects_what_mistral_cannot_carry() {
+    let blob_id = BlobId::from_bytes(b"stored");
+    let blob = request(
+        Vec::new(),
+        vec![ContextItem::User {
+            parts: vec![Part::Blob {
+                blob_id,
+                mime: "image/png".into(),
+                bytes: 6,
+            }],
+        }],
+    );
+    assert_eq!(
+        request_body(&blob, &plan(None, None)),
+        Err(MistralBodyError::UnresolvedBlob { blob_id })
+    );
+
+    let mut other = request(Vec::new(), Vec::new());
+    other.model = ModelRoute::Api {
+        family: Family::Chat,
+        model: "mistral-medium-latest".into(),
+    };
+    assert_eq!(
+        request_body(&other, &plan(None, None)),
+        Err(MistralBodyError::NotMistral {
+            route: "mistral-medium-latest".into()
+        })
+    );
+
+    let anthropic = ThinkingPlan {
+        wire: WireThinking::Anthropic {
+            thinking: crate::thinking::AnthropicThinking::Adaptive,
+            effort: None,
+        },
+        ..plan(None, None)
+    };
+    assert_eq!(
+        request_body(&request(Vec::new(), Vec::new()), &anthropic),
+        Err(MistralBodyError::ForeignThinking)
+    );
+}
+
+#[test]
+fn an_assistant_message_with_nothing_to_send_is_omitted() {
+    let request = request(
+        Vec::new(),
+        vec![ContextItem::Assistant {
+            source: replay_source(),
+            replay: None,
+            parts: Vec::new(),
+        }],
+    );
+    let body = body_text(&request, &plan(None, None));
+    assert!(!body.contains("message.output"), "{body}");
+}
+
+#[test]
+fn prior_reasoning_replays_only_while_reasoning_is_on() {
+    let history = || {
+        request(
+            Vec::new(),
+            vec![ContextItem::Assistant {
+                source: replay_source(),
+                replay: None,
+                parts: vec![
+                    AssistantPart::Thinking {
+                        text: "prior reasoning".into(),
+                        replay: None,
+                    },
+                    AssistantPart::Text {
+                        text: "previous answer".into(),
+                        replay: None,
+                    },
+                ],
+            }],
+        )
+    };
+    // `none` is the thinking-off wire form and no effort means no reasoning
+    // control: neither takes a `thinking` chunk back, the answer still goes.
+    for effort in [Some("none"), None] {
+        let body = body_text(&history(), &plan(effort, None));
+        assert!(!body.contains(r#""type":"thinking""#), "{effort:?}: {body}");
+        assert!(body.contains("previous answer"), "{effort:?}: {body}");
+    }
+    for effort in ["low", "medium", "high", "max"] {
+        let body = body_text(&history(), &plan(Some(effort), None));
+        assert!(
+            body.contains(r#"{"type":"thinking","thinking":[{"type":"text","text":"prior reasoning"}]}"#),
+            "{effort}: {body}"
+        );
+    }
+    // A reasoning-only reply has nothing to send once reasoning is off.
+    let only_thoughts = request(
+        Vec::new(),
+        vec![ContextItem::Assistant {
+            source: replay_source(),
+            replay: None,
+            parts: vec![AssistantPart::Thinking {
+                text: "just thoughts".into(),
+                replay: None,
+            }],
+        }],
+    );
+    let body = body_text(&only_thoughts, &plan(Some("none"), None));
+    assert!(!body.contains("message.output"), "{body}");
+}
+
+#[test]
+fn wire_ids_are_nine_alphanumeric_characters_and_stable_per_build() {
+    let mut normalizer = CallIdNormalizer::default();
+    let first = normalizer.normalize("session:tool/3");
+    let second = normalizer.normalize("session:tool/3");
+    assert_eq!(first, second);
+    assert_eq!(first.len(), TOOL_CALL_ID_LENGTH);
+    assert!(
+        first
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    );
+
+    // Nine alphanumerics already pass through untouched.
+    assert_eq!(normalizer.normalize("a1b2c3d4e"), "a1b2c3d4e");
+
+    // Two different calls whose ids project alike collide, so the normalizer
+    // disambiguates with a counter and still returns distinct ids.
+    let mut other = CallIdNormalizer::default();
+    let left = other.normalize("call-1");
+    let right = other.normalize("call_1");
+    assert_ne!(left, right);
+    assert_eq!(left.len(), TOOL_CALL_ID_LENGTH);
+    assert_eq!(right.len(), TOOL_CALL_ID_LENGTH);
+    assert_eq!(other.normalize("call-1"), left);
+    assert_eq!(other.normalize("call_1"), right);
+}
+
+fn event(name: Option<&str>, data: &str) -> SseEvent {
+    SseEvent {
+        name: name.map(str::to_owned),
+        data: data.to_owned(),
+    }
+}
+
+/// Runs SSE datas through the Mistral decoder. `named` wraps every event in
+/// the matching SSE event name, proving dispatch reads the JSON `type`
+/// member and never the event name.
+fn run(datas: &[&str], named: bool) -> (Vec<StreamEvent>, Option<ProviderError>) {
+    let events: Vec<Result<SseEvent, ProviderError>> = datas
+        .iter()
+        .map(|data| {
+            Ok(event(
+                named.then_some(match data_event_type(data) {
+                    "conversation.response.started" => "conversation.response.started",
+                    "conversation.response.done" => "conversation.response.done",
+                    "conversation.response.error" => "conversation.response.error",
+                    "function.call.delta" => "function.call.delta",
+                    _ => "message.output.delta",
+                }),
+                data,
+            ))
+        })
+        .collect();
+    let decoded = decode_events(
+        stream::iter(events),
+        MistralDecoder::new("mistral", "mistral-medium-latest"),
+    );
+    let items: Vec<_> = block_on(decoded.collect());
+    let mut out = Vec::new();
+    let mut error = None;
+    for item in items {
+        assert!(error.is_none(), "an item followed the terminal error");
+        match item {
+            Ok(result) => out.push(result),
+            Err(failure) => error = Some(failure),
+        }
+    }
+    (out, error)
+}
+
+/// Reads the JSON `type` member of a test event without the decoder.
+fn data_event_type(data: &str) -> &str {
+    data.split("\"type\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or("")
+}
+
+fn done(calls: Vec<ToolCall>, usage: Usage, reason: StopReason) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolCallsDone { calls },
+        StreamEvent::Usage { usage },
+        StreamEvent::Stop { reason },
+    ]
+}
+
+const TURN: [&str; 6] = [
+    r#"{"type":"conversation.response.started","conversation_id":"conv-1"}"#,
+    r#"{"type":"message.output.delta","output_index":0,"id":"e1","content_index":0,"role":"assistant","content":"Hé"}"#,
+    r#"{"type":"message.output.delta","output_index":0,"id":"e2","content_index":0,"content":[{"type":"thinking","thinking":[{"type":"text","text":"why"}]},{"type":"text","text":"llo"}]}"#,
+    r#"{"type":"function.call.delta","output_index":1,"id":"e3","name":"search","tool_call_id":"a1b2c3d4e","arguments":"{\"q"}"#,
+    r#"{"type":"function.call.delta","output_index":1,"id":"e4","name":"search","tool_call_id":"a1b2c3d4e","arguments":"\":\"cats\"}"}"#,
+    r#"{"type":"conversation.response.done","usage":{"prompt_tokens":41,"completion_tokens":12,"total_tokens":53}}"#,
+];
+
+#[test]
+fn turn_decodes_text_reasoning_and_fragmented_arguments() {
+    let args = r#"{"q":"cats"}"#;
+    let mut expected = vec![
+        StreamEvent::TextDelta { text: "Hé".into() },
+        StreamEvent::ReasoningDelta { text: "why".into() },
+        StreamEvent::TextDelta { text: "llo".into() },
+        StreamEvent::ToolCallStarted {
+            id: "a1b2c3d4e".into(),
+            name: "search".into(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "a1b2c3d4e".into(),
+            fragment: r#"{"q"#.as_bytes().to_vec(),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: "a1b2c3d4e".into(),
+            fragment: r#"":"cats"}"#.as_bytes().to_vec(),
+        },
+    ];
+    expected.extend(done(
+        vec![ToolCall {
+            id: "a1b2c3d4e".into(),
+            name: "search".into(),
+            args: ToolArgs::Parsed(raw(args)),
+        }],
+        Usage {
+            input_tokens: 41,
+            output_tokens: 12,
+            ..NO_USAGE
+        },
+        StopReason::ToolUse,
+    ));
+    for named in [false, true] {
+        let (events, error) = run(&TURN, named);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(events, expected, "named {named}");
+    }
+}
+
+#[test]
+fn the_started_event_records_the_conversation_id() {
+    let mut decoder = MistralDecoder::new("mistral", "mistral-medium-latest");
+    let mut out = Vec::new();
+    assert_eq!(decoder.conversation_id.as_deref(), None);
+    assert_eq!(decoder.feed(TURN[0], &mut out).unwrap(), Progress::Open);
+    assert_eq!(out, []);
+    assert_eq!(decoder.conversation_id.as_deref(), Some("conv-1"));
+    // A second started event never overwrites the first.
+    assert_eq!(
+        decoder
+            .feed(
+                r#"{"type":"conversation.response.started","conversation_id":"conv-2"}"#,
+                &mut out,
+            )
+            .unwrap(),
+        Progress::Open
+    );
+    assert_eq!(decoder.conversation_id.as_deref(), Some("conv-1"));
+}
+
+#[test]
+fn a_plain_text_turn_stops_with_zero_usage() {
+    let (events, error) = run(
+        &[
+            r#"{"type":"conversation.response.started","conversation_id":"conv-1"}"#,
+            r#"{"type":"message.output.delta","content":"hi"}"#,
+            r#"{"type":"conversation.response.done","usage":{}}"#,
+        ],
+        false,
+    );
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events,
+        [
+            vec![StreamEvent::TextDelta { text: "hi".into() }],
+            done(Vec::new(), NO_USAGE, StopReason::EndTurn),
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn connector_handoff_and_unknown_events_are_ignored() {
+    let (events, error) = run(
+        &[
+            r#"{"type":"agent.handoff.started","from":"a","to":"b"}"#,
+            r#"{"type":"tool.execution.delta","output_index":2,"id":"t1","name":"web_search","arguments":"x"}"#,
+            r#"{"type":"some.future.event","payload":[1,2]}"#,
+            r#"{"type":"message.output.delta","content":"here"}"#,
+            r#"{"type":"agent.handoff.done"}"#,
+            r#"{"type":"conversation.response.done","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        ],
+        false,
+    );
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events,
+        [
+            vec![StreamEvent::TextDelta {
+                text: "here".into()
+            }],
+            done(
+                Vec::new(),
+                Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..NO_USAGE
+                },
+                StopReason::EndTurn,
+            ),
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn an_error_event_maps_its_numeric_code_to_the_http_twin() {
+    let (events, error) = run(
+        &[
+            r#"{"type":"message.output.delta","content":"par"}"#,
+            r#"{"type":"conversation.response.error","message":"slow down","code":429}"#,
+            r#"{"type":"message.output.delta","content":"never"}"#,
+        ],
+        false,
+    );
+    assert_eq!(events, [StreamEvent::TextDelta { text: "par".into() }]);
+    assert!(matches!(error, Some(ProviderError::RateLimited { .. })));
+
+    let (events, error) = run(
+        &[r#"{"type":"conversation.response.error","message":"bad key","code":401}"#],
+        false,
+    );
+    assert_eq!(events, []);
+    assert!(matches!(error, Some(ProviderError::AuthRejected { .. })));
+}
+
+#[test]
+fn an_error_event_without_a_numeric_code_is_a_status_not_a_transport_failure() {
+    for data in [
+        r#"{"type":"conversation.response.error","message":"boom"}"#,
+        r#"{"type":"conversation.response.error","message":"boom","code":null}"#,
+        r#"{"type":"conversation.response.error","message":"boom","code":"backend exploded"}"#,
+        r#"{"type":"conversation.response.error","message":"boom","code":70000}"#,
+    ] {
+        let (events, error) = run(&[data], false);
+        assert_eq!(events, [], "{data}");
+        assert!(
+            matches!(error, Some(ProviderError::Status { status: 200, .. })),
+            "{data}: {error:?}"
+        );
+    }
+    // A string spelling the retry table knows keeps its meaning.
+    let (events, error) = run(
+        &[r#"{"type":"conversation.response.error","message":"slow","code":"rate_limit_error"}"#],
+        false,
+    );
+    assert_eq!(events, []);
+    assert!(
+        matches!(error, Some(ProviderError::RateLimited { .. })),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn malformed_events_and_end_without_done_fail() {
+    let (events, error) = run(&["this is not json"], false);
+    assert_eq!(events, []);
+    assert!(matches!(
+        error,
+        Some(ProviderError::Protocol {
+            family: Family::Mistral,
+            ..
+        })
+    ));
+
+    let (events, error) = run(
+        &[r#"{"type":"function.call.delta","output_index":0,"name":"","tool_call_id":""}"#],
+        false,
+    );
+    assert_eq!(events, []);
+    assert!(matches!(
+        error,
+        Some(ProviderError::Protocol {
+            family: Family::Mistral,
+            ..
+        })
+    ));
+
+    let (events, error) = run(&[TURN[1]], false);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(error, Some(ProviderError::StreamCut)), "{error:?}");
+}
+
+#[test]
+fn done_closes_the_stream_and_later_input_is_ignored() {
+    let mut decoder = MistralDecoder::new("mistral", "mistral-medium-latest");
+    let mut out = Vec::new();
+    for data in &TURN {
+        decoder.feed(data, &mut out).unwrap();
+    }
+    let settled = out.len();
+    assert_eq!(settled, 9);
+    assert_eq!(decoder.feed(TURN[1], &mut out).unwrap(), Progress::Ended);
+    assert!(decoder.end(&mut out).is_ok());
+    assert_eq!(
+        out.len(),
+        settled,
+        "input after the terminal produced events"
+    );
+}
+
+#[test]
+fn a_sent_done_marker_finishes_without_usage() {
+    let (events, error) = run(
+        &[
+            r#"{"type":"message.output.delta","content":"hi"}"#,
+            "[DONE]",
+        ],
+        false,
+    );
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events,
+        [
+            vec![StreamEvent::TextDelta { text: "hi".into() }],
+            done(Vec::new(), NO_USAGE, StopReason::EndTurn),
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn a_sent_done_marker_without_a_finish_reason_keeps_open_calls_as_tool_use() {
+    let (events, error) = run(
+        &[
+            r#"{"type":"function.call.delta","output_index":0,"name":"search","tool_call_id":"a1b2c3d4e","arguments":"{}"}"#,
+            "[DONE]",
+        ],
+        false,
+    );
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events[events.len() - 3..],
+        done(
+            vec![ToolCall {
+                id: "a1b2c3d4e".into(),
+                name: "search".into(),
+                args: ToolArgs::Parsed(raw("{}")),
+            }],
+            NO_USAGE,
+            StopReason::ToolUse,
+        )
+    );
+}
+
+#[test]
+fn cumulative_deltas_stop_at_the_budgets() {
+    let mut decoder = MistralDecoder::new("mistral", "mistral-medium-latest");
+    let data = r#"{"type":"message.output.delta","content":"x"}"#;
+    let mut out = Vec::new();
+    for _ in 0..crate::stream_budget::STREAM_EVENTS_LIMIT {
+        assert!(decoder.feed(data, &mut out).is_ok());
+        out.clear();
+    }
+    assert!(matches!(
+        decoder.feed(data, &mut out),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
+    ));
+
+    let mut decoder = MistralDecoder::new("mistral", "mistral-medium-latest");
+    let call = r#"{"type":"function.call.delta","output_index":0,"name":"n","tool_call_id":"id"}"#;
+    let mut out = Vec::new();
+    decoder.feed(call, &mut out).unwrap();
+    out.clear();
+    for index in 1..crate::stream_budget::STREAM_ITEMS_LIMIT {
+        let delta = format!(
+            r#"{{"type":"function.call.delta","output_index":{index},"name":"n","tool_call_id":"id{index}"}}"#
+        );
+        assert!(decoder.feed(&delta, &mut out).is_ok(), "index {index}");
+        out.clear();
+    }
+    assert!(matches!(
+        decoder.feed(
+            r#"{"type":"function.call.delta","output_index":65536,"name":"n","tool_call_id":"idx"}"#,
+            &mut out
+        ),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamItems))
+    ));
+}
+
+#[test]
+fn dropping_the_stream_before_its_terminal_drops_the_event_source() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Flag(Arc<AtomicBool>);
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = Flag(Arc::clone(&dropped));
+    let first = Ok(event(None, TURN[1]));
+    let source = stream::unfold((flag, Some(first)), |(flag, item)| async move {
+        let item = item?;
+        Some((item, (flag, None)))
+    });
+    let mut decoded = Box::pin(decode_events(
+        source,
+        MistralDecoder::new("mistral", "mistral-medium-latest"),
+    ));
+    let first = block_on(decoded.next());
+    assert!(matches!(first, Some(Ok(StreamEvent::TextDelta { .. }))));
+    assert!(!dropped.load(Ordering::SeqCst));
+    drop(decoded);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the event source outlived the stream"
+    );
+}
+
+#[test]
+fn the_full_path_runs_through_the_event_stream_guard() {
+    let chunks: Vec<Vec<u8>> = TURN
+        .iter()
+        .map(|data| format!("data: {data}\n\n").into_bytes())
+        .collect();
+    let mut events = crate::stream::EventStream::new(
+        decode_events(
+            crate::sse::decode_stream(futures::stream::iter(chunks)),
+            MistralDecoder::new("mistral", "mistral-medium-latest"),
+        ),
+        || panic!("a clean Stop must not cancel"),
+    );
+    let seen: Vec<_> = block_on(async {
+        let mut seen = Vec::new();
+        while let Some(item) = events.next().await {
+            seen.push(item.unwrap());
+        }
+        seen
+    });
+    assert_eq!(seen.len(), 9);
+    assert!(matches!(seen.last(), Some(StreamEvent::Stop { .. })));
+}
+
+#[test]
+fn request_body_ignores_text_tool_and_message_replay() {
+    let assistant = |replay: fn() -> Option<RawJson>| ContextItem::Assistant {
+        source: replay_source(),
+        replay: replay(),
+        parts: vec![
+            AssistantPart::Text {
+                text: "Hi.".into(),
+                replay: replay(),
+            },
+            AssistantPart::ToolCall {
+                call: CallId::new("call-9"),
+                name: "read".into(),
+                args: raw("{}"),
+                replay: replay(),
+            },
+        ],
+    };
+    let payload = || Some(raw(r#"{"foreign":"REPLAY-MARKER"}"#));
+    let plain = body_text(
+        &request(Vec::new(), vec![assistant(|| None)]),
+        &plan(None, None),
+    );
+    let laden = body_text(
+        &request(Vec::new(), vec![assistant(payload)]),
+        &plan(None, None),
+    );
+    assert_eq!(laden, plain);
+    assert!(!laden.contains("REPLAY-MARKER"), "{laden}");
+}
