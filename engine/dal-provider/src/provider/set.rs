@@ -88,6 +88,11 @@ pub(super) struct ProviderSetInner {
     /// provider; a turn takes its row, drives it, and returns it only while
     /// a tool action is pending.
     pub(super) gitlab_workflows: WorkflowSessions,
+    /// The caller-created TOML deny-all policy the Gemini CLI child runs
+    /// under, written once at build through the dal-store private-file
+    /// boundary. Present only when a `google-gemini-cli` provider is
+    /// configured.
+    pub(super) gemini_policy: Option<PathBuf>,
 }
 
 pub(super) struct ProviderSlot {
@@ -228,6 +233,16 @@ impl ProviderSet {
             http::build_resolver_client(),
             AwsCredentialResolver::home_dir_from_env(&env),
         ));
+        // The Gemini CLI child runs headless under a caller-created TOML
+        // deny-all policy. The file is published once here through the
+        // dal-store atomic private-file boundary, never with an ad-hoc
+        // plaintext write; the family module only passes the path through.
+        let gemini_policy = config
+            .providers
+            .iter()
+            .any(|provider| provider.family == Family::GoogleGeminiCli)
+            .then(|| ensure_gemini_cli_policy(data_dir))
+            .transpose()?;
         let scripted = match &config.scripted {
             None => None,
             Some(selection) => {
@@ -259,6 +274,7 @@ impl ProviderSet {
                 aws_resolver,
                 gitlab_grants,
                 gitlab_workflows: WorkflowSessions::default(),
+                gemini_policy,
             }),
         })
     }
@@ -500,6 +516,43 @@ impl std::fmt::Debug for ProviderSet {
             .field("client_count", &self.inner.clients.len())
             .finish_non_exhaustive()
     }
+}
+
+/// The caller-created TOML deny-all policy the Gemini CLI child runs under.
+///
+/// The exact CLI grammar witnessed by the family's `CliRequest` contract,
+/// not an invented JSON shape and not a product policy: every tool denied,
+/// reads included, with the read-only approval mode on the command line.
+pub(crate) const GEMINI_CLI_DENY_ALL_POLICY: &str =
+    "[[rule]]\ntoolName = \"*\"\ndecision = \"deny\"\npriority = 100\n";
+
+/// The policy file name under the host data directory.
+const GEMINI_CLI_POLICY_FILE: &str = "gemini-cli-policy.toml";
+
+/// Publishes the Gemini CLI deny-all policy through the dal-store atomic
+/// private-file boundary: the directory is created private and the file is
+/// written atomically at mode `0600`, never with an ad-hoc plaintext write.
+///
+/// # Errors
+///
+/// Returns `Transport` when the directory or the atomic write fails; the
+/// child never spawns without its policy file.
+fn ensure_gemini_cli_policy(data_dir: &Path) -> Result<PathBuf, ProviderError> {
+    dal_store::create_private_dir_all(data_dir).map_err(|error| ProviderError::Transport {
+        family: Family::GoogleGeminiCli,
+        reason: format!("creating the Gemini CLI policy directory failed: {error}"),
+    })?;
+    let path = data_dir.join(GEMINI_CLI_POLICY_FILE);
+    dal_store::write_atomic(
+        &path,
+        GEMINI_CLI_DENY_ALL_POLICY.as_bytes(),
+        dal_store::FileMode::Mode0600,
+    )
+    .map_err(|error| ProviderError::Transport {
+        family: Family::GoogleGeminiCli,
+        reason: format!("writing the Gemini CLI deny-all policy failed: {error}"),
+    })?;
+    Ok(path)
 }
 
 /// Whether a family authenticates outside the bound credential: Bedrock

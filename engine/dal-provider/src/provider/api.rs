@@ -37,7 +37,7 @@ pub struct Http {
     pub(crate) credential: Credential,
     pub(crate) client: reqwest::Client,
     pub(crate) user_agent: Box<str>,
-    owner: Weak<ProviderSetInner>,
+    pub(super) owner: Weak<ProviderSetInner>,
 }
 
 /// A provider family and its bound route, credential, and transport state.
@@ -246,6 +246,11 @@ impl Provider {
             return self
                 .open_cursor_single(session, request, hooks, notices, cancel)
                 .await;
+        }
+        // The subprocess turn drives the child under admission; it never
+        // enters the HTTP hook, thinking-plan, or refresh path.
+        if let Self::GeminiCli(http) = self {
+            return request_mod::gemini_cli_open(http, session, request, notices, cancel).await;
         }
         let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
             message: String::from("provider is not HTTP-backed"),
@@ -836,6 +841,21 @@ impl Provider {
     /// Returns `InvalidRequest` when this provider has no model catalog or
     /// its host has ended.
     pub async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        // The subprocess family has no model catalog to fetch: its one
+        // configured row is the display projection.
+        if let Self::GeminiCli(http) = self {
+            let owner = http
+                .owner
+                .upgrade()
+                .ok_or_else(|| ProviderError::InvalidRequest {
+                    message: String::from("provider host has ended"),
+                })?;
+            return Ok(vec![request_mod::model_info(
+                &http.resolved.entry,
+                http.entry.family,
+                owner.config.thinking,
+            )]);
+        }
         let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
             message: String::from("the scripted provider has no model catalog"),
         })?;
@@ -867,6 +887,11 @@ impl Provider {
     where
         F: Fn(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
     {
+        if matches!(self, Self::GeminiCli(_)) {
+            return Err(UsageCheckReason::Transport {
+                reason: String::from("account usage checks are available only for Codex"),
+            });
+        }
         let Some(http) = self.http() else {
             return Err(UsageCheckReason::Transport {
                 reason: String::from("Scripted usage is a token frame, not a Codex account check"),
@@ -986,6 +1011,16 @@ impl Provider {
     ) -> Result<Option<CompactOutcome>, ProviderError> {
         if let Self::Scripted(script) = self {
             return script.compact().map(Some);
+        }
+        // The subprocess family has no remote-compaction endpoint.
+        if let Self::GeminiCli(http) = self {
+            request_mod::ensure_request(http, request)?;
+            if request.purpose != Purpose::Compact {
+                return Err(ProviderError::InvalidRequest {
+                    message: String::from("remote compaction needs a compact-purpose request"),
+                });
+            }
+            return Ok(Some(CompactOutcome::Unsupported));
         }
         let http = self.http().ok_or_else(|| ProviderError::InvalidRequest {
             message: String::from("provider is not HTTP-backed"),

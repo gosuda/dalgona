@@ -534,8 +534,11 @@ fn decode_builtin(
     // At rest the row names its own header. When the user points a preset at
     // another family, the new family's header is the default, exactly as the
     // named-provider path defaulted it before the row existed; an explicit
-    // `auth` still wins either way.
-    let default_auth = if family == def.family {
+    // `auth` still wins either way. A credential-less family takes `none`
+    // whichever row it sits on.
+    let default_auth = if family == Family::GoogleGeminiCli {
+        AuthStyle::None
+    } else if family == def.family {
         def.key.map_or(AuthStyle::Bearer, |key| key.style)
     } else if family == Family::Anthropic {
         AuthStyle::XApiKey
@@ -550,6 +553,7 @@ fn decode_builtin(
     settings.base_url_defaulted = configured.is_none();
 
     validate_transport(name, family, transport)?;
+    validate_auth(name, family, auth)?;
 
     Ok(ProviderEntry {
         id: name.into(),
@@ -613,7 +617,9 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         Transport::Https,
         name,
     )?;
-    let default_auth = if family == Family::Anthropic {
+    let default_auth = if family == Family::GoogleGeminiCli {
+        AuthStyle::None
+    } else if family == Family::Anthropic {
         AuthStyle::XApiKey
     } else {
         AuthStyle::Bearer
@@ -634,6 +640,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
     let settings = decode_settings(Some(table), &path)?;
     validate_transport(name, family, transport)?;
+    validate_auth(name, family, auth)?;
 
     Ok(ProviderEntry {
         id: name.to_owned().into_boxed_str(),
@@ -724,6 +731,17 @@ fn concurrency_limit(table: Option<&toml::Table>, name: &str) -> Result<u32, Pro
             "providers.{name}.max_concurrent_requests must fit in u32"
         ))
     })
+}
+
+/// A `google-gemini-cli` entry spawns a local process and sends no
+/// credential, so its `auth` is `none`, by default or by explicit choice.
+fn validate_auth(name: &str, family: Family, auth: AuthStyle) -> Result<(), ProviderConfigError> {
+    if family == Family::GoogleGeminiCli && auth != AuthStyle::None {
+        return Err(invalid(format!(
+            "providers.{name}.auth must be none for api google-gemini-cli"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_transport(

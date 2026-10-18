@@ -459,6 +459,30 @@ fn auth_accepts_api_key_and_none_and_rejects_everything_else() {
 }
 
 #[test]
+fn gemini_cli_named_providers_authenticate_nothing() {
+    let config = parse(concat!(
+        "[providers.local-gemini]\napi = 'google-gemini-cli'\nbase_url = 'https://example.test'\n",
+        "key_env = 'GEMINI_CLI_API_KEY'\n",
+    ))
+    .expect("a gemini-cli provider is valid");
+    let gemini = entry(&config, "local-gemini");
+    assert_eq!(gemini.auth, AuthStyle::None);
+    // A configured key name stays decodable under `none`: a leftover
+    // `key_env`, or a cached login, must not break an explicit no-auth entry.
+    assert_eq!(gemini.key_env.as_deref(), Some("GEMINI_CLI_API_KEY"));
+
+    let error = parse(concat!(
+        "[providers.local-gemini]\napi = 'google-gemini-cli'\nbase_url = 'https://example.test'\n",
+        "key_env = 'GEMINI_CLI_API_KEY'\nauth = 'bearer'\n",
+    ))
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "providers.local-gemini.auth must be none for api google-gemini-cli"
+    );
+}
+
+#[test]
 fn provider_settings_reject_invalid_values() {
     // Settings keys that refuse a wrong type or a blank value, with the
     // message each refusal renders.

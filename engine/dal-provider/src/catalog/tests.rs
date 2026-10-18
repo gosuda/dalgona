@@ -2275,6 +2275,34 @@ fn gitlab_typed_thinking_follows_proxy_route() {
     ));
 }
 
+#[test]
+fn gemini_cli_typed_carries_no_tools() {
+    let made = provider("my-gemini", Family::GoogleGeminiCli, "http://localhost");
+    let catalog = Catalog::with_sources(vec![(made, CatalogSource::Typed)], Vec::new());
+    let resolved =
+        resolve(&catalog, &[], "my-gemini/gemini-2.5-pro").expect("gemini cli typed resolves");
+    assert_eq!(resolved.entry.tool_support, ToolSupport::None);
+}
+
+#[tokio::test]
+async fn gemini_cli_has_no_live_discovery() {
+    let directory = TestDir::new();
+    let made = provider("my-gemini", Family::GoogleGeminiCli, "http://127.0.0.1:1");
+    let credential = Credential::None;
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &made,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(fetched.entries.is_empty());
+}
+
 /// One request the scripted Gemini server answered: the request line and the
 /// lowercased request headers.
 type SeenRequest = (String, Vec<(String, String)>);

@@ -359,7 +359,7 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         supports_reasoning_summaries: false,
         temperature_allowed: compiled_temperature(provider.id.as_ref(), id),
         display_supported: false,
-        tool_support: ToolSupport::Any,
+        tool_support: entry_tool_support(provider.family),
         custom_grammar: false,
         premium_multiplier: None,
         price: None,
@@ -398,9 +398,19 @@ fn gitlab_thinking(id: &str) -> ThinkingSupport {
     }
 }
 
+fn entry_tool_support(family: Family) -> ToolSupport {
+    if family == Family::GoogleGeminiCli {
+        return ToolSupport::None;
+    }
+    ToolSupport::Any
+}
+
 pub(crate) fn bind_family_capabilities(entry: &mut CatalogEntry, family: Family) {
     if family == Family::Chat {
         entry.remote_compact = false;
+    }
+    if family == Family::GoogleGeminiCli {
+        entry.tool_support = ToolSupport::None;
     }
 }
 

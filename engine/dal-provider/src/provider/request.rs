@@ -46,6 +46,7 @@ use crate::{
         google::{
             antigravity,
             gemini::{self, GeminiRequest},
+            gemini_cli::{self, CliRequest},
             shared as google_shared,
             vertex::{self, VertexAuth, VertexRequest},
         },
@@ -587,6 +588,61 @@ fn valid_workflow_namespace(namespace: &str) -> bool {
     namespace
         .strip_prefix("gid://gitlab/Group/")
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Opens one Gemini CLI turn: the headless child under admission, streaming
+/// its neutral events.
+///
+/// The child runs the set-owned TOML deny-all policy with read-only approval
+/// mode, the provider-settings binary (or `gemini` from `PATH`), and exactly
+/// the captured environment and working directory: ambient state is cleared.
+/// A missing captured working directory or policy fails closed. The stream
+/// owns the child; dropping it signals only while still armed, and no
+/// detached spawn outlives the turn. One attempt, no retry: a failed spawn
+/// cannot succeed by resending.
+///
+/// # Errors
+///
+/// Returns `InvalidRequest` for a route mismatch or a missing policy, and
+/// `Transport` for a spawn failure or a closed admission semaphore.
+pub(crate) async fn gemini_cli_open(
+    http: &Http,
+    _session: SessionId,
+    request: &ModelRequest,
+    _notices: NoticeSink,
+    cancel: &CancellationToken,
+) -> Result<EventStream, ProviderError> {
+    ensure_request(http, request)?;
+    let owner = http
+        .owner
+        .upgrade()
+        .ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from("provider host has ended"),
+        })?;
+    if cancel.is_cancelled() {
+        return Err(ProviderError::Transport {
+            family: Family::GoogleGeminiCli,
+            reason: String::from("provider request cancelled before it started"),
+        });
+    }
+    let permit = transport_mod::acquire_provider_permit(&owner, &http.entry.id, cancel).await?;
+    let policy = owner
+        .gemini_policy
+        .as_deref()
+        .and_then(|path| path.to_str())
+        .ok_or_else(|| ProviderError::InvalidRequest {
+            message: String::from("the Gemini CLI deny-all policy is not initialized"),
+        })?;
+    let child = gemini_cli::spawn(&CliRequest {
+        request,
+        binary: http.entry.settings.binary.as_deref(),
+        policy_file: policy,
+        env: &owner.env,
+    })?;
+    Ok(transport_mod::hold_permit(
+        EventStream::new(child.into_events(), || {}),
+        permit,
+    ))
 }
 
 /// Whether `entry` routes through the GitHub Copilot proxy.

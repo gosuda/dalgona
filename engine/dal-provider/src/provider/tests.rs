@@ -4784,6 +4784,156 @@ async fn gitlab_workflow_namespace_path_is_refused_typed() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn gemini_cli_spawns_fixture_through_provider_set() -> TestResult {
+    let dir = TestDir::new()?;
+    let fixture = format!(
+        "{}/src/family/google/gemini_cli/fixtures/fake-gemini.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut gem_entry = entry(
+        "gemini-test",
+        Family::GoogleGeminiCli,
+        String::from("https://example.com"),
+        None,
+        2,
+        Transport::Https,
+    );
+    gem_entry.auth = AuthStyle::None;
+    gem_entry.settings.binary = Some(fixture.into());
+    let env = EnvSnapshot::test(&[("GEMINI_TEST_MARKER", "1")]).with_cwd(dir.path().to_path_buf());
+    let set = ProviderSet::new(
+        &config(vec![gem_entry], 0),
+        identity(),
+        env,
+        dir.path(),
+        dir.path(),
+    )?;
+    // The deny-all policy is published at build through the dal-store
+    // private-file boundary, in the exact CLI grammar.
+    let policy = set
+        .inner
+        .gemini_policy
+        .clone()
+        .expect("policy written at build");
+    assert_eq!(
+        std::fs::read_to_string(&policy)?,
+        super::set::GEMINI_CLI_DENY_ALL_POLICY
+    );
+    let provider = set.provider(resolved(
+        "gemini-test",
+        Family::GoogleGeminiCli,
+        "gemini-3-pro",
+    ))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::GoogleGeminiCli,
+                    "gemini-3-pro",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    let texts: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, "Hello world");
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gemini_cli_models_lists_configured_row_without_catalog() -> TestResult {
+    let dir = TestDir::new()?;
+    let mut gem_entry = entry(
+        "gemini-models",
+        Family::GoogleGeminiCli,
+        String::from("https://example.com"),
+        None,
+        2,
+        Transport::Https,
+    );
+    gem_entry.auth = AuthStyle::None;
+    let env = EnvSnapshot::test(&[]).with_cwd(dir.path().to_path_buf());
+    let set = ProviderSet::new(
+        &config(vec![gem_entry], 0),
+        identity(),
+        env,
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(
+        "gemini-models",
+        Family::GoogleGeminiCli,
+        "gemini-3-pro",
+    ))?;
+    let models = provider.models().await?;
+    assert_eq!(models.len(), 1, "one configured row, no catalog fetch");
+    assert!(matches!(
+        models[0].route,
+        ModelRoute::Api {
+            family: Family::GoogleGeminiCli,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gemini_cli_compact_is_unsupported() -> TestResult {
+    let dir = TestDir::new()?;
+    let mut gem_entry = entry(
+        "gemini-compact",
+        Family::GoogleGeminiCli,
+        String::from("https://example.com"),
+        None,
+        2,
+        Transport::Https,
+    );
+    gem_entry.auth = AuthStyle::None;
+    let env = EnvSnapshot::test(&[]).with_cwd(dir.path().to_path_buf());
+    let set = ProviderSet::new(
+        &config(vec![gem_entry], 0),
+        identity(),
+        env,
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved(
+        "gemini-compact",
+        Family::GoogleGeminiCli,
+        "gemini-3-pro",
+    ))?;
+    let mut compact_request = request(
+        Family::GoogleGeminiCli,
+        "gemini-3-pro",
+        vec![user_text("Summarize.")],
+    );
+    compact_request.purpose = Purpose::Compact;
+    let outcome = provider
+        .compact(
+            SessionId::new_v7(),
+            &compact_request,
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(outcome, Some(CompactOutcome::Unsupported));
+    Ok(())
+}
+
 fn compact_request(model: &str) -> ModelRequest {
     let mut compact = request(Family::Responses, model, vec![user_text("Summarize.")]);
     compact.purpose = Purpose::Compact;
