@@ -10,7 +10,7 @@ use dal_core::{
     ReplaySource, RequestParams, SessionId, ThinkingLevel,
 };
 use futures::executor::block_on;
-use sonic_rs::JsonValueTrait;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use super::*;
 use crate::{
@@ -895,5 +895,224 @@ async fn entry_prune_collects_dead_slots_left_by_failed_fetches() {
         "{error:?}"
     );
     assert_eq!(cache.slot_count(), 1);
+    servers.abort_all();
+}
+
+#[test]
+fn grant_fresh_splits_on_the_ttl_edge() {
+    let grant = |expires: Instant| {
+        CachedGrant {
+            grant: DirectAccess {
+                token: "t".into(),
+                headers: Vec::new(),
+            },
+            expires,
+        }
+    };
+    assert!(grant_fresh(&grant(Instant::now() + Duration::from_secs(60))));
+    assert!(!grant_fresh(&grant(
+        Instant::now() - Duration::from_secs(1)
+    )));
+}
+
+#[tokio::test]
+async fn direct_access_expired_grant_reexchanges() {
+    use std::sync::Arc;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let cache = DirectAccessCache::default();
+    // A stale grant for this base+token: the entry prune clears it and the
+    // reuse gate would refuse it, so the next ensure must fetch instead of
+    // serving it.
+    lock(&cache.state).slots.insert(
+        cache_key(&base, "gl-pat"),
+        TokenSlot {
+            epoch: Arc::new(TokenEpoch),
+            grant: Some(CachedGrant {
+                grant: DirectAccess {
+                    token: "stale".into(),
+                    headers: Vec::new(),
+                },
+                expires: Instant::now() - Duration::from_secs(1),
+            }),
+        },
+    );
+    let client = crate::http::build_client();
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(serve_once(
+        listener,
+        "200 OK",
+        br#"{"token":"t-2","headers":{"x-a":"b"}}"#.to_vec(),
+    ));
+    let grant = cache
+        .ensure(&client, &base, "gl-pat", "dalgon/test")
+        .await
+        .unwrap();
+    assert_eq!(grant.token.as_ref(), "t-2");
+    // The published grant carries the 25-minute TTL, not a stale or
+    // zeroed expiry.
+    let expires = lock(&cache.state)
+        .slots
+        .get(&cache_key(&base, "gl-pat"))
+        .expect("re-fetched grant publishes")
+        .grant
+        .as_ref()
+        .expect("published grant is present")
+        .expires;
+    let remaining = expires
+        .checked_duration_since(Instant::now())
+        .expect("published grant is fresh");
+    assert!(
+        remaining > Duration::from_secs(24 * 60),
+        "TTL is minutes, not seconds: {remaining:?}"
+    );
+    assert!(
+        remaining <= Duration::from_secs(25 * 60) + Duration::from_secs(5),
+        "TTL is the pinned 25 minutes: {remaining:?}"
+    );
+    servers.abort_all();
+    // The re-fetched grant publishes: a second ensure serves it with no
+    // further fetch (the server is gone).
+    let again = cache
+        .ensure(&client, &base, "gl-pat", "dalgon/test")
+        .await
+        .unwrap();
+    assert_eq!(again.token.as_ref(), "t-2");
+}
+
+#[test]
+fn anthropic_replay_round_trips_through_decode_and_build() {
+    let thinking = enabled_plan();
+    let grant = grant();
+    let producer = request("duo-chat-sonnet-4-6", vec![user("hi")]);
+    let prefix = build_proxy(&proxy_request(
+        &producer,
+        &thinking,
+        &grant,
+        SessionId::new_v7(),
+    ))
+    .unwrap()
+    .replay_prefix
+    .unwrap();
+    // Decode a signed thinking turn the way open() does, then rebind it to
+    // the journal family.
+    let wire = sse(&[
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#,
+        r#"{"type":"message_stop"}"#,
+    ]);
+    let chunks: Vec<Vec<u8>> = wire.as_bytes().chunks(7).map(<[u8]>::to_vec).collect();
+    let decoded = block_on(
+        decode_proxy(
+            ProxyRoute::Anthropic,
+            decode_stream(futures::stream::iter(chunks)),
+            Box::from("duo-chat-sonnet-4-6"),
+            Some(&prefix),
+        )
+        .collect::<Vec<_>>(),
+    );
+    let stored = decoded
+        .into_iter()
+        .map(|item| rebind_replay(item.unwrap()))
+        .find_map(|event| match event {
+            StreamEvent::Replay { payload } => Some(payload),
+            _ => None,
+        })
+        .expect("the signed thinking block replays");
+    assert_eq!(stored.family, Family::GitLab);
+    // Feeding the emitted payload back as the journal entry sends the
+    // signature on the next wire without its storage-only binding.
+    let request = request(
+        "duo-chat-sonnet-4-6",
+        vec![
+            user("hi"),
+            journaled("duo-chat-sonnet-4-6", stored.item.as_str()),
+            user("again"),
+        ],
+    );
+    let input = proxy_request(&request, &thinking, &grant, SessionId::new_v7());
+    let built = build_proxy(&input).unwrap();
+    let text = String::from_utf8(built.body).unwrap();
+    let body: sonic_rs::Value = sonic_rs::from_str(&text).unwrap();
+    assert_eq!(
+        body["messages"][1]["content"][0]["signature"].as_str(),
+        Some("EqQBCgIYAhIM")
+    );
+    assert!(!text.contains("dal_prefix"));
+}
+
+#[test]
+fn completions_route_drops_thinking_replay_without_leaking_signatures() {
+    let thinking = open_plan();
+    let grant = grant();
+    // The chat encoder carries no replay channel: a journaled thinking block
+    // renders nothing, and its storage-only binding never reaches the wire.
+    let request = request(
+        "duo-chat-gpt-5-1",
+        vec![
+            user("hi"),
+            journaled(
+                "duo-chat-gpt-5-1",
+                r#"{"type":"thinking","thinking":"plan","signature":"sig-9","dal_prefix":"prefix-x"}"#,
+            ),
+            user("again"),
+        ],
+    );
+    let input = proxy_request(&request, &thinking, &grant, SessionId::new_v7());
+    let wire = build_proxy(&input).unwrap();
+    let text = String::from_utf8(wire.body).unwrap();
+    assert!(!text.contains("sig-9"));
+    assert!(!text.contains("dal_prefix"));
+    let body: sonic_rs::Value = sonic_rs::from_str(&text).unwrap();
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn proxy_open_rebinds_anthropic_replay_to_gitlab() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let response = sse(&[
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#,
+        r#"{"type":"message_stop"}"#,
+    ]);
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(serve_once(listener, "200 OK", response.as_bytes().to_vec()));
+    let request = request("duo-chat-sonnet-4-6", vec![user("hi")]);
+    let thinking = enabled_plan();
+    let grant = grant();
+    let input = proxy_request(&request, &thinking, &grant, SessionId::new_v7());
+    let mut wire = build_proxy(&input).unwrap();
+    assert!(
+        wire.replay_prefix.is_some(),
+        "the producing request binds the replay it will decode"
+    );
+    // Point the proxy at the loopback server.
+    wire.url = crate::http::endpoint(Family::GitLab, &base, "chat/completions").unwrap();
+    let mut stream = open(&crate::http::build_client(), wire, "dalgon/test")
+        .await
+        .unwrap();
+    let mut replay = None;
+    while let Some(item) = stream.next().await {
+        if let StreamEvent::Replay { payload } = item.unwrap() {
+            replay = Some(payload);
+        }
+    }
+    let replay = replay.expect("the signed thinking block replays");
+    // The shared decoder names its own family; the proxy lifecycle rebinds
+    // the payload to the family the turn is journaled under, keeping the
+    // alias route the journal records (the wire serves the upstream id).
+    assert_eq!(replay.family, Family::GitLab);
+    assert_eq!(replay.model.as_ref(), "duo-chat-sonnet-4-6");
+    assert!(replay.item.as_str().contains("EqQBCgIYAhIM"));
+    assert!(replay.item.as_str().contains("dal_prefix"));
     servers.abort_all();
 }

@@ -256,6 +256,17 @@ fn cache_key(gitlab_base: &str, token: &str) -> CacheKey {
     }
 }
 
+/// Whether one cached grant is still reusable: its TTL has not elapsed.
+///
+/// [`prune_expired`] clears expired grants before the reuse check, so in
+/// production this sees an expired grant only when the TTL elapsed between
+/// the prune and the check. It is a named predicate (rather than an inline
+/// comparison) so the reuse rule is unit-testable in isolation.
+#[must_use]
+fn grant_fresh(cached: &CachedGrant) -> bool {
+    Instant::now() < cached.expires
+}
+
 /// Drops expired grants and reaps slots no fetch can still publish into:
 /// the map owns one epoch ref while each in-flight fetch owns another, so a
 /// slot with no other owner is inactive and safe to drop. A live fetcher
@@ -312,7 +323,7 @@ impl DirectAccessCache {
             prune_expired(&mut state.slots);
             if let Some(slot) = state.slots.get(&key) {
                 if let Some(cached) = &slot.grant
-                    && Instant::now() < cached.expires
+                    && grant_fresh(cached)
                 {
                     return Ok(cached.grant.clone());
                 }
