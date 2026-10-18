@@ -2938,6 +2938,513 @@ fn azure_and_copilot_row_selectors_follow_the_documented_shape() {
     assert!(super::request::is_copilot_entry(&hosted));
 }
 
+fn eventstream_crc(bytes: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
+/// One binary event-stream frame — prelude, string headers, payload, and
+/// both CRCs — encoded independently of the family decoder.
+fn eventstream_frame(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
+    let mut block = Vec::new();
+    for (name, value) in headers {
+        block.push(u8::try_from(name.len()).unwrap_or(u8::MAX));
+        block.extend_from_slice(name.as_bytes());
+        block.push(7);
+        block.extend_from_slice(&u16::try_from(value.len()).unwrap_or(u16::MAX).to_be_bytes());
+        block.extend_from_slice(value.as_bytes());
+    }
+    let total = u32::try_from(12 + block.len() + payload.len() + 4).unwrap_or(u32::MAX);
+    let headers_len = u32::try_from(block.len()).unwrap_or(u32::MAX);
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&total.to_be_bytes());
+    wire.extend_from_slice(&headers_len.to_be_bytes());
+    wire.extend_from_slice(&eventstream_crc(&wire).to_be_bytes());
+    wire.extend_from_slice(&block);
+    wire.extend_from_slice(payload);
+    let message_crc = eventstream_crc(&wire);
+    wire.extend_from_slice(&message_crc.to_be_bytes());
+    wire
+}
+
+fn eventstream_event(kind: &str, payload: &str) -> Vec<u8> {
+    eventstream_frame(
+        &[
+            (":message-type", "event"),
+            (":event-type", kind),
+            (":content-type", "application/json"),
+        ],
+        payload.as_bytes(),
+    )
+}
+
+/// One text-only Converse turn: two text deltas, a stop, and usage.
+fn bedrock_text_turn() -> Vec<u8> {
+    [
+        eventstream_event("messageStart", r#"{"role":"assistant"}"#),
+        eventstream_event(
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"Hel"}}"#,
+        ),
+        eventstream_event(
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"lo"}}"#,
+        ),
+        eventstream_event("contentBlockStop", r#"{"contentBlockIndex":0}"#),
+        eventstream_event("messageStop", r#"{"stopReason":"end_turn"}"#),
+        eventstream_event(
+            "metadata",
+            r#"{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15}}"#,
+        ),
+    ]
+    .concat()
+}
+
+struct BytesReply {
+    status: u16,
+    content_type: &'static str,
+    body: Vec<u8>,
+}
+
+/// A loopback server speaking binary bodies, modeled on [`server`]: it
+/// serves each reply once, in order, and captures every request head.
+async fn bytes_server(
+    replies: Vec<BytesReply>,
+) -> io::Result<(String, tokio::task::JoinSet<io::Result<Vec<Vec<u8>>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let url = format!("http://{address}");
+    let mut task = tokio::task::JoinSet::new();
+    task.spawn(async move {
+        let mut requests = Vec::with_capacity(replies.len());
+        for reply in replies {
+            let (mut socket, _) = listener.accept().await?;
+            requests.push(read_request(&mut socket).await?);
+            let reason = match reply.status {
+                200 => "OK",
+                401 => "Unauthorized",
+                _ => "Test",
+            };
+            let headers = format!(
+                "HTTP/1.1 {} {reason}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                reply.status,
+                reply.content_type,
+                reply.body.len()
+            );
+            socket.write_all(headers.as_bytes()).await?;
+            socket.write_all(&reply.body).await?;
+            socket.flush().await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, task))
+}
+
+/// A Bedrock route with Anthropic thinking support: the catalog seam owns
+/// this shape for real rows, and the adapter proves against it directly.
+fn bedrock_resolved(provider: &str, model: &str) -> ResolvedModel {
+    let mut resolved = resolved(provider, Family::Bedrock, model);
+    resolved.entry.thinking = ThinkingSupport::Budget { can_disable: true };
+    resolved
+}
+
+fn bedrock_env(vars: &[(&str, &str)]) -> EnvSnapshot {
+    let mut full = vec![("AWS_EC2_METADATA_DISABLED", "true")];
+    full.extend(vars.iter().copied());
+    EnvSnapshot::test(&full)
+}
+
+#[tokio::test]
+async fn bedrock_sigv4_turn_streams_eventstream_through_loopback() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "bedrock-test",
+                Family::Bedrock,
+                base,
+                None,
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        bedrock_env(&[
+            ("AWS_ACCESS_KEY_ID", "test-key"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    // No keyed credential exists, so the route binds credential-less and the
+    // AWS chain owns auth.
+    let provider = set.provider(bedrock_resolved("bedrock-test", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    let texts: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, "Hello");
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /model/anthropic.claude-test/converse-stream "));
+    assert!(head.contains("authorization: aws4-hmac-sha256"));
+    assert!(head.contains("x-amz-date:"));
+    assert!(head.contains("x-amz-content-sha256:"));
+    assert!(head.contains("accept: application/vnd.amazon.eventstream"));
+    assert!(!head.contains("authorization: bearer "));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_bearer_token_rides_authorization_header_unsigned() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "bedrock-bearer",
+                Family::Bedrock,
+                base,
+                None,
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        bedrock_env(&[("AWS_BEARER_TOKEN_BEDROCK", "bearer-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("bedrock-bearer", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer bearer-secret"));
+    assert!(!head.contains("x-amz-date:"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bedrock_unauthorized_invalidates_and_retries_once() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut server) = bytes_server(vec![
+        BytesReply {
+            status: 401,
+            content_type: "application/json",
+            body: br#"{"message":"expired"}"#.to_vec(),
+        },
+        BytesReply {
+            status: 200,
+            content_type: "application/vnd.amazon.eventstream",
+            body: bedrock_text_turn(),
+        },
+    ])
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "bedrock-retry",
+                Family::Bedrock,
+                base,
+                None,
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        bedrock_env(&[
+            ("AWS_ACCESS_KEY_ID", "test-key"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("bedrock-retry", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    let texts: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, "Hello");
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 2, "one rejection plus one retry");
+    Ok(())
+}
+
+/// The secret access key of the echo tests' credential. It never travels, so
+/// only a redaction list that names every secret field of the credential
+/// scrubs a server reply that quotes it.
+const ECHO_SECRET_ACCESS_KEY: &str = "echo-test-secret-access-key";
+
+/// The credential material of one signed Bedrock request, read back from the
+/// request head the way a server that echoes headers would see it.
+struct EchoedCredential {
+    key: String,
+    token: String,
+    signature: String,
+    authorization: String,
+}
+
+impl EchoedCredential {
+    fn parse(head: &str) -> Self {
+        let header = |name: &str| {
+            head.lines()
+                .find_map(|line| {
+                    let (field, value) = line.split_once(':')?;
+                    field
+                        .eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap_or_default()
+        };
+        let authorization = header("authorization");
+        let key = authorization
+            .split_once("Credential=")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map(|(key, _)| key.to_owned())
+            .unwrap_or_default();
+        let signature = authorization
+            .rsplit_once("Signature=")
+            .map(|(_, signature)| signature.to_owned())
+            .unwrap_or_default();
+        Self {
+            key,
+            token: header("x-amz-security-token"),
+            signature,
+            authorization,
+        }
+    }
+
+    /// One sentence that quotes every value the request carried, then the
+    /// secret access key, the way a signature mismatch quotes signed headers.
+    fn quote(&self) -> String {
+        format!(
+            "key {} token {} signature {} presented {} secret {ECHO_SECRET_ACCESS_KEY}",
+            self.key, self.token, self.signature, self.authorization
+        )
+    }
+
+    fn values(&self) -> [&str; 5] {
+        [
+            &self.key,
+            &self.token,
+            &self.signature,
+            &self.authorization,
+            ECHO_SECRET_ACCESS_KEY,
+        ]
+    }
+}
+
+/// A loopback server that answers `replies` requests with whatever `respond`
+/// builds from the credential material each request carried, and returns the
+/// material it saw.
+async fn signature_echo_server(
+    replies: usize,
+    respond: fn(&EchoedCredential) -> Reply,
+) -> io::Result<(
+    String,
+    tokio::task::JoinSet<io::Result<Vec<EchoedCredential>>>,
+)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let url = format!("http://{address}");
+    let mut task = tokio::task::JoinSet::new();
+    task.spawn(async move {
+        let mut seen = Vec::with_capacity(replies);
+        for _ in 0..replies {
+            let (mut socket, _) = listener.accept().await?;
+            let captured = read_request(&mut socket).await?;
+            let echoed = EchoedCredential::parse(&String::from_utf8_lossy(&captured));
+            write_reply(&mut socket, respond(&echoed)).await?;
+            seen.push(echoed);
+        }
+        Ok(seen)
+    });
+    Ok((url, task))
+}
+
+/// One Bedrock turn signed with a temporary credential (access key id, secret
+/// access key, session token) against `base`.
+async fn sigv4_session_turn(
+    base: String,
+) -> Result<Result<Vec<StreamEvent>, ProviderError>, Box<dyn Error>> {
+    let dir = TestDir::new()?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "bedrock-echo",
+                Family::Bedrock,
+                base,
+                None,
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        bedrock_env(&[
+            ("AWS_ACCESS_KEY_ID", "AKIDECHOTESTKEY"),
+            ("AWS_SECRET_ACCESS_KEY", ECHO_SECRET_ACCESS_KEY),
+            ("AWS_SESSION_TOKEN", "echo-test-session-token"),
+        ]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("bedrock-echo", "anthropic.claude-test"))?;
+    let opened = provider
+        .open(
+            SessionId::new_v7(),
+            &request(
+                Family::Bedrock,
+                "anthropic.claude-test",
+                vec![user_text("Say hello.")],
+            ),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await;
+    Ok(match opened {
+        Ok(stream) => collect(stream).await,
+        Err(error) => Err(error),
+    })
+}
+
+/// Asserts that a surfaced failure carries none of the credential material
+/// the server saw, and that the echo was scrubbed rather than dropped.
+fn assert_scrubbed(failure: &ProviderError, seen: &[EchoedCredential]) {
+    let text = format!("{failure:?} {failure}");
+    assert!(
+        text.contains("<redacted>"),
+        "the echo was dropped, not scrubbed: {text}"
+    );
+    assert!(!seen.is_empty());
+    for echoed in seen {
+        for value in echoed.values() {
+            assert!(!value.is_empty(), "the request carried no such value");
+            assert!(!text.contains(value), "{value} survived in {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_sigv4_request_never_surfaces_the_credential_it_carried() -> TestResult {
+    // A 403 signature mismatch quotes the signed headers: the session token,
+    // the access key id and the signature. The single unauthorized retry
+    // sends the request again, so both attempts are echoed.
+    let (base, mut server) = signature_echo_server(2, |echoed| Reply {
+        status: 403,
+        content_type: "application/json",
+        body: format!(r#"{{"message":"{}"}}"#, echoed.quote()).into_bytes(),
+    })
+    .await?;
+    let outcome = sigv4_session_turn(base).await?;
+    let seen = server.join_next().await.expect("server completes")??;
+    assert_eq!(seen.len(), 2, "one rejection plus one retry");
+    let Err(failure) = outcome else {
+        return Err(io::Error::other("a 403 must fail the turn").into());
+    };
+    assert_scrubbed(&failure, &seen);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_in_stream_exception_never_surfaces_the_sigv4_credential() -> TestResult {
+    // An exception frame rides inside an HTTP 200 stream, so it reaches the
+    // caller through the decoder's redaction, not the status path.
+    let (base, mut server) = signature_echo_server(1, |echoed| Reply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: eventstream_frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "validationException"),
+                (":content-type", "application/json"),
+            ],
+            format!(r#"{{"message":"{}"}}"#, echoed.quote()).as_bytes(),
+        ),
+    })
+    .await?;
+    let outcome = sigv4_session_turn(base).await?;
+    let seen = server.join_next().await.expect("server completes")??;
+    let Err(failure) = outcome else {
+        return Err(io::Error::other("an exception frame must fail the turn").into());
+    };
+    assert_scrubbed(&failure, &seen);
+    Ok(())
+}
+
 fn compact_request(model: &str) -> ModelRequest {
     let mut compact = request(Family::Responses, model, vec![user_text("Summarize.")]);
     compact.purpose = Purpose::Compact;

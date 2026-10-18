@@ -10,7 +10,7 @@ use dal_core::{Family, ModelInfo, ModelRequest, ModelRoute, Purpose, SessionId, 
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AuthStyle, ProviderEntry, Transport};
-use super::set::{ProviderSet, ProviderSetInner};
+use super::set::{ProviderSet, ProviderSetInner, authenticates_ambiently};
 use crate::{
     auth::credential::{Credential, OAuthCredential},
     catalog::{self, CatalogFetch, ModelFetch, ResolvedModel},
@@ -133,8 +133,12 @@ impl Provider {
             azure::require_https(&entry.id, entry.transport)?;
         }
         // An entry that authenticates nothing admits the credential-less
-        // row; every other style still refuses to build without one.
-        if matches!(&credential, Credential::None) && entry.auth != AuthStyle::None {
+        // row; every other style still refuses to build without one. Bedrock
+        // also admits it: the AWS chain in `aws_resolver` owns Bedrock auth
+        // (bearer-or-SigV4 per attempt), never the bound credential.
+            && entry.auth != AuthStyle::None
+            && !authenticates_ambiently(entry.family)
+        {
             return Err(ProviderError::NoCredentials {
                 provider: entry.id.to_string(),
             });

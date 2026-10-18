@@ -11,7 +11,7 @@ use super::api::Http;
 use super::config::{AuthStyle, ProviderEntry};
 use super::set::ProviderSetInner;
 use crate::{
-    auth::credential::{Credential, EnvSnapshot, OAuthCredential},
+    auth::credential::{AuthStore, Credential, EnvSnapshot, OAuthCredential},
     catalog::{CatalogEntry, ResolvedModel},
     compact::{self, CompactedHistory},
     error::ProviderError,
@@ -19,6 +19,10 @@ use crate::{
         self,
         anthropic::{AnthropicAuth, AnthropicRequest},
         azure::{self, AzureRequest, AzureSettings},
+        bedrock::{
+            self,
+            auth::{AwsResolveOptions, BedrockAuth, SHARED_RESOLVE_TIMEOUT},
+        },
         codex::CodexRequest,
         copilot::{self, CopilotKey, CopilotRequest, IdentityRetry, Integration},
         responses::ResponsesRequest,
@@ -150,8 +154,14 @@ pub(crate) async fn stream_attempt(
             .map_err(AttemptFailure::Provider)?;
         return send_parts(&context, &credential, &cancel, parts).await;
     }
-    let parts = build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
-    send_parts(&context, &credential, &cancel, parts).await
+    match context.family {
+        Family::Bedrock => Box::pin(bedrock_attempt(&context, &credential, &cancel, &owner)).await,
+        _ => {
+            let parts =
+                build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
+            send_parts(&context, &credential, &cancel, parts).await
+        }
+    }
 }
 
 async fn send_parts(
@@ -188,6 +198,236 @@ async fn send_parts(
         secrets,
         None,
     )))
+}
+
+/// The media range of one Bedrock Converse response: binary event-stream
+/// frames, never SSE.
+const BEDROCK_EVENTSTREAM_ACCEPT: &str = "application/vnd.amazon.eventstream";
+
+/// Whether one attempt failure is an unauthorized response: the only status
+/// that invalidates a cached grant or credential before the established
+/// refresh contract runs.
+fn is_unauthorized(failure: &AttemptFailure) -> bool {
+    matches!(
+        failure,
+        AttemptFailure::Response {
+            status: 401 | 403,
+            ..
+        }
+    )
+}
+
+/// One Bedrock attempt: bearer-or-SigV4 auth resolved under a single caller
+/// envelope, one Converse request, and at most one invalidate-and-retry on a
+/// pre-delivery 401/403.
+///
+/// The caller owns the envelope: `Instant::now() + SHARED_RESOLVE_TIMEOUT`
+/// threads through region resolution and every credential tier, including
+/// region and source probes; no nested call mints its own deadline. The
+/// bound credential is never read here: `resolve_bedrock_auth` owns bearer
+/// precedence (stored key, then `AWS_BEARER_TOKEN_BEDROCK`) and the `SigV4`
+/// chain behind one call, so request-level and resolver-level bearer sources
+/// cannot disagree.
+///
+/// A 401/403 before any byte is decoded invalidates the cached credential
+/// and resends once — the `RefreshOnce` contract for a non-OAuth credential
+/// the shared retry table cannot refresh. Any other failure, the second
+/// outcome, and every post-delivery error return as-is: no indiscriminate
+/// retry.
+async fn bedrock_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    let slot = owner.providers.get(&context.provider).ok_or_else(|| {
+        AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!("provider {} is not configured", context.provider),
+        })
+    })?;
+    let entry = slot.entry.clone();
+    let deadline = tokio::time::Instant::now() + SHARED_RESOLVE_TIMEOUT;
+    let region = owner
+        .aws_resolver
+        .resolve_region(entry.settings.region.as_deref(), None, cancel, deadline)
+        .await;
+    let options = AwsResolveOptions {
+        profile: None,
+        region,
+    };
+    let first = Box::pin(bedrock_try(
+        context, credential, &entry, &options, cancel, owner, deadline,
+    ))
+    .await;
+    if !is_bedrock_unauthorized(&first) {
+        return first;
+    }
+    owner
+        .aws_resolver
+        .invalidate(options.profile.as_deref(), &options.region);
+    Box::pin(bedrock_try(
+        context, credential, &entry, &options, cancel, owner, deadline,
+    ))
+    .await
+}
+
+/// Whether one Bedrock outcome earns the single invalidate-and-retry: an
+/// HTTP 401/403, or a 401/403 the signer reported before sending (an
+/// unusable cached credential).
+fn is_bedrock_unauthorized(outcome: &Result<Option<EventStream>, AttemptFailure>) -> bool {
+    match outcome {
+        Err(failure) if is_unauthorized(failure) => true,
+        Err(AttemptFailure::Provider(ProviderError::Status {
+            status: 401 | 403, ..
+        })) => true,
+        _ => false,
+    }
+}
+
+/// Resolves auth, builds the Converse request, sends it, and decodes the
+/// byte stream. Every fallible step returns its failure for the caller to
+/// classify; only the caller retries.
+async fn bedrock_try(
+    context: &StreamContext,
+    credential: &Credential,
+    entry: &ProviderEntry,
+    options: &AwsResolveOptions,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    deadline: tokio::time::Instant,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let store =
+        AuthStore::load(owner.data_dir.join("auth.json")).map_err(AttemptFailure::Provider)?;
+    let auth = Box::pin(
+        owner
+            .aws_resolver
+            .resolve_bedrock_auth(entry, &store, options, cancel, deadline),
+    )
+    .await
+    .map_err(AttemptFailure::Provider)?;
+    let (builder, auth_secrets) = bedrock_request(context, &auth, &options.region)?;
+    let mut secrets = credential_secrets(credential);
+    secrets.extend(auth_secrets);
+    let response = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(None),
+        response = http::send(
+            Family::Bedrock,
+            builder,
+            &context.user_agent,
+            Exchange::Bytes {
+                accept: BEDROCK_EVENTSTREAM_ACCEPT,
+                total: None,
+            },
+            tokio::time::sleep,
+        ) => response.map_err(AttemptFailure::Provider)?,
+    };
+    if !response.status().is_success() {
+        return match status_failure(response, Family::Bedrock, credential, &secrets, cancel).await?
+        {
+            Some(failure) => Err(failure),
+            None => Ok(None),
+        };
+    }
+    Ok(Some(transport_mod::decode_response(
+        response,
+        Family::Bedrock,
+        &context.provider,
+        &context.model,
+        false,
+        None,
+        secrets,
+        None,
+    )))
+}
+
+/// Builds the Converse `RequestBuilder` for one resolved auth: a bearer token
+/// rides `Authorization: Bearer` with no signing, and `SigV4` signs through
+/// the family's narrow signer seam. The second member is the redaction list
+/// of the credential material the request carries; every response and stream
+/// error of the attempt passes through it.
+fn bedrock_request(
+    context: &StreamContext,
+    auth: &BedrockAuth,
+    region: &str,
+) -> Result<(reqwest::RequestBuilder, Vec<Box<str>>), ProviderError> {
+    match auth {
+        BedrockAuth::Bearer(token) => {
+            let path = bedrock::request_path(&context.model);
+            let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
+            let body = bedrock::request_body(&context.request, &context.thinking)
+                .map_err(bedrock_body_error)?;
+            let builder = context
+                .client
+                .post(url)
+                .header("content-type", "application/json")
+                .header("accept", BEDROCK_EVENTSTREAM_ACCEPT)
+                .header("authorization", format!("Bearer {}", token.expose()));
+            Ok((builder.body(body), vec![token.expose().into()]))
+        }
+        BedrockAuth::SigV4(credential) => {
+            let now_unix = jiff::Timestamp::now().as_second();
+            let wire = bedrock::build(
+                &context.request,
+                &context.thinking,
+                &context.base_url,
+                Some(region),
+                credential,
+                now_unix,
+            )?;
+            let secrets = sigv4_secrets(credential, &wire);
+            Ok((wire.into_request(&context.client), secrets))
+        }
+    }
+}
+
+/// The credential material one signed Bedrock request holds, for the
+/// redaction list.
+///
+/// The access key id, the session token and the `authorization` value (which
+/// carries the id, the credential scope and the signature) travel on the
+/// wire, and a rejection can echo any of them: an AWS signature mismatch
+/// quotes the signed headers. The secret access key never leaves the process;
+/// it is listed anyway, as [`credential_secrets`] lists every secret field of
+/// a credential. The whole `authorization` value comes first because
+/// [`transport_mod::redact_text`] replaces in order: scrubbing the access key
+/// id first would leave the scope and the signature of an echoed header
+/// readable. The bare signature follows for an echo that quotes it apart.
+fn sigv4_secrets(
+    credential: &bedrock::AwsCredential,
+    wire: &bedrock::BedrockWire,
+) -> Vec<Box<str>> {
+    let mut secrets: Vec<Box<str>> = Vec::with_capacity(5);
+    if let Some((_, authorization)) =
+        wire.headers.iter().find(|(name, _)| name == "authorization")
+    {
+        secrets.push(authorization.as_str().into());
+        secrets.extend(
+            authorization
+                .rsplit_once("Signature=")
+                .map(|(_, signature)| Box::<str>::from(signature)),
+        );
+    }
+    secrets.extend(credential.session_token.clone());
+    secrets.push(credential.access_key_id.clone());
+    secrets.push(credential.secret_access_key.clone());
+    secrets
+}
+
+/// Maps a Bedrock body error the way the family's own transport layer does:
+/// blobs stay typed, everything else is an invalid request.
+fn bedrock_body_error(error: bedrock::BedrockBodyError) -> ProviderError {
+    match error {
+        bedrock::BedrockBodyError::UnresolvedBlob { blob_id } => {
+            ProviderError::UnresolvedBlob { blob_id }
+        }
+        other => ProviderError::InvalidRequest {
+            message: other.to_string(),
+        },
+    }
 }
 
 /// Whether `entry` routes through the GitHub Copilot proxy.

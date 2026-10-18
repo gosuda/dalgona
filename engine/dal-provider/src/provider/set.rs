@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use dal_core::SessionId;
+use dal_core::{Family, SessionId};
 use tokio::sync::Semaphore;
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     },
     catalog::ResolvedModel,
     error::ProviderError,
-    family::{azure, copilot::IdentityCache},
+    family::{azure, bedrock::auth::AwsCredentialResolver, copilot::IdentityCache},
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
     scripted::Script,
@@ -71,6 +71,10 @@ pub(super) struct ProviderSetInner {
     /// The one Copilot identity negotiation cache of this set; there is no
     /// process-global instance.
     pub(super) copilot_identities: IdentityCache,
+    /// The Bedrock credential chain of this set: one resolver over the
+    /// captured environment, with its own proxy-bypassed HTTP client. No
+    /// process-global state.
+    pub(super) aws_resolver: Arc<AwsCredentialResolver>,
 }
 
 pub(super) struct ProviderSlot {
@@ -191,6 +195,17 @@ impl ProviderSet {
             data_dir.join("auth.json"),
             endpoints,
         ));
+        // The Bedrock chain resolves over the captured environment with its
+        // own HTTP client: the crate's shared per-origin client must never
+        // carry ambient proxy policy into ECS/IMDS credential HTTP. The
+        // dedicated client is built by `http::build_resolver_client`
+        // (parent http.rs seam): crate timeouts, same-origin redirects, and
+        // no ambient proxy.
+        let aws_resolver = Arc::new(AwsCredentialResolver::new(
+            env.clone(),
+            http::build_resolver_client(),
+            AwsCredentialResolver::home_dir_from_env(&env),
+        ));
         let scripted = match &config.scripted {
             None => None,
             Some(selection) => {
@@ -219,6 +234,7 @@ impl ProviderSet {
                 usage,
                 scripted,
                 copilot_identities: IdentityCache::default(),
+                aws_resolver,
             }),
         })
     }
@@ -258,7 +274,22 @@ impl ProviderSet {
             .ok_or_else(|| ProviderError::InvalidRequest {
                 message: format!("provider {} is not configured", resolved.provider),
             })?;
-        let credential = self.credential(&resolved.provider)?;
+        // Bedrock authenticates through the AWS chain in `aws_resolver`,
+        // never through a bound credential: a missing keyed credential binds
+        // credential-less instead of refusing the route. The request adapter
+        // resolves bearer-or-SigV4 per attempt under one caller envelope.
+        // Vertex follows the same precedent: without a key, the adapter
+        // reads a pre-minted bearer token from the captured environment and
+        // refuses with `NoCredentials` itself when there is none.
+        let credential = match self.credential(&resolved.provider) {
+            Ok(credential) => credential,
+            Err(ProviderError::NoCredentials { .. })
+                if authenticates_ambiently(slot.entry.family) =>
+            {
+                Credential::None
+            }
+            Err(error) => return Err(error),
+        };
         Provider::new(
             resolved,
             slot.entry.clone(),
@@ -431,6 +462,15 @@ impl std::fmt::Debug for ProviderSet {
             .field("client_count", &self.inner.clients.len())
             .finish_non_exhaustive()
     }
+}
+
+/// Whether a family authenticates outside the bound credential: Bedrock
+/// through the AWS chain, Vertex through a captured bearer token. Such a
+/// route binds credential-less when nothing is stored, and each attempt
+/// refuses with `NoCredentials` itself when its own source is empty. The set
+/// and [`Provider::new`] share this one rule.
+pub(super) const fn authenticates_ambiently(family: Family) -> bool {
+    matches!(family, Family::Bedrock)
 }
 
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
