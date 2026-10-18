@@ -238,6 +238,8 @@ pub enum ProviderError {
     NoAccountId,
     /// The sign-in was cancelled before completion.
     LoginCancelled,
+    /// The provider operation was cancelled before completion.
+    Cancelled,
     /// The sign-in request itself is unusable: the provider does not offer
     /// the method, or the API key is empty.
     LoginInput {
@@ -463,6 +465,7 @@ impl fmt::Display for ProviderError {
                 f.write_str("sign-in failed: the ID token has no chatgpt_account_id.")
             }
             Self::LoginCancelled => f.write_str("sign-in cancelled."),
+            Self::Cancelled => f.write_str("provider operation cancelled."),
             Self::LoginInput { reason } => write!(f, "sign-in failed: {reason}"),
             Self::UsageCheck { reason } => write!(f, "usage failed: {reason}"),
             Self::UnresolvedBlob { blob_id } => write!(
@@ -556,6 +559,7 @@ impl From<ProviderError> for InferFailure {
             | E::DeviceCode { .. }
             | E::NoAccountId
             | E::LoginCancelled
+            | E::Cancelled
             | E::LoginInput { .. }
             | E::UsageCheck { .. }
             | E::UnresolvedBlob { .. }
