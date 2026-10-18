@@ -24,6 +24,16 @@ pub enum AuthStyle {
     Bearer,
     /// Send the credential in an `x-api-key` header.
     XApiKey,
+    /// Send the credential in an `api-key` header.
+    ///
+    /// On a Chat or Responses entry this style also selects the Azure
+    /// `OpenAI` adapter (deployment routing and the `api-version` query), as
+    /// the configuration reference documents. No other family takes Azure
+    /// routing from this style.
+    ApiKey,
+    /// Send no credential: the entry authenticates nothing, so no
+    /// authorization header is built for it and none is ever invented.
+    None,
 }
 
 /// Provider-specific settings decoded from the effective configuration.
@@ -95,7 +105,9 @@ pub struct ProviderEntry {
     pub base_url: Box<str>,
     /// The provider transport.
     pub transport: Transport,
-    /// The environment variable name for a named provider's API key.
+    /// The environment variable name of this entry's API key. A named
+    /// provider sets it, except that a named `auth = none` entry may omit it
+    /// or keep it; a built-in row may override its own default with it.
     pub key_env: Option<Box<str>>,
     /// The API-key authorization header style.
     pub auth: AuthStyle,
@@ -582,12 +594,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
             key: "base_url",
         }
     })?;
-    let key_env = string_field(Some(table), "key_env", &path)?.ok_or_else(|| {
-        ProviderConfigError::MissingKey {
-            name: name.to_owned().into_boxed_str(),
-            key: "key_env",
-        }
-    })?;
+    let key_env = string_field(Some(table), "key_env", &path)?;
 
     let transport = parse_transport(
         string_field(Some(table), "transport", &path)?,
@@ -604,6 +611,14 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         default_auth,
         name,
     )?;
+    // Every credential style names the variable its key comes from; only an
+    // entry that authenticates nothing may omit it.
+    if key_env.is_none() && auth != AuthStyle::None {
+        return Err(ProviderConfigError::MissingKey {
+            name: name.to_owned().into_boxed_str(),
+            key: "key_env",
+        });
+    }
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
     let settings = decode_settings(Some(table), &path)?;
     validate_transport(name, family, transport)?;
@@ -614,7 +629,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         family,
         base_url: base_url.to_owned().into_boxed_str(),
         transport,
-        key_env: Some(key_env.to_owned().into_boxed_str()),
+        key_env: key_env.map(|value| value.to_owned().into_boxed_str()),
         auth,
         max_concurrent_requests,
         settings,
@@ -657,8 +672,10 @@ fn parse_auth(
         None => Ok(default),
         Some("bearer") => Ok(AuthStyle::Bearer),
         Some("x-api-key") => Ok(AuthStyle::XApiKey),
+        Some("api-key") => Ok(AuthStyle::ApiKey),
+        Some("none") => Ok(AuthStyle::None),
         Some(_) => Err(invalid(format!(
-            "providers.{name}.auth must be bearer or x-api-key"
+            "providers.{name}.auth must be bearer, x-api-key, api-key, or none"
         ))),
     }
 }

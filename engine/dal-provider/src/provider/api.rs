@@ -9,7 +9,7 @@ use std::{
 use dal_core::{Family, ModelInfo, ModelRequest, ModelRoute, Purpose, SessionId, Usage};
 use tokio_util::sync::CancellationToken;
 
-use super::config::{ProviderEntry, Transport};
+use super::config::{AuthStyle, ProviderEntry, Transport};
 use super::set::{ProviderSet, ProviderSetInner};
 use crate::{
     auth::credential::{Credential, OAuthCredential},
@@ -68,7 +68,8 @@ impl Provider {
     ///
     /// # Errors
     /// Returns `InvalidRequest` when the route, provider entry, or transport do
-    /// not agree, and `NoCredentials` when an HTTP route has no credential.
+    /// not agree, and `NoCredentials` when an HTTP route has no credential and
+    /// its family authenticates through one.
     pub fn new(
         resolved: ResolvedModel,
         entry: ProviderEntry,
@@ -119,7 +120,9 @@ impl Provider {
                 ),
             });
         }
-        if matches!(&credential, Credential::None) {
+        // An entry that authenticates nothing admits the credential-less
+        // row; every other style still refuses to build without one.
+        if matches!(&credential, Credential::None) && entry.auth != AuthStyle::None {
             return Err(ProviderError::NoCredentials {
                 provider: entry.id.to_string(),
             });

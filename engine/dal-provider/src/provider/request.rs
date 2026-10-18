@@ -160,14 +160,15 @@ pub(crate) fn build_stream_request(
                 },
             )?;
             let url = http::endpoint(route_family, &context.base_url, family::chat::ENDPOINT_PATH)?;
-            let (header, value) =
-                auth_header(context.auth, credential, route_family, &context.provider)?;
-            Ok((
-                context.client.post(url).header(header, value).body(body),
-                user_agent,
-                secrets,
-                None,
-            ))
+            let mut request = context.client.post(url);
+            // A credential-less row (a keyless local gateway such as
+            // llama.cpp, configured `auth = "none"`) sends no header.
+            if let Some((header, value)) =
+                optional_auth_header(context.auth, credential, route_family, &context.provider)?
+            {
+                request = request.header(header, value);
+            }
+            Ok((request.body(body), user_agent, secrets, None))
         }
         Family::Responses => {
             let wire = build_responses_wire_from_context(context, credential)?;
@@ -186,31 +187,52 @@ pub(crate) fn build_stream_request(
         Family::Codex => Err(ProviderError::InvalidRequest {
             message: String::from("Codex requests use the dedicated HTTPS adapter"),
         }),
-        Family::Anthropic => {
-            let mut wire = build_anthropic_wire(
-                &context.request,
-                &context.entry,
-                context.auth,
-                &context.thinking,
-                credential,
-                false,
-            )?;
-            let url = http::endpoint(route_family, &context.base_url, wire.path)?;
-            let user_agent = wire
-                .user_agent
-                .as_deref()
-                .unwrap_or(context.user_agent.as_ref())
-                .to_owned()
-                .into_boxed_str();
-            let replay_prefix = std::mem::take(&mut wire.prefix);
-            Ok((
-                wire.into_request(&context.client, url),
-                user_agent,
-                secrets,
-                Some(replay_prefix),
-            ))
-        }
+        Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
+}
+
+fn build_anthropic_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let mut wire = build_anthropic_wire(
+        &context.request,
+        &context.entry,
+        context.auth,
+        &context.thinking,
+        credential,
+        false,
+    )?;
+    let url = http::endpoint(context.family, &context.base_url, wire.path)?;
+    let user_agent = wire
+        .user_agent
+        .as_deref()
+        .unwrap_or(context.user_agent.as_ref())
+        .to_owned()
+        .into_boxed_str();
+    let replay_prefix = std::mem::take(&mut wire.prefix);
+    Ok((
+        wire.into_request(&context.client, url),
+        user_agent,
+        secrets,
+        Some(replay_prefix),
+    ))
+}
+
+/// The auth header of one request, or none for a credential-less entry that
+/// authenticates nothing. A held credential on such an entry stays refused;
+/// only the admitted absence sends no header.
+fn optional_auth_header(
+    auth: AuthStyle,
+    credential: &Credential,
+    family: Family,
+    provider: &str,
+) -> Result<Option<(&'static str, String)>, ProviderError> {
+    if auth == AuthStyle::None && matches!(credential, Credential::None) {
+        return Ok(None);
+    }
+    auth_header(auth, credential, family, provider).map(Some)
 }
 
 pub(crate) fn build_responses_wire_from_context(
@@ -261,10 +283,35 @@ pub(crate) fn build_anthropic_wire(
             });
         }
     };
+    match auth_style {
+        AuthStyle::None => {
+            return Err(ProviderError::InvalidRequest {
+                message: String::from("credential-less entries carry no auth header"),
+            });
+        }
+        AuthStyle::ApiKey => {
+            return Err(ProviderError::InvalidRequest {
+                message: String::from("Anthropic requests do not support the api-key header style"),
+            });
+        }
+        AuthStyle::Bearer | AuthStyle::XApiKey => {}
+    }
     let auth = match credential {
         Credential::ApiKey { key } => match auth_style {
             AuthStyle::XApiKey => AnthropicAuth::ApiKey(key.expose()),
             AuthStyle::Bearer => AnthropicAuth::Bearer(key.expose()),
+            AuthStyle::ApiKey => {
+                return Err(ProviderError::InvalidRequest {
+                    message: String::from(
+                        "Anthropic requests do not support the api-key header style",
+                    ),
+                });
+            }
+            AuthStyle::None => {
+                return Err(ProviderError::InvalidRequest {
+                    message: String::from("credential-less entries carry no auth header"),
+                });
+            }
         },
         Credential::OAuth(oauth) => AnthropicAuth::ClaudeOAuth {
             access_token: oauth.access_token.expose(),
@@ -560,10 +607,19 @@ pub(crate) fn auth_header(
     family: Family,
     provider: &str,
 ) -> Result<(&'static str, String), ProviderError> {
+    if auth == AuthStyle::None {
+        return Err(ProviderError::InvalidRequest {
+            message: String::from("credential-less entries carry no auth header"),
+        });
+    }
     match credential {
         Credential::ApiKey { key } => match auth {
             AuthStyle::Bearer => Ok(("authorization", format!("Bearer {}", key.expose()))),
             AuthStyle::XApiKey => Ok(("x-api-key", key.expose().to_owned())),
+            AuthStyle::ApiKey => Ok(("api-key", key.expose().to_owned())),
+            AuthStyle::None => Err(ProviderError::InvalidRequest {
+                message: String::from("credential-less entries carry no auth header"),
+            }),
         },
         Credential::OAuth(oauth) if matches!(family, Family::Codex | Family::Anthropic) => Ok((
             "authorization",

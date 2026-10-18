@@ -429,6 +429,36 @@ fn named_provider_without_settings_still_decodes_to_empty_settings() {
 }
 
 #[test]
+fn auth_accepts_api_key_and_none_and_rejects_everything_else() {
+    let bearer = parse(concat!(
+        "[providers.zenmux-bearer]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nauth = 'bearer'\n",
+        "[providers.zenmux-x-api-key]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nauth = 'x-api-key'\n",
+        "[providers.zenmux-api-key]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nauth = 'api-key'\n",
+        "[providers.zenmux-none]\napi = 'ollama'\nbase_url = 'http://localhost:11434'\n",
+        "auth = 'none'\n",
+    ))
+    .expect("every supported auth style parses");
+    assert_eq!(entry(&bearer, "zenmux-bearer").auth, AuthStyle::Bearer);
+    assert_eq!(entry(&bearer, "zenmux-x-api-key").auth, AuthStyle::XApiKey);
+    assert_eq!(entry(&bearer, "zenmux-api-key").auth, AuthStyle::ApiKey);
+    assert_eq!(entry(&bearer, "zenmux-none").auth, AuthStyle::None);
+    assert!(entry(&bearer, "zenmux-none").key_env.is_none());
+
+    let error = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nauth = 'basic'\n",
+    ))
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "providers.zenmux.auth must be bearer, x-api-key, api-key, or none"
+    );
+}
+
+#[test]
 fn provider_settings_reject_invalid_values() {
     // Settings keys that refuse a wrong type or a blank value, with the
     // message each refusal renders.

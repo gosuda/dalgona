@@ -1645,10 +1645,232 @@ fn preset_api_overrides_decode_like_the_named_provider_path() {
     );
 }
 
+fn api_key_credential(key: &str) -> Credential {
+    Credential::ApiKey {
+        key: SecretString::from(key),
+    }
+}
+
+/// A stored OAuth login: the credential resolution finds before any key.
+fn stored_login(access: &str) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from(access),
+        refresh_token: SecretString::from("stored-refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: Some(String::from("acct-1")),
+    })
+}
+
 /// The error of a lowering that had to refuse, for wire types without `Debug`.
 fn refusal<T>(result: Result<T, ProviderError>) -> ProviderError {
     match result {
         Err(error) => error,
         Ok(_) => panic!("the wire was built for an entry that must refuse it"),
     }
+}
+
+#[test]
+fn plain_shape_headers_emit_the_configured_api_key_style() {
+    for (auth, name, value) in [
+        (AuthStyle::Bearer, "authorization", "Bearer style-test-key"),
+        (AuthStyle::XApiKey, "x-api-key", "style-test-key"),
+        (AuthStyle::ApiKey, "api-key", "style-test-key"),
+    ] {
+        let routed = entry(
+            "openai",
+            Family::Chat,
+            String::from("https://api.openai.com/v1"),
+            None,
+            4,
+            Transport::Https,
+        );
+        let routed = ProviderEntry { auth, ..routed };
+        let credential = api_key_credential("style-test-key");
+        let headers = routed
+            .shape()
+            .headers(&routed, &credential)
+            .expect("a key header");
+        assert_eq!(
+            headers,
+            [(String::from(name), String::from(value))],
+            "{auth:?} sends its own header"
+        );
+    }
+}
+
+#[test]
+fn none_auth_entries_never_carry_a_credential_header() {
+    let none_entry = |id: &str, family: Family| ProviderEntry {
+        auth: AuthStyle::None,
+        ..entry(
+            id,
+            family,
+            String::from("http://localhost:11434"),
+            None,
+            4,
+            Transport::Https,
+        )
+    };
+    let no_credential = Credential::None;
+    let api_key = api_key_credential("unused-key");
+    // A stored login is what credential resolution finds first, so it is the
+    // credential most likely to reach a `none` entry.
+    let oauth = stored_login("stored-access");
+
+    // Every header shape refuses both held credential kinds with one fixed
+    // text: Plain (Ollama), Claude (the anthropic row), Codex (the codex row).
+    for (id, family) in [
+        ("local-ollama", Family::Ollama),
+        ("anthropic", Family::Anthropic),
+        ("openai-codex", Family::Codex),
+    ] {
+        let routed = none_entry(id, family);
+        let expected = format!(
+            "invalid request: {id} sends no credential, so it cannot send an API key or an OAuth login"
+        );
+        for held in [&api_key, &oauth] {
+            let error = routed.shape().headers(&routed, held).unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    // No credential means no header: Plain adds nothing, Claude adds only its
+    // version marker (no OAuth betas), and Codex, which cannot run without a
+    // login, keeps its NoCredentials refusal.
+    let plain = none_entry("local-ollama", Family::Ollama);
+    let headers = plain.shape().headers(&plain, &no_credential).unwrap();
+    assert_eq!(headers, [] as [(String, String); 0]);
+    let claude = none_entry("anthropic", Family::Anthropic);
+    let headers = claude.shape().headers(&claude, &no_credential).unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].0, "anthropic-version");
+    let codex = none_entry("openai-codex", Family::Codex);
+    let error = codex.shape().headers(&codex, &no_credential).unwrap_err();
+    assert!(matches!(error, ProviderError::NoCredentials { .. }));
+
+    // The refusal belongs to `none` alone: a credentialed style still needs a
+    // credential and still sends its own header.
+    let keyed = ProviderEntry {
+        auth: AuthStyle::XApiKey,
+        ..plain
+    };
+    let error = keyed.shape().headers(&keyed, &no_credential).unwrap_err();
+    assert!(matches!(error, ProviderError::NoCredentials { .. }));
+    let headers = keyed.shape().headers(&keyed, &oauth).unwrap();
+    assert_eq!(headers[0].0, "authorization");
+    assert_eq!(headers[0].1, "Bearer stored-access");
+}
+
+#[test]
+fn anthropic_wire_refuses_styles_it_has_no_header_for_whatever_secret_is_held() {
+    use crate::thinking::{AnthropicThinking, ThinkingPlan, WireThinking};
+
+    let model = "claude-test";
+    let request = request(Family::Anthropic, model, vec![user_text("hello")]);
+    let catalog = resolved("anthropic", Family::Anthropic, model).entry;
+    let thinking = ThinkingPlan {
+        level: ThinkingLevel::Off,
+        wire: WireThinking::Anthropic {
+            thinking: AnthropicThinking::Omit,
+            effort: None,
+        },
+        temperature: None,
+        notices: Vec::new(),
+    };
+    let api_key = api_key_credential("anthropic-key");
+    let oauth = stored_login("stored-access");
+    let build = |style: AuthStyle, held: &Credential| {
+        super::request::build_anthropic_wire(&request, &catalog, style, &thinking, held, false)
+    };
+
+    // The wire has no `api-key` header form, and `none` sends no credential.
+    // Both are refused before the credential kind is looked at, so a stored
+    // OAuth login cannot slip through to the Claude OAuth wire. The refusal
+    // text is not pinned, but it must never echo a secret.
+    for (style, held) in [
+        (AuthStyle::ApiKey, &oauth),
+        (AuthStyle::ApiKey, &api_key),
+        (AuthStyle::None, &oauth),
+        (AuthStyle::None, &api_key),
+    ] {
+        let error = refusal(build(style, held));
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{style:?}"
+        );
+        let text = error.to_string();
+        assert!(!text.contains("stored-access"));
+        assert!(!text.contains("anthropic-key"));
+    }
+
+    // Supported styles keep building: an OAuth login is still lowered to the
+    // Claude OAuth wire, the only one that carries a user-agent override.
+    for style in [AuthStyle::XApiKey, AuthStyle::Bearer] {
+        let wire = build(style, &oauth).map_err(|error| error.to_string());
+        let wire = wire.expect("a supported style builds");
+        assert!(wire.user_agent.is_some());
+    }
+}
+
+#[test]
+fn responses_wire_refuses_secrets_it_cannot_carry_and_keeps_keyless_https() {
+    use crate::{
+        family::responses::{self, ResponsesRequest},
+        thinking::WireThinking,
+    };
+
+    let request = request(Family::Responses, "gpt-test", vec![user_text("hello")]);
+    let api_key = api_key_credential("responses-key");
+    let oauth = stored_login("stored-access");
+    let build = |style: AuthStyle, held: &Credential| {
+        responses::wire(&ResponsesRequest {
+            request: &request,
+            thinking: WireThinking::OpenAi { effort: None },
+            reasoning_summary: false,
+            auth: style,
+            credential: held,
+            session_id: SessionId::new_v7(),
+            user_agent: "dalgon/test",
+        })
+    };
+
+    // `none` sends no credential, and an OAuth login always rides a bearer
+    // header, which an `api-key` entry cannot carry. Each is refused before
+    // the credential kind is looked at, without echoing a secret.
+    for (style, held) in [
+        (AuthStyle::None, &oauth),
+        (AuthStyle::None, &api_key),
+        (AuthStyle::ApiKey, &oauth),
+    ] {
+        let error = refusal(build(style, held));
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{style:?}"
+        );
+        let text = error.to_string();
+        assert!(!text.contains("stored-access"));
+        assert!(!text.contains("responses-key"));
+    }
+
+    // Existing behavior is preserved: keyless HTTPS sends no header, an API
+    // key keeps its configured header, and an OAuth login stays a bearer
+    // token that the lifecycle may refresh.
+    let keyless = build(AuthStyle::None, &Credential::None).map_err(|error| error.to_string());
+    let keyless = keyless.expect("a keyless none entry builds");
+    assert!(keyless.auth_header.is_none());
+    assert!(!keyless.oauth);
+    let keyed = build(AuthStyle::XApiKey, &api_key).map_err(|error| error.to_string());
+    let keyed = keyed.expect("an API key still builds");
+    assert_eq!(
+        keyed.auth_header,
+        Some(("x-api-key", String::from("responses-key")))
+    );
+    let login = build(AuthStyle::Bearer, &oauth).map_err(|error| error.to_string());
+    let login = login.expect("an OAuth login still builds");
+    assert!(login.oauth);
+    assert_eq!(
+        login.auth_header,
+        Some(("authorization", String::from("Bearer stored-access")))
+    );
 }
