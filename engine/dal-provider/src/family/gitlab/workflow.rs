@@ -209,9 +209,9 @@ pub(crate) struct WorkflowTurn<'a> {
     pub(crate) user_agent: &'a str,
 }
 
-/// A live workflow socket table, keyed by session and provider. A turn takes
 type SessionMap = HashMap<(SessionId, Box<str>), Session>;
 
+/// A live workflow socket table, keyed by session and provider. A turn takes
 /// its row, drives it, and returns it only while a tool action is pending.
 /// The handle clones so a turn's stream can own it.
 #[derive(Clone, Debug, Default)]

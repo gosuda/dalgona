@@ -836,7 +836,13 @@ async fn loopback_fresh_connect_failure_stops_the_created_workflow() {
         workflow_definition: None,
     };
     let model_request = request(vec![user("hi")]);
-    let turn = test_turn(&model_request, &scope, &cancel, &rest_base, SessionId::new_v7());
+    let turn = test_turn(
+        &model_request,
+        &scope,
+        &cancel,
+        &rest_base,
+        SessionId::new_v7(),
+    );
     // The fresh run fails before its first frame; without the cleanup the
     // created workflow would strand server-side with no terminal owning it.
     let result = run_turn(&client, &sessions, &turn).await;

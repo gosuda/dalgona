@@ -1,7 +1,7 @@
 //! Loopback rig shared by the workflow surface tests and the provider-set
 //! boundary test: a canned REST router, per-hop timeouts, and action frames.
 //!
-//! Test-only: the parent declares this module under `#[cfg(test)]`.
+//! Test-only: the parent module declares this module under `#[cfg(test)]`.
 //! Everything here speaks loopback TCP or builds in-memory fixtures; nothing
 //! touches a live service or credential.
 
