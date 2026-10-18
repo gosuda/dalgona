@@ -6,7 +6,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 use dal_agent::{Host, Product};
 use dal_wire::{
@@ -20,8 +19,6 @@ use crate::cli;
 use crate::edge;
 use crate::exit;
 use crate::{Startup, two_lines};
-
-const HOST_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy)]
 enum Wire {
@@ -104,19 +101,24 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     }
     let stop = CancellationToken::new();
     let outcome = super::drive(&stop, async {
-        let result = tokio::select! {
+        tokio::select! {
             biased;
             () = stop.cancelled() => Ok(()),
             result = wire.serve(host.clone(), transport) => result,
-        };
-        let _ = host.shutdown(HOST_GRACE).await;
-        result
+        }
     })
     .await;
-    match outcome {
-        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
-        Ok(Err(error)) => wire_failure(wire, &error),
-        Err(code) => ExitCode::from(code),
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
+    };
+    let closed = exit::Ladder::begin().close_host(host).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(()) => exit::code(exit::ExitKind::Success),
+        Err(error) => wire_failure(wire, &error),
     }
 }
 
@@ -153,7 +155,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     let listener_host = host.clone();
     let stop = CancellationToken::new();
     let outcome = super::drive(&stop, async {
-        let result = tokio::select! {
+        tokio::select! {
             biased;
             () = stop.cancelled() => Ok(()),
             result = serve_local(
@@ -162,15 +164,20 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
                 sid.as_ref().map(edge::CurrentUserSid::as_str),
                 move |transport| Box::pin(serve_rpc(listener_host.clone(), transport)),
             ) => result,
-        };
-        let _ = host.shutdown(HOST_GRACE).await;
-        result
+        }
     })
     .await;
-    match outcome {
-        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
-        Ok(Err(error)) => socket_failure(&path, &data_root, &error),
-        Err(code) => ExitCode::from(code),
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
+    };
+    let closed = exit::Ladder::begin().close_host(host).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(()) => exit::code(exit::ExitKind::Success),
+        Err(error) => socket_failure(&path, &data_root, &error),
     }
 }
 

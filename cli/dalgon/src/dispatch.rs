@@ -49,9 +49,12 @@ pub(crate) use models::run as models;
 /// Drives `future` until it completes, cancelling `stop` on the first
 /// shutdown signal and abandoning the wait on the second.
 ///
-/// Returns the inner output, or the `128 + signo` code when a second signal
-/// arrives while draining. Dropping the future closes the listener without
-/// waiting out the grace period.
+/// The first signal starts the shutdown ladder, so every later step shares
+/// its one clock. Returns the inner output, or the `128 + signo` code when a
+/// second signal arrives while draining. Dropping the future closes the
+/// listener without waiting out the grace period. `future` must not own the
+/// host close: that step runs after this returns, inside the ladder, and is
+/// never abandoned.
 pub(crate) async fn drive<Fut>(stop: &CancellationToken, future: Fut) -> Result<Fut::Output, u8>
 where
     Fut: Future,
@@ -68,6 +71,7 @@ where
                     return Err(code);
                 }
                 signalled = true;
+                exit::Ladder::begin();
                 stop.cancel();
             }
         }
@@ -166,31 +170,43 @@ pub(crate) async fn serve(
     };
     let stop = CancellationToken::new();
     let snapshot = edge::terminal_snapshot();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let stderr = std::io::stderr();
-    let mut err = stderr.lock();
-    match drive(
-        &stop,
-        serve::run(
-            serve::ServeRun {
-                host,
-                args: serve_args,
-                config: serve_config,
-                data_root,
-                stop: stop.clone(),
-            },
-            &mut out,
-            &mut err,
-            snapshot.stderr_tty,
-            snapshot.stdout_tty,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(code)) => code,
-        Ok(Err(error)) => serve_error(error),
-        Err(code) => ExitCode::from(code),
+    let closing = host.clone();
+    // The stream locks live only as long as the server: the host close that
+    // follows must not hold up other threads that write diagnostics.
+    let outcome = {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let stderr = std::io::stderr();
+        let mut err = stderr.lock();
+        drive(
+            &stop,
+            serve::run(
+                serve::ServeRun {
+                    host,
+                    args: serve_args,
+                    config: serve_config,
+                    data_root,
+                    stop: stop.clone(),
+                },
+                &mut out,
+                &mut err,
+                snapshot.stderr_tty,
+                snapshot.stdout_tty,
+            ),
+        )
+        .await
+    };
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
+    };
+    let closed = exit::Ladder::begin().close_host(closing).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(code) => code,
+        Err(error) => serve_error(error),
     }
 }
 
