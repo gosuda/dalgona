@@ -687,6 +687,22 @@ impl Host {
     }
 }
 
+/// The lookup the session services use to resolve a live turn's
+/// cancellation token through the actor's control cell. A turn that is not
+/// running resolves to `None`.
+type TurnCancelLookup = Arc<dyn Fn(dal_core::TurnId) -> Option<CancellationToken> + Send + Sync>;
+
+fn turn_cancel_lookup(
+    control: Arc<std::sync::Mutex<crate::session::control::ControlCell>>,
+) -> TurnCancelLookup {
+    Arc::new(move |turn| {
+        control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token_for(turn)
+    })
+}
+
 /// The shareable ports of one live session.
 struct SessionPorts {
     id: SessionId,
@@ -1029,7 +1045,6 @@ impl Host {
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
         }));
-        let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
             grants: extensions.grants,
             broker: Arc::clone(&broker),
@@ -1043,12 +1058,7 @@ impl Host {
             overlay: Arc::clone(&extensions.overlay),
             history: opening_texts,
             sites: HashMap::new(),
-            turn_cancel: Arc::new(move |turn| {
-                turn_control
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .token_for(turn)
-            }),
+            turn_cancel: turn_cancel_lookup(Arc::clone(&ports.control)),
             cancel: cancel.clone(),
             resolutions: handle.resolutions(),
             ask_timeout: ask_timeout(&self.state.shared.config),

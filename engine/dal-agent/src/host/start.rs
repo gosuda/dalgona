@@ -19,11 +19,6 @@ impl Host {
     /// # Errors
     /// Returns [`HostError::Config`] when extension registrations or provider
     /// configuration cannot be validated or initialized.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the public startup API is awaited by callers across the workspace; startup validation stays async for one composition shape"
-    )]
     pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
         Self::start_with_defaults(product, config, env, DefaultAuthority::Disabled).await
     }
@@ -40,6 +35,7 @@ impl Host {
     /// configuration cannot be validated or initialized.
     #[expect(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "the public startup API is awaited by callers across the workspace; startup validation stays async for one composition shape"
     )]
     pub async fn start_with_defaults(

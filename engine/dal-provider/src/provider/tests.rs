@@ -2932,15 +2932,15 @@ fn antigravity_failover_context() -> super::request::StreamContext {
 
 /// The Cloud Code Assist wire the failover loop re-sends to each endpoint;
 /// the loop supplies the base.
-fn cca_failover_wire() -> Result<crate::family::google::shared::GoogleWire, ProviderError> {
-    Ok(crate::family::google::shared::GoogleWire {
+fn cca_failover_wire() -> crate::family::google::shared::GoogleWire {
+    crate::family::google::shared::GoogleWire {
         path: String::from("v1internal:streamGenerateContent?alt=sse"),
         base_override: None,
         headers: vec![("authorization", String::from("Bearer ya29-test"))],
         user_agent: None,
         body: br#"{"request":{}}"#.to_vec(),
         fallback: None,
-    })
+    }
 }
 
 async fn run_antigravity_failover(
@@ -2949,8 +2949,15 @@ async fn run_antigravity_failover(
 ) -> Result<Option<EventStream>, crate::lifecycle::AttemptFailure> {
     let context = antigravity_failover_context();
     let slot = crate::family::google::shared::ResponseIdSlot::default();
-    super::request::antigravity_failover(&context, &[], cancel, bases, cca_failover_wire, &slot)
-        .await
+    super::request::antigravity_failover(
+        &context,
+        &[],
+        cancel,
+        bases,
+        || Ok(cca_failover_wire()),
+        &slot,
+    )
+    .await
 }
 
 fn json_reply(status: u16, body: &str) -> Reply {
@@ -5349,12 +5356,15 @@ fn compact_request(model: &str) -> ModelRequest {
     compact
 }
 
+/// Rewrites a provider entry into one routed shape.
+type EntryShape = fn(&mut ProviderEntry);
+
 #[tokio::test]
 async fn azure_and_copilot_routed_entries_compact_locally_without_any_request() -> TestResult {
     // The `openai` row's remote-compaction capability describes api.openai.com.
     // Pointed at an Azure or Copilot surface it routes turns through that
     // adapter, and neither offers the plain `/responses/compact` wire.
-    let shapes: [(&str, fn(&mut ProviderEntry)); 2] = [
+    let shapes: [(&str, EntryShape); 2] = [
         ("openai", |entry| entry.auth = AuthStyle::ApiKey),
         ("github-copilot-responses", |_| {}),
     ];
@@ -5581,6 +5591,10 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture parks and drops the workflows of a session in place"
+)]
 async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult {
     use crate::family::gitlab::workflow::support::{
         RestCounts, action_frame, rest_router, test_timeouts,

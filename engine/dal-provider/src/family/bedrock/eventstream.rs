@@ -461,17 +461,16 @@ impl FrameDecoder {
                 Err(error) => break Some(error),
             }
         };
-        match failure {
-            Some(error) => Pushed {
+        if let Some(error) = failure {
+            Pushed {
                 frames,
                 failure: Some(self.fail(error)),
-            },
-            None => {
-                self.buffer.drain(..consumed);
-                Pushed {
-                    frames,
-                    failure: None,
-                }
+            }
+        } else {
+            self.buffer.drain(..consumed);
+            Pushed {
+                frames,
+                failure: None,
             }
         }
     }

@@ -906,7 +906,7 @@ async fn loopback_restart_open_failure_stops_the_created_workflow() {
     let Some(ProviderError::Transport { .. }) = error else {
         panic!("restart open failure must surface its transport error, got {error:?}");
     };
-    assert!(events.is_empty());
+    assert_eq!(events, [] as [StreamEvent; 0]);
     let counts = lock(&counts);
     assert_eq!(counts.creates, 2);
     assert_eq!(

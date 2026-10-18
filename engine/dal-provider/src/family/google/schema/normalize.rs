@@ -43,11 +43,11 @@ pub(super) fn normalize(schema: &Node, spelling: Spelling) -> Option<Node> {
     let walker = Walker {
         legacy: spelling == Spelling::Legacy,
     };
-    let walked = walker.node(&inlined, ChildKind::Schema, 0);
+    let normalized = walker.node(&inlined, ChildKind::Schema, 0);
     if !walker.legacy {
-        return Some(walked);
+        return Some(normalized);
     }
-    let collapsed = strip_residual_combiners(&walked, ChildKind::Schema, 0);
+    let collapsed = strip_residual_combiners(&normalized, ChildKind::Schema, 0);
     let projected = lift_nullable(&collapsed, ChildKind::Schema, 0);
     if has_residual(&projected, ChildKind::Schema, 0) || !is_valid(&projected) {
         return Some(fallback());

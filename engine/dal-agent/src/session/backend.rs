@@ -2312,6 +2312,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps every rejected transition in order"
+    )]
     async fn private_rejected_transitions_persist_nothing() {
         let (host, root, child, temp) = host_with_child().await;
         let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
@@ -2451,6 +2455,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps the receipt and closed-lane phases in order"
+    )]
     async fn private_receipt_persisted_and_closed_operations_reject() {
         let (host, root, child, temp) = host_with_child().await;
         let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
@@ -2584,6 +2592,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps the reopen and repair phases in order"
+    )]
     async fn private_unfinished_start_repairs_once_across_reopen() {
         let (host, root, child, temp) = host_with_child().await;
         let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");

@@ -824,7 +824,7 @@ async fn a_waiter_behind_a_busy_resolution_obeys_its_own_cancellation_and_deadli
             // Let the holder reach its helper and take the key's slot.
             tokio::time::sleep(Duration::from_millis(300)).await;
             let waiter_cancel = cancel();
-            let canceller = waiter_cancel.clone();
+            let stop_waiter = waiter_cancel.clone();
             let (cancelled, ()) = tokio::join!(
                 resolver_instance.resolve_credentials(
                     "amazon-bedrock",
@@ -834,7 +834,7 @@ async fn a_waiter_behind_a_busy_resolution_obeys_its_own_cancellation_and_deadli
                 ),
                 async {
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    canceller.cancel();
+                    stop_waiter.cancel();
                 },
             );
             let error = cancelled.expect_err("the cancelled waiter refuses");
@@ -1474,7 +1474,7 @@ async fn a_relative_container_token_file_resolves_against_the_captured_directory
     );
     let client = crate::http::build_client();
     let ctx = ctx_of(&env, &client, dir.path());
-    metadata::resolve_container_credentials(&ctx, &cancel(), deadline())
+    let _ = metadata::resolve_container_credentials(&ctx, &cancel(), deadline())
         .await
         .expect("ecs")
         .expect("credential");

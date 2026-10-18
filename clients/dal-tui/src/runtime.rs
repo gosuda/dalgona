@@ -1233,7 +1233,7 @@ impl Surfaces {
                 self.view = fresh;
             }
             UpdateKind::Settings(settings) => {
-                self.view.session.name = settings.name.clone();
+                self.view.session.name.clone_from(&settings.name);
                 self.view.settings = settings.clone();
             }
             UpdateKind::Usage(usage) => self.view.usage = usage.clone(),

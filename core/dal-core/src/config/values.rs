@@ -645,7 +645,6 @@ struct ModelRouteText {
 pub(super) fn parse_model_route(
     value: toml::Value,
 ) -> Result<crate::model::ModelRoute, ConfigError> {
-    use crate::model::ModelRoute;
     const EXPECTED: &str = "table with kind api/synthetic/harness";
     let toml::Value::Table(table) = value else {
         return Err(invalid_value("model_route", value_text(&value), EXPECTED));
@@ -657,12 +656,12 @@ pub(super) fn parse_model_route(
                 line: None,
                 message: Box::<str>::from(error.message()),
             })?;
-    let kind = match text.kind {
-        Some(toml::Value::String(kind)) => kind,
+    let kind = match &text.kind {
+        Some(toml::Value::String(kind)) => kind.clone(),
         Some(other) => {
             return Err(invalid_value(
                 "model_route.kind",
-                value_text(&other),
+                value_text(other),
                 "api, synthetic, harness",
             ));
         }
@@ -675,104 +674,116 @@ pub(super) fn parse_model_route(
         }
     };
     match kind.as_str() {
-        "api" => {
-            if let Some(unexpected) = text.id.as_ref() {
-                return Err(invalid_value(
-                    "model_route.id",
-                    value_text(unexpected),
-                    "absent for kind api",
-                ));
-            }
-            let family = match text.family {
-                Some(toml::Value::String(family)) => parse_model_route_family(&family)?,
-                Some(other) => {
-                    return Err(invalid_value(
-                        "model_route.family",
-                        value_text(&other),
-                        MODEL_ROUTE_FAMILIES,
-                    ));
-                }
-                None => {
-                    return Err(invalid_value(
-                        "model_route.family",
-                        "missing",
-                        MODEL_ROUTE_FAMILIES,
-                    ));
-                }
-            };
-            let model = match text.model {
-                Some(toml::Value::String(model)) if !model.is_empty() => model.into_boxed_str(),
-                Some(other) => {
-                    return Err(invalid_value(
-                        "model_route.model",
-                        value_text(&other),
-                        "non-empty model id",
-                    ));
-                }
-                None => {
-                    return Err(invalid_value(
-                        "model_route.model",
-                        "missing",
-                        "non-empty model id",
-                    ));
-                }
-            };
-            Ok(ModelRoute::Api { family, model })
-        }
-        "synthetic" | "harness" => {
-            if let Some(unexpected) = text.family.as_ref() {
-                return Err(invalid_value(
-                    "model_route.family",
-                    value_text(unexpected),
-                    "absent unless kind api",
-                ));
-            }
-            if let Some(unexpected) = text.model.as_ref() {
-                return Err(invalid_value(
-                    "model_route.model",
-                    value_text(unexpected),
-                    "absent unless kind api",
-                ));
-            }
-            let id = match text.id {
-                Some(toml::Value::String(id)) if !id.is_empty() => id.into_boxed_str(),
-                Some(other) => {
-                    return Err(invalid_value(
-                        "model_route.id",
-                        value_text(&other),
-                        "non-empty synthetic or harness id",
-                    ));
-                }
-                None => {
-                    return Err(invalid_value(
-                        "model_route.id",
-                        "missing",
-                        "non-empty synthetic or harness id",
-                    ));
-                }
-            };
-            if kind.as_str() == "harness" {
-                ModelRoute::harness(id).map_err(|error| {
-                    invalid_value(
-                        "model_route.id",
-                        error.to_string().into_boxed_str(),
-                        "dalgon/normal, dalgon/eval-first, dalgon/eval-only",
-                    )
-                })
-            } else {
-                ModelRoute::synthetic(id).map_err(|error| {
-                    invalid_value(
-                        "model_route.id",
-                        error.to_string().into_boxed_str(),
-                        "[a-z0-9-]+/[a-z0-9._-]+",
-                    )
-                })
-            }
-        }
+        "api" => parse_model_route_api(text),
+        "synthetic" | "harness" => parse_model_route_id(text, &kind),
         other => Err(invalid_value(
             "model_route.kind",
             Box::<str>::from(other),
             "api, synthetic, harness",
         )),
+    }
+}
+
+/// Builds the structured `kind = "api"` route after rejecting the members
+/// the api kind does not own.
+fn parse_model_route_api(text: ModelRouteText) -> Result<crate::model::ModelRoute, ConfigError> {
+    if let Some(unexpected) = text.id.as_ref() {
+        return Err(invalid_value(
+            "model_route.id",
+            value_text(unexpected),
+            "absent for kind api",
+        ));
+    }
+    let family = match text.family {
+        Some(toml::Value::String(family)) => parse_model_route_family(&family)?,
+        Some(other) => {
+            return Err(invalid_value(
+                "model_route.family",
+                value_text(&other),
+                MODEL_ROUTE_FAMILIES,
+            ));
+        }
+        None => {
+            return Err(invalid_value(
+                "model_route.family",
+                "missing",
+                MODEL_ROUTE_FAMILIES,
+            ));
+        }
+    };
+    let model = match text.model {
+        Some(toml::Value::String(model)) if !model.is_empty() => model.into_boxed_str(),
+        Some(other) => {
+            return Err(invalid_value(
+                "model_route.model",
+                value_text(&other),
+                "non-empty model id",
+            ));
+        }
+        None => {
+            return Err(invalid_value(
+                "model_route.model",
+                "missing",
+                "non-empty model id",
+            ));
+        }
+    };
+    Ok(crate::model::ModelRoute::Api { family, model })
+}
+
+/// Builds a synthetic or harness route after rejecting the members those
+/// kinds do not own.
+fn parse_model_route_id(
+    text: ModelRouteText,
+    kind: &str,
+) -> Result<crate::model::ModelRoute, ConfigError> {
+    use crate::model::ModelRoute;
+    if let Some(unexpected) = text.family.as_ref() {
+        return Err(invalid_value(
+            "model_route.family",
+            value_text(unexpected),
+            "absent unless kind api",
+        ));
+    }
+    if let Some(unexpected) = text.model.as_ref() {
+        return Err(invalid_value(
+            "model_route.model",
+            value_text(unexpected),
+            "absent unless kind api",
+        ));
+    }
+    let id = match text.id {
+        Some(toml::Value::String(id)) if !id.is_empty() => id.into_boxed_str(),
+        Some(other) => {
+            return Err(invalid_value(
+                "model_route.id",
+                value_text(&other),
+                "non-empty synthetic or harness id",
+            ));
+        }
+        None => {
+            return Err(invalid_value(
+                "model_route.id",
+                "missing",
+                "non-empty synthetic or harness id",
+            ));
+        }
+    };
+    if kind == "harness" {
+        ModelRoute::harness(id).map_err(|error| {
+            invalid_value(
+                "model_route.id",
+                error.to_string().into_boxed_str(),
+                "dalgon/normal, dalgon/eval-first, dalgon/eval-only",
+            )
+        })
+    } else {
+        ModelRoute::synthetic(id).map_err(|error| {
+            invalid_value(
+                "model_route.id",
+                error.to_string().into_boxed_str(),
+                "[a-z0-9-]+/[a-z0-9._-]+",
+            )
+        })
     }
 }

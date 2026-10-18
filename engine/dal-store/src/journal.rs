@@ -1573,6 +1573,10 @@ pub(crate) fn turn_totals(
     Ok((usage.finish(), changes))
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag independently tracks whether one usage member was ever reported"
+)]
 struct UsageTotal {
     input_tokens: u64,
     cached_input_tokens: u64,

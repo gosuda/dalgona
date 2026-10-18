@@ -274,10 +274,10 @@ impl SignIn {
                     KeyAction::None
                 }
                 KeyCode::Enter if flow.paste_hint.is_some() => {
-                    let to_send = if !flow.pasted.trim().is_empty() {
-                        Some(std::mem::take(&mut flow.pasted))
-                    } else {
+                    let to_send = if flow.pasted.trim().is_empty() {
                         flow.paste_default.take()
+                    } else {
+                        Some(std::mem::take(&mut flow.pasted))
                     };
                     let Some(text) = to_send else {
                         return KeyAction::None;
@@ -904,7 +904,7 @@ mod tests {
         assert!(flow.paste_hint.is_none());
         assert!(flow.paste_default.is_none());
         assert!(flow.exchanging);
-        assert!(flow.pasted.is_empty());
+        assert_eq!(flow.pasted, "");
         assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
     }
 
@@ -956,7 +956,7 @@ mod tests {
         assert!(flow.paste_hint.is_none());
         assert!(flow.paste_default.is_none());
         assert!(flow.exchanging);
-        assert!(flow.pasted.is_empty());
+        assert_eq!(flow.pasted, "");
         assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
     }
 
@@ -981,7 +981,7 @@ mod tests {
         assert!(flow.paste_hint.is_none());
         assert!(flow.paste_default.is_none());
         assert!(flow.exchanging);
-        assert!(flow.pasted.is_empty());
+        assert_eq!(flow.pasted, "");
         assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
     }
 }

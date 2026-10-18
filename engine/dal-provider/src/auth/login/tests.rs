@@ -352,6 +352,10 @@ mod copilot {
     ];
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one device-login fixture proves the full public success path in place"
+    )]
     async fn copilot_device_login_public_success_persists_api_key_envelope() {
         let dir = TestDir::new();
         let server = Server::start(|request: &Request| match request.path() {
@@ -676,6 +680,10 @@ mod copilot {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one discovery fixture proves the truncated-body path in place"
+    )]
     async fn copilot_discovery_truncated_body_is_best_effort_and_persists_without_endpoint() {
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

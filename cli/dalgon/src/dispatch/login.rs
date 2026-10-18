@@ -446,10 +446,10 @@ async fn run_with_paste(
                 let Ok(line) = line else {
                     return Err(HostError::Provider(ProviderError::LoginCancelled));
                 };
-                let answer = if !line.is_empty() {
-                    Some(line)
-                } else {
+                let answer = if line.is_empty() {
                     prompt_default.take()
+                } else {
+                    Some(line)
                 };
                 let Some(answer) = answer else {
                     reader.set(read_masked_value());

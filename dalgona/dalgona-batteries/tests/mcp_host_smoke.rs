@@ -7,8 +7,10 @@
 //! (`dal-agent`, `dal-core`, `dal-store`, `dalgona-batteries`, `tokio`) is
 //! already a dependency of `dalgona-batteries`.
 //! PARENT RUN (exact, from workspace root):
-//!   env -u CARGO_BUILD_BUILD_DIR CARGO_TARGET_DIR=<target> TMPDIR=<tmp> CARGO_BUILD_JOBS=2 \
-//!     cargo test --locked --offline -p dalgona-batteries --test mcp_host_smoke
+//! ```text
+//! env -u CARGO_BUILD_BUILD_DIR CARGO_TARGET_DIR=<target> TMPDIR=<tmp> CARGO_BUILD_JOBS=2 \
+//!   cargo test --locked --offline -p dalgona-batteries --test mcp_host_smoke
+//! ```
 //! FEATURE FLAGS: none. Default features. Unix only (`#![cfg(unix)]`).
 //!
 //! SCOPE: cancels only an in-flight `tools/call` on a ready server. It never
@@ -28,6 +30,8 @@
 //! and on failure; every failure message names the evidence directory.
 
 #![cfg(unix)]
+#![expect(clippy::expect_used, reason = "test assertions abort on failure")]
+#![expect(clippy::panic, reason = "test assertions abort on failure")]
 
 use std::{
     collections::BTreeMap,
@@ -433,6 +437,10 @@ fn durable_results(records: &[Record], call: &CallId) -> Vec<ResultEntry> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end host smoke keeps its discover, invoke, cancel, close, and read-back phases in order"
+)]
 async fn host_smoke_discover_invoke_cancel_close_and_read_back() {
     let root = evidence_root();
     let data = root.join("host-data");

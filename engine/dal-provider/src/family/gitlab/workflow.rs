@@ -740,7 +740,7 @@ impl ReplayTurn {
             body.push('\n');
         }
         for (name, args) in &self.calls {
-            let _ = write!(body, "<ran {name}>{args}</ran>\n");
+            let _ = writeln!(body, "<ran {name}>{args}</ran>");
         }
         if self.role == "tool" {
             let header = self.tool_name.as_ref().map_or_else(

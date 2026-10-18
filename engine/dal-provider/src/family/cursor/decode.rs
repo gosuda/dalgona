@@ -43,9 +43,12 @@ use dal_core::{Family, ModelRequest, Part, ReplayCapture, ReplayRefusal, Usage};
 use futures::{Stream, channel::mpsc};
 use prost::Message as _;
 
-#[expect(
-    clippy::wildcard_imports,
-    reason = "Cursor protobuf types are namespaced under proto and imported wholesale"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "Cursor protobuf types are namespaced under proto and imported wholesale"
+    )
 )]
 use super::proto::*;
 use super::{
@@ -959,6 +962,21 @@ impl Session {
         );
     }
 
+    /// Answers one exec frame with `ToolNotFound` for `name` and the
+    /// session's advertised wire names.
+    fn reply_tool_not_found(&mut self, id: u32, exec_id: &str, name: String, out: &mut PumpOut) {
+        self.reply(
+            id,
+            exec_id,
+            exec_client_message::Body::McpResult(McpResult {
+                result: Some(mcp_result::Result::ToolNotFound(McpToolNotFound {
+                    name,
+                    available_tools: self.wire_names.clone(),
+                })),
+            }),
+            out,
+        );
+    }
     /// Routes one MCP exec frame: approval probes and unknown tools are
     /// answered at once, and anything else becomes one pending tool event
     /// carrying the internal name. A redispatch for a call the session
@@ -971,22 +989,8 @@ impl Session {
         // `server_identifier` is ignored (no declaration; see
         // `is_ours_provider`).
         if !self.is_ours_provider(args.provider_identifier.as_str()) {
-            let name = if args.tool_name.is_empty() {
-                args.name.clone()
-            } else {
-                args.tool_name.clone()
-            };
-            self.reply(
-                id,
-                exec_id,
-                exec_client_message::Body::McpResult(McpResult {
-                    result: Some(mcp_result::Result::ToolNotFound(McpToolNotFound {
-                        name,
-                        available_tools: self.wire_names.clone(),
-                    })),
-                }),
-                out,
-            );
+            let name = wire_tool_name(args);
+            self.reply_tool_not_found(id, exec_id, name, out);
             return;
         }
         if args.smart_mode_approval_only {
@@ -1002,27 +1006,13 @@ impl Session {
             );
             return;
         }
-        let name = if args.tool_name.is_empty() {
-            args.name.clone()
-        } else {
-            args.tool_name.clone()
-        };
+        let name = wire_tool_name(args);
         let internal = if let Some(mapped) = self.restore.get(name.as_str()) {
             mapped.to_string()
         } else if self.wire_names.contains(&name) {
             name.clone()
         } else {
-            self.reply(
-                id,
-                exec_id,
-                exec_client_message::Body::McpResult(McpResult {
-                    result: Some(mcp_result::Result::ToolNotFound(McpToolNotFound {
-                        name,
-                        available_tools: self.wire_names.clone(),
-                    })),
-                }),
-                out,
-            );
+            self.reply_tool_not_found(id, exec_id, name, out);
             return;
         };
         let wire_id = args.tool_call_id.clone();
@@ -1550,7 +1540,7 @@ impl Session {
             });
             return;
         }
-        self.turn_usage = Some(map_turn_usage(&ended));
+        self.turn_usage = Some(map_turn_usage(ended));
         self.finalize(out);
     }
 
@@ -1894,6 +1884,16 @@ fn host_content(parts: &[Part]) -> Vec<McpContentItem> {
         }
     }
     content
+}
+
+/// The tool name one exec frame carries: the declared tool name unless it
+/// is empty, which falls back to the frame's bare name.
+fn wire_tool_name(args: &McpArgs) -> String {
+    if args.tool_name.is_empty() {
+        args.name.clone()
+    } else {
+        args.tool_name.clone()
+    }
 }
 
 /// Locks a session mutex, recovering from poisoning with the surviving

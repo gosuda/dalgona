@@ -871,6 +871,12 @@ fn tool_schema_and_arguments_travel_verbatim() {
 
 #[test]
 fn consecutive_tool_results_fold_into_one_user_message_with_role_alternation() {
+    fn status(block: &sonic_rs::Value) -> Option<&str> {
+        block
+            .get("toolResult")
+            .and_then(|r| r.get("status"))
+            .and_then(|s| s.as_str())
+    }
     let value = body_value(
         &request(
             vec![
@@ -929,12 +935,6 @@ fn consecutive_tool_results_fold_into_one_user_message_with_role_alternation() {
         .get(2)
         .and_then(|m| m.get("content"))
         .expect("the folded user message");
-    fn status(block: &sonic_rs::Value) -> Option<&str> {
-        block
-            .get("toolResult")
-            .and_then(|r| r.get("status"))
-            .and_then(|s| s.as_str())
-    }
     let blocks = elems(content);
     assert_eq!(
         blocks.len(),

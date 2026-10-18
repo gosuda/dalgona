@@ -1983,7 +1983,7 @@ fn strip_images_for_text_model(context: Vec<ContextItem>) -> Vec<ContextItem> {
                 is_error,
                 parts: without_images(parts),
             },
-            item => item,
+            item @ ContextItem::Assistant { .. } => item,
         })
         .collect()
 }

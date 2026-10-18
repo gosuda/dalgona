@@ -502,185 +502,13 @@ impl PiMessagesDecoder {
             }
         };
         match kind.as_str() {
-            Some("start" | "text_start" | "thinking_start") => {}
-            Some("text_delta") => {
-                #[derive(Deserialize)]
-                struct TextDelta {
-                    #[serde(rename = "contentIndex")]
-                    content_index: Option<usize>,
-                    delta: Option<String>,
-                }
-                let event: TextDelta = parse(data, "text_delta")?;
-                if let Some(index) = event.content_index {
-                    self.seen_text.insert(index);
-                }
-                if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
-                    out.push(StreamEvent::TextDelta { text: delta });
-                }
-            }
-            Some("text_end") => {
-                #[derive(Deserialize)]
-                struct TextEnd {
-                    #[serde(rename = "contentIndex")]
-                    content_index: usize,
-                    content: Option<String>,
-                }
-                let event: TextEnd = parse(data, "text_end")?;
-                if !self.seen_text.contains(&event.content_index)
-                    && let Some(content) = event.content.filter(|s| !s.is_empty())
-                {
-                    out.push(StreamEvent::TextDelta { text: content });
-                }
-            }
-            Some("thinking_delta") => {
-                #[derive(Deserialize)]
-                struct ThinkingDelta {
-                    #[serde(rename = "contentIndex")]
-                    content_index: Option<usize>,
-                    delta: Option<String>,
-                }
-                let event: ThinkingDelta = parse(data, "thinking_delta")?;
-                if let Some(index) = event.content_index {
-                    self.seen_thinking.insert(index);
-                }
-                if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
-                    out.push(StreamEvent::ReasoningDelta { text: delta });
-                }
-            }
-            Some("thinking_end") => {
-                #[derive(Deserialize)]
-                struct ThinkingEnd {
-                    #[serde(rename = "contentIndex")]
-                    content_index: usize,
-                    content: Option<String>,
-                    #[serde(rename = "contentSignature")]
-                    content_signature: Option<String>,
-                    redacted: Option<bool>,
-                }
-                let event: ThinkingEnd = parse(data, "thinking_end")?;
-                if !self.seen_thinking.contains(&event.content_index)
-                    && let Some(content) = event.content.filter(|s| !s.is_empty())
-                {
-                    out.push(StreamEvent::ReasoningDelta { text: content });
-                }
-                if event.content_signature.is_some() || event.redacted.is_some() {
-                    #[derive(Serialize)]
-                    struct ReplayData<'a> {
-                        #[serde(
-                            skip_serializing_if = "Option::is_none",
-                            rename = "thinkingSignature"
-                        )]
-                        thinking_signature: Option<&'a str>,
-                        #[serde(skip_serializing_if = "Option::is_none")]
-                        redacted: Option<bool>,
-                    }
-                    let payload_struct = ReplayData {
-                        thinking_signature: event.content_signature.as_deref(),
-                        redacted: event.redacted,
-                    };
-                    if let Ok(json_str) = sonic_rs::to_string(&payload_struct)
-                        && let Ok(raw_json) = RawJson::parse(&json_str)
-                    {
-                        out.push(StreamEvent::Replay {
-                            payload: ReplayPayload {
-                                family: Family::PiMessages,
-                                model: self.model.clone(),
-                                item: raw_json,
-                            },
-                        });
-                    }
-                }
-            }
-            Some("toolcall_start") => {
-                #[derive(Deserialize)]
-                struct ToolcallStart {
-                    #[serde(rename = "contentIndex")]
-                    content_index: usize,
-                    id: Option<String>,
-                    #[serde(rename = "toolName")]
-                    tool_name: Option<String>,
-                }
-                let event: ToolcallStart = parse(data, "toolcall_start")?;
-                self.budget.admit_item()?;
-                let (Some(id), Some(name)) = (
-                    event.id.filter(|s| !s.is_empty()),
-                    event.tool_name.filter(|s| !s.is_empty()),
-                ) else {
-                    return Err(protocol(format!(
-                        "toolcall_start contentIndex {} missing id or toolName",
-                        event.content_index
-                    )));
-                };
-                out.push(StreamEvent::ToolCallStarted {
-                    id: id.clone(),
-                    name: name.clone(),
-                });
-                self.calls.insert(
-                    event.content_index,
-                    OpenCall {
-                        id,
-                        name,
-                        args: Vec::new(),
-                        authoritative_args: None,
-                        incomplete: false,
-                    },
-                );
-            }
-            Some("toolcall_delta") => {
-                #[derive(Deserialize)]
-                struct ToolcallDelta {
-                    #[serde(rename = "contentIndex")]
-                    content_index: usize,
-                    delta: Option<String>,
-                }
-                let event: ToolcallDelta = parse(data, "toolcall_delta")?;
-                let Some(call) = self.calls.get_mut(&event.content_index) else {
-                    return Err(protocol(format!(
-                        "toolcall_delta for unknown contentIndex {}",
-                        event.content_index
-                    )));
-                };
-                if let Some(fragment) = event.delta.filter(|s| !s.is_empty()) {
-                    call.args.extend_from_slice(fragment.as_bytes());
-                    out.push(StreamEvent::ToolArgsDelta {
-                        id: call.id.clone(),
-                        fragment: fragment.into_bytes(),
-                    });
-                }
-            }
-            Some("toolcall_end") => {
-                #[derive(Deserialize)]
-                struct ToolcallEnd {
-                    #[serde(rename = "contentIndex")]
-                    content_index: usize,
-                    #[serde(rename = "toolCall")]
-                    tool_call: Option<WireToolCall>,
-                }
-                #[derive(Deserialize)]
-                struct WireToolCall {
-                    id: Option<String>,
-                    name: Option<String>,
-                    arguments: Option<RawJson>,
-                    incomplete: Option<bool>,
-                }
-                let event: ToolcallEnd = parse(data, "toolcall_end")?;
-                if let Some(call) = self.calls.get_mut(&event.content_index)
-                    && let Some(tc) = event.tool_call
-                {
-                    if let Some(id) = tc.id.filter(|s| !s.is_empty()) {
-                        call.id = id;
-                    }
-                    if let Some(name) = tc.name.filter(|s| !s.is_empty()) {
-                        call.name = name;
-                    }
-                    if tc.incomplete == Some(true) {
-                        call.incomplete = true;
-                    }
-                    if let Some(args_val) = tc.arguments {
-                        call.authoritative_args = Some(args_val.as_str().as_bytes().to_vec());
-                    }
-                }
-            }
+            Some("text_delta") => self.on_text_delta(data, out)?,
+            Some("text_end") => self.on_text_end(data, out)?,
+            Some("thinking_delta") => self.on_thinking_delta(data, out)?,
+            Some("thinking_end") => self.on_thinking_end(data, out)?,
+            Some("toolcall_start") => self.on_toolcall_start(data, out)?,
+            Some("toolcall_delta") => self.on_toolcall_delta(data, out)?,
+            Some("toolcall_end") => self.on_toolcall_end(data)?,
             Some("done") => {
                 #[derive(Deserialize)]
                 struct DoneEvent {
@@ -708,9 +536,229 @@ impl PiMessagesDecoder {
                         });
                 return Err(self.server_error(&message));
             }
+            // `start`, `text_start`, `thinking_start`, and unknown event
+            // types carry nothing to emit.
             _ => {}
         }
         Ok(Progress::Open)
+    }
+
+    /// Handles one `text_delta` event.
+    fn on_text_delta(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct TextDelta {
+            #[serde(rename = "contentIndex")]
+            content_index: Option<usize>,
+            delta: Option<String>,
+        }
+        let event: TextDelta = parse(data, "text_delta")?;
+        if let Some(index) = event.content_index {
+            self.seen_text.insert(index);
+        }
+        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
+            out.push(StreamEvent::TextDelta { text: delta });
+        }
+        Ok(())
+    }
+
+    /// Handles one `text_end` event.
+    fn on_text_end(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct TextEnd {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            content: Option<String>,
+        }
+        let event: TextEnd = parse(data, "text_end")?;
+        if !self.seen_text.contains(&event.content_index)
+            && let Some(content) = event.content.filter(|s| !s.is_empty())
+        {
+            out.push(StreamEvent::TextDelta { text: content });
+        }
+        Ok(())
+    }
+
+    /// Handles one `thinking_delta` event.
+    fn on_thinking_delta(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ThinkingDelta {
+            #[serde(rename = "contentIndex")]
+            content_index: Option<usize>,
+            delta: Option<String>,
+        }
+        let event: ThinkingDelta = parse(data, "thinking_delta")?;
+        if let Some(index) = event.content_index {
+            self.seen_thinking.insert(index);
+        }
+        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
+            out.push(StreamEvent::ReasoningDelta { text: delta });
+        }
+        Ok(())
+    }
+
+    /// Handles one `thinking_end` event, journaling the signature or
+    /// redaction marker as a replay payload.
+    fn on_thinking_end(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ThinkingEnd {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            content: Option<String>,
+            #[serde(rename = "contentSignature")]
+            content_signature: Option<String>,
+            redacted: Option<bool>,
+        }
+        let event: ThinkingEnd = parse(data, "thinking_end")?;
+        if !self.seen_thinking.contains(&event.content_index)
+            && let Some(content) = event.content.filter(|s| !s.is_empty())
+        {
+            out.push(StreamEvent::ReasoningDelta { text: content });
+        }
+        if event.content_signature.is_some() || event.redacted.is_some() {
+            #[derive(Serialize)]
+            struct ReplayData<'a> {
+                #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSignature")]
+                thinking_signature: Option<&'a str>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                redacted: Option<bool>,
+            }
+            let payload_struct = ReplayData {
+                thinking_signature: event.content_signature.as_deref(),
+                redacted: event.redacted,
+            };
+            if let Ok(json_str) = sonic_rs::to_string(&payload_struct)
+                && let Ok(raw_json) = RawJson::parse(&json_str)
+            {
+                out.push(StreamEvent::Replay {
+                    payload: ReplayPayload {
+                        family: Family::PiMessages,
+                        model: self.model.clone(),
+                        item: raw_json,
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles one `toolcall_start` event: admits the item and opens the call.
+    fn on_toolcall_start(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ToolcallStart {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            id: Option<String>,
+            #[serde(rename = "toolName")]
+            tool_name: Option<String>,
+        }
+        let event: ToolcallStart = parse(data, "toolcall_start")?;
+        self.budget.admit_item()?;
+        let (Some(id), Some(name)) = (
+            event.id.filter(|s| !s.is_empty()),
+            event.tool_name.filter(|s| !s.is_empty()),
+        ) else {
+            return Err(protocol(format!(
+                "toolcall_start contentIndex {} missing id or toolName",
+                event.content_index
+            )));
+        };
+        out.push(StreamEvent::ToolCallStarted {
+            id: id.clone(),
+            name: name.clone(),
+        });
+        self.calls.insert(
+            event.content_index,
+            OpenCall {
+                id,
+                name,
+                args: Vec::new(),
+                authoritative_args: None,
+                incomplete: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Handles one `toolcall_delta` event.
+    fn on_toolcall_delta(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ToolcallDelta {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            delta: Option<String>,
+        }
+        let event: ToolcallDelta = parse(data, "toolcall_delta")?;
+        let Some(call) = self.calls.get_mut(&event.content_index) else {
+            return Err(protocol(format!(
+                "toolcall_delta for unknown contentIndex {}",
+                event.content_index
+            )));
+        };
+        if let Some(fragment) = event.delta.filter(|s| !s.is_empty()) {
+            call.args.extend_from_slice(fragment.as_bytes());
+            out.push(StreamEvent::ToolArgsDelta {
+                id: call.id.clone(),
+                fragment: fragment.into_bytes(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Handles one `toolcall_end` event: the final call overrides the
+    /// streamed id, name, and arguments.
+    fn on_toolcall_end(&mut self, data: &str) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ToolcallEnd {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            #[serde(rename = "toolCall")]
+            tool_call: Option<WireToolCall>,
+        }
+        #[derive(Deserialize)]
+        struct WireToolCall {
+            id: Option<String>,
+            name: Option<String>,
+            arguments: Option<RawJson>,
+            incomplete: Option<bool>,
+        }
+        let event: ToolcallEnd = parse(data, "toolcall_end")?;
+        if let Some(call) = self.calls.get_mut(&event.content_index)
+            && let Some(tc) = event.tool_call
+        {
+            if let Some(id) = tc.id.filter(|s| !s.is_empty()) {
+                call.id = id;
+            }
+            if let Some(name) = tc.name.filter(|s| !s.is_empty()) {
+                call.name = name;
+            }
+            if tc.incomplete == Some(true) {
+                call.incomplete = true;
+            }
+            if let Some(args_val) = tc.arguments {
+                call.authoritative_args = Some(args_val.as_str().as_bytes().to_vec());
+            }
+        }
+        Ok(())
     }
 
     fn finish(
@@ -723,7 +771,7 @@ impl PiMessagesDecoder {
         let reason = match reason_str {
             Some("length") => StopReason::MaxTokens,
             Some("toolUse") => StopReason::ToolUse,
-            Some("stop") => {
+            Some("stop") | None => {
                 if has_calls {
                     StopReason::ToolUse
                 } else {
@@ -731,13 +779,6 @@ impl PiMessagesDecoder {
                 }
             }
             Some(other) => StopReason::Other(other.to_owned()),
-            None => {
-                if has_calls {
-                    StopReason::ToolUse
-                } else {
-                    StopReason::EndTurn
-                }
-            }
         };
         let truncated = reason == StopReason::MaxTokens;
         let calls = mem::take(&mut self.calls)

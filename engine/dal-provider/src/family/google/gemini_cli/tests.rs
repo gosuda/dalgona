@@ -894,7 +894,7 @@ async fn nonzero_exit_preserves_the_stdin_writer_cause() {
         "{error:?}"
     );
     let text = error.to_string();
-    assert!(text.contains("3"), "{text}");
+    assert!(text.contains('3'), "{text}");
     assert!(
         text.contains("writing the gemini prompt failed"),
         "{text}"

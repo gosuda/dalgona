@@ -260,12 +260,12 @@ async fn local_discovery_joins_tags_to_the_show_probe_without_credentials() {
     assert_eq!(thinker.tool_support, ToolSupport::Any);
     assert_eq!(thinker.max_output, None);
 
-    let seer = row_of(&fetched, "llava:7b");
-    assert_eq!(seer.context_window, Some(4_096));
-    assert!(seer.image_input);
+    let vision = row_of(&fetched, "llava:7b");
+    assert_eq!(vision.context_window, Some(4_096));
+    assert!(vision.image_input);
     // No `thinking` capability: no ladder and no `none` spelling, so the
     // request carries no `think` member at all.
-    assert_eq!(openai_ladder(seer), (Vec::new(), false));
+    assert_eq!(openai_ladder(vision), (Vec::new(), false));
 
     let embedder = row_of(&fetched, "nomic-embed:1");
     assert_eq!(embedder.tool_support, ToolSupport::None);

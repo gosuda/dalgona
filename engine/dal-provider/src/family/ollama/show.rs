@@ -19,7 +19,7 @@
 //! Ollama Cloud (`https://ollama.com`) speaks the same wire with three
 //! differences the rows carry: `/api/chat` rejects `options.num_predict`
 //! above [`CLOUD_NUM_PREDICT_CAP`] with HTTP 400 for every cloud model, the
-//! DeepSeek V4 Pro and Flash deployments cap their output at the same value
+//! `DeepSeek` V4 Pro and Flash deployments cap their output at the same value
 //! while advertising a far larger window (`/api/show` never reports it), and
 //! several cloud models reject assistant `thinking` in replayed history.
 //! [`Deployment::of`] decides which deployment a provider row is.
@@ -99,7 +99,7 @@ pub(crate) fn cloud_output_capped(model: &str) -> bool {
 ///
 /// `api/show` reports only whether a model thinks, never a tier vocabulary,
 /// so the ladder comes from the model id exactly like the reference rules:
-/// GPT-OSS keeps its Harmony `low`/`medium`/`high`; DeepSeek V4 keeps
+/// GPT-OSS keeps its Harmony `low`/`medium`/`high`; `DeepSeek` V4 keeps
 /// `low`/`high`/`max`; on the cloud, GLM 5.2 takes `high`/`max`, GLM 5.3 takes
 /// `low`/`high`/`max`, and any other cloud model takes the four-step default
 /// whose `minimal` spells `low` on the wire; any other self-hosted model takes
@@ -263,7 +263,7 @@ pub(crate) fn decode_show(bytes: &[u8]) -> Result<OllamaShow, ProviderError> {
 fn think_values(thinking: &sonic_rs::Value) -> Option<ThinkValues> {
     let items = thinking.as_object()?.get(&"values")?.as_array()?;
     let mut values = ThinkValues::default();
-    for item in items.iter() {
+    for item in items {
         if let Some(flag) = item.as_bool() {
             *(if flag { &mut values.on } else { &mut values.off }) = true;
             continue;

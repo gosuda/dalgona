@@ -253,11 +253,11 @@ async fn runner_success_returns_exact_stdout() {
         env,
         profile: "test-success",
     };
-    let out = run_credential_process(
+    let out = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("echo succeeds");
     assert_eq!(out.as_ref(), b"hello\n");
@@ -276,11 +276,11 @@ async fn runner_environment_isolated_to_snapshot() {
         env,
         profile: "test-env",
     };
-    let out = run_credential_process(
+    let out = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("env succeeds");
     let text = String::from_utf8_lossy(&out);
@@ -314,11 +314,11 @@ async fn runner_cwd_is_edge_captured_value() {
         env,
         profile: "test-cwd",
     };
-    let out = run_credential_process(
+    let out = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("pwd succeeds");
     let text = String::from_utf8_lossy(&out);
@@ -341,11 +341,11 @@ async fn runner_nonzero_exit_is_secret_free_transport() {
         env,
         profile: "test-nonzero",
     };
-    let error = run_credential_process(
+    let error = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect_err("nonzero must fail");
     let text = transport_reason(&error);
@@ -369,11 +369,11 @@ async fn runner_stdout_beyond_body_limit_returns_limit_without_truncated_bytes()
         env,
         profile: "test-limit",
     };
-    let error = run_credential_process(
+    let error = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect_err("over-limit must fail");
     match error {
@@ -405,9 +405,13 @@ async fn runner_explicit_cancel_kills_and_reaps() {
         sleep(Duration::from_millis(200)).await;
         child_cancel.cancel();
     });
-    let error = run_credential_process(&req, &cancel, Instant::now() + Duration::from_secs(30))
-        .await
-        .expect_err("cancel must fail");
+    let error = Box::pin(run_credential_process(
+        &req,
+        &cancel,
+        Instant::now() + Duration::from_secs(30),
+    ))
+    .await
+    .expect_err("cancel must fail");
     let text = transport_reason(&error);
     assert!(text.contains("test-cancel"), "names profile: {text}");
     assert!(text.contains("cancel"), "names cancel: {text}");
@@ -426,11 +430,11 @@ async fn runner_absolute_deadline_timeout_kills_and_reaps() {
         env,
         profile: "test-deadline",
     };
-    let error = run_credential_process(
+    let error = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_millis(300),
-    )
+    ))
     .await
     .expect_err("deadline must fail");
     let text = transport_reason(&error);
@@ -451,11 +455,11 @@ async fn runner_leader_exit_with_descendant_holding_pipe_drains_promptly() {
         env,
         profile: "test-descendant",
     };
-    let out = run_credential_process(
+    let out = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("leader exit drains after group kill");
     assert_eq!(out.as_ref(), b"hello\n");
@@ -480,14 +484,14 @@ async fn runner_future_drop_sends_termination_only_and_releases_slot() {
         env,
         profile: "test-drop",
     };
-    let outcome = tokio::time::timeout(
+    let outcome = Box::pin(tokio::time::timeout(
         Duration::from_millis(500),
         run_credential_process(
             &req,
             &CancellationToken::new(),
             Instant::now() + Duration::from_secs(30),
         ),
-    )
+    ))
     .await;
     assert!(outcome.is_err(), "long fixture times out via drop");
     let mut gone = false;
@@ -507,11 +511,11 @@ async fn runner_future_drop_sends_termination_only_and_releases_slot() {
         env,
         profile: "test-drop",
     };
-    run_credential_process(
+    Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("slot released after drop");
     let _ = std::fs::remove_dir_all(&dir);

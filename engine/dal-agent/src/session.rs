@@ -315,16 +315,37 @@ pub(crate) enum ActorRequest {
         req: ExtRecordRequest,
     },
     /// Journal one private-loop birth before its first effect.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
     PrivateLoop {
         /// The birth request.
         req: PrivateLoopRequest,
     },
     /// Journal one private-effect start before the effect runs.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
     PrivateStart {
         /// The start request.
         req: PrivateStartRequest,
     },
     /// Journal one private-effect terminal outcome.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
     PrivateEnd {
         /// The end request.
         req: PrivateEndRequest,
@@ -734,6 +755,13 @@ impl SessionHandle {
     /// the birth record did not persist. It folds/publishes nothing
     /// (irreversible store errors may leave a partial write; the next
     /// open repairs it).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
     pub(crate) async fn private_loop_born(
         &self,
         r#loop: PrivateLoopId,
@@ -759,6 +787,13 @@ impl SessionHandle {
     /// the standard closed-record text (same literal as the backend's
     /// closed-record error). A validation conflict appends nothing; an
     /// append failure folds/publishes no row or terminal (reopen repairs).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
     pub(crate) async fn private_start(
         &self,
         r#loop: PrivateLoopId,
@@ -795,6 +830,13 @@ impl SessionHandle {
     /// index. A validation rejection appends nothing; an append failure
     /// folds/publishes nothing and leaves the row Started in memory, which
     /// the next open repairs to [`PrivateOutcome::Indeterminate`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
     pub(crate) async fn private_end(
         &self,
         r#loop: PrivateLoopId,

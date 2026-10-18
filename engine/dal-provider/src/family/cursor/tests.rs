@@ -1777,7 +1777,7 @@ fn history_calls_carry_the_advertised_provider_identifier() {
     .unwrap();
     assert_eq!(lowered.tools.len(), 1);
     let advertised = lowered.tools[0].provider_identifier.as_str();
-    assert!(!advertised.is_empty());
+    assert_ne!(advertised, "");
     let run = run_request_of(&lowered.first_frame);
     let state = run.conversation_state.as_ref().unwrap();
     let mut identifiers = Vec::new();
@@ -2206,9 +2206,8 @@ fn the_context_handshake_declares_hosted_web_search_off() {
         Some(exec_client_message::Body::RequestContextResult(result)) => result,
         other => panic!("wrong body: {other:?}"),
     };
-    let success = match result.result {
-        Some(request_context_result::Result::Success(success)) => success,
-        None => panic!("the handshake carries no result"),
+    let Some(request_context_result::Result::Success(success)) = result.result else {
+        panic!("the handshake carries no result");
     };
     assert_eq!(
         success.request_context.unwrap().web_search_enabled,

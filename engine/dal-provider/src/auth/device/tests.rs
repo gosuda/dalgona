@@ -18,7 +18,7 @@ use crate::{Hook, ProviderError};
 
 use super::super::oauth::{DeviceUrls, LoginProgress, OAuthHttp, unix_now};
 
-/// The pinned public WorkOS client id; the start body must name it verbatim.
+/// The pinned public `WorkOS` client id; the start body must name it verbatim.
 const CLIENT_ID: &str = "client_01HNM792M5G5G1A2THWPXKFMXB";
 
 #[test]

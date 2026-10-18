@@ -369,8 +369,8 @@ fn wire_ids(body: &str) -> (Vec<String>, Vec<String>) {
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
     let root: sonic_rs::Value = sonic_rs::from_str(body).unwrap();
     let (mut calls, mut results) = (Vec::new(), Vec::new());
-    for content in root["contents"].as_array().unwrap().iter() {
-        for part in content["parts"].as_array().unwrap().iter() {
+    for content in root["contents"].as_array().unwrap() {
+        for part in content["parts"].as_array().unwrap() {
             for (member, sink) in [
                 ("functionCall", &mut calls),
                 ("functionResponse", &mut results),
@@ -1429,6 +1429,10 @@ async fn collect_turn(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one loopback fixture proves the direct turn end to end in place"
+)]
 async fn loopback_direct_turn_carries_key_and_decodes_tool_reasoning() {
     let mut request = loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro");
     request.tools = vec![ModelToolSpec {
@@ -1846,7 +1850,7 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
     // lifecycle's pre-delivery retry re-requests and the consumer only ever
     // sees the second response.
     let empty = sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]);
-    let served = sse(&[
+    let answer = sse(&[
         r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
     ]);
     let listener = LoopbackListener::bind("127.0.0.1:0").await.unwrap();
@@ -1855,7 +1859,7 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
     let mut server = tokio::task::JoinSet::new();
     server.spawn(serve_script(
         listener,
-        vec![(200, empty), (200, served)],
+        vec![(200, empty), (200, answer)],
         Arc::clone(&seen),
     ));
 

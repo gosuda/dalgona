@@ -690,7 +690,7 @@ fn replace_model_route_table(
     match route {
         ModelRoute::Api { family, model } => {
             table.insert("kind", toml_edit::value("api"));
-            table.insert("family", toml_edit::value(family_wire(family)));
+            table.insert("family", toml_edit::value(family_wire(*family)));
             table.insert("model", toml_edit::value(model.as_ref()));
         }
         ModelRoute::Synthetic { id } => {
@@ -717,7 +717,7 @@ fn approval_as_str(mode: ApprovalMode) -> &'static str {
 /// Renders a provider family with its `model_route.family` wire name: the
 /// [`crate::model::Family`] serde names, matching the
 /// [`parse_model_route`](super::values::parse_model_route) grammar.
-fn family_wire(family: &crate::model::Family) -> &'static str {
+fn family_wire(family: crate::model::Family) -> &'static str {
     use crate::model::Family;
     match family {
         Family::Chat => "openai_chat",

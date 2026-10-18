@@ -454,6 +454,10 @@ async fn google_direct_text_turn() {
 /// carries the signature on both the thought part and the `functionCall` part
 /// and a `functionResponse` part, byte for byte as the fixture golden.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one replay fixture proves both request bodies byte for byte in place"
+)]
 async fn google_direct_thinking_tool_turn_replays_the_signature() {
     let harness = Harness::direct("direct_thinking_tool_turn", 0).await;
     let provider = harness.direct_provider();

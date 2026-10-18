@@ -1,3 +1,9 @@
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration tests fail loudly"
+)]
+
 //! ENG-01 shared-contract regression tests for the journal codec.
 //!
 //! Covers call identity, terminal outcomes, cancellation ordering,
@@ -241,13 +247,13 @@ fn assistant_stops_round_trip() {
 
 #[test]
 fn job_outcomes_are_terminal_and_distinct() {
-    check_job_outcome(JobOutcome::Exited { code: 0 }, "\"exited\"");
-    check_job_outcome(JobOutcome::Cancelled, "\"cancelled\"");
-    check_job_outcome(JobOutcome::Lost, "\"lost\"");
-    check_job_outcome(JobOutcome::Failed { message: "x".into() }, "\"failed\"");
+    check_job_outcome(&JobOutcome::Exited { code: 0 }, "\"exited\"");
+    check_job_outcome(&JobOutcome::Cancelled, "\"cancelled\"");
+    check_job_outcome(&JobOutcome::Lost, "\"lost\"");
+    check_job_outcome(&JobOutcome::Failed { message: "x".into() }, "\"failed\"");
 }
 
-fn check_job_outcome(outcome: JobOutcome, fragment: &str) {
+fn check_job_outcome(outcome: &JobOutcome, fragment: &str) {
     let record = Record::Job {
         at: at(),
         job: dal_core::JobId::new_v7(),
@@ -263,7 +269,7 @@ fn check_job_outcome(outcome: JobOutcome, fragment: &str) {
     let JobEvent::Settled { outcome: Some(back_outcome) } = event else {
         panic!("expected settled outcome");
     };
-    assert_eq!(back_outcome, outcome);
+    assert_eq!(&back_outcome, outcome);
 }
 
 #[test]
@@ -288,8 +294,8 @@ fn owner_core_and_extension_never_alias_across_the_codec() {
         Owner::Core,
         Owner::Extension { name: "web".into(), origin: "bundled".into() }
     );
-    check_owner_round_trip(Owner::Core);
-    check_owner_round_trip(Owner::Extension {
+    check_owner_round_trip(&Owner::Core);
+    check_owner_round_trip(&Owner::Extension {
         name: "web".into(),
         origin: "bundled".into(),
     });
@@ -297,7 +303,7 @@ fn owner_core_and_extension_never_alias_across_the_codec() {
     assert_eq!(ClientId::new("tui").as_str(), "tui");
 }
 
-fn check_owner_round_trip(who: Owner) {
+fn check_owner_round_trip(who: &Owner) {
     let record = Record::Inferred {
         at: at(),
         who: who.clone(),
@@ -309,7 +315,7 @@ fn check_owner_round_trip(who: Owner) {
     let Record::Inferred { who: back_who, .. } = back else {
         panic!("expected inferred");
     };
-    assert_eq!(back_who, who);
+    assert_eq!(&back_who, who);
 }
 
 #[test]

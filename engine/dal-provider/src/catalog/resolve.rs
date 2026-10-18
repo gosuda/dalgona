@@ -75,7 +75,7 @@ pub fn resolve_route(
     // owner so a lone custom Chat or Responses owner serves typed routes and
     // dual owners never silently pick the canonical row. Zero or several
     // owners return the bare error without a degenerate probe.
-    let Some(owner) = single_family_owner(catalog, family) else {
+    let Some(owner) = single_family_owner(catalog, *family) else {
         return bare;
     };
     if model.is_empty() {
@@ -136,11 +136,11 @@ fn resolve_expanded(
 /// guess would bind cloud ids to the local row. It must also not prefer a
 /// built-in row the catalog does not configure. Zero or several owners mean no
 /// retry and the bare error stands.
-fn single_family_owner<'a>(catalog: &'a Catalog, family: &Family) -> Option<&'a str> {
+fn single_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
     let mut owners = catalog
         .providers
         .iter()
-        .filter(|(provider, _)| provider.family == *family)
+        .filter(|(provider, _)| provider.family == family)
         .map(|(provider, _)| provider.id.as_ref());
     let only = owners.next()?;
     owners.next().is_none().then_some(only)

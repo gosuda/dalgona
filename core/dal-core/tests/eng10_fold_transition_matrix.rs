@@ -1,3 +1,11 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    reason = "integration tests fail loudly"
+)]
+
 //! ENG-10 fold state-transition matrix (FLD-03A, FLD-03B, FLD-05A, FLD-06A).
 //!
 //! Drives one `Session` into every reachable lifecycle phase through the

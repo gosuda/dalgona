@@ -492,37 +492,8 @@ pub(crate) fn map_structured_error(
             message: full,
         };
     }
-    if matches!(
-        code,
-        Code::NOT_HIGH_ENOUGH_PERMISSIONS
-            | Code::PRO_USER_ONLY
-            | Code::GITHUB_NO_USER_CREDENTIALS
-            | Code::GITHUB_USER_NO_ACCESS
-            | Code::GITHUB_APP_NO_ACCESS
-            | Code::GITHUB_MULTIPLE_OWNERS
-            | Code::SUSPICIOUS_USAGE_BLOCKED
-            | Code::UNSUPPORTED_REGION
-            | Code::MODEL_BLOCKED
-    ) {
-        return ProviderError::Status {
-            family: Family::Cursor,
-            status: 403,
-            message: full,
-        };
-    }
-    if matches!(
-        code,
-        Code::BAD_MODEL_NAME
-            | Code::USER_NOT_FOUND
-            | Code::FILE_NOT_FOUND
-            | Code::NOT_FOUND
-            | Code::MODEL_NO_LONGER_SUPPORTED
-    ) {
-        return ProviderError::Status {
-            family: Family::Cursor,
-            status: 404,
-            message: full,
-        };
+    if let Some(status) = map_structured_status(code, &name, &text) {
+        return status;
     }
     if code == Code::MAX_TOKENS {
         return ProviderError::Status {
@@ -535,6 +506,43 @@ pub(crate) fn map_structured_error(
         return ProviderError::Overloaded;
     }
     ProviderError::InvalidRequest { message: full }
+}
+
+/// Maps the permission- and existence-shaped structured codes to their
+/// HTTP-status [`ProviderError`].
+fn map_structured_status(code: i32, name: &str, text: &str) -> Option<ProviderError> {
+    use super::proto::CursorError as Code;
+
+    let status = if matches!(
+        code,
+        Code::NOT_HIGH_ENOUGH_PERMISSIONS
+            | Code::PRO_USER_ONLY
+            | Code::GITHUB_NO_USER_CREDENTIALS
+            | Code::GITHUB_USER_NO_ACCESS
+            | Code::GITHUB_APP_NO_ACCESS
+            | Code::GITHUB_MULTIPLE_OWNERS
+            | Code::SUSPICIOUS_USAGE_BLOCKED
+            | Code::UNSUPPORTED_REGION
+            | Code::MODEL_BLOCKED
+    ) {
+        403
+    } else if matches!(
+        code,
+        Code::BAD_MODEL_NAME
+            | Code::USER_NOT_FOUND
+            | Code::FILE_NOT_FOUND
+            | Code::NOT_FOUND
+            | Code::MODEL_NO_LONGER_SUPPORTED
+    ) {
+        404
+    } else {
+        return None;
+    };
+    Some(ProviderError::Status {
+        family: Family::Cursor,
+        status,
+        message: format!("Cursor {name}: {text}"),
+    })
 }
 
 /// Maps one unstructured Connect code to its [`ProviderError`]. Unknown

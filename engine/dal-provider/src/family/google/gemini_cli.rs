@@ -298,20 +298,19 @@ impl CliDecoder {
         if line.trim().is_empty() {
             return Ok(());
         }
-        let event: CliEvent = match sonic_rs::from_str(line) {
-            Ok(event) => event,
-            Err(_) => {
-                let kind: Option<KindOnly> = sonic_rs::from_str(line).ok();
-                if let Some(kind) = kind.and_then(|kind| kind.kind)
-                    && is_known_event(&kind)
-                {
-                    return Err(ProviderError::Protocol {
-                        family: FAMILY,
-                        detail: format!("gemini-cli {kind} event is not valid"),
-                    });
-                }
-                return Ok(());
+        let event: CliEvent = if let Ok(event) = sonic_rs::from_str(line) {
+            event
+        } else {
+            let kind: Option<KindOnly> = sonic_rs::from_str(line).ok();
+            if let Some(kind) = kind.and_then(|kind| kind.kind)
+                && is_known_event(&kind)
+            {
+                return Err(ProviderError::Protocol {
+                    family: FAMILY,
+                    detail: format!("gemini-cli {kind} event is not valid"),
+                });
             }
+            return Ok(());
         };
         if self.result_seen {
             return match event {

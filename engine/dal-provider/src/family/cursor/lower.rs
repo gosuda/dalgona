@@ -296,6 +296,57 @@ impl TurnDigest {
     }
 }
 
+/// Encodes the run request carrying the lowered state as the stream's
+/// first frame.
+fn encode_run_frame(
+    root: Vec<Vec<u8>>,
+    turns: Vec<Vec<u8>>,
+    action: Action,
+    rules: &[super::proto::CursorRule],
+    tools: &[McpToolDefinition],
+    display_model_id: &str,
+    wire: &WireModel,
+    conversation_id: &str,
+) -> Result<Vec<u8>, CursorBodyError> {
+    let run_request = AgentRunRequest {
+        conversation_state: Some(ConversationStateStructure {
+            root_prompt_messages_json: root,
+            turns,
+        }),
+        action: Some(action.into_proto(rules, tools)),
+        model_details: Some(ModelDetails {
+            model_id: wire.details_id.to_string(),
+            display_model_id: display_model_id.to_string(),
+            display_name: wire.display_name.to_string(),
+            display_name_short: wire.display_name.to_string(),
+            aliases: Vec::new(),
+            thinking_details: None,
+            max_mode: wire.max_mode.then_some(true),
+        }),
+        requested_model: Some(RequestedModel {
+            model_id: wire.model_id.to_string(),
+            max_mode: wire.max_mode,
+            parameters: wire
+                .parameters
+                .iter()
+                .map(|(id, value)| RequestedModelParameter {
+                    id: id.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+        }),
+        mcp_tools: Some(McpTools {
+            tools: tools.to_vec(),
+        }),
+        conversation_id: Some(conversation_id.to_owned()),
+    };
+    let client_message = AgentClientMessage {
+        message: Some(client_message::Body::RunRequest(run_request)),
+    };
+    super::frame::encode_frame(&client_message.encode_to_vec(), 0)
+        .map_err(|_| CursorBodyError::FrameTooLarge)
+}
+
 /// Builds the run request frame and session seeds for one request.
 ///
 /// The trailing user message rides the action; anything else (trailing tool
@@ -372,43 +423,16 @@ pub(crate) fn build_run(
         None => Action::Resume,
     };
 
-    let run_request = AgentRunRequest {
-        conversation_state: Some(ConversationStateStructure {
-            root_prompt_messages_json: root,
-            turns,
-        }),
-        action: Some(action.into_proto(&rules, &tools)),
-        model_details: Some(ModelDetails {
-            model_id: wire.details_id.to_string(),
-            display_model_id: model.to_string(),
-            display_name: wire.display_name.to_string(),
-            display_name_short: wire.display_name.to_string(),
-            aliases: Vec::new(),
-            thinking_details: None,
-            max_mode: wire.max_mode.then_some(true),
-        }),
-        requested_model: Some(RequestedModel {
-            model_id: wire.model_id.to_string(),
-            max_mode: wire.max_mode,
-            parameters: wire
-                .parameters
-                .iter()
-                .map(|(id, value)| RequestedModelParameter {
-                    id: id.to_string(),
-                    value: value.to_string(),
-                })
-                .collect(),
-        }),
-        mcp_tools: Some(McpTools {
-            tools: tools.clone(),
-        }),
-        conversation_id: Some(conversation_id.to_owned()),
-    };
-    let client_message = AgentClientMessage {
-        message: Some(client_message::Body::RunRequest(run_request)),
-    };
-    let first_frame = super::frame::encode_frame(&client_message.encode_to_vec(), 0)
-        .map_err(|_| CursorBodyError::FrameTooLarge)?;
+    let first_frame = encode_run_frame(
+        root,
+        turns,
+        action,
+        &rules,
+        &tools,
+        model.as_ref(),
+        wire,
+        conversation_id,
+    )?;
 
     let mut digest = TurnDigest::new();
     digest.route(&route);
@@ -1145,10 +1169,6 @@ fn split_rounds_impl<'a>(
 
 /// Emits the results of a non-final round in arrival order: the first
 /// position triggers, the last occurrence supplies the content.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one pass over a fixed nine-tuple of lowering state"
-)]
 fn emit_round_results(
     history: &[ContextItem],
     assistant: usize,

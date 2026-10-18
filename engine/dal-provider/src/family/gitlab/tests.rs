@@ -911,7 +911,7 @@ fn grant_fresh_splits_on_the_ttl_edge() {
     };
     assert!(grant_fresh(&grant(Instant::now() + Duration::from_secs(60))));
     assert!(!grant_fresh(&grant(
-        Instant::now() - Duration::from_secs(1)
+        Instant::now().checked_sub(Duration::from_secs(1)).unwrap()
     )));
 }
 
@@ -933,7 +933,7 @@ async fn direct_access_expired_grant_reexchanges() {
                     token: "stale".into(),
                     headers: Vec::new(),
                 },
-                expires: Instant::now() - Duration::from_secs(1),
+                expires: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             }),
         },
     );
@@ -963,11 +963,11 @@ async fn direct_access_expired_grant_reexchanges() {
         .checked_duration_since(Instant::now())
         .expect("published grant is fresh");
     assert!(
-        remaining > Duration::from_secs(24 * 60),
+        remaining > Duration::from_mins(24),
         "TTL is minutes, not seconds: {remaining:?}"
     );
     assert!(
-        remaining <= Duration::from_secs(25 * 60) + Duration::from_secs(5),
+        remaining <= Duration::from_mins(25) + Duration::from_secs(5),
         "TTL is the pinned 25 minutes: {remaining:?}"
     );
     servers.abort_all();

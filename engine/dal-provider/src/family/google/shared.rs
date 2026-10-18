@@ -2006,12 +2006,13 @@ fn is_quota(message: &str, detail: Option<&ErrorDetail>) -> bool {
     if let Some(detail) = detail {
         for entry in &detail.details {
             match entry.kind.as_deref() {
-                Some(ERROR_INFO) => match entry.reason.as_deref() {
-                    Some("QUOTA_EXHAUSTED" | "INSUFFICIENT_G1_CREDITS_BALANCE") => {
+                Some(ERROR_INFO) => {
+                    if let Some("QUOTA_EXHAUSTED" | "INSUFFICIENT_G1_CREDITS_BALANCE") =
+                        entry.reason.as_deref()
+                    {
                         return true;
                     }
-                    _ => {}
-                },
+                }
                 Some(RETRY_INFO)
                     if entry
                         .retry_delay

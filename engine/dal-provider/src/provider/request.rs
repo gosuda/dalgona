@@ -881,42 +881,12 @@ async fn devin_attempt(
 
     let cascade_id = context.session.to_string();
     let (chat_model_uid, assignment_jwt) = if routed {
-        let assign_url =
-            http::endpoint(Family::Devin, &base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
-        let assign_response = devin_unary(
-            &context.client,
-            assign_url,
-            UNARY_HEADERS,
-            assign_body(
-                &wire_key,
-                &router_uid,
-                &cascade_id,
-                router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
-            ),
-            &context.user_agent,
-            cancel,
-        )
-        .await?;
-        let Some(assign_response) = assign_response else {
+        let Some((chat_model_uid, assignment_jwt)) =
+            devin_assign(context, credential, cancel, &wire_key, &cascade_id, &base).await?
+        else {
             return Ok(None);
         };
-        let assign_bytes = devin_body(assign_response, credential, cancel).await?;
-        let Some(assign_bytes) = assign_bytes else {
-            return Ok(None);
-        };
-        let assigned: AssignModelResponse = decode_unary(&assign_bytes, "AssignModelResponse")
-            .map_err(|err| devin_protocol(&err))?;
-        let assignment = assigned
-            .assignment
-            .filter(|assignment| {
-                !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
-            })
-            .ok_or_else(|| {
-                AttemptFailure::Provider(ProviderError::InvalidRequest {
-                    message: String::from("devin assignment did not resolve a serving model"),
-                })
-            })?;
-        (assignment.model_uid, Some(assignment.assignment_jwt))
+        (chat_model_uid, assignment_jwt)
     } else {
         (router_uid, None)
     };
@@ -993,6 +963,60 @@ async fn devin_attempt(
         None,
         secrets,
         None,
+    )))
+}
+
+/// Assigns the router model on Devin when the discovery marks it as a
+/// router: sends the `AssignModel` unary call and returns the serving
+/// model uid with its assignment JWT. `None` when the server stays silent
+/// (the caller then yields no stream).
+async fn devin_assign(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    wire_key: &str,
+    cascade_id: &str,
+    base: &str,
+) -> Result<Option<(String, Option<String>)>, AttemptFailure> {
+    let router_uid = context.request.model.id().to_owned();
+    let assign_url =
+        http::endpoint(Family::Devin, base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
+    let assign_response = devin_unary(
+        &context.client,
+        assign_url,
+        UNARY_HEADERS,
+        assign_body(
+            wire_key,
+            &router_uid,
+            cascade_id,
+            router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
+        ),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(assign_response) = assign_response else {
+        return Ok(None);
+    };
+    let assign_bytes = devin_body(assign_response, credential, cancel).await?;
+    let Some(assign_bytes) = assign_bytes else {
+        return Ok(None);
+    };
+    let assigned: AssignModelResponse =
+        decode_unary(&assign_bytes, "AssignModelResponse").map_err(|err| devin_protocol(&err))?;
+    let assignment = assigned
+        .assignment
+        .filter(|assignment| {
+            !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
+        })
+        .ok_or_else(|| {
+            AttemptFailure::Provider(ProviderError::InvalidRequest {
+                message: String::from("devin assignment did not resolve a serving model"),
+            })
+        })?;
+    Ok(Some((
+        assignment.model_uid,
+        Some(assignment.assignment_jwt),
     )))
 }
 
@@ -1313,21 +1337,20 @@ async fn vertex_attempt(
     // authenticates: a token that never lived in the credential must still
     // be scrubbed from every error text and stream the request produces.
     let mut secrets = credential_secrets(credential);
-    let auth = match credential {
-        Credential::ApiKey { key } => VertexAuth::Express {
+    let auth = if let Credential::ApiKey { key } = credential {
+        VertexAuth::Express {
             api_key: key.expose(),
             location,
             explicit_location,
-        },
-        _ => {
-            let token = vertex_bearer(credential, owner, &context.provider)?;
-            require_vertex_route(&context.provider, project, location)?;
-            secrets.push(Box::from(token));
-            VertexAuth::Bearer {
-                access_token: token,
-                project: project.unwrap_or_default(),
-                location: location.unwrap_or_default(),
-            }
+        }
+    } else {
+        let token = vertex_bearer(credential, owner, &context.provider)?;
+        require_vertex_route(&context.provider, project, location)?;
+        secrets.push(Box::from(token));
+        VertexAuth::Bearer {
+            access_token: token,
+            project: project.unwrap_or_default(),
+            location: location.unwrap_or_default(),
         }
     };
     let oauth = matches!(credential, Credential::OAuth(_));
@@ -1960,26 +1983,20 @@ pub(crate) fn build_stream_request(
     credential: &Credential,
 ) -> Result<StreamRequestParts, ProviderError> {
     let route_family = context.family;
-    let user_agent = context.user_agent.clone();
     let secrets = credential_secrets(credential);
     match route_family {
-        Family::Chat => {
-            let body = family::chat::request_body(&context.request, &context.thinking).map_err(
-                |error| ProviderError::InvalidRequest {
+        Family::Chat => build_openai_compatible_stream(
+            context,
+            credential,
+            secrets,
+            family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
+                ProviderError::InvalidRequest {
                     message: error.to_string(),
-                },
-            )?;
-            let url = http::endpoint(route_family, &context.base_url, family::chat::ENDPOINT_PATH)?;
-            let mut request = context.client.post(url);
-            // A credential-less row (a keyless local gateway such as
-            // llama.cpp, configured `auth = "none"`) sends no header.
-            if let Some((header, value)) =
-                optional_auth_header(context.auth, credential, route_family, &context.provider)?
-            {
-                request = request.header(header, value);
-            }
-            Ok((request.body(body), user_agent, secrets, None))
-        }
+                }
+            })?,
+            family::chat::ENDPOINT_PATH,
+            None,
+        ),
         Family::Responses => {
             let wire = build_responses_wire_from_context(context, credential)?;
             let url = http::endpoint(route_family, &context.base_url, "responses")?;
@@ -2020,25 +2037,18 @@ pub(crate) fn build_stream_request(
         Family::GoogleGeminiCli => Err(ProviderError::InvalidRequest {
             message: String::from("Gemini CLI requests use the dedicated subprocess adapter"),
         }),
-        Family::Mistral => {
-            let body = family::mistral::request_body(&context.request, &context.thinking).map_err(
+        Family::Mistral => build_openai_compatible_stream(
+            context,
+            credential,
+            secrets,
+            family::mistral::request_body(&context.request, &context.thinking).map_err(
                 |error| ProviderError::InvalidRequest {
                     message: error.to_string(),
                 },
-            )?;
-            let url = http::endpoint(
-                route_family,
-                &context.base_url,
-                family::mistral::ENDPOINT_PATH,
-            )?;
-            let mut request = context.client.post(url);
-            if let Some((header, value)) =
-                optional_auth_header(context.auth, credential, route_family, &context.provider)?
-            {
-                request = request.header(header, value);
-            }
-            Ok((request.body(body), user_agent, secrets, None))
-        }
+            )?,
+            family::mistral::ENDPOINT_PATH,
+            None,
+        ),
         Family::Ollama => {
             let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
             let policy = family::ollama::WirePolicy::for_model(
@@ -2046,45 +2056,77 @@ pub(crate) fn build_stream_request(
                 &context.model,
                 &context.entry.thinking,
             );
-            let body = family::ollama::request_body(&context.request, &context.thinking, policy)
-                .map_err(|error| ProviderError::InvalidRequest {
-                    message: error.to_string(),
-                })?;
-            let base = family::ollama::trim_api_suffix(&context.base_url);
-            let url = http::endpoint(route_family, base, family::ollama::ENDPOINT_PATH)?;
-            let mut request = context.client.post(url);
-            if let Some((header, value)) =
-                optional_auth_header(context.auth, credential, route_family, &context.provider)?
-            {
-                request = request.header(header, value);
-            }
-            Ok((request.body(body), user_agent, secrets, None))
-        }
-        Family::PiMessages => {
-            let body = family::pi_messages::request_body(
-                &context.request,
-                &context.provider,
-                &context.thinking,
-            )
-            .map_err(|error| ProviderError::InvalidRequest {
-                message: error.to_string(),
-            })?;
-            let url = http::endpoint(
-                route_family,
-                &context.base_url,
-                family::pi_messages::ENDPOINT_PATH,
-            )?;
-            let (header, value) =
-                auth_header(context.auth, credential, route_family, &context.provider)?;
-            Ok((
-                context.client.post(url).header(header, value).body(body),
-                user_agent,
+            build_openai_compatible_stream(
+                context,
+                credential,
                 secrets,
-                None,
-            ))
+                family::ollama::request_body(&context.request, &context.thinking, policy).map_err(
+                    |error| ProviderError::InvalidRequest {
+                        message: error.to_string(),
+                    },
+                )?,
+                family::ollama::ENDPOINT_PATH,
+                Some(family::ollama::trim_api_suffix(&context.base_url)),
+            )
         }
+        Family::PiMessages => build_pi_messages_stream(context, credential, secrets),
         Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
+}
+
+/// Builds the streaming request for the pi-messages family: one POST with a
+/// mandatory auth header.
+fn build_pi_messages_stream(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::pi_messages::request_body(&context.request, &context.provider, &context.thinking)
+            .map_err(|error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::pi_messages::ENDPOINT_PATH,
+    )?;
+    let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
+    Ok((
+        context.client.post(url).header(header, value).body(body),
+        context.user_agent.clone(),
+        secrets,
+        None,
+    ))
+}
+
+/// Builds the streaming request for the OpenAI-compatible families (Chat,
+/// Mistral, Ollama): one POST on the family endpoint with an optional auth
+/// header, the built body, and the standard user agent. A credential-less
+/// row (a keyless local gateway such as llama.cpp, configured
+/// `auth = "none"`) sends no header.
+fn build_openai_compatible_stream(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    body: Vec<u8>,
+    path: &'static str,
+    base_override: Option<&str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let base = base_override.unwrap_or(&context.base_url);
+    let url = http::endpoint(context.family, base, path)?;
+    let mut request = context.client.post(url);
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((
+        request.body(body),
+        context.user_agent.clone(),
+        secrets,
+        None,
+    ))
 }
 
 fn build_anthropic_stream_request(

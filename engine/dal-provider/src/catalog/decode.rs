@@ -270,7 +270,7 @@ pub(crate) fn decode_ollama_models(
 /// `thinking.values` (named levels, and whether `false` turns reasoning off)
 /// and only when a server reports none does it come from the model id. A probe
 /// that lists no capabilities leaves the row as `api/tags` made it. On the
-/// cloud, the DeepSeek V4 deployments that cap output below their window carry
+/// cloud, the `DeepSeek` V4 deployments that cap output below their window carry
 /// that cap as their output limit, which `api/show` never reports.
 pub(crate) fn apply_ollama_show(
     entry: &mut CatalogEntry,

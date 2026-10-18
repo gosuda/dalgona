@@ -124,7 +124,7 @@ fn crc_mismatch_is_a_typed_failure_and_ends_the_decoder() {
     wire[last] ^= 0x01;
     let mut decoder = FrameDecoder::new();
     let pushed = decoder.push(&wire);
-    assert!(pushed.frames.is_empty());
+    assert_eq!(pushed.frames, [] as [Frame; 0]);
     assert!(matches!(
         pushed.failure,
         Some(FrameError::Crc {
@@ -486,7 +486,7 @@ fn a_chunk_of_many_frames_leaves_only_the_partial_tail_buffered() {
     );
     let pushed = decoder.push(&third[cut..]);
     assert_eq!(pushed.frames.len(), 1);
-    assert!(decoder.buffer.is_empty());
+    assert_eq!(decoder.buffer, [] as [u8; 0]);
     assert_eq!(decoder.finish(), Ok(()));
 }
 
@@ -615,8 +615,9 @@ fn header_text_that_is_not_utf8_is_refused() {
 fn a_declared_value_length_never_reads_past_the_header_block() {
     // Sixty-five thousand bytes follow in the payload, so a missing bound
     // would decode payload bytes as header data instead of refusing.
+    let payload = vec![0x41; 70_000].into_boxed_slice();
     for kind in [6, 7] {
-        let wire = raw_frame(&typed("k", &[kind, 0xFF, 0xFF]), &[0x41; 70_000]);
+        let wire = raw_frame(&typed("k", &[kind, 0xFF, 0xFF]), &payload);
         assert!(
             matches!(decode_all(vec![wire]), Err(FrameError::Header { .. })),
             "type {kind}"

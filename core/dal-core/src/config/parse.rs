@@ -207,15 +207,7 @@ pub(super) fn parse_file_text(
 ) -> Result<ParsedLayer, ConfigError> {
     let mut layer = ParsedLayer::default();
     capture_raw_sections(&mut layer, &mut file);
-    if let Some(value) = layer.sections.get("judge")
-        && !matches!(value, toml::Value::Table(_))
-    {
-        return Err(invalid_value(
-            "judge",
-            value_text(value),
-            "Use a [judge] table with gate, model, timeout_ms, max_concurrent, max_per_turn.",
-        ));
-    }
+    validate_judge_section(&layer)?;
     if let Some(value) = file.mode {
         layer.mode = Some(parse_mode(value)?);
     }
@@ -306,6 +298,21 @@ pub(super) fn parse_file_text(
         )?);
     }
     Ok(layer)
+}
+
+/// Rejects a raw `judge` section that is not a table before extension
+/// validation sees it.
+fn validate_judge_section(layer: &ParsedLayer) -> Result<(), ConfigError> {
+    if let Some(value) = layer.sections.get("judge")
+        && !matches!(value, toml::Value::Table(_))
+    {
+        return Err(invalid_value(
+            "judge",
+            value_text(value),
+            "Use a [judge] table with gate, model, timeout_ms, max_concurrent, max_per_turn.",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_tui(product: ConfigProduct, value: toml::Value) -> Result<TuiConfig, ConfigError> {

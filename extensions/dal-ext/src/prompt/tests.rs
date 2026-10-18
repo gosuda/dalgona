@@ -551,97 +551,39 @@ async fn absent_tools_and_instructions_leave_no_section_or_separator() {
     assert_eq!(system, expected);
 }
 
+/// The ten static sections one owner registers, in canonical render order,
+/// each carrying its own marker line.
+fn single_owner_sections() -> [(PromptOrder, &'static str); 10] {
+    [
+        (PromptOrder::Identity, "SECTION-IDENTITY\n"),
+        (PromptOrder::D2, "SECTION-D2\n"),
+        (PromptOrder::Tools, "SECTION-TOOLS\n"),
+        (PromptOrder::Skills, "SECTION-SKILLS\n"),
+        (PromptOrder::Rules, "SECTION-RULES\n"),
+        (PromptOrder::Rulebook, "SECTION-RULEBOOK\n"),
+        (PromptOrder::Plugins, "SECTION-PLUGINS\n"),
+        (PromptOrder::Environment, "SECTION-ENVIRONMENT\n"),
+        (PromptOrder::Fallback, "SECTION-FALLBACK\n"),
+        (PromptOrder::DocsLine, "SECTION-DOCS\n"),
+    ]
+}
+
+/// Builds one extension that registers `sections` in the order given.
+fn single_owner_extension(
+    sections: impl IntoIterator<Item = (PromptOrder, &'static str)>,
+) -> Extension {
+    let mut builder =
+        ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY).expect("fixture builder");
+    for (order, text) in sections {
+        builder = builder.prompt_section(PromptSection::static_text(order, text.into()));
+    }
+    builder.build().expect("fixture extension")
+}
+
 #[tokio::test]
 async fn prompt_sections_under_single_owner_render_in_deterministic_order() {
-    let reverse_owner = ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY)
-        .expect("fixture builder")
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::DocsLine,
-            "SECTION-DOCS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Fallback,
-            "SECTION-FALLBACK\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Environment,
-            "SECTION-ENVIRONMENT\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Plugins,
-            "SECTION-PLUGINS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Rulebook,
-            "SECTION-RULEBOOK\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Rules,
-            "SECTION-RULES\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Skills,
-            "SECTION-SKILLS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Tools,
-            "SECTION-TOOLS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::D2,
-            "SECTION-D2\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Identity,
-            "SECTION-IDENTITY\n".into(),
-        ))
-        .build()
-        .expect("reverse fixture extension");
-
-    let forward_owner = ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY)
-        .expect("fixture builder")
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Identity,
-            "SECTION-IDENTITY\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::D2,
-            "SECTION-D2\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Tools,
-            "SECTION-TOOLS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Skills,
-            "SECTION-SKILLS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Rules,
-            "SECTION-RULES\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Rulebook,
-            "SECTION-RULEBOOK\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Plugins,
-            "SECTION-PLUGINS\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Environment,
-            "SECTION-ENVIRONMENT\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::Fallback,
-            "SECTION-FALLBACK\n".into(),
-        ))
-        .prompt_section(PromptSection::static_text(
-            PromptOrder::DocsLine,
-            "SECTION-DOCS\n".into(),
-        ))
-        .build()
-        .expect("forward fixture extension");
+    let reverse_owner = single_owner_extension(single_owner_sections().into_iter().rev());
+    let forward_owner = single_owner_extension(single_owner_sections());
 
     let reverse_system = assembled(vec![reverse_owner]).await;
     let forward_system = assembled(vec![forward_owner]).await;

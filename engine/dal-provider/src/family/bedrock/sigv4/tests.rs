@@ -1,6 +1,6 @@
 use super::*;
 
-/// The well-known AWS SigV4 test credential from the AWS documentation
+/// The well-known AWS `SigV4` test credential from the AWS documentation
 /// example (GET vanilla object, service `s3` shape adapted to `bedrock`).
 fn credential() -> AwsCredential {
     AwsCredential {
