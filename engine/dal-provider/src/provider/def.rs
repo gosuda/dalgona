@@ -310,7 +310,7 @@ const VENDOR_ROWS: &[ProviderDef] = &[OPENAI, OPENAI_CODEX, ANTHROPIC];
 const ROWS: usize = VENDOR_ROWS.len() + presets::PRESETS.len();
 
 /// The vendor rows, then the presets, joined at compile time.
-const TABLE: [ProviderDef; ROWS] = {
+static TABLE: [ProviderDef; ROWS] = {
     let mut rows = [OPENAI; ROWS];
     let mut index = 0;
     while index < ROWS {
@@ -326,7 +326,7 @@ const TABLE: [ProviderDef; ROWS] = {
 
 /// Every built-in provider, in the order the configuration lists them: the
 /// vendor rows, then the API-key presets by id.
-pub const PROVIDERS: &[ProviderDef] = &TABLE;
+pub static PROVIDERS: &[ProviderDef] = &TABLE;
 
 /// The built-in provider with `id`, if any.
 #[must_use]
