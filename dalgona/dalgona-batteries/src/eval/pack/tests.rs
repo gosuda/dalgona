@@ -213,10 +213,22 @@ fn a_check_passes_and_fails_on_the_workspace() {
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(dir.join("scripts/run.sh"), "#!/bin/sh\nset -e\n").unwrap();
     let (cancel, deadline) = unexpired();
-    assert!(check.run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline).unwrap());
-    assert!(!check.run(&input(Exit::Failed, "done", &[]), &dir, &cancel, deadline).unwrap());
+    assert!(
+        check
+            .run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline)
+            .unwrap()
+    );
+    assert!(
+        !check
+            .run(&input(Exit::Failed, "done", &[]), &dir, &cancel, deadline)
+            .unwrap()
+    );
     std::fs::write(dir.join("scripts/run.sh"), "set -e\n").unwrap();
-    assert!(!check.run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline).unwrap());
+    assert!(
+        !check
+            .run(&input(Exit::Ok, "done", &[]), &dir, &cancel, deadline)
+            .unwrap()
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -231,8 +243,16 @@ fn a_check_sees_text_tool_calls_and_usage() {
     }];
     let dir = std::env::temp_dir();
     let (cancel, deadline) = unexpired();
-    assert!(check.run(&input(Exit::Ok, "hi", &calls), &dir, &cancel, deadline).unwrap());
-    assert!(!check.run(&input(Exit::Ok, "no", &calls), &dir, &cancel, deadline).unwrap());
+    assert!(
+        check
+            .run(&input(Exit::Ok, "hi", &calls), &dir, &cancel, deadline)
+            .unwrap()
+    );
+    assert!(
+        !check
+            .run(&input(Exit::Ok, "no", &calls), &dir, &cancel, deadline)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -242,7 +262,12 @@ fn a_check_that_raises_names_its_line() {
     );
     let (cancel, deadline) = unexpired();
     let CheckError::Script(error) = check
-        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir(), &cancel, deadline)
+        .run(
+            &input(Exit::Ok, "", &[]),
+            &std::env::temp_dir(),
+            &cancel,
+            deadline,
+        )
         .unwrap_err()
     else {
         panic!("expected a script failure");
@@ -326,7 +351,12 @@ fn a_runaway_check_stops_at_its_tick_budget() {
     );
     let (cancel, deadline) = unexpired();
     let CheckError::Script(error) = check
-        .run(&input(Exit::Ok, "", &[]), &std::env::temp_dir(), &cancel, deadline)
+        .run(
+            &input(Exit::Ok, "", &[]),
+            &std::env::temp_dir(),
+            &cancel,
+            deadline,
+        )
         .unwrap_err()
     else {
         panic!("expected a script failure");
@@ -353,7 +383,12 @@ fn a_check_that_returns_a_non_bool_is_an_error_not_a_coercion() {
         ));
         let (cancel, deadline) = unexpired();
         let CheckError::Script(error) = check
-            .run(&input(Exit::Ok, "done", &[]), &std::env::temp_dir(), &cancel, deadline)
+            .run(
+                &input(Exit::Ok, "done", &[]),
+                &std::env::temp_dir(),
+                &cancel,
+                deadline,
+            )
             .unwrap_err()
         else {
             panic!("expected a script failure");

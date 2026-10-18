@@ -57,7 +57,10 @@ pub fn run_command(command: &mut std::process::Command) -> std::io::Result<std::
     command.output().map_err(|error| {
         std::io::Error::new(
             error.kind(),
-            format!("cannot run `{}`: {error}", command.get_program().to_string_lossy()),
+            format!(
+                "cannot run `{}`: {error}",
+                command.get_program().to_string_lossy()
+            ),
         )
     })
 }
