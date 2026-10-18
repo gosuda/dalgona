@@ -926,7 +926,7 @@ async fn reused_pending_id_cancel_held_logout_after_failed_login() {
             .expect("first authorize url")
             .to_owned();
         host.set_login_endpoints(
-            dal_provider::LoginEndpoints::loopback(&base_b)
+            dal_provider::LoginEndpoints::loopback(&base_b, &dal_provider::EnvSnapshot::default())
                 .expect("loopback endpoints")
                 .with_callback_ports(0, 0),
         )
@@ -993,7 +993,7 @@ async fn string_and_numeric_request_ids_do_not_share_cancel() {
     let (base_b, admitted_rx, release_tx, mut server) = held_revoke_endpoint().await;
     rig.host
         .set_login_endpoints(
-            dal_provider::LoginEndpoints::loopback(&base_b)
+            dal_provider::LoginEndpoints::loopback(&base_b, &dal_provider::EnvSnapshot::default())
                 .expect("loopback endpoints")
                 .with_callback_ports(0, 0),
         )

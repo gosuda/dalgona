@@ -102,6 +102,21 @@ pub(super) struct AuthHost {
     pub(super) auth_path: PathBuf,
 }
 
+#[cfg(feature = "test-support")]
+pub(super) fn test_login_endpoints(
+    vars: &VarsMap,
+) -> Result<Option<dal_provider::LoginEndpoints>, ProviderError> {
+    let Some(base) = vars
+        .get(std::ffi::OsStr::new(TEST_ENDPOINTS_ENV))
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy())
+    else {
+        return Ok(None);
+    };
+    dal_provider::LoginEndpoints::loopback(&base, &dal_provider::EnvSnapshot::from_vars(vars))
+        .map(Some)
+}
+
 /// Starts the shared host for one auth command. Test-support builds also
 /// apply the loopback endpoint override when the test seam names one;
 /// release builds never read it.
@@ -113,11 +128,8 @@ pub(super) async fn start_auth_host(
     let vars = startup.vars.clone();
     let auth_path = data_root.join("auth.json");
     #[cfg(feature = "test-support")]
-    let test_base = startup
-        .vars
-        .get(std::ffi::OsStr::new(TEST_ENDPOINTS_ENV))
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string_lossy().into_owned());
+    let test_endpoints = test_login_endpoints(&startup.vars)
+        .map_err(|error| provider_error("login", &error, &auth_path))?;
     let host = super::start_host(
         product,
         &startup.config,
@@ -128,9 +140,7 @@ pub(super) async fn start_auth_host(
     )
     .await?;
     #[cfg(feature = "test-support")]
-    if let Some(base) = test_base {
-        let endpoints = dal_provider::LoginEndpoints::loopback(&base)
-            .map_err(|error| provider_error("login", &error, &auth_path))?;
+    if let Some(endpoints) = test_endpoints {
         host.set_login_endpoints(endpoints)
             .map_err(|error| host_auth_error("login", &error, &auth_path))?;
     }
@@ -142,9 +152,11 @@ pub(super) async fn start_auth_host(
     })
 }
 
-/// Shuts the auth host down after its command finishes.
+/// Shuts the auth host down after its command finishes, inside the process
+/// shutdown ladder. An auth command holds no busy extension status, so it
+/// has no quiet wait to spend.
 pub(super) async fn shutdown_auth_host(host: Host) {
-    let _ = host.shutdown(Duration::from_secs(3)).await;
+    let _closed = exit::Ladder::begin().close_host_after_quiet_wait(host).await;
 }
 
 /// Maps a host auth failure to its exit code, keeping the provider error
@@ -213,6 +225,9 @@ async fn login_browser_or_prompted(
             return no_terminal();
         }
         return login_oauth(startup, product, def, Method::Browser).await;
+    }
+    if def.offers(Method::Device) {
+        return login_device(startup, product, def).await;
     }
     login_prompted_key(startup, product, def).await
 }
@@ -407,7 +422,8 @@ async fn run_with_paste(
     tokio::pin!(run);
     let mut paste = Some(paste);
     let mut raw_mode = None;
-    let mut reader = std::pin::pin!(read_paste());
+    let mut prompt_default = None;
+    let mut reader = std::pin::pin!(read_masked_value());
     loop {
         let reading = raw_mode.is_some() && paste.is_some();
         tokio::select! {
@@ -420,29 +436,30 @@ async fn run_with_paste(
                         })
                     })?);
                 }
-                login_progress(event);
+                login_progress(&event);
+                if let LoginProgress::AskPaste { default, .. } = event {
+                    prompt_default = default;
+                }
             }
             result = &mut run => return result,
             line = &mut reader, if reading => {
-                match line {
-                    Ok(line) => {
-                        if let Some(current) = paste.take() {
-                            let _ = current.send(line);
-                        }
-                    }
-                    Err(_) => return Err(HostError::Provider(ProviderError::LoginCancelled)),
+                let Ok(line) = line else {
+                    return Err(HostError::Provider(ProviderError::LoginCancelled));
+                };
+                let answer = if !line.is_empty() {
+                    Some(line)
+                } else {
+                    prompt_default.take()
+                };
+                let Some(answer) = answer else {
+                    reader.set(read_masked_value());
+                    continue;
+                };
+                drop(raw_mode.take());
+                if let Some(current) = paste.take() {
+                    let _ = current.send(answer);
                 }
             }
-        }
-    }
-}
-
-/// Reads masked lines until one is not empty.
-async fn read_paste() -> io::Result<String> {
-    loop {
-        let line = read_masked_value().await?;
-        if !line.is_empty() {
-            return Ok(line);
         }
     }
 }
@@ -514,7 +531,7 @@ async fn read_masked_value() -> io::Result<String> {
     }
 }
 
-fn login_progress(progress: LoginProgress) {
+fn login_progress(progress: &LoginProgress) {
     let mut stderr = std::io::stderr().lock();
     match progress {
         LoginProgress::OpenUrl { url } => {
@@ -529,7 +546,7 @@ fn login_progress(progress: LoginProgress) {
                 "Open {url} and enter code {code}.\nWaiting for sign-in..."
             );
         }
-        LoginProgress::AskPaste { hint } => {
+        LoginProgress::AskPaste { hint, .. } => {
             let _ = writeln!(stderr, "Open the sign-in URL, then {hint}");
         }
         LoginProgress::Exchanging => {
@@ -567,11 +584,39 @@ async fn status(host: &Host, data_root: &Path, vars: &crate::VarsMap) -> ExitCod
         Ok(stored) => stored,
         Err(error) => return host_auth_error("login status", &error, &path),
     };
+    let cancel = CancellationToken::new();
+    let readiness = match host.provider_readiness(&cancel).await {
+        Ok(readiness) => readiness,
+        Err(error) => return host_auth_error("login status", &error, &path),
+    };
+    let mut pending: std::collections::BTreeMap<&str, bool> = readiness
+        .iter()
+        .filter(|row| row.family == dal_core::Family::Bedrock)
+        .map(|row| (row.provider.as_ref(), row.ready))
+        .collect();
     let mut ready = false;
     let mut first_missing = None;
+    let mut bedrock_missing = false;
     let mut output = String::new();
     for def in dal_provider::login_providers() {
         let provider = def.id;
+        if let Some(bedrock_ready) = pending.remove(provider) {
+            if bedrock_ready {
+                ready = true;
+                let _ = std::fmt::Write::write_fmt(
+                    &mut output,
+                    format_args!("{provider:<14} {:<15} {}\n", "ready", "bedrock"),
+                );
+            } else {
+                first_missing.get_or_insert(provider);
+                bedrock_missing = true;
+                let _ = std::fmt::Write::write_fmt(
+                    &mut output,
+                    format_args!("{provider:<14} not configured\n"),
+                );
+            }
+            continue;
+        }
         let row = stored.iter().find(|row| row.provider.as_ref() == provider);
         let environment_key = def.key.is_some_and(|key| {
             key.env.iter().any(|name| {
@@ -584,20 +629,33 @@ async fn status(host: &Host, data_root: &Path, vars: &crate::VarsMap) -> ExitCod
             let state = if row.expired { "expired" } else { "ready" };
             let _ = std::fmt::Write::write_fmt(
                 &mut output,
-                format_args!("{provider:<14}{:<15}{}\n", state, stored_kind(row)),
+                format_args!("{provider:<14} {:<15} {}\n", state, stored_kind(row)),
             );
         } else if environment_key {
             ready = true;
             let _ = std::fmt::Write::write_fmt(
                 &mut output,
-                format_args!("{provider:<14}{:<15}api_key\n", "ready"),
+                format_args!("{provider:<14} {:<15} api_key\n", "ready"),
             );
         } else {
             first_missing.get_or_insert(provider);
             let _ = std::fmt::Write::write_fmt(
                 &mut output,
-                format_args!("{provider:<14}not configured\n"),
+                format_args!("{provider:<14} not configured\n"),
             );
+        }
+    }
+    for (id, bedrock_ready) in pending {
+        if bedrock_ready {
+            ready = true;
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{id:<14} {:<15} {}\n", "ready", "bedrock"),
+            );
+        } else {
+            bedrock_missing = true;
+            let _ =
+                std::fmt::Write::write_fmt(&mut output, format_args!("{id:<14} not configured\n"));
         }
     }
     let _ = write!(std::io::stdout().lock(), "{output}");
@@ -611,6 +669,12 @@ async fn status(host: &Host, data_root: &Path, vars: &crate::VarsMap) -> ExitCod
         std::io::stderr().lock(),
         "Run dalgon login {provider} to sign in."
     );
+    if bedrock_missing {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Set up AWS credentials for Bedrock via environment, shared config, or SSO."
+        );
+    }
     exit::code(exit::ExitKind::RequestedFailure)
 }
 
@@ -644,6 +708,13 @@ fn no_terminal() -> ExitCode {
 }
 
 pub(super) fn provider_error(module: &str, error: &ProviderError, path: &Path) -> ExitCode {
+    two_lines(
+        provider_error_lines(module, error, path),
+        exit::ExitKind::RequestedFailure,
+    )
+}
+
+fn provider_error_lines(module: &str, error: &ProviderError, path: &Path) -> [String; 2] {
     let (what, hint) = match &error {
         ProviderError::AuthFileInvalid { message, .. } => (
             format!("dalgon: auth.json is not valid JSON: {message}"),
@@ -661,6 +732,22 @@ pub(super) fn provider_error(module: &str, error: &ProviderError, path: &Path) -
             format!("dalgon: {error}"),
             format!("Check the permissions of {} and try again.", path.display()),
         ),
+        ProviderError::CallbackBind { port, .. } => (
+            format!("dalgon: {module} failed: {error}"),
+            format!("Free TCP port {port} on 127.0.0.1, then run dalgon login PROVIDER again."),
+        ),
+        ProviderError::StateMismatch => (
+            format!("dalgon: {module} failed: {error}"),
+            "Run dalgon login PROVIDER again without opening a second sign-in.".to_owned(),
+        ),
+        ProviderError::LoginTimeout => (
+            format!("dalgon: {module} failed: {error}"),
+            "Run dalgon login PROVIDER again and approve the sign-in within 15 minutes.".to_owned(),
+        ),
+        ProviderError::LoginCancelled => (
+            format!("dalgon: {module}: {error}"),
+            "Run dalgon login PROVIDER again to restart the sign-in.".to_owned(),
+        ),
         _ => (
             format!("dalgon: {module} failed: {error}"),
             error
@@ -668,5 +755,80 @@ pub(super) fn provider_error(module: &str, error: &ProviderError, path: &Path) -
                 .unwrap_or_else(|| crate::cli::texts::LOGIN_RETRY_HINT.into()),
         ),
     };
-    two_lines([what, hint], exit::ExitKind::RequestedFailure)
+    [what, hint]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_error_lines;
+    use dal_provider::ProviderError;
+    use std::path::Path;
+
+    #[test]
+    fn callback_bind_names_port_and_free_remedy() {
+        let lines = provider_error_lines(
+            "login",
+            &ProviderError::CallbackBind {
+                port: 8471,
+                reason: "in use".into(),
+            },
+            Path::new("/tmp/x/auth.json"),
+        );
+        assert_eq!(
+            lines[0],
+            "dalgon: login failed: could not listen on 127.0.0.1:8471: in use"
+        );
+        assert_eq!(
+            lines[1],
+            "Free TCP port 8471 on 127.0.0.1, then run dalgon login PROVIDER again."
+        );
+    }
+
+    #[test]
+    fn state_mismatch_rules_out_second_sign_in() {
+        let lines = provider_error_lines(
+            "login",
+            &ProviderError::StateMismatch,
+            Path::new("/tmp/x/auth.json"),
+        );
+        assert_eq!(
+            lines[0],
+            "dalgon: login failed: sign-in failed: the OAuth state does not match."
+        );
+        assert_eq!(
+            lines[1],
+            "Run dalgon login PROVIDER again without opening a second sign-in."
+        );
+    }
+
+    #[test]
+    fn login_timeout_names_fifteen_minute_window() {
+        let lines = provider_error_lines(
+            "login",
+            &ProviderError::LoginTimeout,
+            Path::new("/tmp/x/auth.json"),
+        );
+        assert_eq!(
+            lines[0],
+            "dalgon: login failed: sign-in timed out after 15 minutes."
+        );
+        assert_eq!(
+            lines[1],
+            "Run dalgon login PROVIDER again and approve the sign-in within 15 minutes."
+        );
+    }
+
+    #[test]
+    fn login_cancelled_points_at_restart() {
+        let lines = provider_error_lines(
+            "login",
+            &ProviderError::LoginCancelled,
+            Path::new("/tmp/x/auth.json"),
+        );
+        assert_eq!(lines[0], "dalgon: login: sign-in cancelled.");
+        assert_eq!(
+            lines[1],
+            "Run dalgon login PROVIDER again to restart the sign-in."
+        );
+    }
 }
