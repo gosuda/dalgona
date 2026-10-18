@@ -9,8 +9,9 @@
 use std::{
     fmt,
     fmt::Write as _,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,10 +30,13 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+use super::device::DeviceOutcome;
 use crate::{
-    AuthStore, AuthStyle, Completion, Credential, Hook, OAuthCredential, OAuthSpec, PROVIDERS,
-    ProviderDef, ProviderEntry, ProviderError, QueryValue, Redirect, SecretString, Transport,
-    auth::credential::{codex_identity, oauth_expires_at},
+    AuthStore, AuthStyle, Completion, Credential, EnvSnapshot, Hook, OAuthCredential, OAuthSpec,
+    PROVIDERS, ProviderDef, ProviderEntry, ProviderError, ProviderSettings, QueryValue, Redirect,
+    SecretString, Transport,
+    auth::credential::{codex_identity, oauth_expires_at, oauth_issued_at},
+    family::gitlab::{DirectAccessCache, PROVIDER_ID as GITLAB_PROVIDER_ID},
     find,
     http::{
         CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, OAUTH_TIMEOUT, STREAM_IDLE_TIMEOUT, check_base_url,
@@ -66,6 +70,12 @@ pub enum LoginProgress {
     AskPaste {
         /// Instructions for the host's input surface.
         hint: String,
+        /// Fallback answer used when the user submits an empty line.
+        ///
+        /// When `None`, the prompt requires a nonempty answer and empty inputs
+        /// are rejected or retried. When `Some(value)`, an empty submission
+        /// accepts `value` as the answer.
+        default: Option<String>,
     },
     /// The authorization code is being exchanged for durable credentials.
     Exchanging,
@@ -84,19 +94,131 @@ pub const PASTE_HINT: &str = "Paste the redirect URL or the code shown in the br
 pub struct LoginEndpoints {
     rows: Vec<RowEndpoints>,
     loopback_override: bool,
+    copilot: CopilotEndpoints,
 }
 
-/// The endpoints and callback port of one OAuth row.
+/// Private endpoint mapping for Copilot device login, discovery, and policy.
+#[derive(Clone, Debug)]
+pub(crate) struct CopilotEndpoints {
+    /// In production: None (formats <https://{target.host}>).
+    /// In loopback: `Some(loopback_base_url)`.
+    pub(crate) device: Option<Url>,
+    /// In production: <https://api.github.com>.
+    /// In loopback: `loopback_base_url`.
+    pub(crate) discovery: Url,
+    /// In production: None.
+    /// In loopback: `Some(loopback_base_url)`.
+    pub(crate) policy: Option<Url>,
+}
+
+impl CopilotEndpoints {
+    fn production() -> Result<Self, ProviderError> {
+        let discovery = Url::parse("https://api.github.com")
+            .map_err(|error| endpoint_error(Family::Chat, error.to_string()))?;
+        Ok(Self {
+            device: None,
+            discovery,
+            policy: None,
+        })
+    }
+
+    fn loopback(base: &Url) -> Self {
+        Self {
+            device: Some(base.clone()),
+            discovery: base.clone(),
+            policy: Some(base.clone()),
+        }
+    }
+
+    fn validate_production(&self) -> Result<(), ProviderError> {
+        if self.discovery.scheme() != "https" || self.discovery.host_str() != Some("api.github.com")
+        {
+            return Err(endpoint_error(
+                Family::Chat,
+                "Copilot discovery endpoint must be https://api.github.com in production",
+            ));
+        }
+        if self.device.is_some() || self.policy.is_some() {
+            return Err(endpoint_error(
+                Family::Chat,
+                "Copilot override endpoints must be None in production",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_loopback(&self) -> Result<(), ProviderError> {
+        if !is_loopback(&self.discovery) {
+            return Err(endpoint_error(
+                Family::Chat,
+                "Copilot discovery base must use a literal loopback host in tests",
+            ));
+        }
+        if let Some(device) = &self.device
+            && !is_loopback(device)
+        {
+            return Err(endpoint_error(
+                Family::Chat,
+                "Copilot device base must use a literal loopback host in tests",
+            ));
+        }
+        if let Some(policy) = &self.policy
+            && !is_loopback(policy)
+        {
+            return Err(endpoint_error(
+                Family::Chat,
+                "Copilot policy base must use a literal loopback host in tests",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The endpoints, effective client id, and callback port of one OAuth row.
 #[derive(Clone, Debug)]
 pub(crate) struct RowEndpoints {
     pub(crate) def: &'static ProviderDef,
     pub(crate) oauth: OAuthSpec,
+    /// The client id every request of this sign-in carries: the trimmed value
+    /// of the row's override variable in the captured environment when that
+    /// is not blank, else the row's pinned id. The authorize URL, the code
+    /// exchange, and the revoke request all read this one value.
+    pub(crate) client_id: Box<str>,
+    /// The redirect URI the captured environment supplies in place of the
+    /// row's registered one, for the rows that honor one.
+    redirect_override: Option<RedirectOverride>,
     pub(crate) authorize: Url,
     pub(crate) token: Url,
     pub(crate) device: Option<DeviceUrls>,
     pub(crate) revoke: Option<Url>,
     pub(crate) models_base: Option<Url>,
+    /// The base the sign-in's session is verified against before it is
+    /// stored; `None` for the rows that verify nothing.
+    pub(crate) session_base: Option<Url>,
     pub(crate) callback_port: u16,
+}
+
+/// A redirect URI taken from the captured environment, kept as supplied
+/// (trimmed) and parsed only when a browser sign-in needs it, so a malformed
+/// value fails that one sign-in instead of every endpoint set.
+///
+/// `Debug` names the variable and never prints the value, as
+/// [`EnvSnapshot`]'s does: the text is unvalidated until a sign-in parses it
+/// and could still carry credentials.
+#[derive(Clone)]
+struct RedirectOverride {
+    /// The environment variable that supplied the value.
+    variable: &'static str,
+    /// The value, advertised verbatim.
+    uri: Box<str>,
+}
+
+impl fmt::Debug for RedirectOverride {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedirectOverride")
+            .field("variable", &self.variable)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The device-code endpoints of one OAuth row.
@@ -109,12 +231,14 @@ pub(crate) struct DeviceUrls {
 }
 
 impl RowEndpoints {
-    /// Places every URL of the row with `locate`: production keeps the table's
-    /// URLs, the loopback seam moves them under one local server.
+    /// Places every URL of the row with `locate` and resolves its client id
+    /// and redirect override from the captured environment: production keeps
+    /// the table's URLs, the loopback seam moves them under one local server.
     fn build(
         def: &'static ProviderDef,
         oauth: OAuthSpec,
         callback_port: u16,
+        env: &EnvSnapshot,
         locate: &dyn Fn(&str) -> Result<Url, ProviderError>,
     ) -> Result<Self, ProviderError> {
         let device = oauth
@@ -131,11 +255,16 @@ impl RowEndpoints {
         Ok(Self {
             def,
             oauth,
+            client_id: effective_client_id(&oauth, env).into(),
+            redirect_override: redirect_override(oauth.hook, env),
             authorize: locate(oauth.authorize_url)?,
             token: locate(oauth.token_url)?,
             device,
             revoke: oauth.revoke_url.map(locate).transpose()?,
             models_base: fetches_models(oauth.hook)
+                .then(|| locate(def.base_url))
+                .transpose()?,
+            session_base: verifies_session(oauth.hook)
                 .then(|| locate(def.base_url))
                 .transpose()?,
             callback_port,
@@ -155,7 +284,10 @@ impl RowEndpoints {
         if let (Some(url), Some(text)) = (&self.revoke, oauth.revoke_url) {
             validate_endpoint(family, url, &host_of(text))?;
         }
-        if let Some(url) = &self.models_base {
+        for url in [&self.models_base, &self.session_base]
+            .into_iter()
+            .flatten()
+        {
             validate_endpoint(family, url, &host_of(self.def.base_url))?;
         }
         Ok(())
@@ -163,7 +295,9 @@ impl RowEndpoints {
 }
 
 impl LoginEndpoints {
-    pub(crate) fn production() -> Result<Self, ProviderError> {
+    /// The pinned production endpoints, with each row's client id and
+    /// redirect override resolved from the captured environment `env`.
+    pub(crate) fn production(env: &EnvSnapshot) -> Result<Self, ProviderError> {
         let mut rows = Vec::new();
         for def in PROVIDERS {
             let Some(oauth) = def.oauth else { continue };
@@ -174,12 +308,14 @@ impl LoginEndpoints {
                 def,
                 oauth,
                 oauth.redirect.port,
+                env,
                 &locate,
             )?);
         }
         let endpoints = Self {
             rows,
             loopback_override: false,
+            copilot: CopilotEndpoints::production()?,
         };
         endpoints.validate()?;
         Ok(endpoints)
@@ -189,24 +325,26 @@ impl LoginEndpoints {
     ///
     /// This test seam accepts only `http` or `https` on the literal loopback
     /// hosts `127.0.0.1`, `::1`, or `localhost`. The callback ports default to
-    /// zero so each test can bind an available ephemeral port.
+    /// zero so each test can bind an available ephemeral port. Each row's
+    /// client id and redirect override come from the captured environment
+    /// `env`, exactly as for the production endpoints.
     ///
     /// # Errors
     /// Returns a typed transport error if `base_url` is invalid or not loopback.
-    pub fn loopback(base_url: &str) -> Result<Self, ProviderError> {
+    pub fn loopback(base_url: &str, env: &EnvSnapshot) -> Result<Self, ProviderError> {
+        let base = Url::parse(base_url).map_err(|error| {
+            endpoint_error(Family::Chat, format!("loopback base is invalid: {error}"))
+        })?;
+        check_base_url(Family::Chat, base_url)?;
+        if !is_loopback(&base) {
+            return Err(endpoint_error(
+                Family::Chat,
+                "test OAuth endpoints must use a literal loopback host",
+            ));
+        }
         let mut rows = Vec::new();
         for def in PROVIDERS {
             let Some(oauth) = def.oauth else { continue };
-            let base = Url::parse(base_url).map_err(|error| {
-                endpoint_error(def.family, format!("loopback base is invalid: {error}"))
-            })?;
-            check_base_url(def.family, base_url)?;
-            if !is_loopback(&base) {
-                return Err(endpoint_error(
-                    def.family,
-                    "test OAuth endpoints must use a literal loopback host",
-                ));
-            }
             let prefix = loopback_prefix(oauth.hook);
             let locate = |production: &str| {
                 let path = Url::parse(production)
@@ -214,24 +352,27 @@ impl LoginEndpoints {
                     .path()
                     .trim_start_matches('/')
                     .to_owned();
-                endpoint(def.family, base_url, &format!("{prefix}{path}"))
+                endpoint(def.family, base_url, &loopback_path(prefix, &path))
             };
-            rows.push(RowEndpoints::build(def, oauth, 0, &locate)?);
+            rows.push(RowEndpoints::build(def, oauth, 0, env, &locate)?);
         }
         Ok(Self {
             rows,
             loopback_override: true,
+            copilot: CopilotEndpoints::loopback(&base),
         })
     }
 
     /// Sets the loopback callback ports, one for the Codex sign-in and one for
-    /// the Claude sign-in; zero asks the OS to choose a free port.
+    /// the Claude sign-in; zero asks the OS to choose a free port. The other
+    /// rows keep the port they were built with.
     #[must_use]
     pub fn with_callback_ports(mut self, codex: u16, claude: u16) -> Self {
         for row in &mut self.rows {
             row.callback_port = match row.oauth.hook {
                 Hook::CodexAccount => codex,
                 Hook::ClaudeCode => claude,
+                Hook::WorkOsDevice | Hook::GitLabDuo => row.callback_port,
             };
         }
         self
@@ -242,7 +383,16 @@ impl LoginEndpoints {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ProviderError> {
-        self.rows.iter().try_for_each(RowEndpoints::validate)
+        self.rows.iter().try_for_each(RowEndpoints::validate)?;
+        if self.loopback_override {
+            self.copilot.validate_loopback()
+        } else {
+            self.copilot.validate_production()
+        }
+    }
+
+    pub(crate) fn copilot(&self) -> &CopilotEndpoints {
+        &self.copilot
     }
 }
 
@@ -263,6 +413,7 @@ pub struct LoginFlow<'a> {
     user_agent: String,
     cache_dir: PathBuf,
     endpoints: LoginEndpoints,
+    gitlab_grants: Option<Arc<DirectAccessCache>>,
     models_provider: Option<ProviderEntry>,
     paste_sender: Option<oneshot::Sender<String>>,
     paste_receiver: Option<oneshot::Receiver<String>>,
@@ -274,6 +425,8 @@ pub struct LoginFlow<'a> {
 }
 
 impl fmt::Debug for LoginFlow<'_> {
+    // Intentionally omits `gitlab_grants`: the cache is keyed by raw tokens
+    // and must never format.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoginFlow")
             .field("provider", &self.def.id)
@@ -290,18 +443,23 @@ impl<'a> LoginFlow<'a> {
     /// The supplied client is used only for the post-login catalog fetch.
     /// Credential-bearing OAuth calls use a private client with redirects
     /// disabled, so a 307/308 cannot forward codes, verifiers, or refresh tokens.
-    /// `cache_dir` is the host's separate model-cache directory.
+    /// `cache_dir` is the host's separate model-cache directory. `endpoints`
+    /// carries the pinned HTTPS or literal-loopback URLs and the effective
+    /// client ids of every row; arbitrary remote hosts are rejected so
+    /// authorization codes and verifiers cannot be sent to a caller-selected
+    /// origin.
     ///
     /// # Errors
     /// Returns [`ProviderError::AuthWrite`] for an unsupported provider, or a
-    /// transport error if production endpoints or the private OAuth client
-    /// cannot be constructed.
+    /// transport error if an endpoint violates the origin allowlist or URL
+    /// rules, or the private OAuth client cannot be constructed.
     pub fn new(
         provider: &str,
         store: &'a mut AuthStore,
         client: Client,
         user_agent: impl Into<String>,
         cache_dir: impl Into<PathBuf>,
+        endpoints: LoginEndpoints,
     ) -> Result<Self, ProviderError> {
         let Some((def, oauth)) = find(provider).and_then(|def| def.oauth.map(|oauth| (def, oauth)))
         else {
@@ -309,6 +467,7 @@ impl<'a> LoginFlow<'a> {
                 reason: format!("{provider} has no OAuth login flow"),
             });
         };
+        endpoints.validate()?;
         let oauth_client = build_oauth_client(def.family)?;
         let (paste_sender, paste_receiver) = match oauth.completion {
             Completion::PasteCode => {
@@ -324,7 +483,8 @@ impl<'a> LoginFlow<'a> {
             oauth_client,
             user_agent: user_agent.into(),
             cache_dir: cache_dir.into(),
-            endpoints: LoginEndpoints::production()?,
+            endpoints,
+            gitlab_grants: None,
             models_provider: None,
             paste_sender,
             paste_receiver,
@@ -356,6 +516,17 @@ impl<'a> LoginFlow<'a> {
         endpoints.validate()?;
         self.endpoints = endpoints;
         Ok(self)
+    }
+
+    /// Attaches the shared GitLab grant cache for post-commit invalidation.
+    ///
+    /// `None` (standalone flows) disables invalidation and preserves existing
+    /// behavior. The host supplies `Some` via `LoginSite::with_provider_set`.
+    /// No allocation, no global, no default no-op: a missing handle means
+    /// there is no associated provider cache, not a skipped step.
+    pub(crate) fn with_gitlab_grants(mut self, grants: Option<Arc<DirectAccessCache>>) -> Self {
+        self.gitlab_grants = grants;
+        self
     }
 
     /// Uses the host's configured built-in route of this flow's provider for
@@ -392,16 +563,20 @@ impl<'a> LoginFlow<'a> {
     ///
     /// The progress callback runs on the host task and can render the same
     /// events for a CLI, TUI, or GUI. Cancellation and the 15-minute deadline
-    /// apply through callback/device authorization and token exchange. Cancellation
-    /// also applies while the auth-file lock is contended and is checked again
-    /// under the lock before the write. After this commit point, the durable write
-    /// completes as one locked atomic transaction. After commit, cancellation only
-    /// stops the best-effort model fetch and the committed credential is returned.
+    /// apply through callback/device authorization and token exchange. A row
+    /// that verifies its session (Factory Droid) checks the new grant against
+    /// the vendor before the write; a refused or cancelled verification fails
+    /// the login with nothing stored. Cancellation also applies while the
+    /// auth-file lock is contended and is checked again under the lock before
+    /// the write. After this commit point, the durable write completes as one
+    /// locked atomic transaction. After commit, cancellation only stops the
+    /// best-effort model fetch and the committed credential is returned.
     ///
     /// # Errors
     /// Returns a typed login, transport, token-exchange, ID-token, or auth-store
-    /// error. A state mismatch and every pre-commit error leave `auth.json`
-    /// unchanged.
+    /// error. A state mismatch and every pre-commit error, including a refused
+    /// session verification, leave `auth.json` unchanged: an existing file keeps
+    /// its bytes and an absent one stays absent.
     pub async fn run(
         &mut self,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
@@ -433,10 +608,15 @@ impl<'a> LoginFlow<'a> {
                 return Err(error);
             }
         };
-        if cancel.is_cancelled() {
+        let verified = if cancel.is_cancelled() {
+            Err(ProviderError::LoginCancelled)
+        } else {
+            self.verify_session(&oauth, cancel).await
+        };
+        if let Err(error) = verified {
             drop(self.paste_sender.take());
             drop(self.paste_receiver.take());
-            return Err(ProviderError::LoginCancelled);
+            return Err(error);
         }
         let credential = Credential::OAuth(oauth);
         #[cfg(test)]
@@ -490,6 +670,7 @@ impl<'a> LoginFlow<'a> {
     }
 
     /// The callback-only browser flow: a busy port falls back to the device
+    /// flow, and a row that offers no browser sign-in runs only the device
     /// flow.
     async fn authorize_callback(
         &self,
@@ -500,7 +681,7 @@ impl<'a> LoginFlow<'a> {
         verifier: &str,
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
-        if self.device_auth {
+        if self.device_auth || !row.oauth.browser {
             return self.authorize_device(row, progress, cancel, deadline).await;
         }
         let state = flow_state(row.oauth.hook, verifier);
@@ -510,6 +691,7 @@ impl<'a> LoginFlow<'a> {
             let url = authorize_url(
                 row.def.family,
                 &row.oauth,
+                &row.client_id,
                 &row.authorize,
                 &redirect,
                 challenge,
@@ -548,25 +730,31 @@ impl<'a> LoginFlow<'a> {
             client: &self.oauth_client,
             user_agent: &self.user_agent,
         };
-        let grant = super::device::run(
+        let outcome = super::device::run(
             &http,
             row.def.family,
-            row.oauth.client_id,
+            row.oauth.hook,
+            &row.client_id,
             device,
             deadline,
             progress,
             cancel,
         )
         .await?;
-        report_progress(progress, LoginProgress::Exchanging, cancel)?;
-        self.exchange(
-            row,
-            &grant.authorization_code,
-            &grant.code_verifier,
-            device.redirect_uri,
-            &[&grant.authorization_code, &grant.code_verifier],
-        )
-        .await
+        match outcome {
+            DeviceOutcome::Grant(grant) => {
+                report_progress(progress, LoginProgress::Exchanging, cancel)?;
+                self.exchange(
+                    row,
+                    &grant.authorization_code,
+                    &grant.code_verifier,
+                    device.redirect_uri,
+                    &[&grant.authorization_code, &grant.code_verifier],
+                )
+                .await
+            }
+            DeviceOutcome::Tokens(credential) => Ok(credential),
+        }
     }
 
     /// The paste browser flow: the callback or a pasted value completes it.
@@ -579,49 +767,19 @@ impl<'a> LoginFlow<'a> {
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
         let state = flow_state(row.oauth.hook, verifier);
-        let listener = bind_callback_with_fallback(row.callback_port).await;
-        let (listener, redirect) =
-            Self::paste_listener_redirect(row, listener, challenge, &state, progress, cancel)?;
-        report_progress(
-            progress,
-            LoginProgress::AskPaste {
-                hint: String::from(PASTE_HINT),
-            },
-            cancel,
-        )?;
-        let receiver = self.paste_receiver.take();
-        drop(self.paste_sender.take());
-        let code = if let Some(listener) = listener {
-            Self::paste_callback_code(row, listener, receiver, &state, cancel).await?
-        } else {
-            let value = receive_paste(receiver, cancel).await?;
-            parse_pasted_code(&value, &state)?
-        };
-        report_progress(progress, LoginProgress::Exchanging, cancel)?;
-        self.exchange(row, &code, verifier, &redirect, &[&code, &state])
-            .await
-    }
-
-    fn paste_listener_redirect(
-        row: &RowEndpoints,
-        listener: std::io::Result<(tokio::net::TcpListener, u16)>,
-        challenge: &str,
-        state: &str,
-        progress: &(dyn Fn(LoginProgress) + Send + Sync),
-        cancel: &CancellationToken,
-    ) -> Result<(Option<tokio::net::TcpListener>, String), ProviderError> {
-        let (listener, port) = match listener {
-            Ok((listener, port)) => (Some(listener), port),
-            Err(_) => (None, row.callback_port),
-        };
-        let redirect = redirect_uri(row.oauth.redirect, port);
+        let Landing {
+            uri,
+            path,
+            listener,
+        } = Landing::open(row).await?;
         let url = authorize_url(
             row.def.family,
             &row.oauth,
+            &row.client_id,
             &row.authorize,
-            &redirect,
+            &uri,
             challenge,
-            state,
+            &state,
         )?;
         report_progress(
             progress,
@@ -630,23 +788,48 @@ impl<'a> LoginFlow<'a> {
             },
             cancel,
         )?;
-        Ok((listener, redirect))
+        report_progress(
+            progress,
+            LoginProgress::AskPaste {
+                hint: String::from(PASTE_HINT),
+                default: None,
+            },
+            cancel,
+        )?;
+        let receiver = self.paste_receiver.take();
+        drop(self.paste_sender.take());
+        let code = if let Some(listener) = listener {
+            Self::paste_callback_code(row, &path, listener, receiver, &state, cancel).await?
+        } else {
+            let value = receive_paste(receiver, cancel).await?;
+            parse_pasted_code(&value, &state, row.def.family)?
+        };
+        report_progress(progress, LoginProgress::Exchanging, cancel)?;
+        self.exchange(
+            row,
+            &code,
+            verifier,
+            &uri,
+            &[code.as_str(), verifier, state.as_str()],
+        )
+        .await
     }
 
     async fn paste_callback_code(
         row: &RowEndpoints,
+        path: &str,
         listener: tokio::net::TcpListener,
         receiver: Option<tokio::sync::oneshot::Receiver<String>>,
         state: &str,
         cancel: &CancellationToken,
     ) -> Result<String, ProviderError> {
-        let callback = callback_code(listener, row.oauth.redirect.path, state, row.def.family);
+        let callback = callback_code(listener, path, state, row.def.family);
         tokio::pin!(callback);
         tokio::select! {
             biased;
             result = &mut callback => result,
             pasted = receive_paste(receiver, cancel) => match pasted {
-                Ok(value) => parse_pasted_code(&value, state),
+                Ok(value) => parse_pasted_code(&value, state, row.def.family),
                 Err(error) if cancel.is_cancelled() => Err(error),
                 Err(_) => callback.await,
             }
@@ -667,15 +850,7 @@ impl<'a> LoginFlow<'a> {
         };
         match row.oauth.hook {
             Hook::CodexAccount => {
-                let body = {
-                    let mut form = url::form_urlencoded::Serializer::new(String::new());
-                    form.append_pair("grant_type", "authorization_code")
-                        .append_pair("client_id", row.oauth.client_id)
-                        .append_pair("code", code)
-                        .append_pair("code_verifier", verifier)
-                        .append_pair("redirect_uri", redirect);
-                    form.finish()
-                };
+                let body = code_exchange_form(&row.client_id, code, verifier, redirect);
                 let response = post_form(&http, row.def.family, &row.token, &body).await?;
                 let token = token_or_exchange_error::<CodexTokenResponse>(&response, secrets)?;
                 validate_token_pair(&token.access_token, &token.refresh_token)?;
@@ -691,7 +866,7 @@ impl<'a> LoginFlow<'a> {
             Hook::ClaudeCode => {
                 let request = ClaudeTokenRequest {
                     grant_type: "authorization_code",
-                    client_id: row.oauth.client_id,
+                    client_id: &row.client_id,
                     code,
                     state: verifier,
                     redirect_uri: redirect,
@@ -708,7 +883,54 @@ impl<'a> LoginFlow<'a> {
                     account_id: None,
                 })
             }
+            Hook::GitLabDuo => {
+                let body = code_exchange_form(&row.client_id, code, verifier, redirect);
+                let response = post_form(&http, row.def.family, &row.token, &body).await?;
+                let token = token_or_exchange_error::<GitLabTokenResponse>(&response, secrets)?;
+                validate_token_pair(&token.access_token, &token.refresh_token)?;
+                Ok(OAuthCredential {
+                    expires_at: oauth_expires_at(
+                        oauth_issued_at(token.created_at.as_ref(), unix_now()),
+                        token.expires_in,
+                        &token.access_token,
+                    ),
+                    access_token: SecretString::from(token.access_token),
+                    refresh_token: SecretString::from(token.refresh_token),
+                    id_token: None,
+                    account_id: None,
+                })
+            }
+            Hook::WorkOsDevice => Err(ProviderError::AuthWrite {
+                reason: format!(
+                    "{} signs in by device grant and has no authorization-code exchange",
+                    row.def.id
+                ),
+            }),
         }
+    }
+
+    /// Checks the vendor's session endpoint against the new grant before it
+    /// is stored, for the rows that verify one. Cancellation reports
+    /// [`ProviderError::LoginCancelled`]; every other refusal fails the login.
+    async fn verify_session(
+        &self,
+        oauth: &OAuthCredential,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProviderError> {
+        let Some(base) = self
+            .endpoints
+            .row(self.def)
+            .and_then(|row| row.session_base.as_ref())
+        else {
+            return Ok(());
+        };
+        crate::family::droid::verify_session(
+            &self.oauth_client,
+            base.as_str(),
+            oauth.access_token.expose(),
+            cancel,
+        )
+        .await
     }
 
     async fn persist(
@@ -716,9 +938,21 @@ impl<'a> LoginFlow<'a> {
         credential: &Credential,
         cancel: &CancellationToken,
     ) -> Result<(), ProviderError> {
+        fn token_of(value: &Credential) -> Option<&str> {
+            match value {
+                Credential::ApiKey { key } => Some(key.expose()),
+                Credential::OAuth(oauth) => Some(oauth.access_token.expose()),
+                Credential::None => None,
+            }
+        }
         let path = self.store.path().to_path_buf();
         let provider = self.def.id;
         let credential = credential.clone();
+        create_auth_dir(&path).await?;
+        // Cloned (never allocated) into the commit closure so invalidation runs
+        // at the real commit point: a future dropped after the durable write
+        // but before the outer await still leaves the cache coherent.
+        let grants = self.gitlab_grants.clone();
         let lock = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ProviderError::LoginCancelled),
@@ -728,11 +962,33 @@ impl<'a> LoginFlow<'a> {
         let updated = crate::auth::refresh::blocking(move || {
             let _lock = lock;
             let mut latest = AuthStore::load(&path)?;
+            // Same-lock pre-commit snapshot for rotation hygiene.
+            let previous = latest.credential(provider);
             latest.set(provider, credential)?;
             if cancel.is_cancelled() {
                 return Err(ProviderError::LoginCancelled);
             }
             latest.store()?;
+            // Post-commit, pre-return: GitLab only, no pre-commit invalidation,
+            // no token formatting. New value always; replaced value when it
+            // differs (first login has no previous).
+            if provider == GITLAB_PROVIDER_ID
+                && let Some(grants) = grants.as_ref()
+            {
+                let committed = latest.credential(provider);
+                let new_token = committed.as_ref().and_then(token_of);
+                let old_token = previous.as_ref().and_then(token_of);
+                match (old_token, new_token) {
+                    (Some(old), Some(new)) if old != new => {
+                        grants.remove(old);
+                        grants.remove(new);
+                    }
+                    (_, Some(new)) => {
+                        grants.remove(new);
+                    }
+                    _ => {}
+                }
+            }
             Ok(latest)
         })
         .await?;
@@ -750,6 +1006,7 @@ impl<'a> LoginFlow<'a> {
             key_env: None,
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 1,
+            settings: ProviderSettings::default(),
         };
         let entry = self
             .models_provider
@@ -767,35 +1024,11 @@ impl<'a> LoginFlow<'a> {
         let _catalog = crate::catalog::load_models(&fetch, |duration| sleep(duration)).await;
     }
 }
-/// Stores one API key while holding the cross-process auth-file lock.
-///
-/// # Errors
-/// Returns an auth-store or lock error when the key cannot be written.
-pub async fn store_api_key(
-    path: impl Into<PathBuf>,
-    provider: &str,
-    key: String,
-) -> Result<(), ProviderError> {
-    store_api_key_unless_cancelled(path.into(), provider, key, &CancellationToken::new()).await
-}
 
-/// Stores one API key unless `cancel` fires first.
-///
-/// The commit point is the cancellation check made while the auth-file lock is
-/// held, immediately before the atomic write. Cancellation seen before it
-/// returns [`ProviderError::LoginCancelled`] and leaves `auth.json` unchanged,
-/// including while the lock is still contended; cancellation after it finds the
-/// key durably stored and returns `Ok`.
-///
-/// # Errors
-/// Returns [`ProviderError::LoginCancelled`] when cancellation wins, and an
-/// auth-store or lock error when the key cannot be written.
-pub(crate) async fn store_api_key_unless_cancelled(
-    path: PathBuf,
-    provider: &str,
-    key: String,
-    cancel: &CancellationToken,
-) -> Result<(), ProviderError> {
+/// Creates the directory `auth.json` lives in (mode 0700 on Unix) when it is
+/// missing, so the lock file beside the credential file can be opened on a
+/// first sign-in. The credential file itself is not touched.
+async fn create_auth_dir(path: &Path) -> Result<(), ProviderError> {
     let parent = path
         .parent()
         .map(Path::to_path_buf)
@@ -814,10 +1047,49 @@ pub(crate) async fn store_api_key_unless_cancelled(
             .create(&parent)
             .map_err(|error| ProviderError::AuthWrite {
                 reason: format!("could not create {}: {error}", parent.display()),
-            })?;
-        Ok(())
+            })
     })
-    .await?;
+    .await
+}
+
+/// Stores one API key while holding the cross-process auth-file lock.
+///
+/// # Errors
+/// Returns an auth-store or lock error when the key cannot be written.
+pub async fn store_api_key(
+    path: impl Into<PathBuf>,
+    provider: &str,
+    key: String,
+) -> Result<(), ProviderError> {
+    store_api_key_unless_cancelled_with_grants(
+        path.into(),
+        provider,
+        key,
+        &CancellationToken::new(),
+        None,
+    )
+    .await
+}
+
+/// Stores one API key unless `cancel` fires first, with an optional shared
+/// GitLab grant cache (internal companion; single implementation, no duplicate
+/// lock).
+///
+/// Pre-commit snapshot and post-commit invalidation both run inside the one
+/// existing commit closure holding the auth-file lock: the previous credential
+/// is read before `set`, and after `store()` succeeds the GitLab grant for the
+/// replaced token (when different) plus the new key are removed. A future
+/// dropped after the durable write but before the outer await still leaves the
+/// cache coherent. Non-GitLab rows, pre-commit cancel/errors, and `None` caches
+/// change nothing. Token values never enter Debug/error/log.
+pub(crate) async fn store_api_key_unless_cancelled_with_grants(
+    path: PathBuf,
+    provider: &str,
+    key: String,
+    cancel: &CancellationToken,
+    grants: Option<Arc<DirectAccessCache>>,
+) -> Result<(), ProviderError> {
+    create_auth_dir(&path).await?;
     let provider = provider.to_owned();
     let lock = tokio::select! {
         biased;
@@ -831,13 +1103,33 @@ pub(crate) async fn store_api_key_unless_cancelled(
             return Err(ProviderError::LoginCancelled);
         }
         let mut store = AuthStore::load(&path)?;
+        let previous = store.credential(&provider);
         store.set(
             &provider,
             Credential::ApiKey {
-                key: SecretString::from(key),
+                key: SecretString::from(key.clone()),
             },
         )?;
-        store.store()
+        store.store()?;
+        if provider.as_str() == GITLAB_PROVIDER_ID
+            && let Some(grants) = grants.as_ref()
+        {
+            let old_token = previous.as_ref().and_then(|value| match value {
+                Credential::ApiKey { key } => Some(key.expose()),
+                Credential::OAuth(oauth) => Some(oauth.access_token.expose()),
+                Credential::None => None,
+            });
+            match old_token {
+                Some(old) if old != key.as_str() => {
+                    grants.remove(old);
+                    grants.remove(key.as_str());
+                }
+                _ => {
+                    grants.remove(key.as_str());
+                }
+            }
+        }
+        Ok(())
     })
     .await
 }
@@ -849,13 +1141,25 @@ pub(crate) async fn store_api_key_unless_cancelled(
 /// Repeated logout and a provider with no stored entry succeed without a remote
 /// request. API-key credentials and providers without a revocation endpoint are
 /// removed locally; an OAuth credential of a provider with one sends one revoke
-/// request to the pinned production endpoint. The revoke is
+/// request to the pinned production endpoint, carrying the client id `env`
+/// resolves for that provider. The revoke is
 /// best effort: a network/status failure never prevents local logout.
 /// # Errors
 /// Returns an auth-store or lock error if the durable local removal fails.
-pub async fn logout(provider: &str, store: &mut AuthStore) -> Result<(), ProviderError> {
+pub async fn logout(
+    provider: &str,
+    store: &mut AuthStore,
+    env: &EnvSnapshot,
+) -> Result<(), ProviderError> {
     let user_agent = default_user_agent();
-    logout_with(provider, store, &user_agent, &LoginEndpoints::production()?).await
+    logout_with_grants(
+        provider,
+        store,
+        &user_agent,
+        &LoginEndpoints::production(env)?,
+        None,
+    )
+    .await
 }
 
 /// Logout with explicit user-agent and endpoint values, primarily for loopback
@@ -872,6 +1176,25 @@ pub async fn logout_with(
     user_agent: &str,
     endpoints: &LoginEndpoints,
 ) -> Result<(), ProviderError> {
+    logout_with_grants(provider, store, user_agent, endpoints, None).await
+}
+
+/// Logout with an optional shared GitLab grant cache (internal contract).
+///
+/// Public `logout`/`logout_with` signatures are unchanged and route here with
+/// `None`, preserving standalone behavior. `sign_out` routes the site handle
+/// here. Ordering: the best-effort revoke runs first and never blocks local
+/// removal; the grant is removed AFTER the durable removal section commits
+/// (including when the revoke failed), never before, using the exact stored
+/// token snapshot taken under the existing auth lock. No-entry targets make
+/// no request and invalidate nothing. Token values never enter Debug/error/log.
+pub(crate) async fn logout_with_grants(
+    provider: &str,
+    store: &mut AuthStore,
+    user_agent: &str,
+    endpoints: &LoginEndpoints,
+    grants: Option<&Arc<DirectAccessCache>>,
+) -> Result<(), ProviderError> {
     let path = store.path().to_path_buf();
     let remove_path = path.clone();
     let provider_for_load = provider.to_owned();
@@ -887,23 +1210,17 @@ pub async fn logout_with(
         return Ok(());
     };
     let revoke = find(provider).and_then(|def| {
-        let oauth = def.oauth?;
-        let url = endpoints.row(def)?.revoke.as_ref()?;
-        Some((def, oauth, url))
+        let row = endpoints.row(def)?;
+        Some((def, row, row.revoke.as_ref()?))
     });
-    if let (Some((def, oauth, url)), Credential::OAuth(token)) = (revoke, &stored) {
+    if let (Some((def, row, url)), Credential::OAuth(token)) = (revoke, &stored) {
         endpoints.validate()?;
-        let request = RevokeRequest {
-            token: token.refresh_token.expose(),
-            token_type_hint: "refresh_token",
-            client_id: oauth.client_id,
-        };
         if let Ok(client) = build_oauth_client(def.family) {
             let http = OAuthHttp {
                 client: &client,
                 user_agent,
             };
-            match post_json(&http, def.family, url, &request).await {
+            match post_revoke(&http, row, url, token.refresh_token.expose()).await {
                 Ok(response) if (200..300).contains(&response.status) => {}
                 Ok(response) => tracing::warn!(
                     provider = def.id,
@@ -918,6 +1235,21 @@ pub async fn logout_with(
             tracing::warn!(provider = def.id, "OAuth token revocation client failed");
         }
     }
+    // Under-lock snapshot token moved into the removal closure so invalidation
+    // runs at the real commit point (covers revoke failures and future-drop
+    // after the durable write). GitLab only; no pre-commit invalidation.
+    let old_token: Option<String> = if provider == GITLAB_PROVIDER_ID {
+        match &stored {
+            Credential::ApiKey { key } => Some(key.expose().to_owned()),
+            Credential::OAuth(oauth) => Some(oauth.access_token.expose().to_owned()),
+            Credential::None => None,
+        }
+    } else {
+        None
+    };
+    // Owned clone: `blocking` requires `Send + 'static`, so the borrowed cache
+    // handle cannot cross into the closure; the `Arc` clone is a refcount bump.
+    let grants_owned: Option<Arc<DirectAccessCache>> = grants.cloned();
     let updated = crate::auth::refresh::blocking(move || {
         let _lock = lock;
         latest.remove(&provider_owned);
@@ -933,6 +1265,9 @@ pub async fn logout_with(
             }
         } else {
             latest.store()?;
+        }
+        if let (Some(grants), Some(old)) = (grants_owned.as_ref(), old_token.as_deref()) {
+            grants.remove(old);
         }
         Ok(latest)
     })
@@ -1029,6 +1364,49 @@ pub(crate) fn report_progress(
     Ok(())
 }
 
+/// The form body of a standard PKCE authorization-code exchange.
+fn code_exchange_form(client_id: &str, code: &str, verifier: &str, redirect_uri: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("client_id", client_id)
+        .append_pair("code", code)
+        .append_pair("code_verifier", verifier)
+        .append_pair("redirect_uri", redirect_uri)
+        .finish()
+}
+
+/// Sends one refresh-token revocation in the encoding the vendor reads:
+/// `GitLab`'s authorization server takes form parameters and ignores a JSON
+/// body; every other row with a revoke endpoint takes JSON.
+async fn post_revoke(
+    http: &OAuthHttp<'_>,
+    row: &RowEndpoints,
+    url: &Url,
+    refresh_token: &str,
+) -> Result<OAuthResponse, ProviderError> {
+    let family = row.def.family;
+    match row.oauth.hook {
+        Hook::GitLabDuo => {
+            let body = {
+                let mut form = url::form_urlencoded::Serializer::new(String::new());
+                form.append_pair("token", refresh_token)
+                    .append_pair("token_type_hint", "refresh_token")
+                    .append_pair("client_id", &row.client_id);
+                form.finish()
+            };
+            post_form(http, family, url, &body).await
+        }
+        Hook::CodexAccount | Hook::ClaudeCode | Hook::WorkOsDevice => {
+            let request = RevokeRequest {
+                token: refresh_token,
+                token_type_hint: "refresh_token",
+                client_id: &row.client_id,
+            };
+            post_json(http, family, url, &request).await
+        }
+    }
+}
+
 pub(crate) async fn post_json<T: Serialize>(
     http: &OAuthHttp<'_>,
     family: Family,
@@ -1048,7 +1426,7 @@ pub(crate) async fn post_json<T: Serialize>(
     .await
 }
 
-async fn post_form(
+pub(crate) async fn post_form(
     http: &OAuthHttp<'_>,
     family: Family,
     url: &Url,
@@ -1111,11 +1489,18 @@ pub(crate) fn error_message(body: &[u8], secrets: &[&str]) -> String {
     let mut safe = message;
     for secret in secrets.iter().copied().filter(|secret| !secret.is_empty()) {
         safe = safe.replace(secret, "<redacted>");
+        // The same secret also reaches error bodies percent-encoded, the way
+        // a form body or a URL query carries it.
+        let encoded: String = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+        if encoded != secret {
+            safe = safe.replace(&encoded, "<redacted>");
+        }
     }
     truncate_message(&safe)
 }
 
-fn truncate_message(message: &str) -> String {
+/// The first line of `message`, at most 300 bytes, for an error value.
+pub(crate) fn truncate_message(message: &str) -> String {
     let end = message.find(['\n', '\r']).unwrap_or(message.len());
     let line = &message[..end];
     if line.len() <= 300 {
@@ -1171,10 +1556,24 @@ struct ClaudeTokenResponse {
     expires_in: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct GitLabTokenResponse {
+    access_token: String,
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    /// When the server issued the grant, in Unix seconds. The expiry counts
+    /// from it when it is an integer and from the local clock otherwise; any
+    /// other JSON type is ignored rather than failing the sign-in, exactly as
+    /// a refresh reads it.
+    #[serde(default)]
+    created_at: Option<sonic_rs::Value>,
+}
+
 #[derive(Serialize)]
 struct ClaudeTokenRequest<'a> {
     grant_type: &'static str,
-    client_id: &'static str,
+    client_id: &'a str,
     code: &'a str,
     state: &'a str,
     redirect_uri: &'a str,
@@ -1185,12 +1584,13 @@ struct ClaudeTokenRequest<'a> {
 struct RevokeRequest<'a> {
     token: &'a str,
     token_type_hint: &'static str,
-    client_id: &'static str,
+    client_id: &'a str,
 }
 
 fn authorize_url(
     family: Family,
     oauth: &OAuthSpec,
+    client_id: &str,
     endpoint_url: &Url,
     redirect_uri: &str,
     challenge: &str,
@@ -1203,7 +1603,7 @@ fn authorize_url(
         .map(|(name, value)| {
             let text = match value {
                 QueryValue::Text(text) => text,
-                QueryValue::ClientId => oauth.client_id,
+                QueryValue::ClientId => client_id,
                 QueryValue::RedirectUri => redirect_uri,
                 QueryValue::Scope => scope.as_str(),
                 QueryValue::Challenge => challenge,
@@ -1220,19 +1620,68 @@ fn fetches_models(hook: Hook) -> bool {
     matches!(hook, Hook::CodexAccount)
 }
 
+/// Whether the new grant is checked against the vendor's session endpoint
+/// before it is stored.
+fn verifies_session(hook: Hook) -> bool {
+    matches!(hook, Hook::WorkOsDevice)
+}
+
+/// The client id a row's requests carry: the trimmed value of its override
+/// variable in the captured environment when that is not blank, else the
+/// row's pinned id. A blank value counts as unset.
+fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> String {
+    oauth
+        .client_id_env
+        .and_then(|name| env.get(name))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(oauth.client_id)
+        .to_owned()
+}
+
+/// The variable that replaces a row's registered redirect URI, for the rows
+/// that honor one.
+const fn redirect_env(hook: Hook) -> Option<&'static str> {
+    match hook {
+        Hook::GitLabDuo => Some("GITLAB_REDIRECT_URI"),
+        Hook::CodexAccount | Hook::ClaudeCode | Hook::WorkOsDevice => None,
+    }
+}
+
+/// The redirect override `env` supplies for `hook`, when it is not blank.
+fn redirect_override(hook: Hook, env: &EnvSnapshot) -> Option<RedirectOverride> {
+    let variable = redirect_env(hook)?;
+    let uri = env.get(variable)?.trim();
+    (!uri.is_empty()).then(|| RedirectOverride {
+        variable,
+        uri: uri.into(),
+    })
+}
+
 /// The path prefix that keeps the rows apart on one loopback test server.
 const fn loopback_prefix(hook: Hook) -> &'static str {
     match hook {
         Hook::CodexAccount => "",
         Hook::ClaudeCode => "claude/",
+        Hook::WorkOsDevice => "workos/",
+        Hook::GitLabDuo => "gitlab/",
     }
+}
+
+/// The loopback path of a production `path` under a row's `prefix`; a bare
+/// origin has no path of its own and lands on the prefix alone.
+fn loopback_path(prefix: &str, path: &str) -> String {
+    if path.is_empty() {
+        return prefix.trim_end_matches('/').to_owned();
+    }
+    format!("{prefix}{path}")
 }
 
 /// How the vendor's authorization endpoint reads a space in a query value.
 const fn query_encoding(hook: Hook) -> QueryEncoding {
     match hook {
         Hook::CodexAccount => QueryEncoding::Percent20,
-        Hook::ClaudeCode => QueryEncoding::Form,
+        Hook::ClaudeCode | Hook::WorkOsDevice | Hook::GitLabDuo => QueryEncoding::Form,
     }
 }
 
@@ -1241,7 +1690,7 @@ const fn query_encoding(hook: Hook) -> QueryEncoding {
 fn flow_state(hook: Hook, verifier: &str) -> String {
     match hook {
         Hook::ClaudeCode => verifier.to_owned(),
-        Hook::CodexAccount => new_state(),
+        Hook::CodexAccount | Hook::WorkOsDevice | Hook::GitLabDuo => new_state(),
     }
 }
 #[derive(Clone, Copy)]
@@ -1273,6 +1722,92 @@ fn with_query(
 
 fn redirect_uri(redirect: Redirect, port: u16) -> String {
     format!("http://{}:{port}{}", redirect.host, redirect.path)
+}
+
+/// Where a browser sign-in receives its authorization result.
+struct Landing {
+    /// The `redirect_uri` the vendor is told and the code exchange repeats.
+    uri: String,
+    /// The callback path the listener serves.
+    path: String,
+    /// The bound loopback listener; `None` when only a pasted value can
+    /// complete the sign-in.
+    listener: Option<TcpListener>,
+}
+
+impl Landing {
+    /// Opens the landing of `row`: the environment's redirect override when
+    /// one is set, otherwise the registered redirect on its preferred port or,
+    /// when that is busy, on any free loopback port.
+    async fn open(row: &RowEndpoints) -> Result<Self, ProviderError> {
+        if let Some(redirect) = &row.redirect_override {
+            return Self::overridden(redirect).await;
+        }
+        let (listener, port) = match bind_callback_with_fallback(row.callback_port).await {
+            Ok((listener, port)) => (Some(listener), port),
+            Err(_) => (None, row.callback_port),
+        };
+        Ok(Self {
+            uri: redirect_uri(row.oauth.redirect, port),
+            path: row.oauth.redirect.path.to_owned(),
+            listener,
+        })
+    }
+
+    /// An explicit override is advertised verbatim and served only where it
+    /// says: its loopback host, port, and path. A busy port, or a host this
+    /// machine cannot serve, leaves the sign-in to a pasted value; no other
+    /// port is ever tried.
+    async fn overridden(redirect: &RedirectOverride) -> Result<Self, ProviderError> {
+        let url = redirect.parse()?;
+        let listener = match loopback_address(&url) {
+            Some(address) => TcpListener::bind(address).await.ok(),
+            None => None,
+        };
+        Ok(Self {
+            uri: redirect.uri.to_string(),
+            path: url.path().to_owned(),
+            listener,
+        })
+    }
+}
+
+impl RedirectOverride {
+    /// The override as a URL: an `http` or `https` URL that names a host and,
+    /// when it names a port, a nonzero one, with no credentials and no
+    /// fragment. The error names the variable, never its value.
+    fn parse(&self) -> Result<Url, ProviderError> {
+        Url::parse(&self.uri)
+            .ok()
+            .filter(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.fragment().is_none()
+                    && url.port() != Some(0)
+            })
+            .ok_or_else(|| ProviderError::LoginInput {
+                reason: format!(
+                    "{} must be an http or https URL with a host, a nonzero port, no credentials, and no fragment.",
+                    self.variable
+                ),
+            })
+    }
+}
+
+/// The loopback socket that serves `url`, when this machine can: a plain
+/// `http` URL on `localhost`, `127.0.0.1`, or `::1`. `localhost` binds the
+/// IPv4 loopback, as the registered redirects do.
+fn loopback_address(url: &Url) -> Option<SocketAddr> {
+    if url.scheme() != "http" || !is_loopback(url) {
+        return None;
+    }
+    let ip = match url.host()? {
+        url::Host::Ipv6(address) => IpAddr::V6(address),
+        url::Host::Domain(_) | url::Host::Ipv4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    };
+    Some(SocketAddr::new(ip, url.port_or_known_default()?))
 }
 
 fn host_of(url: &str) -> String {
@@ -1464,39 +1999,43 @@ fn parse_callback_target(
     Ok(code.filter(|value| !value.is_empty()))
 }
 
-fn parse_pasted_code(input: &str, expected_state: &str) -> Result<String, ProviderError> {
+fn parse_pasted_code(
+    input: &str,
+    expected_state: &str,
+    family: Family,
+) -> Result<String, ProviderError> {
     let input = input.trim();
     if input.is_empty() {
-        return Err(endpoint_error(
-            Family::Anthropic,
-            "pasted authorization code is empty",
-        ));
+        return Err(endpoint_error(family, "pasted authorization code is empty"));
     }
     if let Some((code, state)) = input.split_once('#') {
         if state != expected_state {
             return Err(ProviderError::StateMismatch);
         }
-        return nonempty_code(code);
+        return nonempty_code(code, family);
     }
     if let Ok(url) = Url::parse(input) {
         if url.query().is_some() {
-            return parse_query(url.query().unwrap_or_default(), true, expected_state);
+            return parse_query(
+                url.query().unwrap_or_default(),
+                true,
+                expected_state,
+                family,
+            );
         }
-        return Err(endpoint_error(
-            Family::Anthropic,
-            "pasted redirect URL has no code",
-        ));
+        return Err(endpoint_error(family, "pasted redirect URL has no code"));
     }
     if input.starts_with('?') || input.contains('=') {
-        return parse_query(input.trim_start_matches('?'), false, expected_state);
+        return parse_query(input.trim_start_matches('?'), false, expected_state, family);
     }
-    nonempty_code(input)
+    nonempty_code(input, family)
 }
 
 fn parse_query(
     query: &str,
     require_state: bool,
     expected_state: &str,
+    family: Family,
 ) -> Result<String, ProviderError> {
     let mut code = None;
     let mut state = None;
@@ -1515,16 +2054,13 @@ fn parse_query(
         return Err(ProviderError::StateMismatch);
     }
     code.filter(|value| !value.is_empty())
-        .ok_or_else(|| endpoint_error(Family::Anthropic, "pasted authorization result has no code"))
+        .ok_or_else(|| endpoint_error(family, "pasted authorization result has no code"))
 }
 
-fn nonempty_code(code: &str) -> Result<String, ProviderError> {
+fn nonempty_code(code: &str, family: Family) -> Result<String, ProviderError> {
     let code = code.trim();
     if code.is_empty() {
-        return Err(endpoint_error(
-            Family::Anthropic,
-            "pasted authorization code is empty",
-        ));
+        return Err(endpoint_error(family, "pasted authorization code is empty"));
     }
     Ok(code.to_owned())
 }
@@ -1571,7 +2107,7 @@ fn validate_endpoint(family: Family, url: &Url, pinned_host: &str) -> Result<(),
     ))
 }
 
-fn is_loopback(url: &Url) -> bool {
+pub(crate) fn is_loopback(url: &Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(host)) => host == "localhost",
         Some(url::Host::Ipv4(address)) => address == Ipv4Addr::LOCALHOST,

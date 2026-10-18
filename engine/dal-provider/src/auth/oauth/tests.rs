@@ -2,7 +2,7 @@ use super::{
     LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, callback_code, parse_pasted_code,
     pkce_challenge,
 };
-use crate::{AuthStore, Credential, OAuthCredential, ProviderError, SecretString};
+use crate::{AuthStore, Credential, EnvSnapshot, OAuthCredential, ProviderError, SecretString};
 use dal_core::Family;
 use reqwest::Client;
 use std::{
@@ -183,7 +183,7 @@ async fn occupied_callback_port() -> Option<(TcpListener, u16)> {
 }
 
 fn loopback_endpoints(base: &str, codex_port: u16, claude_port: u16) -> Option<LoginEndpoints> {
-    LoginEndpoints::loopback(base)
+    LoginEndpoints::loopback(base, &EnvSnapshot::default())
         .ok()
         .map(|endpoints| endpoints.with_callback_ports(codex_port, claude_port))
 }
@@ -200,8 +200,8 @@ fn configured_flow<'a>(
         Client::new(),
         "dalgon/test (linux test; x86_64)",
         dir.cache_dir(),
-    )?
-    .with_endpoints(endpoints)
+        endpoints,
+    )
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn pkce_rfc7636_vector() {
 
 #[test]
 fn pasted_state_mismatch_is_typed() {
-    let result = parse_pasted_code("code123#wrong-state", "right-state");
+    let result = parse_pasted_code("code123#wrong-state", "right-state", Family::Anthropic);
     assert!(matches!(result, Err(crate::ProviderError::StateMismatch)));
 }
 
@@ -223,14 +223,17 @@ fn pasted_redirect_and_query_are_accepted() {
     assert_eq!(
         parse_pasted_code(
             "http://localhost/callback?code=code123&state=state",
-            "state"
+            "state",
+            Family::Anthropic
         )
         .ok()
         .as_deref(),
         Some("code123")
     );
     assert_eq!(
-        parse_pasted_code("code123", "state").ok().as_deref(),
+        parse_pasted_code("code123", "state", Family::Anthropic)
+            .ok()
+            .as_deref(),
         Some("code123")
     );
     assert_eq!(
@@ -241,8 +244,9 @@ fn pasted_redirect_and_query_are_accepted() {
 
 #[test]
 fn endpoint_override_rejects_non_loopback_origins() {
-    assert!(LoginEndpoints::loopback("http://127.0.0.1:8123").is_ok());
-    assert!(LoginEndpoints::loopback("http://example.com").is_err());
+    let env = EnvSnapshot::default();
+    assert!(LoginEndpoints::loopback("http://127.0.0.1:8123", &env).is_ok());
+    assert!(LoginEndpoints::loopback("http://example.com", &env).is_err());
 }
 
 /// Occupies one loopback port to stand in for the preferred callback port.
@@ -861,10 +865,10 @@ async fn device_poll_redirect_does_not_forward_user_code() {
         }
     };
     let result = flow.run(&progress, &CancellationToken::new()).await;
-    assert!(matches!(
-        result,
-        Err(ProviderError::DeviceCode { status: 307, .. })
-    ));
+    assert!(
+        matches!(result, Err(ProviderError::DeviceCode { status: 307, .. })),
+        "expected DeviceCode {{ status: 307, .. }}, got: {result:?}"
+    );
     drop(flow);
     drop(blocker);
     assert!(store.credential("openai-codex").is_none());
@@ -950,10 +954,13 @@ async fn explicit_device_auth_shows_code_without_opening_browser_on_free_callbac
         flow.run(&progress, &CancellationToken::new()),
     )
     .await;
-    assert!(matches!(
-        result,
-        Ok(Err(ProviderError::DeviceCode { status: 307, .. }))
-    ));
+    assert!(
+        matches!(
+            result,
+            Ok(Err(ProviderError::DeviceCode { status: 307, .. }))
+        ),
+        "expected Ok(Err(DeviceCode {{ status: 307, .. }})), got: {result:?}"
+    );
     assert!(
         shown_code
             .lock()
@@ -979,11 +986,13 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(claude_base) = claude_base.ok() else {
         return;
     };
+    let claude_row = crate::find("anthropic")
+        .and_then(|def| def.oauth)
+        .expect("claude row");
     let claude = super::authorize_url(
         Family::Anthropic,
-        &crate::find("anthropic")
-            .and_then(|def| def.oauth)
-            .expect("claude row"),
+        &claude_row,
+        claude_row.client_id,
         &claude_base,
         "http://localhost:53692/callback",
         "challenge",
@@ -1004,11 +1013,13 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(codex_base) = codex_base.ok() else {
         return;
     };
+    let codex_row = crate::find("openai-codex")
+        .and_then(|def| def.oauth)
+        .expect("codex row");
     let codex = super::authorize_url(
         Family::Codex,
-        &crate::find("openai-codex")
-            .and_then(|def| def.oauth)
-            .expect("codex row"),
+        &codex_row,
+        codex_row.client_id,
         &codex_base,
         "http://localhost:1455/auth/callback",
         "challenge",
@@ -1034,6 +1045,7 @@ fn authorization_urls_keep_each_vendor_parameter_order_and_encoding() {
         super::authorize_url(
             family,
             &oauth,
+            oauth.client_id,
             &Url::parse(base).expect("base"),
             redirect,
             "challenge",
@@ -1064,17 +1076,20 @@ fn authorization_urls_keep_each_vendor_parameter_order_and_encoding() {
 fn login_run_future_is_send_for_rpc_handlers() {
     fn assert_send<T: Send>(_: T) {}
     let dir = TestDir::new();
-    let mut store = AuthStore::empty(dir.auth_path());
-    let mut flow = LoginFlow::new(
-        "openai-codex",
-        &mut store,
-        Client::new(),
-        "dalgon/test",
-        dir.cache_dir(),
-    )
-    .expect("test flow builds");
-    let progress = |_: LoginProgress| {};
-    assert_send(flow.run(&progress, &CancellationToken::new()));
+    for provider in ["openai-codex", "factory-droid", "gitlab-duo"] {
+        let mut store = AuthStore::empty(dir.auth_path());
+        let mut flow = LoginFlow::new(
+            provider,
+            &mut store,
+            Client::new(),
+            "dalgon/test",
+            dir.cache_dir(),
+            LoginEndpoints::production(&EnvSnapshot::default()).expect("production endpoints"),
+        )
+        .expect("test flow builds");
+        let progress = |_: LoginProgress| {};
+        assert_send(flow.run(&progress, &CancellationToken::new()));
+    }
 }
 
 #[tokio::test]
@@ -1188,7 +1203,7 @@ async fn logout_of_the_last_credential_reports_a_failed_directory_sync() {
         .expect("seed credential");
     store.store().expect("save seed");
     let _fault = DirSyncFault::arm(path.clone());
-    let result = super::logout("openai", &mut store).await;
+    let result = super::logout("openai", &mut store, &EnvSnapshot::default()).await;
     assert!(
         matches!(result, Err(ProviderError::AuthWrite { .. })),
         "directory sync failure must not report successful logout: {result:?}"
@@ -1201,4 +1216,1206 @@ async fn logout_of_the_last_credential_reports_a_failed_directory_sync() {
             .credential("openai")
             .is_none()
     );
+}
+
+/// One answer the route server gives to a request line without its version.
+struct Route {
+    key: &'static str,
+    status: u16,
+    body: String,
+    /// Read the request and never answer it.
+    hold: bool,
+    /// Answer with the request body quoted into an `error_description`.
+    echo: bool,
+}
+
+impl Route {
+    fn json(key: &'static str, status: u16, body: impl Into<String>) -> Self {
+        Self {
+            key,
+            status,
+            body: body.into(),
+            hold: false,
+            echo: false,
+        }
+    }
+
+    /// Answers `{"error_description":"<the request body>"}`, so an exchange
+    /// failure can quote exactly what was sent.
+    fn json_echo(key: &'static str, status: u16) -> Self {
+        Self {
+            key,
+            status,
+            body: String::new(),
+            hold: false,
+            echo: true,
+        }
+    }
+
+    fn held(key: &'static str) -> Self {
+        Self {
+            key,
+            status: 200,
+            body: String::from("{}"),
+            hold: true,
+            echo: false,
+        }
+    }
+}
+
+/// One request as the route server saw it.
+#[derive(Clone)]
+struct Seen {
+    key: String,
+    head: String,
+    body: String,
+    /// The `auth.json` bytes at the moment the request arrived; `None` while
+    /// the file did not exist.
+    auth: Option<Vec<u8>>,
+}
+
+/// A loopback server that answers by request line and records every request.
+/// Its one task is owned by the `JoinSet`, which aborts it on drop.
+struct RouteServer {
+    base: Url,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    _task: tokio::task::JoinSet<()>,
+}
+
+async fn write_json(stream: &mut TcpStream, status: u16, body: &str) {
+    let head = format!(
+        "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    let _head = stream.write_all(head.as_bytes()).await;
+    let _body = stream.write_all(body.as_bytes()).await;
+}
+
+async fn route_server(routes: Vec<Route>, auth_path: PathBuf) -> RouteServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("route server binds");
+    let address = listener.local_addr().expect("route server address");
+    let base = Url::parse(&format!("http://{address}")).expect("route server base");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let mut task = tokio::task::JoinSet::new();
+    task.spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Some(request) = read_test_request(&mut stream).await else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+            let key = head
+                .lines()
+                .next()
+                .and_then(|line| line.rsplit_once(' '))
+                .map_or("", |(key, _version)| key);
+            record.lock().expect("seen lock").push(Seen {
+                key: key.to_owned(),
+                head: head.to_owned(),
+                body: body.to_owned(),
+                auth: fs::read(&auth_path).ok(),
+            });
+            let Some(route) = routes.iter().find(|route| route.key == key) else {
+                write_json(&mut stream, 404, "{}").await;
+                continue;
+            };
+            if route.hold {
+                std::future::pending::<()>().await;
+            }
+            let body = if route.echo {
+                format!("{{\"error\":\"invalid_grant\",\"error_description\":\"{body}\"}}")
+            } else {
+                route.body.clone()
+            };
+            write_json(&mut stream, route.status, &body).await;
+        }
+    });
+    RouteServer {
+        base,
+        seen,
+        _task: task,
+    }
+}
+
+impl RouteServer {
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.seen().into_iter().map(|request| request.key).collect()
+    }
+
+    /// The one request made to `key`.
+    fn only(&self, key: &str) -> Seen {
+        let mut matching: Vec<Seen> = self
+            .seen()
+            .into_iter()
+            .filter(|request| request.key == key)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "{key} must be requested exactly once: {:?}",
+            self.keys()
+        );
+        matching.remove(0)
+    }
+
+    /// Waits until a request for `key` has arrived; callers bound it with a
+    /// timeout.
+    async fn wait_for(&self, key: &str) {
+        while !self.keys().iter().any(|seen| seen == key) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+fn form_fields(body: &str) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+fn query_fields(url: &str) -> Vec<(String, String)> {
+    Url::parse(url)
+        .expect("authorize URL parses")
+        .query_pairs()
+        .into_owned()
+        .collect()
+}
+
+fn is_form(request: &Seen) -> bool {
+    request
+        .head
+        .to_ascii_lowercase()
+        .contains("content-type: application/x-www-form-urlencoded")
+}
+
+fn pinned_client_id(provider: &str) -> &'static str {
+    crate::find(provider)
+        .and_then(|def| def.oauth)
+        .map(|oauth| oauth.client_id)
+        .expect("provider with OAuth")
+}
+
+/// Stores one API key, so the file exists before a failing login, and returns
+/// its bytes.
+fn seed_openai_key(store: &mut AuthStore) -> Vec<u8> {
+    store
+        .set(
+            "openai",
+            Credential::ApiKey {
+                key: SecretString::from("seed"),
+            },
+        )
+        .expect("seed credential");
+    store.store().expect("save seed");
+    fs::read(store.path()).expect("seed bytes")
+}
+
+/// An existing file keeps its exact bytes; an absent one stays absent.
+fn assert_store_untouched(dir: &TestDir, before: Option<&[u8]>) {
+    match before {
+        Some(bytes) => assert_eq!(fs::read(dir.auth_path()).expect("auth bytes"), bytes),
+        None => assert!(!dir.auth_path().exists(), "an absent store stays absent"),
+    }
+}
+
+async fn free_loopback_port() -> u16 {
+    let (holder, port) = held_loopback_port().await;
+    drop(holder);
+    port
+}
+
+/// Plays the browser: one `GET` to the loopback callback, returning the
+/// status line.
+async fn browser_get(port: u16, target: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("callback listener accepts");
+    let request = format!("GET {target} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("callback request written");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("callback response read");
+    String::from_utf8_lossy(&response)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn opened_url(event: &LoginProgress) -> Option<String> {
+    match event {
+        LoginProgress::OpenUrl { url } => Some(url.clone()),
+        LoginProgress::ShowCode { .. }
+        | LoginProgress::AskPaste { .. }
+        | LoginProgress::Exchanging => None,
+    }
+}
+
+const WORKOS_START: &str = "POST /workos/user_management/authorize/device";
+const WORKOS_POLL: &str = "POST /workos/user_management/authenticate";
+const WORKOS_WHOAMI: &str = "GET /workos/api/cli/whoami";
+const GITLAB_TOKEN: &str = "POST /gitlab/oauth/token";
+const GITLAB_REVOKE: &str = "POST /gitlab/oauth/revoke";
+const WORKOS_DEVICE: &str = r#"{"device_code":"device-code-secret","user_code":"WDJB-MJHT","verification_uri":"https://workos.example/device","verification_uri_complete":"https://workos.example/device?user_code=WDJB-MJHT","expires_in":300,"interval":1}"#;
+const WORKOS_TOKENS: &str =
+    r#"{"access_token":"workos-access","refresh_token":"workos-refresh","expires_in":3600}"#;
+
+fn workos_routes(whoami: Route) -> Vec<Route> {
+    vec![
+        Route::json(WORKOS_START, 200, WORKOS_DEVICE),
+        Route::json(WORKOS_POLL, 200, WORKOS_TOKENS),
+        whoami,
+    ]
+}
+
+/// What `auth.json` holds before a sign-in starts.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StartingStore {
+    /// No file at all.
+    Absent,
+    /// A file holding one API key.
+    Seeded,
+}
+
+/// One finished Factory Droid sign-in against a route server.
+struct DroidRun {
+    result: Result<Credential, ProviderError>,
+    server: RouteServer,
+    dir: TestDir,
+    store: AuthStore,
+    /// The seed file's bytes when the run began with an existing store.
+    before: Option<Vec<u8>>,
+}
+
+/// Signs in to Factory Droid without asking for the device flow: the row
+/// offers no browser sign-in, so the flow itself must pick the device grant.
+async fn droid_login(whoami: Route, start: StartingStore) -> DroidRun {
+    let dir = TestDir::new();
+    let server = route_server(workos_routes(whoami), dir.auth_path()).await;
+    let mut store = AuthStore::empty(dir.auth_path());
+    let before = (start == StartingStore::Seeded).then(|| seed_openai_key(&mut store));
+    let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow =
+        configured_flow("factory-droid", &mut store, &dir, endpoints).expect("droid flow");
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        flow.run(&|_: LoginProgress| {}, &CancellationToken::new()),
+    )
+    .await
+    .expect("login settles");
+    drop(flow);
+    DroidRun {
+        result,
+        server,
+        dir,
+        store,
+        before,
+    }
+}
+
+#[tokio::test]
+async fn workos_tokens_are_verified_then_stored_without_a_second_exchange() {
+    for start in [StartingStore::Absent, StartingStore::Seeded] {
+        let started = super::unix_now();
+        let run = droid_login(
+            Route::json(WORKOS_WHOAMI, 200, r#"{"orgId":"org_1"}"#),
+            start,
+        )
+        .await;
+        let finished = super::unix_now();
+        let credential = run.result.expect("device tokens complete the login");
+        let Credential::OAuth(oauth) = &credential else {
+            panic!("a device login stores an OAuth credential: {credential:?}");
+        };
+        assert_eq!(oauth.access_token.expose(), "workos-access");
+        assert_eq!(oauth.refresh_token.expose(), "workos-refresh");
+        assert_eq!(oauth.id_token, None);
+        assert_eq!(oauth.account_id, None);
+        let expires_at = oauth.expires_at.expect("expires_in sets an expiry");
+        assert!((started + 3600..=finished + 3600).contains(&expires_at));
+
+        // The poll delivered the tokens: nothing is exchanged afterwards, and
+        // the one extra request is the session check.
+        assert_eq!(
+            run.server.keys(),
+            [WORKOS_START, WORKOS_POLL, WORKOS_WHOAMI]
+        );
+        let device_start = run.server.only(WORKOS_START);
+        assert!(is_form(&device_start), "device start is form-encoded");
+        let start_fields = form_fields(&device_start.body);
+        assert_eq!(
+            field(&start_fields, "client_id"),
+            Some(pinned_client_id("factory-droid"))
+        );
+        let poll = run.server.only(WORKOS_POLL);
+        assert!(is_form(&poll), "device poll is form-encoded");
+        let poll_fields = form_fields(&poll.body);
+        assert_eq!(
+            field(&poll_fields, "grant_type"),
+            Some("urn:ietf:params:oauth:grant-type:device_code")
+        );
+        assert_eq!(
+            field(&poll_fields, "device_code"),
+            Some("device-code-secret")
+        );
+        assert!(
+            field(&poll_fields, "code").is_none() && field(&poll_fields, "code_verifier").is_none(),
+            "no authorization-code exchange is built for a direct grant"
+        );
+
+        // Verification precedes persistence: when whoami arrived the file was
+        // still the seed (or absent), and the bearer was the new access token.
+        let whoami = run.server.only(WORKOS_WHOAMI);
+        assert_eq!(whoami.auth, run.before);
+        assert!(
+            whoami
+                .head
+                .to_ascii_lowercase()
+                .contains("authorization: bearer workos-access")
+        );
+
+        let stored = AuthStore::load(run.dir.auth_path()).expect("stored file loads");
+        assert_eq!(stored.credential("factory-droid"), Some(credential.clone()));
+        assert_eq!(run.store.credential("factory-droid"), Some(credential));
+        assert_eq!(stored.credential("openai").is_some(), run.before.is_some());
+    }
+}
+
+/// Signs in while whoami answers `status` with a hostile body, and checks the
+/// refusal is typed, quotes nothing, and leaves the store as it was.
+async fn assert_whoami_refusal(status: u16, start: StartingStore) {
+    let hostile = r#"{"message":"hostile org-secret body"}"#;
+    let run = droid_login(Route::json(WORKOS_WHOAMI, status, hostile), start).await;
+    let refusal = run.result.as_ref().expect_err("a refused session fails");
+    assert!(
+        matches!(
+            refusal,
+            ProviderError::Status { family: Family::Droid, status: refused, .. }
+                if *refused == status
+        ),
+        "whoami {status} must fail the login: {refusal:?}"
+    );
+    let shown = format!("{refusal:?} {refusal}");
+    for secret in ["hostile", "org-secret", "workos-access", "workos-refresh"] {
+        assert!(!shown.contains(secret), "{secret} leaked into {shown}");
+    }
+    assert_store_untouched(&run.dir, run.before.as_deref());
+    assert!(run.store.credential("factory-droid").is_none());
+    assert_eq!(
+        run.store.credential("openai").is_some(),
+        run.before.is_some()
+    );
+    assert_eq!(
+        run.server.keys(),
+        [WORKOS_START, WORKOS_POLL, WORKOS_WHOAMI],
+        "the grant was issued before the verification refused it"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_session_verification_fails_the_login_and_leaves_the_store_untouched() {
+    for start in [StartingStore::Absent, StartingStore::Seeded] {
+        assert_whoami_refusal(403, start).await;
+        assert_whoami_refusal(500, start).await;
+    }
+}
+
+#[tokio::test]
+async fn a_session_without_an_organization_is_refused_before_persistence() {
+    for start in [StartingStore::Absent, StartingStore::Seeded] {
+        let run = droid_login(Route::json(WORKOS_WHOAMI, 200, "{}"), start).await;
+        assert!(
+            matches!(
+                &run.result,
+                Err(ProviderError::TokenExchange { status: 200, .. })
+            ),
+            "an unresolved organization fails the login: {:?}",
+            run.result
+        );
+        assert_store_untouched(&run.dir, run.before.as_deref());
+        assert!(run.store.credential("factory-droid").is_none());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_during_session_verification_is_cancellation_and_stores_nothing() {
+    for seeded in [false, true] {
+        let dir = TestDir::new();
+        let server = route_server(workos_routes(Route::held(WORKOS_WHOAMI)), dir.auth_path()).await;
+        let mut store = AuthStore::empty(dir.auth_path());
+        let before = seeded.then(|| seed_openai_key(&mut store));
+        let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+            .expect("loopback endpoints");
+        let mut flow =
+            configured_flow("factory-droid", &mut store, &dir, endpoints).expect("droid flow");
+        let cancel = CancellationToken::new();
+        let progress = |_: LoginProgress| {};
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(flow.run(&progress, &cancel), async {
+                server.wait_for(WORKOS_WHOAMI).await;
+                cancel.cancel();
+            })
+        })
+        .await
+        .expect("a cancelled verification settles");
+        drop(flow);
+        assert!(
+            matches!(result, Err(ProviderError::LoginCancelled)),
+            "cancellation during whoami stays cancellation: {result:?}"
+        );
+        assert_store_untouched(&dir, before.as_deref());
+        assert!(store.credential("factory-droid").is_none());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_at_the_device_code_prompt_stops_before_any_poll() {
+    let dir = TestDir::new();
+    let server = route_server(
+        workos_routes(Route::json(WORKOS_WHOAMI, 200, r#"{"orgId":"org_1"}"#)),
+        dir.auth_path(),
+    )
+    .await;
+    let mut store = AuthStore::empty(dir.auth_path());
+    let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("factory-droid", &mut store, &dir, endpoints).expect("flow");
+    let cancel = CancellationToken::new();
+    let shown = Mutex::new(None);
+    let progress = |event: LoginProgress| {
+        if let LoginProgress::ShowCode { url, code } = event {
+            *shown.lock().expect("shown lock") = Some((url, code));
+            cancel.cancel();
+        }
+    };
+    let result = flow.run(&progress, &cancel).await;
+    drop(flow);
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    let (url, code) = shown
+        .into_inner()
+        .expect("shown lock")
+        .expect("the device code was shown");
+    assert_eq!(code, "WDJB-MJHT");
+    assert_eq!(url, "https://workos.example/device?user_code=WDJB-MJHT");
+    assert_eq!(server.keys(), [WORKOS_START]);
+    assert!(!dir.auth_path().exists());
+}
+
+fn gitlab_grant(extra: &str) -> String {
+    format!(
+        r#"{{"access_token":"gitlab-access","refresh_token":"gitlab-refresh","token_type":"Bearer"{extra}}}"#
+    )
+}
+
+/// The events and result of one `GitLab` sign-in whose pasted value is sent
+/// when the authorize URL is shown.
+struct PasteRun {
+    result: Result<Credential, ProviderError>,
+    events: Vec<LoginProgress>,
+}
+
+impl PasteRun {
+    fn url(&self) -> String {
+        self.events
+            .iter()
+            .find_map(opened_url)
+            .expect("an authorize URL was shown")
+    }
+}
+
+async fn paste_login(flow: &mut LoginFlow<'_>, pasted: &str) -> PasteRun {
+    let sender = Mutex::new(flow.take_paste_sender());
+    let events = Mutex::new(Vec::new());
+    let progress = |event: LoginProgress| {
+        if matches!(event, LoginProgress::OpenUrl { .. })
+            && let Some(sender) = sender.lock().expect("paste lock").take()
+        {
+            let _sent = sender.send(pasted.to_owned());
+        }
+        events.lock().expect("events lock").push(event);
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        flow.run(&progress, &CancellationToken::new()),
+    )
+    .await
+    .expect("login settles");
+    PasteRun {
+        result,
+        events: events.into_inner().expect("events lock"),
+    }
+}
+
+#[tokio::test]
+async fn gitlab_authorize_url_carries_the_pinned_client_scope_and_registered_redirect() {
+    let dir = TestDir::new();
+    let mut store = AuthStore::empty(dir.auth_path());
+    let before = seed_openai_key(&mut store);
+    let endpoints = LoginEndpoints::loopback("http://127.0.0.1:1", &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let cancel = CancellationToken::new();
+    let opened = Mutex::new(None);
+    let progress = |event: LoginProgress| {
+        if let LoginProgress::OpenUrl { url } = event {
+            *opened.lock().expect("opened lock") = Some(url);
+            cancel.cancel();
+        }
+    };
+    let result = flow.run(&progress, &cancel).await;
+    drop(flow);
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    let url = opened
+        .into_inner()
+        .expect("opened lock")
+        .expect("an authorize URL was shown");
+    assert_eq!(
+        Url::parse(&url).expect("URL").path(),
+        "/gitlab/oauth/authorize"
+    );
+    let query = query_fields(&url);
+    assert_eq!(
+        field(&query, "client_id"),
+        Some(pinned_client_id("gitlab-duo"))
+    );
+    assert_eq!(field(&query, "response_type"), Some("code"));
+    assert_eq!(field(&query, "scope"), Some("api"));
+    assert_eq!(field(&query, "code_challenge_method"), Some("S256"));
+    assert_eq!(field(&query, "code_challenge").map(str::len), Some(43));
+    assert!(field(&query, "state").is_some_and(|state| !state.is_empty()));
+    let redirect = field(&query, "redirect_uri").expect("redirect_uri");
+    assert!(redirect.starts_with("http://localhost:") && redirect.ends_with("/callback"));
+    assert_eq!(
+        fs::read(dir.auth_path()).expect("auth bytes"),
+        before,
+        "a cancelled login leaves the existing file untouched"
+    );
+}
+
+#[test]
+fn effective_client_ids_follow_the_captured_environment() {
+    let client = |entries: &[(&str, &str)], provider: &str| {
+        let endpoints =
+            LoginEndpoints::production(&EnvSnapshot::test(entries)).expect("production endpoints");
+        let def = crate::find(provider).expect("table row");
+        endpoints.row(def).expect("OAuth row").client_id.to_string()
+    };
+    assert_eq!(client(&[], "gitlab-duo"), pinned_client_id("gitlab-duo"));
+    assert_eq!(
+        client(&[("GITLAB_CLIENT_ID", "  override-client\t")], "gitlab-duo"),
+        "override-client"
+    );
+    assert_eq!(
+        client(&[("GITLAB_CLIENT_ID", "  ")], "gitlab-duo"),
+        pinned_client_id("gitlab-duo"),
+        "a blank override counts as unset"
+    );
+    for provider in ["anthropic", "openai-codex", "factory-droid"] {
+        assert_eq!(
+            client(&[("GITLAB_CLIENT_ID", "override-client")], provider),
+            pinned_client_id(provider),
+            "{provider} names no override variable"
+        );
+    }
+}
+
+#[test]
+fn production_and_loopback_rows_place_the_new_vendors_apart() {
+    let env = EnvSnapshot::default();
+    let production = LoginEndpoints::production(&env).expect("production endpoints");
+    let row = |endpoints: &LoginEndpoints, provider: &str| {
+        endpoints
+            .row(crate::find(provider).expect("table row"))
+            .expect("OAuth row")
+            .clone()
+    };
+    let gitlab = row(&production, "gitlab-duo");
+    assert_eq!(
+        gitlab.authorize.as_str(),
+        "https://gitlab.com/oauth/authorize"
+    );
+    assert_eq!(gitlab.token.as_str(), "https://gitlab.com/oauth/token");
+    assert_eq!(
+        gitlab.revoke.as_ref().map(Url::as_str),
+        Some("https://gitlab.com/oauth/revoke")
+    );
+    let droid = row(&production, "factory-droid");
+    assert_eq!(
+        droid.session_base.as_ref().map(Url::as_str),
+        Some("https://api.factory.ai/")
+    );
+
+    let loopback = LoginEndpoints::loopback("http://127.0.0.1:9", &env).expect("loopback");
+    let paths: Vec<String> = ["openai-codex", "anthropic", "factory-droid", "gitlab-duo"]
+        .into_iter()
+        .map(|provider| row(&loopback, provider).token.path().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/oauth/token",
+            "/claude/v1/oauth/token",
+            "/workos/user_management/authenticate",
+            "/gitlab/oauth/token",
+        ],
+        "each row owns its token path on one loopback server"
+    );
+    assert_eq!(
+        row(&loopback, "factory-droid")
+            .session_base
+            .as_ref()
+            .map(Url::as_str),
+        Some("http://127.0.0.1:9/workos")
+    );
+}
+
+/// A finished `GitLab` exchange: the stored credential, the exchange form, and
+/// the authorize URL.
+async fn gitlab_exchange(
+    env: &EnvSnapshot,
+    grant: String,
+) -> (Credential, Vec<(String, String)>, String) {
+    let dir = TestDir::new();
+    let server = route_server(vec![Route::json(GITLAB_TOKEN, 200, grant)], dir.auth_path()).await;
+    let mut store = AuthStore::empty(dir.auth_path());
+    let endpoints =
+        LoginEndpoints::loopback(server.base.as_str(), env).expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let run = paste_login(&mut flow, "code123").await;
+    drop(flow);
+    let url = run.url();
+    let credential = run.result.expect("the exchange completes the login");
+    let request = server.only(GITLAB_TOKEN);
+    assert!(is_form(&request), "the GitLab exchange is form-encoded");
+    assert!(!request.body.starts_with('{'), "not a JSON body");
+    let stored = AuthStore::load(dir.auth_path()).expect("stored file loads");
+    assert_eq!(stored.credential("gitlab-duo"), Some(credential.clone()));
+    (credential, form_fields(&request.body), url)
+}
+
+#[tokio::test]
+async fn gitlab_exchange_sends_the_effective_client_and_verifier_as_a_form() {
+    let pinned = pinned_client_id("gitlab-duo");
+    let padded = " override-client ";
+    let cases: [(&[(&str, &str)], &str); 3] = [
+        (&[("GITLAB_CLIENT_ID", padded)], "override-client"),
+        (&[("GITLAB_CLIENT_ID", "   ")], pinned),
+        (&[], pinned),
+    ];
+    for (entries, expected) in cases {
+        let (credential, form, url) = gitlab_exchange(
+            &EnvSnapshot::test(entries),
+            gitlab_grant(r#","expires_in":7200,"created_at":1700000000"#),
+        )
+        .await;
+        let query = query_fields(&url);
+        assert_eq!(field(&query, "client_id"), Some(expected), "authorize");
+        assert_eq!(field(&form, "client_id"), Some(expected), "exchange");
+        assert_eq!(field(&form, "grant_type"), Some("authorization_code"));
+        assert_eq!(field(&form, "code"), Some("code123"));
+        assert_eq!(field(&form, "redirect_uri"), field(&query, "redirect_uri"));
+        let verifier = field(&form, "code_verifier").expect("code_verifier");
+        assert_eq!(
+            Some(pkce_challenge(verifier).as_str()),
+            field(&query, "code_challenge"),
+            "the exchange proves the verifier behind the authorize challenge"
+        );
+        let Credential::OAuth(oauth) = credential else {
+            panic!("a GitLab login stores an OAuth credential");
+        };
+        assert_eq!(oauth.access_token.expose(), "gitlab-access");
+        assert_eq!(oauth.refresh_token.expose(), "gitlab-refresh");
+        assert_eq!(oauth.id_token, None);
+        assert_eq!(oauth.account_id, None);
+        assert_eq!(oauth.expires_at, Some(1_700_007_200));
+    }
+}
+
+#[tokio::test]
+async fn gitlab_expiry_counts_from_created_at_only_when_the_response_supplies_it() {
+    let expires_at = async |extra: &str| {
+        let (credential, _, _) =
+            gitlab_exchange(&EnvSnapshot::default(), gitlab_grant(extra)).await;
+        let Credential::OAuth(oauth) = credential else {
+            panic!("a GitLab login stores an OAuth credential");
+        };
+        oauth.expires_at
+    };
+    let started = super::unix_now();
+    let local = expires_at(r#","expires_in":7200"#).await.expect("expiry");
+    let finished = super::unix_now();
+    assert!(
+        (started + 7200..=finished + 7200).contains(&local),
+        "without created_at the expiry counts from the local clock"
+    );
+    assert_eq!(
+        expires_at(r#","expires_in":7200,"created_at":1000"#).await,
+        Some(8200),
+        "created_at is the issuance base"
+    );
+    assert_eq!(
+        expires_at(r#","created_at":1000"#).await,
+        None,
+        "created_at alone names no expiry"
+    );
+}
+
+#[tokio::test]
+async fn a_gitlab_exchange_ignores_a_created_at_that_is_not_an_integer() {
+    // A refresh reads the same field the same way, so a grant that one accepts
+    // the other never refuses.
+    for created_at in [
+        r#""2025-01-01T00:00:00Z""#,
+        "1.5",
+        "null",
+        "true",
+        "18446744073709551615",
+    ] {
+        let started = super::unix_now();
+        let (credential, _, _) = gitlab_exchange(
+            &EnvSnapshot::default(),
+            gitlab_grant(&format!(r#","expires_in":7200,"created_at":{created_at}"#)),
+        )
+        .await;
+        let finished = super::unix_now();
+        let Credential::OAuth(oauth) = credential else {
+            panic!("a GitLab login stores an OAuth credential");
+        };
+        let expires_at = oauth.expires_at.expect("expires_in names an expiry");
+        assert!(
+            (started + 7200..=finished + 7200).contains(&expires_at),
+            "{created_at}: an unusable created_at counts from the local clock, got {expires_at}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_first_login_creates_the_missing_data_directory() {
+    let dir = TestDir::new();
+    let auth_path = dir.0.join("fresh").join("data").join("auth.json");
+    let server = route_server(
+        vec![Route::json(
+            GITLAB_TOKEN,
+            200,
+            gitlab_grant(r#","expires_in":7200"#),
+        )],
+        auth_path.clone(),
+    )
+    .await;
+    let mut store = AuthStore::empty(auth_path.clone());
+    let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let run = paste_login(&mut flow, "code123").await;
+    drop(flow);
+    run.result.expect("a login into a missing data directory completes");
+    let stored = AuthStore::load(&auth_path).expect("the stored file loads");
+    assert!(
+        matches!(stored.credential("gitlab-duo"), Some(Credential::OAuth(_))),
+        "the credential reached the new directory"
+    );
+}
+
+#[test]
+fn a_redirect_override_value_never_formats_in_debug_output() {
+    let uri = "http://user:hunter2@localhost:8080/callback";
+    let env = EnvSnapshot::test(&[("GITLAB_REDIRECT_URI", uri)]);
+    let endpoints = LoginEndpoints::production(&env).expect("production endpoints");
+    let shown = format!("{endpoints:?}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert!(!shown.contains(uri), "{shown}");
+    assert!(
+        shown.contains("GITLAB_REDIRECT_URI"),
+        "the variable stays named: {shown}"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_gitlab_exchange_redacts_the_code_and_leaves_the_store_untouched() {
+    for seeded in [false, true] {
+        let dir = TestDir::new();
+        let server = route_server(
+            vec![Route::json(
+                GITLAB_TOKEN,
+                400,
+                r#"{"error":"invalid_grant","error_description":"code123 is not accepted"}"#,
+            )],
+            dir.auth_path(),
+        )
+        .await;
+        let mut store = AuthStore::empty(dir.auth_path());
+        let before = seeded.then(|| seed_openai_key(&mut store));
+        let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+            .expect("loopback endpoints");
+        let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+        let run = paste_login(&mut flow, "code123").await;
+        drop(flow);
+        assert!(
+            matches!(
+                &run.result,
+                Err(ProviderError::TokenExchange { status: 400, message })
+                    if message.as_str() == "<redacted> is not accepted"
+            ),
+            "{:?}",
+            run.result
+        );
+        assert_store_untouched(&dir, before.as_deref());
+        assert!(store.credential("gitlab-duo").is_none());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_gitlab_exchange_stores_nothing() {
+    let dir = TestDir::new();
+    let server = route_server(vec![Route::held(GITLAB_TOKEN)], dir.auth_path()).await;
+    let mut store = AuthStore::empty(dir.auth_path());
+    let before = seed_openai_key(&mut store);
+    let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let cancel = CancellationToken::new();
+    let sender = Mutex::new(flow.take_paste_sender());
+    let progress = |event: LoginProgress| {
+        if matches!(event, LoginProgress::OpenUrl { .. })
+            && let Some(sender) = sender.lock().expect("paste lock").take()
+        {
+            let _sent = sender.send(String::from("code123"));
+        }
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(flow.run(&progress, &cancel), async {
+            server.wait_for(GITLAB_TOKEN).await;
+            cancel.cancel();
+        })
+    })
+    .await
+    .expect("a cancelled exchange settles");
+    drop(flow);
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    assert_eq!(fs::read(dir.auth_path()).expect("auth bytes"), before);
+    assert!(store.credential("gitlab-duo").is_none());
+}
+
+#[tokio::test]
+async fn a_redirect_override_is_advertised_verbatim_and_served_at_its_own_port_and_path() {
+    let dir = TestDir::new();
+    let server = route_server(
+        vec![Route::json(
+            GITLAB_TOKEN,
+            200,
+            gitlab_grant(r#","expires_in":7200"#),
+        )],
+        dir.auth_path(),
+    )
+    .await;
+    let port = free_loopback_port().await;
+    let advertised = format!("http://localhost:{port}/gitlab/cb");
+    let padded = format!("  {advertised}  ");
+    let env = EnvSnapshot::test(&[("GITLAB_REDIRECT_URI", padded.as_str())]);
+    let mut store = AuthStore::empty(dir.auth_path());
+    let endpoints =
+        LoginEndpoints::loopback(server.base.as_str(), &env).expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let events = Mutex::new(Vec::new());
+    let progress = |event: LoginProgress| events.lock().expect("events lock").push(event);
+    let cancel = CancellationToken::new();
+    let browser = async {
+        let url = loop {
+            let shown = events
+                .lock()
+                .expect("events lock")
+                .iter()
+                .find_map(opened_url);
+            if let Some(url) = shown {
+                break url;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        let query = query_fields(&url);
+        let state = field(&query, "state").expect("state").to_owned();
+        let default_path = browser_get(port, &format!("/callback?code=wrong&state={state}")).await;
+        let override_path =
+            browser_get(port, &format!("/gitlab/cb?code=code123&state={state}")).await;
+        (url, default_path, override_path)
+    };
+    let (result, (url, default_path, override_path)) =
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(flow.run(&progress, &cancel), browser)
+        })
+        .await
+        .expect("the callback completes the login");
+    drop(flow);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        field(&query_fields(&url), "redirect_uri"),
+        Some(advertised.as_str())
+    );
+    assert!(
+        default_path.contains("404"),
+        "the registered path is not served under an override: {default_path}"
+    );
+    assert!(
+        override_path.contains("200"),
+        "the override path is served: {override_path}"
+    );
+    let form = form_fields(&server.only(GITLAB_TOKEN).body);
+    assert_eq!(field(&form, "redirect_uri"), Some(advertised.as_str()));
+    assert_eq!(field(&form, "code"), Some("code123"));
+}
+
+#[tokio::test]
+async fn a_redirect_override_that_this_machine_cannot_serve_leaves_the_login_to_paste() {
+    let (holder, busy) = held_loopback_port().await;
+    let overrides = [
+        // The override's own port is taken: no other port is tried.
+        format!("http://127.0.0.1:{busy}/cb"),
+        // Not loopback: nothing local can receive it.
+        String::from("https://app.example/gitlab/callback"),
+        // TLS cannot be terminated by the loopback listener.
+        format!("https://localhost:{busy}/cb"),
+    ];
+    for advertised in overrides {
+        let dir = TestDir::new();
+        let server = route_server(
+            vec![Route::json(
+                GITLAB_TOKEN,
+                200,
+                gitlab_grant(r#","expires_in":7200"#),
+            )],
+            dir.auth_path(),
+        )
+        .await;
+        let env = EnvSnapshot::test(&[("GITLAB_REDIRECT_URI", advertised.as_str())]);
+        let mut store = AuthStore::empty(dir.auth_path());
+        let endpoints =
+            LoginEndpoints::loopback(server.base.as_str(), &env).expect("loopback endpoints");
+        let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+        let run = paste_login(&mut flow, "code123").await;
+        drop(flow);
+        assert!(run.result.is_ok(), "{advertised}: {:?}", run.result);
+        assert!(
+            run.events
+                .iter()
+                .any(|event| matches!(event, LoginProgress::AskPaste { .. })),
+            "{advertised} is paste-only"
+        );
+        assert_eq!(
+            field(&query_fields(&run.url()), "redirect_uri"),
+            Some(advertised.as_str()),
+            "the advertised value never changes"
+        );
+        let form = form_fields(&server.only(GITLAB_TOKEN).body);
+        assert_eq!(field(&form, "redirect_uri"), Some(advertised.as_str()));
+    }
+    drop(holder);
+}
+
+#[tokio::test]
+async fn a_busy_override_port_is_paste_only_not_a_fallback_listener() {
+    // With no paste input the paste-only flow ends at once; a fallback
+    // listener would instead keep waiting for a callback nobody can send.
+    let (holder, busy) = held_loopback_port().await;
+    let advertised = format!("http://127.0.0.1:{busy}/cb");
+    let env = EnvSnapshot::test(&[("GITLAB_REDIRECT_URI", advertised.as_str())]);
+    let dir = TestDir::new();
+    let mut store = AuthStore::empty(dir.auth_path());
+    let endpoints = LoginEndpoints::loopback("http://127.0.0.1:1", &env).expect("loopback");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let opened = Mutex::new(None);
+    let progress = |event: LoginProgress| {
+        if let LoginProgress::OpenUrl { url } = event {
+            *opened.lock().expect("opened lock") = Some(url);
+        }
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        flow.run(&progress, &CancellationToken::new()),
+    )
+    .await
+    .expect("a paste-only login does not wait on a listener");
+    drop(flow);
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    let url = opened
+        .into_inner()
+        .expect("opened lock")
+        .expect("an authorize URL was shown");
+    assert_eq!(
+        field(&query_fields(&url), "redirect_uri"),
+        Some(advertised.as_str())
+    );
+    assert!(!dir.auth_path().exists());
+    drop(holder);
+}
+
+#[tokio::test]
+async fn a_malformed_redirect_override_fails_that_login_before_any_request() {
+    // Each value with the part of it that must never reach the error text.
+    let refused = [
+        ("not a url", "not a url"),
+        ("ftp://localhost:9/cb", "ftp://"),
+        ("http://localhost:0/cb", "localhost"),
+        ("http://user:secretpw@localhost:9/cb", "secretpw"),
+        ("http://localhost:9/cb#leaky", "leaky"),
+    ];
+    for (bad, leak) in refused {
+        let dir = TestDir::new();
+        let server = route_server(Vec::new(), dir.auth_path()).await;
+        let env = EnvSnapshot::test(&[("GITLAB_REDIRECT_URI", bad)]);
+        let endpoints =
+            LoginEndpoints::loopback(server.base.as_str(), &env).expect("other rows still build");
+        let mut store = AuthStore::empty(dir.auth_path());
+        let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+        let run = paste_login(&mut flow, "code123").await;
+        drop(flow);
+        let error = match run.result {
+            Err(error @ ProviderError::LoginInput { .. }) => error,
+            other => panic!("{bad} must be refused as input: {other:?}"),
+        };
+        let shown = error.to_string();
+        assert!(shown.contains("GITLAB_REDIRECT_URI"), "{shown}");
+        assert!(!shown.contains(leak), "{leak} leaked into {shown}");
+        assert!(server.keys().is_empty(), "no request precedes the refusal");
+        assert!(!dir.auth_path().exists());
+    }
+}
+
+#[test]
+fn error_messages_scrub_raw_and_percent_encoded_secrets() {
+    let quoted = r#"{"error_description":"grant co%3Ade and verifier V-x_y~z failed"}"#;
+    let message = super::error_message(quoted.as_bytes(), &["co:de", "V-x_y~z"]);
+    assert_eq!(message, "grant <redacted> and verifier <redacted> failed");
+}
+
+#[tokio::test]
+async fn a_gitlab_exchange_error_never_quotes_the_code_verifier_or_state() {
+    let dir = TestDir::new();
+    let server = route_server(vec![Route::json_echo(GITLAB_TOKEN, 400)], dir.auth_path()).await;
+    let mut store = AuthStore::empty(dir.auth_path());
+    let endpoints = LoginEndpoints::loopback(server.base.as_str(), &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let run = paste_login(&mut flow, "code123").await;
+    drop(flow);
+    let request = server.only(GITLAB_TOKEN);
+    let form = form_fields(&request.body);
+    assert!(
+        field(&form, "state").is_none(),
+        "the GitLab exchange form sends no state"
+    );
+    let verifier = field(&form, "code_verifier")
+        .expect("code_verifier")
+        .to_owned();
+    assert!(
+        request.body.contains(&verifier) && request.body.contains("code123"),
+        "the server echoed the exchange body: {}",
+        request.body
+    );
+    let message = match run.result {
+        Err(ProviderError::TokenExchange {
+            status: 400,
+            message,
+        }) => message,
+        other => panic!("an echoed exchange failure is a token-exchange error: {other:?}"),
+    };
+    for secret in ["code123", verifier.as_str()] {
+        assert!(!message.contains(secret), "{secret} leaked into {message}");
+    }
+    let encoded: String = url::form_urlencoded::byte_serialize(verifier.as_bytes()).collect();
+    assert!(!message.contains(&encoded));
+    assert_store_untouched(&dir, None);
+}
+
+#[tokio::test]
+async fn a_gitlab_paste_failure_names_the_gitlab_family() {
+    let dir = TestDir::new();
+    let mut store = AuthStore::empty(dir.auth_path());
+    let before = seed_openai_key(&mut store);
+    let endpoints = LoginEndpoints::loopback("http://127.0.0.1:1", &EnvSnapshot::default())
+        .expect("loopback endpoints");
+    let mut flow = configured_flow("gitlab-duo", &mut store, &dir, endpoints).expect("flow");
+    let run = paste_login(&mut flow, "   ").await;
+    drop(flow);
+    assert!(
+        matches!(
+            &run.result,
+            Err(ProviderError::Transport {
+                family: Family::GitLab,
+                reason
+            }) if reason.contains("empty")
+        ),
+        "{:?}",
+        run.result
+    );
+    assert_eq!(fs::read(dir.auth_path()).expect("auth bytes"), before);
+}
+
+#[tokio::test]
+async fn gitlab_revoke_is_a_form_with_the_effective_client_and_never_blocks_logout() {
+    type RevokeCase<'a> = (&'a [(&'a str, &'a str)], &'a str, u16);
+    let pinned = pinned_client_id("gitlab-duo");
+    let padded = " override-client ";
+    let cases: [RevokeCase<'_>; 3] = [
+        (&[], pinned, 200),
+        (&[("GITLAB_CLIENT_ID", padded)], "override-client", 400),
+        (&[("GITLAB_CLIENT_ID", "  ")], pinned, 503),
+    ];
+    for (entries, expected, status) in cases {
+        let dir = TestDir::new();
+        let server = route_server(
+            vec![Route::json(GITLAB_REVOKE, status, "{}")],
+            dir.auth_path(),
+        )
+        .await;
+        let mut store = AuthStore::empty(dir.auth_path());
+        store
+            .set(
+                "gitlab-duo",
+                Credential::OAuth(OAuthCredential {
+                    access_token: SecretString::from("gitlab-access"),
+                    refresh_token: SecretString::from("gitlab refresh/token"),
+                    expires_at: Some(100),
+                    id_token: None,
+                    account_id: None,
+                }),
+            )
+            .expect("seed credential");
+        store.store().expect("save seed");
+        let env = EnvSnapshot::test(entries);
+        let endpoints =
+            LoginEndpoints::loopback(server.base.as_str(), &env).expect("loopback endpoints");
+        let result = super::logout_with("gitlab-duo", &mut store, "dalgon/test", &endpoints).await;
+        assert!(result.is_ok(), "revoke status {status} never blocks logout");
+        let request = server.only(GITLAB_REVOKE);
+        assert!(is_form(&request), "Doorkeeper reads form parameters");
+        assert!(!request.body.starts_with('{'), "not a JSON body");
+        let form = form_fields(&request.body);
+        assert_eq!(field(&form, "token"), Some("gitlab refresh/token"));
+        assert_eq!(field(&form, "token_type_hint"), Some("refresh_token"));
+        assert_eq!(field(&form, "client_id"), Some(expected));
+        assert!(store.credential("gitlab-duo").is_none());
+        assert!(!dir.auth_path().exists(), "the last entry removes the file");
+    }
 }
