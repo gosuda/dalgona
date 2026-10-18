@@ -196,14 +196,18 @@ pub(crate) async fn serve(
         )
         .await
     };
-    let result = match outcome {
-        Ok(result) => result,
-        Err(code) => return ExitCode::from(code),
-    };
+    // A second signal still closes the host: `close_host` always runs the
+    // close to completion and only abandons the quiet poll, so a durable
+    // provider credential write is never detached. A later signal during the
+    // quiet wait wins; otherwise the drive's second signal decides the exit.
     let closed = exit::Ladder::begin().close_host(closing).await;
     if let Some(code) = closed.skipped_by {
         return ExitCode::from(code);
     }
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
+    };
     match result {
         Ok(code) => code,
         Err(error) => serve_error(error),
