@@ -2224,6 +2224,621 @@ mod tests {
             );
         }
     }
+
+    /// Private-effect actor boundary proofs: real actor plus temp-Store
+    /// journals. Every write below travels `private_loop_born` /
+    /// `private_start` / `private_end` through the live session actor and
+    /// asserts against the file-backed journal; no fake journal or backend
+    /// stands in. Owners are minted through `private_owner_of`, the same
+    /// renderer the read filter uses, and every `Owner` value stays
+    /// test-internal.
+    fn private_test_caller(name: &str, origin: dal_core::Origin) -> crate::ext::Caller {
+        crate::ext::Caller::new(
+            name.parse::<dal_core::Name>()
+                .expect("valid extension name"),
+            origin,
+            dal_core::ServiceSet::from_names(["ask"]).expect("inject parses"),
+            std::num::NonZeroU32::MIN,
+            crate::ext::CallerKind::Handler,
+            None,
+        )
+        .with_test_digest()
+    }
+
+    fn private_journal_bytes(
+        temp: &tempfile::TempDir,
+        workspace: &Workspace,
+        id: SessionId,
+    ) -> Vec<u8> {
+        let data_root = temp.path().join("data");
+        let path = dal_store::Store::new(data_root, workspace.clone(), dal_core::Product::Dal)
+            .session_file(id);
+        std::fs::read(&path).expect("private journal is file-backed")
+    }
+
+    fn private_decode_records(bytes: &[u8]) -> Vec<dal_core::Record> {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| dal_core::decode(line).expect("journal line decodes").record)
+            .collect()
+    }
+
+    fn count_private_starts(
+        records: &[dal_core::Record],
+        want_loop: &dal_core::PrivateLoopId,
+        want_token: &dal_core::PrivateEffectId,
+    ) -> usize {
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    dal_core::Record::PrivateStart {
+                        r#loop: found_loop,
+                        token: found_token,
+                        ..
+                    } if found_loop == want_loop && found_token == want_token
+                )
+            })
+            .count()
+    }
+
+    fn count_private_ends(
+        records: &[dal_core::Record],
+        want_loop: &dal_core::PrivateLoopId,
+        want_token: &dal_core::PrivateEffectId,
+    ) -> usize {
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    dal_core::Record::PrivateEnd {
+                        r#loop: found_loop,
+                        token: found_token,
+                        ..
+                    } if found_loop == want_loop && found_token == want_token
+                )
+            })
+            .count()
+    }
+
+    fn private_settled_outcome() -> dal_core::PrivateOutcome {
+        dal_core::PrivateOutcome::Settled {
+            is_error: false,
+            parts: vec![dal_core::JournalPart::Text { text: "ok".into() }],
+        }
+    }
+
+    #[tokio::test]
+    async fn private_rejected_transitions_persist_nothing() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let handle = backend_of(&host, root).handle().clone();
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        handle
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        let baseline = private_journal_bytes(&temp, &workspace, root);
+
+        // A duplicate birth is rejected and the journal stays byte-identical.
+        assert!(
+            handle
+                .private_loop_born(r#loop, owner.clone(), None)
+                .await
+                .is_err(),
+            "a twice-born loop must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            baseline,
+            "a rejected birth appends nothing"
+        );
+
+        // A start under a foreign owner is rejected with no new bytes.
+        let stranger = private_test_caller("stranger", dal_core::Origin::User);
+        assert!(
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    private_owner_of(&stranger),
+                    None,
+                    0,
+                    dal_core::CallId::new("rejected-call"),
+                    "proof-tool".into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .is_err(),
+            "an owner-mismatched start must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            baseline,
+            "a mismatched start appends nothing"
+        );
+
+        // The one valid start receipts; its duplicate fails without a record.
+        handle
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                0,
+                dal_core::CallId::new("proof-call"),
+                "proof-tool".into(),
+                dal_core::RawJson::parse("null").expect("args parse"),
+            )
+            .await
+            .expect("valid start receipts");
+        let after_start = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_starts(&private_decode_records(&after_start), &r#loop, &token),
+            1,
+            "exactly one start record lands"
+        );
+        assert!(
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    owner.clone(),
+                    None,
+                    0,
+                    dal_core::CallId::new("proof-call"),
+                    "proof-tool".into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .is_err(),
+            "a twice-started effect must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            after_start,
+            "a duplicate start appends nothing"
+        );
+
+        // One end settles the row; a second end for the token fails and the
+        // journal still holds exactly one end record for it.
+        handle
+            .private_end(r#loop, token, private_settled_outcome())
+            .await
+            .expect("valid end receipts");
+        let after_end = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_ends(&private_decode_records(&after_end), &r#loop, &token),
+            1,
+            "exactly one end record lands"
+        );
+        assert!(
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .is_err(),
+            "a twice-ended effect must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            after_end,
+            "a duplicate end appends nothing"
+        );
+
+        // The rejections above left the fold untouched: an end for a token
+        // that never started still fails instead of settling a phantom row.
+        assert!(
+            handle
+                .private_end(
+                    r#loop,
+                    dal_core::PrivateEffectId::new_v7(),
+                    private_settled_outcome()
+                )
+                .await
+                .is_err(),
+            "an end without a start must fail"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_receipt_persisted_and_closed_operations_reject() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        handle
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        handle
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                0,
+                dal_core::CallId::new("proof-call"),
+                "proof-tool".into(),
+                dal_core::RawJson::parse("null").expect("args parse"),
+            )
+            .await
+            .expect("start receipts");
+
+        // The receipt above is durable: the start record is on the file, and
+        // only then does the row settle and publish its terminal.
+        let records = private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_starts(&records, &r#loop, &token),
+            1,
+            "the start receipt is on disk"
+        );
+        handle
+            .private_end(r#loop, token, private_settled_outcome())
+            .await
+            .expect("end receipts");
+        let settled_rows = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads its terminal");
+        assert_eq!(settled_rows.len(), 1, "the settled terminal publishes");
+        assert_eq!(settled_rows[0].token, token);
+
+        // A failed append folds and publishes nothing: the armed write fault
+        // rejects the start, the owner still reads only the settled row, and
+        // the journal file is byte-identical (the partial batch rolls back).
+        let faulted = dal_core::PrivateEffectId::new_v7();
+        let before_fault = private_journal_bytes(&temp, &workspace, root);
+        dal_store::Store::new(
+            temp.path().join("data"),
+            workspace.clone(),
+            dal_core::Product::Dal,
+        )
+        .arm_append_write_fault(root, 0);
+        assert!(
+            matches!(
+                handle
+                    .private_start(
+                        r#loop,
+                        faulted,
+                        owner.clone(),
+                        None,
+                        1,
+                        dal_core::CallId::new("faulted-call"),
+                        "proof-tool".into(),
+                        dal_core::RawJson::parse("null").expect("args parse"),
+                    )
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a failed append must reject the start"
+        );
+        let rows_after_fault = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads after the failed append");
+        assert_eq!(
+            rows_after_fault.len(),
+            1,
+            "the failed start publishes nothing"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            before_fault,
+            "the rolled-back batch leaves no bytes"
+        );
+
+        // A closed lane rejects with typed errors.
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+        assert!(
+            matches!(
+                handle
+                    .private_start(
+                        r#loop,
+                        dal_core::PrivateEffectId::new_v7(),
+                        owner.clone(),
+                        None,
+                        1,
+                        dal_core::CallId::new("closed-call"),
+                        "proof-tool".into(),
+                        dal_core::RawJson::parse("null").expect("args parse"),
+                    )
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a start on a closed session must fail"
+        );
+        assert!(
+            matches!(
+                handle
+                    .private_end(r#loop, token, private_settled_outcome())
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "an end on a closed session must fail"
+        );
+        assert!(
+            matches!(
+                handle
+                    .private_loop_born(dal_core::PrivateLoopId::new_v7(), owner, None)
+                    .await,
+                Err(AgentError::SessionClosed { .. })
+            ),
+            "a birth on a closed session must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn private_unfinished_start_repairs_once_across_reopen() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        backend_of(&host, root)
+            .handle()
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        backend_of(&host, root)
+            .handle()
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                3,
+                dal_core::CallId::new("wire-call-9"),
+                "tool-a".into(),
+                dal_core::RawJson::parse(r#"{"n":9}"#).expect("args parse"),
+            )
+            .await
+            .expect("start receipts");
+        // The row stays Started with no end landed; then the armed write
+        // fault rejects the end, which must fold and publish nothing.
+        dal_store::Store::new(
+            temp.path().join("data"),
+            workspace.clone(),
+            dal_core::Product::Dal,
+        )
+        .arm_append_write_fault(root, 0);
+        assert!(
+            matches!(
+                backend_of(&host, root)
+                    .handle()
+                    .private_end(r#loop, token, private_settled_outcome())
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a failed end append must reject"
+        );
+        let rows_before_close = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads before close");
+        assert!(
+            rows_before_close.is_empty(),
+            "the failed end publishes no terminal"
+        );
+        let records_before_close =
+            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_ends(&records_before_close, &r#loop, &token),
+            0,
+            "the failed end appends no record"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+
+        // Reopen repairs the unresolved start to exactly one Indeterminate
+        // end on disk; the owner reads that terminal, never a Settled row.
+        let reopened = host
+            .open(
+                SessionRef::Resume {
+                    key: root.to_string().into(),
+                    workspace: workspace.clone(),
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("reopen session");
+        assert_eq!(reopened.session(), root, "resume reopens the same session");
+        let rows = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads its terminals");
+        assert_eq!(rows.len(), 1, "one repair terminal publishes");
+        assert_eq!(rows[0].r#loop, r#loop);
+        assert_eq!(rows[0].token, token);
+        assert_eq!(rows[0].round, 3);
+        assert!(
+            matches!(rows[0].outcome, dal_core::PrivateOutcome::Indeterminate),
+            "an unfinished effect reads Indeterminate, never Settled"
+        );
+        let repaired = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_ends(&private_decode_records(&repaired), &r#loop, &token),
+            1,
+            "the reopen persists exactly one repair end"
+        );
+
+        host.close(root).await.expect("close repaired session");
+        let reopened_again = host
+            .open(
+                SessionRef::Resume {
+                    key: root.to_string().into(),
+                    workspace: workspace.clone(),
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("second reopen");
+        assert_eq!(reopened_again.session(), root);
+        let reopened_records =
+            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_ends(&reopened_records, &r#loop, &token),
+            1,
+            "the second reopen persists no extra repair"
+        );
+        let rows_again = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads after second reopen");
+        assert_eq!(rows_again.len(), 1, "still exactly one terminal");
+        assert_eq!(rows_again[0].r#loop, r#loop);
+        assert_eq!(rows_again[0].token, token);
+        assert_eq!(rows_again[0].round, 3);
+        assert!(
+            matches!(
+                rows_again[0].outcome,
+                dal_core::PrivateOutcome::Indeterminate
+            ),
+            "the terminal stays Indeterminate"
+        );
+
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_end_only_advance_is_visible_to_the_owner_read() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+
+        // Two loops settle with no leaf or ext movement at all: only private
+        // records land, so a publication parked behind the `sync_ext` memo
+        // early-return would stay stuck at one row.
+        for (round, tool) in [(0_u32, "tool-a"), (1_u32, "tool-b")] {
+            let r#loop = dal_core::PrivateLoopId::new_v7();
+            let token = dal_core::PrivateEffectId::new_v7();
+            handle
+                .private_loop_born(r#loop, owner.clone(), None)
+                .await
+                .expect("loop birth receipts");
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    owner.clone(),
+                    None,
+                    round,
+                    dal_core::CallId::new("proof-call"),
+                    tool.into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .expect("start receipts");
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .expect("end receipts");
+            let rows = backend
+                .private_outcomes(&caller)
+                .await
+                .expect("owner reads its terminals");
+            assert_eq!(
+                rows.len(),
+                usize::try_from(round).expect("round fits") + 1,
+                "each End-only advance publishes"
+            );
+        }
+        let rows = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("final owner read");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(&*rows[0].name, "tool-a");
+        assert_eq!(&*rows[1].name, "tool-b");
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_same_name_under_different_origins_reads_only_own_facts() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let user_caller = private_test_caller("focus", dal_core::Origin::User);
+        let bundled_caller = private_test_caller("focus", dal_core::Origin::Bundled);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+
+        for (caller, tool) in [(&user_caller, "tool-a"), (&bundled_caller, "tool-b")] {
+            let r#loop = dal_core::PrivateLoopId::new_v7();
+            let token = dal_core::PrivateEffectId::new_v7();
+            handle
+                .private_loop_born(r#loop, private_owner_of(caller), None)
+                .await
+                .expect("loop birth receipts");
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    private_owner_of(caller),
+                    None,
+                    0,
+                    dal_core::CallId::new("proof-call"),
+                    tool.into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .expect("start receipts");
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .expect("end receipts");
+        }
+
+        let user_rows = backend
+            .private_outcomes(&user_caller)
+            .await
+            .expect("user reads its terminals");
+        assert_eq!(user_rows.len(), 1, "user/focus reads only its terminal");
+        assert_eq!(&*user_rows[0].name, "tool-a");
+        let bundled_rows = backend
+            .private_outcomes(&bundled_caller)
+            .await
+            .expect("bundled reads its terminals");
+        assert_eq!(
+            bundled_rows.len(),
+            1,
+            "the same name under bundled reads only its own"
+        );
+        assert_eq!(&*bundled_rows[0].name, "tool-b");
+        let stranger = private_test_caller("stranger", dal_core::Origin::User);
+        assert!(
+            backend
+                .private_outcomes(&stranger)
+                .await
+                .expect("stranger reads")
+                .is_empty(),
+            "a third owner reads nothing"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
 }
 
 #[cfg(test)]
