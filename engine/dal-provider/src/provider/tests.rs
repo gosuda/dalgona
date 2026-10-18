@@ -190,6 +190,8 @@ fn resolved(provider: &str, family: Family, model: &str) -> ResolvedModel {
         custom_grammar: false,
         temperature_allowed: true,
         display_supported: false,
+        premium_multiplier: None,
+        price: None,
     };
     ResolvedModel {
         provider: provider.into(),

@@ -101,6 +101,8 @@ pub(crate) fn decode_openai_models(
                 custom_grammar: base.custom_grammar,
                 temperature_allowed: base.temperature_allowed,
                 display_supported: base.display_supported,
+                premium_multiplier: base.premium_multiplier,
+                price: base.price,
             };
             bind_family_capabilities(&mut entry, provider.family);
             entry
@@ -172,6 +174,8 @@ pub(crate) fn decode_codex_models(
                     &sanitize_identifier(&model.slug),
                 ),
                 display_supported: false,
+                premium_multiplier: None,
+                price: None,
             })
         })
         .collect()
@@ -223,6 +227,8 @@ pub(crate) fn decode_anthropic_page(
                     &sanitize_identifier(&model.id),
                 ),
                 display_supported: false,
+                premium_multiplier: None,
+                price: None,
             }
         })
         .collect();

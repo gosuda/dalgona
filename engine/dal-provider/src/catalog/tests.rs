@@ -9,7 +9,7 @@ use std::{
 
 use super::*;
 use super::{
-    cache::{read_cache_async, write_cache_async},
+    cache::{CacheError, read_cache_async, write_cache_async},
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
     prices::{PRICE_ROWS, PRICE_TIER_ROWS, TierRow, tier_rows_are_sorted_unique},
     resolve::capability_row,
@@ -52,6 +52,8 @@ fn row(provider: &str, id: &str, context_window: Option<u32>) -> CatalogEntry {
         custom_grammar: false,
         temperature_allowed: false,
         display_supported: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -739,7 +741,7 @@ async fn version_one_cache_without_optional_capabilities_defaults_false() {
     let cache_path = directory.path().join("models.json");
     fs::write(
             &cache_path,
-            br#"{"version":1,"entries":[{"provider":"anthropic","id":"unknown","display":"unknown","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false},{"provider":"anthropic","id":"claude-haiku-4-5","display":"Claude Haiku 4.5","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false}]}"#,
+            br#"{"version":1,"entries":[{"provider":"anthropic","id":"unknown","display":"unknown","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false,"billing":{"premium_multiplier":null,"price":null}},{"provider":"anthropic","id":"claude-haiku-4-5","display":"Claude Haiku 4.5","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false,"billing":{"premium_multiplier":null,"price":null}}]}"#,
         )
         .expect("write version-one cache");
     let entries = read_cache_async(cache_path)
@@ -750,6 +752,10 @@ async fn version_one_cache_without_optional_capabilities_defaults_false() {
     assert!(!entries[0].temperature_allowed);
     assert!(entries[1].temperature_allowed);
     assert!(!entries[0].display_supported && !entries[1].display_supported);
+    assert_eq!(entries[0].premium_multiplier, None);
+    assert_eq!(entries[0].price, None);
+    assert_eq!(entries[1].premium_multiplier, None);
+    assert_eq!(entries[1].price, None);
 }
 
 #[tokio::test]
@@ -1193,4 +1199,119 @@ fn generated_table_remains_sorted_for_binary_search() {
             .all(|pair| pair[0].model < pair[1].model)
     );
     assert_eq!(price_source().0, "models.dev");
+}
+
+#[tokio::test]
+async fn billing_metadata_survives_cache_roundtrip_and_resolution() {
+    use dal_core::{ModelPrice, PriceTier};
+
+    let directory = TestDir::new();
+    let cache_path = directory.path().join("models.json");
+    let mut billed = row("anthropic", "billing-model", Some(32_000));
+    billed.premium_multiplier = Some(2.5);
+    billed.price = Some(ModelPrice {
+        input: 1.0,
+        cached_input: 0.5,
+        output: 2.0,
+        reasoning: 0.25,
+        cache_write: Some(0.125),
+        tiers: vec![PriceTier {
+            size: 100,
+            input: Some(10.0),
+            cached_input: None,
+            cache_write: None,
+            output: None,
+            reasoning: None,
+        }]
+        .into_boxed_slice(),
+    });
+    let unbilled = row("anthropic", "plain-model", Some(32_000));
+    write_cache_async(
+        cache_path.clone(),
+        "anthropic".into(),
+        vec![billed.clone(), unbilled],
+    )
+    .await
+    .expect("write billing cache");
+    let entries = read_cache_async(cache_path)
+        .await
+        .expect("read billing cache");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].premium_multiplier, Some(2.5));
+    assert_eq!(entries[0].price, billed.price);
+    assert_eq!(entries[1].premium_multiplier, None);
+    assert_eq!(entries[1].price, None);
+
+    let catalog = Catalog::with_sources(
+        vec![(
+            provider("anthropic", Family::Anthropic, "https://api.anthropic.com"),
+            CatalogSource::Cache,
+        )],
+        entries,
+    );
+    let resolved =
+        resolve(&catalog, &[], "anthropic/billing-model").expect("billed model resolves");
+    assert_eq!(resolved.entry.premium_multiplier, Some(2.5));
+    assert_eq!(resolved.entry.price, billed.price);
+}
+
+#[tokio::test]
+async fn stale_derived_cache_without_billing_refreshes_through_typed_fallback() {
+    let directory = TestDir::new();
+    let cache_path = directory.path().join("models.json");
+    fs::write(
+        &cache_path,
+        br#"{"version":1,"entries":[{"provider":"openai-codex","id":"stale-model","display":"Stale Model","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false}]}"#,
+    )
+    .expect("write stale derived cache");
+    let stale = read_cache_async(cache_path.clone()).await;
+    assert!(
+        matches!(&stale, Err(CacheError::Invalid(_))),
+        "derived rows without billing are stale, not known-empty: {stale:?}"
+    );
+
+    fs::write(
+        &cache_path,
+        br#"{"version":1,"entries":[{"provider":"openai-codex","id":"stale-model","display":"Stale Model","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false,"billing":{"premium_multiplier":-1.0,"price":null}}]}"#,
+    )
+    .expect("write invalid billing cache");
+    let invalid = read_cache_async(cache_path.clone()).await;
+    assert!(
+        matches!(&invalid, Err(CacheError::Invalid(_))),
+        "negative premium metadata is rejected: {invalid:?}"
+    );
+
+    fs::write(
+        &cache_path,
+        br#"{"version":1,"entries":[{"provider":"openai-codex","id":"stale-model","display":"Stale Model","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false}]}"#,
+    )
+    .expect("restore stale derived cache");
+    let port = closed_loopback_port();
+    let provider = provider(
+        "openai-codex",
+        Family::Codex,
+        &format!("http://127.0.0.1:{port}/backend-api/codex"),
+    );
+    let credential = oauth(Some("account"));
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(fetched.entries.is_empty());
+    assert!(fetched.live_error.is_some());
+    assert!(
+        fetched
+            .cache_error
+            .as_ref()
+            .is_some_and(|error| error.contains("billing")),
+        "stale billing surfaces through the refresh path: {:?}",
+        fetched.cache_error
+    );
 }

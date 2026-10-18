@@ -148,6 +148,8 @@ fn resolve_harness(reference: &str) -> Result<ResolvedModel, ResolveError> {
         display_supported: false,
         tool_support: ToolSupport::None,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     };
     Ok(ResolvedModel {
         provider: "dalgon".into(),
@@ -340,6 +342,8 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         display_supported: false,
         tool_support: ToolSupport::Any,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 

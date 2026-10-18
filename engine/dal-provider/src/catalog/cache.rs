@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dal_core::ThinkingLevel;
+use dal_core::{ModelPrice, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 
 use super::decode::parse_anthropic_effort;
@@ -132,6 +132,35 @@ struct CachedEntry {
     temperature_allowed: Option<bool>,
     #[serde(default)]
     display_supported: bool,
+    #[serde(default)]
+    billing: Option<CachedBilling>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedBilling {
+    #[serde(default)]
+    premium_multiplier: Option<f64>,
+    #[serde(default)]
+    price: Option<ModelPrice>,
+}
+
+fn valid_rate(rate: f64) -> bool {
+    rate.is_finite() && rate >= 0.0
+}
+
+fn valid_price(price: &ModelPrice) -> bool {
+    valid_rate(price.input)
+        && valid_rate(price.cached_input)
+        && valid_rate(price.output)
+        && valid_rate(price.reasoning)
+        && price.cache_write.is_none_or(valid_rate)
+        && price.tiers.iter().all(|tier| {
+            tier.input.is_none_or(valid_rate)
+                && tier.cached_input.is_none_or(valid_rate)
+                && tier.cache_write.is_none_or(valid_rate)
+                && tier.output.is_none_or(valid_rate)
+                && tier.reasoning.is_none_or(valid_rate)
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -224,6 +253,10 @@ impl From<&CatalogEntry> for CachedEntry {
             tool_support: CachedToolSupport::from(entry.tool_support),
             temperature_allowed: Some(entry.temperature_allowed),
             display_supported: entry.display_supported,
+            billing: Some(CachedBilling {
+                premium_multiplier: entry.premium_multiplier,
+                price: entry.price.clone(),
+            }),
         }
     }
 }
@@ -236,6 +269,28 @@ impl CachedEntry {
         if provider.is_empty() || id.is_empty() || display.is_empty() {
             return Err(CacheError::Invalid(
                 "models cache contains an empty provider, id, or display name".into(),
+            ));
+        }
+        let Some(billing) = self.billing else {
+            return Err(CacheError::Invalid(
+                "models cache predates billing metadata; refresh from the live model list".into(),
+            ));
+        };
+        if billing
+            .premium_multiplier
+            .is_some_and(|multiplier| !valid_rate(multiplier))
+        {
+            return Err(CacheError::Invalid(
+                "models cache holds an invalid premium multiplier".into(),
+            ));
+        }
+        if billing
+            .price
+            .as_ref()
+            .is_some_and(|price| !valid_price(price))
+        {
+            return Err(CacheError::Invalid(
+                "models cache holds an invalid model price".into(),
             ));
         }
         let temperature_allowed = self
@@ -282,6 +337,8 @@ impl CachedEntry {
             custom_grammar: self.custom_grammar,
             temperature_allowed,
             display_supported: self.display_supported,
+            premium_multiplier: billing.premium_multiplier,
+            price: billing.price,
         })
     }
 }
