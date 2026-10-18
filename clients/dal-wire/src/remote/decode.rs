@@ -11,6 +11,10 @@ use super::RemoteHostUpdate;
 use crate::error::WireError;
 use crate::jsonrpc::ErrorObject;
 
+/// The code a draining server answers every request with: it starts no new
+/// work and closes its connections shortly after.
+pub(super) const SERVER_DRAINING: i32 = -32009;
+
 /// Maps a JSON-RPC error object to its wire error.
 pub(super) fn protocol_error(error: ErrorObject) -> WireError {
     WireError::Protocol {
