@@ -1,3 +1,5 @@
+use std::io;
+
 use super::wire_entries::BlockWire;
 use super::{
     Answer, AssistantStop, Block, EncodeError, Entry, InferredPurpose, JobOutcome, JournalPart,
@@ -67,9 +69,14 @@ impl Record {
 // Encode side: ordered member structs per record, hand-rolled lenses for
 // the members whose durable literals differ from the wire shapes.
 
-pub(super) fn encode_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, EncodeError> {
-    sonic_rs::to_vec(value).map_err(|error| EncodeError::Json {
-        message: error.to_string().into(),
+pub(super) fn encode_json<T: Serialize + ?Sized>(
+    value: &T,
+    out: &mut dyn io::Write,
+) -> Result<(), EncodeError> {
+    sonic_rs::to_writer(sonic_rs::writer::BufferedWriter::new(out), value).map_err(|error| {
+        EncodeError::Json {
+            message: error.to_string().into(),
+        }
     })
 }
 

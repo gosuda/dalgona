@@ -2062,3 +2062,110 @@ fn premium_without_optional_usage_is_rejected() {
         Err(DecodeError::Invalid { .. })
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn canonical_vectors_encoded_len_matches_encode_len() -> Result<(), Box<dyn std::error::Error>> {
+    for line in VECTORS {
+        let decoded = decode(line.as_bytes())?;
+        let encoded = encode(&decoded.record)?;
+        let measured_len = encoded_len(&decoded.record)?;
+        assert_eq!(measured_len, encoded.len(), "vector line: {line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn representative_records_encoded_len_matches_encode_len() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Raw/non-ASCII replay
+    let replay_raw = RawJson::parse(
+        r#"{"api":"anthropic","text":"hello \n \t \u0000 🚀 \"world\"","nested":{"flag":true}}"#,
+    )?;
+    let raw_record = assistant_with_replay(Vec::new(), Some(replay_raw));
+    let encoded = encode(&raw_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, raw_record);
+    assert_eq!(encoded_len(&raw_record)?, encoded.len());
+
+    // Escaped user_entry text
+    let user_record = Record::User(user_entry(
+        42,
+        Some(1),
+        "Line 1\nLine 2\t\r\"escaped quotes\" and backslash \\ and unicode \u{1F980} & \u{00E9}",
+    ));
+    let encoded = encode(&user_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, user_record);
+    assert_eq!(encoded_len(&user_record)?, encoded.len());
+
+    // v:2 turn_reserved
+    let reserved_record = Record::TurnReserved {
+        at: "2026-10-13T00:00:00.000Z"
+            .parse()
+            .map_err(|error: jiff::Error| error.to_string())?,
+        turn: TurnId::new(nz(2)),
+    };
+    let encoded = encode(&reserved_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, reserved_record);
+    assert_eq!(encoded_len(&reserved_record)?, encoded.len());
+
+    // Routed assistant (API and synthetic)
+    let api_routed = Record::Assistant(assistant_entry(
+        "probe/model",
+        Some(AssistantRoute::Api(Family::Chat)),
+    ));
+    let encoded = encode(&api_routed)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, api_routed);
+    assert_eq!(encoded_len(&api_routed)?, encoded.len());
+
+    let synthetic_routed = Record::Assistant(assistant_entry(
+        "probe/model",
+        Some(AssistantRoute::Synthetic),
+    ));
+    let encoded = encode(&synthetic_routed)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, synthetic_routed);
+    assert_eq!(encoded_len(&synthetic_routed)?, encoded.len());
+
+    Ok(())
+}
+
+#[test]
+fn encoded_len_and_encode_error_parity() {
+    // NullReplay: explicit null replay in assistant entry
+    let null_replay = assistant_with_replay(Vec::new(), Some(RawJson::null()));
+    let len_err = encoded_len(&null_replay);
+    let enc_err = encode(&null_replay);
+    assert_eq!(len_err, Err(EncodeError::NullReplay));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // EmptyModel: empty model id on assistant entry
+    let empty_model = Record::Assistant(assistant_entry("", None));
+    let len_err = encoded_len(&empty_model);
+    let enc_err = encode(&empty_model);
+    assert_eq!(len_err, Err(EncodeError::EmptyModel));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // InvalidRoute: synthetic grammar violation
+    let invalid_route =
+        Record::Assistant(assistant_entry("Upper/x", Some(AssistantRoute::Synthetic)));
+    let len_err = encoded_len(&invalid_route);
+    let enc_err = encode(&invalid_route);
+    assert_eq!(
+        len_err,
+        Err(EncodeError::InvalidRoute(RouteError::InvalidSyntheticId {
+            id: "Upper/x".into(),
+        }))
+    );
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // InvalidCost: negative dollar cost
+    let invalid_cost = turn_end_with_cost(-0.000_001);
+    let len_err = encoded_len(&invalid_cost);
+    let enc_err = encode(&invalid_cost);
+    assert_eq!(len_err, Err(EncodeError::InvalidCost));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+}

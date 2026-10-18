@@ -297,10 +297,11 @@ impl Session {
                         Some(payload.clone()),
                     ),
                 };
-                let line = crate::journal::encode(&Record::Assistant(entry))
-                    .map_err(|error| invalid(&error.to_string()))?;
-                let line_len =
-                    u64::try_from(line.len()).map_err(|_| invalid("record length overflow"))?;
+                let line_len = u64::try_from(
+                    crate::journal::encoded_len(&Record::Assistant(entry))
+                        .map_err(|error| invalid(&error.to_string()))?,
+                )
+                .map_err(|_| invalid("record length overflow"))?;
                 if line_len > MAX_RECORD {
                     (None, Some((ReplayRefusal::LineBound, Some(line_len))))
                 } else {

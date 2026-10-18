@@ -5141,3 +5141,558 @@ mod threshold_estimate_fallback {
         );
     }
 }
+
+/// Provider replay capture policy, driven through `Session::step`.
+///
+/// The fold decides once per completed response whether a provider capture
+/// rides the closing assistant entry: a `Captured` payload is measured as the
+/// exact journal line and journals only when that line fits `MAX_RECORD`; a
+/// `Refused` capture (or an over-bound line) journals the content without a
+/// payload and fails the turn once; a capture on a tool-call response is
+/// ignored.
+///
+/// Duplicate and post-usage captures are `debug_assert!`ed protocol
+/// violations (`helpers.rs`), not recoverable input. The policy test choice
+/// (GAP-3c): debug builds prove the assertion fires (`#[should_panic]`);
+/// builds without debug assertions prove the documented release behavior
+/// (first capture wins, a capture after the usage is dropped). Each cfg
+/// compiles only its own half, so a default `cargo test` exercises the debug
+/// half and a profile with `debug-assertions = false` exercises the other.
+mod capture_policy {
+    use super::*;
+    use crate::fold::helpers::assistant_stop;
+    use crate::journal::{MAX_RECORD, decode, encode};
+    use crate::model::{ReplayCapture, ReplayRefusal};
+
+    const BODY: &str = "Texte diffuse.";
+    const STOPS: [Stop; 6] = [
+        Stop::EndTurn,
+        Stop::Length,
+        Stop::Filter,
+        Stop::MaxSteps,
+        Stop::Cancelled,
+        Stop::Failed,
+    ];
+    /// Every refusal an adapter can report; `LineBound` is the fold's own.
+    const ADAPTER_REFUSALS: [ReplayRefusal; 7] = [
+        ReplayRefusal::RecordNotUtf8,
+        ReplayRefusal::RecordNotRoundtrip,
+        ReplayRefusal::RecordNotJson,
+        ReplayRefusal::UserRecordNotFound,
+        ReplayRefusal::NoRecords,
+        ReplayRefusal::CheckpointNotCoveringTurn,
+        ReplayRefusal::RouteMixed,
+    ];
+
+    fn text() -> StreamEvent {
+        StreamEvent::Delta {
+            channel: StreamChannel::Text,
+            text: BODY.into(),
+        }
+    }
+
+    fn captured(payload: &str) -> StreamEvent {
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Captured {
+                payload: RawJson::parse(payload).unwrap(),
+            },
+        }
+    }
+
+    fn refused(reason: ReplayRefusal) -> StreamEvent {
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Refused { reason },
+        }
+    }
+
+    fn tool_call() -> StreamEvent {
+        StreamEvent::ToolCall {
+            call: CallId::new("call-1"),
+            name: "read_file".into(),
+            args: RawJson::parse("{}").unwrap(),
+        }
+    }
+
+    /// The body text, `between` events, then the usage and the stop: the
+    /// capture sits inside the grammar's window, before the usage.
+    fn closing(between: Vec<StreamEvent>, stop: Stop) -> Inference {
+        let mut events = vec![text()];
+        events.extend(between);
+        events.push(StreamEvent::Usage(usage(10)));
+        events.push(StreamEvent::Stop(stop));
+        Inference { events }
+    }
+
+    /// A response whose capture arrives after its usage: outside the window.
+    fn late(capture: StreamEvent) -> Inference {
+        Inference {
+            events: vec![
+                text(),
+                StreamEvent::Usage(usage(10)),
+                capture,
+                StreamEvent::Stop(Stop::EndTurn),
+            ],
+        }
+    }
+
+    /// One response whose capture is a JSON string of `chars` characters.
+    fn padded(chars: usize) -> Inference {
+        let mut json = String::with_capacity(chars + 2);
+        json.push('"');
+        json.push_str(&"a".repeat(chars));
+        json.push('"');
+        closing(vec![captured(&json)], Stop::EndTurn)
+    }
+
+    fn run(response: Inference) -> (Session, TurnId, Vec<Effect>) {
+        let mut session = session();
+        let turn = begin(&mut session);
+        let out = stream_result(&mut session, turn, response);
+        (session, turn, out)
+    }
+
+    fn records(out: &[Effect]) -> impl Iterator<Item = &Record> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Emit(emit) => Some(emit.records.iter()),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    fn only_assistant(out: &[Effect]) -> (&Record, &EntryKind) {
+        let mut found = records(out).filter_map(|record| match record {
+            Record::Assistant(entry) => Some((record, &entry.kind)),
+            _ => None,
+        });
+        let first = found
+            .next()
+            .expect("the response journals an assistant entry");
+        assert!(
+            found.next().is_none(),
+            "the response journals exactly one assistant entry"
+        );
+        first
+    }
+
+    fn turn_ends(out: &[Effect]) -> Vec<&TurnEndStop> {
+        records(out)
+            .filter_map(|record| match record {
+                Record::TurnEnd { stop, .. } => Some(stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stop_effects(out: &[Effect]) -> Vec<Stop> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Stop { stop, .. } => Some(*stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ended_updates(out: &[Effect]) -> Vec<Stop> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Emit(emit) => Some(emit.updates.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|update| match update {
+                UpdateKind::TurnEnded { stop, .. } => Some(*stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn replay_of(kind: &EntryKind) -> Option<&RawJson> {
+        match kind {
+            EntryKind::Assistant { replay, .. } => replay.as_ref(),
+            other => panic!("expected an assistant entry kind: {other:?}"),
+        }
+    }
+
+    fn content_of(kind: &EntryKind) -> &[Block] {
+        match kind {
+            EntryKind::Assistant { content, .. } => content,
+            other => panic!("expected an assistant entry kind: {other:?}"),
+        }
+    }
+
+    fn body() -> [Block; 1] {
+        [Block::Text {
+            text: BODY.into(),
+            replay: None,
+        }]
+    }
+
+    fn failed_token(stop: &TurnEndStop) -> &str {
+        match stop {
+            TurnEndStop::Failed { message } => message,
+            other => panic!("expected a failed turn end, got {other:?}"),
+        }
+    }
+
+    /// No emitted record may exceed the store's record bound.
+    fn every_record_fits(out: &[Effect]) {
+        for record in records(out) {
+            let len = crate::journal::encoded_len(record).unwrap();
+            assert!(
+                u64::try_from(len).unwrap() <= MAX_RECORD,
+                "a {len}-byte record is over the record bound: {:?}",
+                std::mem::discriminant(record)
+            );
+        }
+    }
+
+    #[test]
+    fn the_record_bound_admits_an_exact_line_and_refuses_one_byte_more() {
+        let bound = usize::try_from(MAX_RECORD).unwrap();
+
+        // Measure the candidate line with a one-character payload, then pad
+        // the payload by exactly the headroom left to the bound.
+        let (_, _, probe) = run(padded(1));
+        let (probe_record, _) = only_assistant(&probe);
+        let probe_len = encode(probe_record).unwrap().len();
+        assert!(probe_len < bound, "the probe line must leave headroom");
+        let exact_chars = 1 + (bound - probe_len);
+        drop(probe);
+
+        // Exactly at the bound: the entry journals with its payload.
+        let (session, _, out) = run(padded(exact_chars));
+        let (record, kind) = only_assistant(&out);
+        let line = encode(record).unwrap();
+        assert_eq!(
+            line.len(),
+            bound,
+            "the padded line must be exactly the record bound, line feed included"
+        );
+        let payload = replay_of(kind).expect("a line exactly at the bound journals its capture");
+        assert_eq!(
+            payload.as_str().len(),
+            exact_chars + 2,
+            "the whole payload rides the entry"
+        );
+        assert_eq!(content_of(kind), body());
+        assert!(
+            turn_ends(&out).is_empty() && stop_effects(&out).is_empty(),
+            "a capture that fits fails nothing: {:?}",
+            turn_ends(&out)
+        );
+        assert!(
+            !matches!(session.phase(), Phase::Idle),
+            "the turn continues past an accepted capture"
+        );
+        assert!(
+            decode(&line).unwrap().record == *record,
+            "the reader must accept the exact-bound line the writer emitted"
+        );
+        every_record_fits(&out);
+
+        // The same entry with one more payload character is one byte over.
+        let mut candidate = match record {
+            Record::Assistant(entry) => entry.clone(),
+            other => panic!("expected an assistant record: {other:?}"),
+        };
+        if let EntryKind::Assistant { replay, .. } = &mut candidate.kind {
+            let mut json = String::with_capacity(exact_chars + 3);
+            json.push('"');
+            json.push_str(&"a".repeat(exact_chars + 1));
+            json.push('"');
+            *replay = Some(RawJson::parse(&json).unwrap());
+        }
+        let measured = encode(&Record::Assistant(candidate)).unwrap().len();
+        assert_eq!(
+            measured,
+            bound + 1,
+            "the over-bound candidate is one byte over"
+        );
+        drop((session, out, line));
+
+        // One byte over: the content journals without the payload and the
+        // turn ends Failed once, naming the token, the measured line and
+        // the bound.
+        let (session, _, out) = run(padded(exact_chars + 1));
+        let (_, kind) = only_assistant(&out);
+        assert!(
+            replay_of(kind).is_none(),
+            "an over-bound capture journals no payload"
+        );
+        assert_eq!(content_of(kind), body());
+        let ends = turn_ends(&out);
+        let [end] = ends.as_slice() else {
+            panic!("the refusal ends the turn exactly once: {ends:?}");
+        };
+        let message = failed_token(end);
+        assert!(
+            message.contains(ReplayRefusal::LineBound.token()),
+            "{message}"
+        );
+        assert!(message.contains(&measured.to_string()), "{message}");
+        assert!(message.contains(&MAX_RECORD.to_string()), "{message}");
+        assert_eq!(stop_effects(&out), [Stop::Failed]);
+        assert_eq!(ended_updates(&out), [Stop::Failed]);
+        assert!(matches!(session.phase(), Phase::Idle));
+        every_record_fits(&out);
+    }
+
+    #[test]
+    fn a_refusal_fails_the_turn_once_under_every_provider_stop() {
+        for stop in STOPS {
+            for reason in ADAPTER_REFUSALS {
+                let case = format!("{stop:?} with {reason:?}");
+                let (mut session, turn, out) = run(closing(vec![refused(reason)], stop));
+
+                // The streamed content journals once, unchanged and without
+                // a payload, under the provider's own stop.
+                let (_, kind) = only_assistant(&out);
+                assert!(replay_of(kind).is_none(), "{case}");
+                assert_eq!(content_of(kind), body(), "{case}");
+                let EntryKind::Assistant { stop: entry, .. } = kind else {
+                    panic!("{case}: expected an assistant entry kind");
+                };
+                assert_eq!(*entry, assistant_stop(stop), "{case}");
+
+                // One failed end naming the token; the provider's stop does
+                // not end the turn a second time.
+                let ends = turn_ends(&out);
+                let [end] = ends.as_slice() else {
+                    panic!("{case}: expected one turn end, got {ends:?}");
+                };
+                let message = failed_token(end);
+                assert!(message.contains(reason.token()), "{case}: {message}");
+                assert_eq!(stop_effects(&out), [Stop::Failed], "{case}");
+                assert_eq!(ended_updates(&out), [Stop::Failed], "{case}");
+                assert!(
+                    !records(&out).any(|record| matches!(record, Record::ToolResult(_))),
+                    "{case}: no call exists to settle"
+                );
+                assert!(matches!(session.phase(), Phase::Idle), "{case}");
+
+                // A late repeat of the stream end finds no streaming turn.
+                let again = send(
+                    &mut session,
+                    Event::StreamEnded {
+                        turn,
+                        model: route(),
+                        family: Family::Chat,
+                        result: Ok(closing(vec![], stop)),
+                        partial: None,
+                    },
+                )
+                .unwrap();
+                assert!(again.is_empty(), "{case}: a second end_turn ran: {again:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capture_on_a_tool_call_response_is_ignored_under_every_stop() {
+        for stop in STOPS {
+            let (baseline_session, _, baseline) = run(closing(vec![tool_call()], stop));
+            for capture in [
+                captured(r#"{"records":["r1"]}"#),
+                refused(ReplayRefusal::NoRecords),
+            ] {
+                // The capture event sits on either side of the call.
+                for (before, after) in [(true, false), (false, true)] {
+                    let mut between = Vec::new();
+                    if before {
+                        between.push(capture.clone());
+                    }
+                    between.push(tool_call());
+                    if after {
+                        between.push(capture.clone());
+                    }
+                    let (session, _, out) = run(closing(between, stop));
+                    assert_eq!(
+                        out, baseline,
+                        "{stop:?}: the capture changed the fold's effects"
+                    );
+                    assert_eq!(
+                        session, baseline_session,
+                        "{stop:?}: the capture changed the session"
+                    );
+                }
+            }
+            let (_, kind) = only_assistant(&baseline);
+            assert!(replay_of(kind).is_none(), "{stop:?}");
+            assert!(
+                !turn_ends(&baseline).iter().any(|end| matches!(
+                    end,
+                    TurnEndStop::Failed { message }
+                        if ADAPTER_REFUSALS.iter().any(|reason| message.contains(reason.token()))
+                )),
+                "{stop:?}: no refusal token may surface"
+            );
+        }
+        let (session, _, _) = run(closing(
+            vec![tool_call(), refused(ReplayRefusal::NoRecords)],
+            Stop::EndTurn,
+        ));
+        assert!(
+            matches!(
+                session.phase(),
+                Phase::Running {
+                    stage: TurnStage::Resolving { .. },
+                    ..
+                }
+            ),
+            "the call is still pending after a refusal on its response: {:?}",
+            session.phase()
+        );
+    }
+
+    #[test]
+    fn a_capture_alone_opens_no_entry_and_needs_no_entry_id() {
+        // No stop and no content: the capture is not visible output, so the
+        // preflight reserves no entry, the fold journals none, and the
+        // response ends the turn as a stream without a stop.
+        let mut session = session();
+        let turn = begin(&mut session);
+        session.next_entry = None;
+        let out = stream_result(
+            &mut session,
+            turn,
+            Inference {
+                events: vec![captured(r#"{"records":["r1"]}"#)],
+            },
+        );
+        assert!(
+            !records(&out).any(|record| matches!(record, Record::Assistant(_))),
+            "a capture alone opens no entry"
+        );
+        let ends = turn_ends(&out);
+        let [TurnEndStop::Failed { .. }] = ends.as_slice() else {
+            panic!("a stop-less response fails the turn once: {ends:?}");
+        };
+        assert!(matches!(session.phase(), Phase::Idle));
+    }
+
+    #[test]
+    fn a_capture_with_a_stop_reserves_the_one_entry_it_rides() {
+        let response = || Inference {
+            events: vec![
+                captured(r#"{"records":["r1"]}"#),
+                StreamEvent::Usage(usage(10)),
+                StreamEvent::Stop(Stop::EndTurn),
+            ],
+        };
+        let mut session = session();
+        let turn = begin(&mut session);
+        session.next_entry = None;
+        let before = session.clone();
+        let error = send(
+            &mut session,
+            Event::StreamEnded {
+                turn,
+                model: route(),
+                family: Family::Chat,
+                result: Ok(response()),
+                partial: None,
+            },
+        )
+        .expect_err("the closing entry needs an id before the fold changes state");
+        assert!(matches!(error, Rejection::Invalid { .. }));
+        assert_eq!(session, before, "a rejected stream end changed the session");
+
+        // The last id of the space is enough for the entry and its capture.
+        session.next_entry = Some(entry(u64::MAX));
+        let out = stream_result(&mut session, turn, response());
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(
+            replay_of(kind).map(RawJson::as_str),
+            Some(r#"{"records":["r1"]}"#)
+        );
+        assert!(turn_ends(&out).is_empty());
+    }
+
+    /// Debug half of GAP-3c: the protocol violations trip their assertions.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate message replay event")]
+    fn a_duplicate_capture_trips_the_debug_assertion() {
+        let _ = run(closing(
+            vec![
+                captured(r#"{"records":["first"]}"#),
+                captured(r#"{"records":["second"]}"#),
+            ],
+            Stop::EndTurn,
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "after its response's usage")]
+    fn a_capture_after_the_usage_trips_the_debug_assertion() {
+        let _ = run(late(captured(r#"{"records":["late"]}"#)));
+    }
+
+    /// Release half of GAP-3c: the first capture decides and is never
+    /// overwritten, whichever kinds follow it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_second_capture_never_overwrites_the_first() {
+        let first = r#"{"records":["first"]}"#;
+        let second = r#"{"records":["second"]}"#;
+
+        let (_, _, out) = run(closing(
+            vec![captured(first), captured(second)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
+        assert!(turn_ends(&out).is_empty());
+
+        let (_, _, out) = run(closing(
+            vec![captured(first), refused(ReplayRefusal::NoRecords)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
+        assert!(turn_ends(&out).is_empty());
+
+        let (_, _, out) = run(closing(
+            vec![refused(ReplayRefusal::NoRecords), captured(second)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        let ends = turn_ends(&out);
+        let [end] = ends.as_slice() else {
+            panic!("the first capture's refusal ends the turn once: {ends:?}");
+        };
+        assert!(failed_token(end).contains(ReplayRefusal::NoRecords.token()));
+    }
+
+    /// Release half of GAP-3c: a capture outside the window is dropped, and
+    /// never displaces one accepted inside it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_capture_after_the_usage_is_dropped() {
+        let (_, _, out) = run(late(captured(r#"{"records":["late"]}"#)));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        assert!(turn_ends(&out).is_empty());
+
+        let (_, _, out) = run(late(refused(ReplayRefusal::NoRecords)));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        assert!(
+            turn_ends(&out).is_empty(),
+            "a late refusal must not fail the turn"
+        );
+
+        let early = r#"{"records":["early"]}"#;
+        let mut response = closing(vec![captured(early)], Stop::EndTurn);
+        let stop = response.events.pop().unwrap();
+        response.events.push(captured(r#"{"records":["late"]}"#));
+        response.events.push(stop);
+        let (_, _, out) = run(response);
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(early));
+        assert!(turn_ends(&out).is_empty());
+    }
+}

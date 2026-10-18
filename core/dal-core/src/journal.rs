@@ -2,7 +2,8 @@
 //! session-branch projection.
 //! Existing record kinds retain format 1; turn reservations require format 2.
 //! Encoding uses the declared member order, so canonical vectors round-trip
-//! byte for byte. Decoding checks the version before the type and payload,
+//! byte for byte. Line length can be measured without allocating the line
+//! via [`encoded_len`]. Decoding checks the version before the type and payload,
 //! drops undeclared record members, and keeps closed nested payloads strict.
 //!
 //! Durable member shapes follow the store's format-1 table rather than
@@ -57,6 +58,7 @@ mod wire_entries;
 pub use branch::{Branch, BranchError, BranchMode, branch};
 pub use decode_records::{decode, scan_head};
 pub use encode::encode;
+pub(crate) use encode::encoded_len;
 pub use entries::{Entry, InferredPurpose, JobEvent, JobKind, JobOutcome, Mail};
 pub use records::{DecodeError, Decoded, EncodeError, Record, ScannedHead, TreeKind};
 pub use turn_sequence::{TurnSequence, TurnSequenceError};
