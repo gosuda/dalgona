@@ -51,9 +51,15 @@ pub fn repo_root() -> PathBuf {
 /// Runs `command` to completion and returns its captured output.
 ///
 /// # Errors
-/// Returns the spawn or wait error.
+/// Returns the spawn or wait error with its kind kept, naming the program, so
+/// a missing tool is not reported as a bare operating-system error.
 pub fn run_command(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
-    command.output()
+    command.output().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("cannot run `{}`: {error}", command.get_program().to_string_lossy()),
+        )
+    })
 }
 
 /// The resident set of this process, in bytes, read per platform without a
@@ -1406,5 +1412,23 @@ fn collect_session_journals(dir: &Path, found: &mut Vec<PathBuf>) {
         } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
             found.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_command;
+
+    #[test]
+    fn run_command_names_a_program_that_cannot_start() {
+        let mut command = std::process::Command::new("dalgona-gates-no-such-program");
+        let Err(error) = run_command(&mut command) else {
+            panic!("a missing program must not start");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("dalgona-gates-no-such-program"),
+            "the error must name the program: {error}"
+        );
     }
 }
