@@ -11,7 +11,8 @@ mod transport;
 
 pub use api::{Http, Provider};
 pub use config::{
-    AuthStyle, ProviderConfig, ProviderConfigError, ProviderEntry, ScriptedSelection, Transport,
+    AuthStyle, ProviderConfig, ProviderConfigError, ProviderEntry, ProviderSettings,
+    ScriptedSelection, Transport,
 };
 pub use def::{
     Completion, Device, Hook, KeySpec, OAuthSpec, PROVIDERS, ProviderDef, QueryValue, Redirect,

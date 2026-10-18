@@ -17,7 +17,7 @@ use super::{
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
     error::ResolveError,
-    provider::{AuthStyle, Transport},
+    provider::{AuthStyle, ProviderSettings, Transport},
     thinking::Effort,
 };
 
@@ -31,6 +31,7 @@ fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
         key_env: None,
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 1,
+        settings: ProviderSettings::default(),
     }
 }
 

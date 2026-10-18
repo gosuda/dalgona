@@ -299,6 +299,198 @@ fn empty_default_model_is_rejected() {
 }
 
 #[test]
+fn builtin_provider_settings_default_to_empty() {
+    let config = parse("").expect("empty config uses defaults");
+    // Empty tables carry nothing but the omission record: every built-in row
+    // names no `base_url`, so preparation may resolve one from the captured
+    // environment.
+    let expected = ProviderSettings {
+        base_url_defaulted: true,
+        ..ProviderSettings::default()
+    };
+    assert!(
+        config
+            .providers
+            .iter()
+            .all(|provider| provider.settings == expected)
+    );
+}
+
+#[test]
+fn base_url_provenance_records_omission_not_equality() {
+    let openai_default = find("openai").expect("the openai row exists").base_url;
+    let config = parse(&format!(
+        "[providers.openai]\nbase_url = '{openai_default}'\n"
+    ))
+    .expect("an explicit default URL is valid");
+    // Explicitly configuring the default still wins: only omission is
+    // recorded, never equality with the row default.
+    assert!(!entry(&config, "openai").settings.base_url_defaulted);
+    assert_eq!(&*entry(&config, "openai").base_url, openai_default);
+
+    let config = parse("[providers.openai]\napi_version = '2025-01-01'\n")
+        .expect("a settings-only table is valid");
+    assert!(entry(&config, "openai").settings.base_url_defaulted);
+
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+    ))
+    .expect("a named provider is valid");
+    assert!(!entry(&config, "zenmux").settings.base_url_defaulted);
+}
+
+#[test]
+fn named_provider_settings_decode_from_their_own_table() {
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+        "api_version = ' 2025-01-01 '\n",
+        "deployments = { 'gpt-chat' = ' prod-gpt ' }\nregion = 'us-west-2'\n",
+        "project = 'zenmux-project'\nlocation = 'us'\nnamespace = 'zenmux'\n",
+        "binary = '/usr/local/bin/zenmux'\nintegration = 'vscode'\n",
+    ))
+    .expect("a named provider keeps its settings");
+    let zenmux = entry(&config, "zenmux");
+    assert_eq!(
+        zenmux.settings,
+        ProviderSettings {
+            base_url_defaulted: false,
+            api_version: Some("2025-01-01".into()),
+            deployments: [("gpt-chat".into(), "prod-gpt".into())].into(),
+            region: Some("us-west-2".into()),
+            project: Some("zenmux-project".into()),
+            location: Some("us".into()),
+            namespace: Some("zenmux".into()),
+            binary: Some("/usr/local/bin/zenmux".into()),
+            integration: Some("vscode".into()),
+        }
+    );
+    assert!(zenmux.def.is_none());
+}
+
+#[test]
+fn deployments_decode_trimmed_values_and_dotted_model_ids() {
+    // The parity the obsolete Azure TOML decoder pinned: trimmed values, and
+    // a model id holding a dot as a quoted TOML key rather than a table path.
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+        "api_version = ' 2025-03-01-preview '\n",
+        "[providers.zenmux.deployments]\n\"gpt-5.5\" = ' prod '\nm = 'd2'\n",
+    ))
+    .expect("a deployments table is valid");
+    let zenmux = entry(&config, "zenmux");
+    assert_eq!(
+        zenmux.settings.api_version.as_deref(),
+        Some("2025-03-01-preview")
+    );
+    assert_eq!(
+        zenmux
+            .settings
+            .deployments
+            .get("gpt-5.5")
+            .map(|name| &**name),
+        Some("prod")
+    );
+    assert_eq!(
+        zenmux.settings.deployments.get("m").map(|name| &**name),
+        Some("d2")
+    );
+}
+
+#[test]
+fn builtin_settings_do_not_leak_into_named_providers() {
+    let config = parse(concat!(
+        "[providers.openai]\napi_version = '2025-01-01'\n",
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+    ))
+    .expect("a builtin setting and a named provider decode together");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.settings.api_version.as_deref(), Some("2025-01-01"));
+    assert_eq!(openai.def.map(|row| row.id), Some("openai"));
+    let zenmux = entry(&config, "zenmux");
+    assert!(zenmux.settings.api_version.is_none());
+    assert!(zenmux.def.is_none());
+}
+
+#[test]
+fn named_provider_without_settings_still_decodes_to_empty_settings() {
+    let config = parse(concat!(
+        "[providers.zenmux]\napi = 'openai_chat'\n",
+        "base_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
+    ))
+    .expect("a provider without settings keys is valid");
+    assert_eq!(
+        entry(&config, "zenmux").settings,
+        ProviderSettings::default()
+    );
+}
+
+#[test]
+fn provider_settings_reject_invalid_values() {
+    // Settings keys that refuse a wrong type or a blank value, with the
+    // message each refusal renders.
+    for (key, expected) in [
+        (
+            "api_version = 7",
+            "providers.zenmux.api_version must be a non-empty string",
+        ),
+        (
+            "api_version = ''",
+            "providers.zenmux.api_version must be a non-empty string",
+        ),
+        (
+            "api_version = '  '",
+            "providers.zenmux.api_version must be a non-empty string",
+        ),
+        (
+            "deployments = 7",
+            "providers.zenmux.deployments must be a table",
+        ),
+        (
+            "deployments = { prod = '' }",
+            "providers.zenmux.deployments.prod must be a non-empty string",
+        ),
+        (
+            "deployments = { prod = 3 }",
+            "providers.zenmux.deployments.prod must be a non-empty string",
+        ),
+        (
+            "region = 7",
+            "providers.zenmux.region must be a non-empty string",
+        ),
+        (
+            "project = 7",
+            "providers.zenmux.project must be a non-empty string",
+        ),
+        (
+            "location = 7",
+            "providers.zenmux.location must be a non-empty string",
+        ),
+        (
+            "namespace = 7",
+            "providers.zenmux.namespace must be a non-empty string",
+        ),
+        (
+            "binary = 7",
+            "providers.zenmux.binary must be a non-empty string",
+        ),
+        (
+            "integration = 7",
+            "providers.zenmux.integration must be a non-empty string",
+        ),
+    ] {
+        let input = format!(
+            "[providers.zenmux]\napi = 'openai_chat'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n{key}\n"
+        );
+        let error = parse(&input).unwrap_err();
+        assert_eq!(error.to_string(), expected, "{key}");
+    }
+}
+
+#[test]
 fn named_anthropic_defaults_to_x_api_key_auth() {
     let config = parse(
             "[providers.zenmux-anthropic]\napi = 'anthropic'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",

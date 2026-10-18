@@ -1,5 +1,7 @@
 //! Strict decoding of the provider layer's effective TOML configuration.
 
+use std::collections::BTreeMap;
+
 use dal_core::{Config, Family, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
@@ -43,6 +45,42 @@ pub struct ProviderConfig {
     pub scripted: Option<ScriptedSelection>,
 }
 
+/// The per-provider settings that sit beside the connection defaults.
+///
+/// Each field is the value of the same-named key in the entry's own
+/// `providers.<id>` table, trimmed; an absent key leaves it empty. Nothing is
+/// inherited from a built-in row and nothing is read from the environment:
+/// the families that consume a setting overlay the environment themselves.
+/// `base_url_defaulted` is the one field without a same-named key: it records
+/// whether the entry's own table named no `base_url`, so the entry carries
+/// its built-in row default. Preparation consults the captured environment
+/// for such an entry only; an explicit URL wins even when it equals the row
+/// default, because omission is what the table said, not what the value is.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderSettings {
+    /// Whether the entry's own table named no `base_url`: the entry carries
+    /// its built-in row default, which preparation may replace from the
+    /// captured environment. `false` for every named provider, whose table
+    /// always names one.
+    pub(crate) base_url_defaulted: bool,
+    /// The `api-version` query value of an Azure endpoint.
+    pub(crate) api_version: Option<Box<str>>,
+    /// Catalog model id to deployment name, in model-id order.
+    pub(crate) deployments: BTreeMap<Box<str>, Box<str>>,
+    /// The cloud region of a Bedrock endpoint.
+    pub(crate) region: Option<Box<str>>,
+    /// The cloud project of a Vertex endpoint.
+    pub(crate) project: Option<Box<str>>,
+    /// The cloud location of a Vertex endpoint.
+    pub(crate) location: Option<Box<str>>,
+    /// The `GitLab` namespace that scopes a workflow session.
+    pub(crate) namespace: Option<Box<str>>,
+    /// The executable a command-line family launches.
+    pub(crate) binary: Option<Box<str>>,
+    /// The integration identity a Copilot request presents.
+    pub(crate) integration: Option<Box<str>>,
+}
+
 /// One configured provider route and its connection defaults.
 #[derive(Clone, Debug)]
 pub struct ProviderEntry {
@@ -63,6 +101,8 @@ pub struct ProviderEntry {
     pub auth: AuthStyle,
     /// The maximum number of simultaneous requests for this provider.
     pub max_concurrent_requests: u32,
+    /// The settings of this entry's own `providers.<id>` table.
+    pub settings: ProviderSettings,
 }
 
 impl ProviderEntry {
@@ -188,6 +228,14 @@ const PROVIDER_KEYS: &[&str] = &[
     "key_env",
     "auth",
     "max_concurrent_requests",
+    "api_version",
+    "deployments",
+    "region",
+    "project",
+    "location",
+    "namespace",
+    "binary",
+    "integration",
 ];
 
 fn invalid(message: impl Into<Box<str>>) -> ProviderConfigError {
@@ -230,6 +278,47 @@ fn string_field<'a>(
         .as_str()
         .map(Some)
         .ok_or_else(|| invalid(format!("{path}.{key} must be a string")))
+}
+
+/// A string setting, trimmed; `None` when the key is absent.
+///
+/// A value that is not a string, or is blank, is refused: a setting that is
+/// present must name something.
+fn setting_field(
+    table: Option<&toml::Table>,
+    key: &str,
+    path: &str,
+) -> Result<Option<Box<str>>, ProviderConfigError> {
+    let Some(value) = table.and_then(|table| table.get(key)) else {
+        return Ok(None);
+    };
+    match value.as_str().map(str::trim) {
+        Some(text) if !text.is_empty() => Ok(Some(text.into())),
+        _ => Err(invalid(format!("{path}.{key} must be a non-empty string"))),
+    }
+}
+
+/// The `deployments` table: model id to a non-empty, trimmed deployment name.
+fn deployments_field(
+    table: Option<&toml::Table>,
+    path: &str,
+) -> Result<BTreeMap<Box<str>, Box<str>>, ProviderConfigError> {
+    let Some(value) = table.and_then(|table| table.get("deployments")) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(rows) = value.as_table() else {
+        return Err(invalid(format!("{path}.deployments must be a table")));
+    };
+    rows.iter()
+        .map(|(model, value)| match value.as_str().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                Ok((Box::<str>::from(model.as_str()), Box::<str>::from(name)))
+            }
+            _ => Err(invalid(format!(
+                "{path}.deployments.{model} must be a non-empty string"
+            ))),
+        })
+        .collect()
 }
 
 /// The decoded `[models]` table: default model, thinking level, and aliases.
@@ -364,6 +453,23 @@ fn decode_scripted(value: &toml::Value) -> Result<ScriptedSelection, ProviderCon
     })
 }
 
+fn decode_settings(
+    table: Option<&toml::Table>,
+    path: &str,
+) -> Result<ProviderSettings, ProviderConfigError> {
+    Ok(ProviderSettings {
+        base_url_defaulted: false,
+        api_version: setting_field(table, "api_version", path)?,
+        deployments: deployments_field(table, path)?,
+        region: setting_field(table, "region", path)?,
+        project: setting_field(table, "project", path)?,
+        location: setting_field(table, "location", path)?,
+        namespace: setting_field(table, "namespace", path)?,
+        binary: setting_field(table, "binary", path)?,
+        integration: setting_field(table, "integration", path)?,
+    })
+}
+
 fn decode_builtin(
     value: Option<&toml::Value>,
     def: &'static ProviderDef,
@@ -403,7 +509,8 @@ fn decode_builtin(
         }
     };
 
-    let url = string_field(table, "base_url", &path)?
+    let configured = string_field(table, "base_url", &path)?;
+    let url = configured
         .unwrap_or(def.base_url)
         .to_owned()
         .into_boxed_str();
@@ -427,6 +534,8 @@ fn decode_builtin(
     let key_env =
         string_field(table, "key_env", &path)?.map(|value| value.to_owned().into_boxed_str());
     let max_concurrent_requests = concurrency_limit(table, name)?;
+    let mut settings = decode_settings(table, &path)?;
+    settings.base_url_defaulted = configured.is_none();
 
     validate_transport(name, family, transport)?;
 
@@ -439,6 +548,7 @@ fn decode_builtin(
         key_env,
         auth,
         max_concurrent_requests,
+        settings,
     })
 }
 
@@ -495,6 +605,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         name,
     )?;
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
+    let settings = decode_settings(Some(table), &path)?;
     validate_transport(name, family, transport)?;
 
     Ok(ProviderEntry {
@@ -506,6 +617,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         key_env: Some(key_env.to_owned().into_boxed_str()),
         auth,
         max_concurrent_requests,
+        settings,
     })
 }
 

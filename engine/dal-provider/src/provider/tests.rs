@@ -145,6 +145,7 @@ fn entry(
         key_env: key_env.map(Into::into),
         auth: AuthStyle::Bearer,
         max_concurrent_requests,
+        settings: ProviderSettings::default(),
     }
 }
 

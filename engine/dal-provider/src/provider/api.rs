@@ -95,6 +95,7 @@ impl Provider {
             || slot.entry.key_env != entry.key_env
             || slot.entry.auth != entry.auth
             || slot.entry.max_concurrent_requests != entry.max_concurrent_requests
+            || slot.entry.settings != entry.settings
         {
             return Err(ProviderError::InvalidRequest {
                 message: format!("provider {} does not match this provider set", entry.id),
