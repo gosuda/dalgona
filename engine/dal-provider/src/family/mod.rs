@@ -14,4 +14,5 @@ pub(crate) mod google;
 pub(crate) mod mistral;
 pub(crate) mod ollama;
 pub(crate) mod pi_messages;
+mod process;
 pub(crate) mod responses;
