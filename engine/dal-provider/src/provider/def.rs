@@ -168,6 +168,10 @@ pub enum Hook {
     /// tokens directly, with no second code exchange. After sign-in and
     /// after refresh the Factory whoami endpoint verifies the session.
     WorkOsDevice,
+    /// `GitLab Duo` sign-in: the code exchange and refresh are form-encoded
+    /// with the `api` scope. After sign-in and after refresh the
+    /// direct-access cache drops its grants.
+    GitLabDuo,
 }
 
 impl ProviderDef {
@@ -351,6 +355,48 @@ pub(crate) const FACTORY_DROID: ProviderDef = ProviderDef {
     shape: Shape::Plain,
 };
 
+pub(crate) const GITLAB_DUO: ProviderDef = ProviderDef {
+    id: "gitlab-duo",
+    name: "GitLab Duo",
+    family: Family::GitLab,
+    family_policy: FamilyPolicy::Native,
+    base_url: "https://gitlab.com",
+    transport: Transport::Https,
+    key: Some(KeySpec {
+        style: AuthStyle::Bearer,
+        env: &["GITLAB_TOKEN"],
+    }),
+    oauth: Some(OAuthSpec {
+        client_id: "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b",
+        client_id_env: Some("GITLAB_CLIENT_ID"),
+        authorize_url: "https://gitlab.com/oauth/authorize",
+        token_url: "https://gitlab.com/oauth/token",
+        scopes: &["api"],
+        query: &[
+            ("client_id", QueryValue::ClientId),
+            ("redirect_uri", QueryValue::RedirectUri),
+            ("response_type", QueryValue::Text("code")),
+            ("state", QueryValue::State),
+            ("scope", QueryValue::Scope),
+            ("code_challenge", QueryValue::Challenge),
+            ("code_challenge_method", QueryValue::Text("S256")),
+        ],
+        redirect: Redirect {
+            host: "localhost",
+            port: 8080,
+            path: "/callback",
+        },
+        // Pasted code or redirect URL, never the device fallback: the row
+        // has no device sign-in, so a busy port must not route into one.
+        completion: Completion::PasteCode,
+        browser: true,
+        device: None,
+        revoke_url: Some("https://gitlab.com/oauth/revoke"),
+        hook: Hook::GitLabDuo,
+    }),
+    shape: Shape::Plain,
+};
+
 pub(crate) const GITHUB_COPILOT: ProviderDef = ProviderDef {
     id: "github-copilot",
     name: "GitHub Copilot",
@@ -430,6 +476,7 @@ const VENDOR_ROWS: &[ProviderDef] = &[
     OPENAI_CODEX,
     ANTHROPIC,
     FACTORY_DROID,
+    GITLAB_DUO,
     GITHUB_COPILOT,
     RADIUS,
     OPENROUTER,

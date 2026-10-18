@@ -11,6 +11,7 @@ use super::compiled_temperature;
 use super::{Catalog, CatalogEntry, CatalogSource, Listing, ResolvedModel, ToolSupport};
 use crate::{
     error::ResolveError,
+    family::gitlab::{ProxyRoute, proxy_route},
     provider::{OPENAI, ProviderEntry},
     thinking::ThinkingSupport,
 };
@@ -351,7 +352,7 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         listing: Listing::Listed,
         context_window: None,
         max_output: None,
-        thinking: default_thinking(provider.family),
+        thinking: entry_thinking(provider, id),
         image_input: false,
         image_profile: None,
         remote_compact: false,
@@ -362,6 +363,38 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         custom_grammar: false,
         premium_multiplier: None,
         price: None,
+    }
+}
+
+fn entry_thinking(provider: &ProviderEntry, id: &str) -> ThinkingSupport {
+    if provider.family == Family::GitLab {
+        return gitlab_thinking(id);
+    }
+    default_thinking(provider.family)
+}
+
+/// Thinking support for one GitLab model id, matching the proxy route the
+/// request will take rather than the shared family label.
+///
+/// The Anthropic route lowers through the Anthropic encoder and needs the
+/// Anthropic contract; the Responses and Completions routes lower through
+/// the `OpenAI` encoders and need the `OpenAI` ladder. This mirrors
+/// [`crate::family::gitlab::proxy_route`], the same function the request
+/// path uses to pick its encoder.
+fn gitlab_thinking(id: &str) -> ThinkingSupport {
+    match proxy_route(id) {
+        ProxyRoute::Anthropic => ThinkingSupport::UnknownAdaptive,
+        ProxyRoute::Responses | ProxyRoute::Completions => ThinkingSupport::OpenAi {
+            accepted: vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Max,
+            ],
+            none_supported: true,
+        },
     }
 }
 

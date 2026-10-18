@@ -1563,6 +1563,7 @@ async fn a_signed_in_preset_key_outranks_the_environment_and_takes_no_oauth() ->
         dir.path().join("auth.json"),
         dir.path().join("cache"),
         "dal/test",
+        &EnvSnapshot::test(&[]),
     )?;
     let signed_in = login("deepseek", Method::ApiKey, login_io, &site).await?;
     assert_eq!(
@@ -3570,6 +3571,257 @@ async fn an_in_stream_exception_never_surfaces_the_sigv4_credential() -> TestRes
     Ok(())
 }
 
+fn gitlab_grant_reply(token: &str) -> Reply {
+    Reply {
+        status: 200,
+        content_type: "application/json",
+        body: format!(r#"{{"token":"{token}","headers":{{"X-GitLab-Test":"1"}}}}"#).into_bytes(),
+    }
+}
+
+#[tokio::test]
+async fn gitlab_grant_cache_is_singleton_and_refetchable_over_loopback() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut grant_server) = server(
+        "",
+        vec![
+            gitlab_grant_reply("grant-one"),
+            gitlab_grant_reply("grant-two"),
+        ],
+    )
+    .await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "gitlab-test",
+                Family::GitLab,
+                base.clone(),
+                Some("GITLAB_TEST_TOKEN"),
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("GITLAB_TEST_TOKEN", "pat-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let client = set
+        .inner
+        .providers
+        .get("gitlab-test")
+        .expect("configured provider")
+        .client
+        .get()
+        .clone();
+    let user_agent = identity().user_agent();
+    let grants = set.gitlab_grants();
+    // The same instance serves every caller: the second ensure is a cache
+    // hit and never reaches the loopback grant endpoint.
+    grants
+        .ensure(&client, &base, "pat-token", &user_agent)
+        .await?;
+    grants
+        .ensure(&client, &base, "pat-token", &user_agent)
+        .await?;
+    // Invalidation drops every grant of the token, so the next ensure
+    // refetches instead of serving the rotated grant.
+    grants.remove("pat-token");
+    grants
+        .ensure(&client, &base, "pat-token", &user_agent)
+        .await?;
+    let captured = grant_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    assert_eq!(
+        captured.len(),
+        2,
+        "one initial fetch and one refetch after invalidation"
+    );
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /api/v4/ai/third_party_agents/direct_access "));
+    assert!(head.contains("authorization: bearer pat-token"));
+    let second_head = String::from_utf8_lossy(&captured[1]).to_ascii_lowercase();
+    assert!(second_head.starts_with("post /api/v4/ai/third_party_agents/direct_access "));
+    assert!(second_head.contains("authorization: bearer pat-token"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gitlab_proxy_builds_pinned_wire_from_cached_grant() -> TestResult {
+    let dir = TestDir::new()?;
+    let (base, mut grant_server) = server("", vec![gitlab_grant_reply("grant-wire")]).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "gitlab-wire",
+                Family::GitLab,
+                base.clone(),
+                Some("GITLAB_TEST_TOKEN"),
+                2,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("GITLAB_TEST_TOKEN", "pat-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let client = set
+        .inner
+        .providers
+        .get("gitlab-wire")
+        .expect("configured provider")
+        .client
+        .get()
+        .clone();
+    let user_agent = identity().user_agent();
+    let grant = set
+        .gitlab_grants()
+        .ensure(&client, &base, "pat-token", &user_agent)
+        .await?;
+    let _ = grant_server
+        .join_next()
+        .await
+        .expect("server completes")??;
+    let mut resolved = resolved("gitlab-wire", Family::GitLab, "duo-chat-sonnet-4-6");
+    resolved.entry.thinking = ThinkingSupport::Budget { can_disable: true };
+    let wire = crate::family::gitlab::build_proxy(&crate::family::gitlab::DuoProxyRequest {
+        request: &request(
+            Family::GitLab,
+            "duo-chat-sonnet-4-6",
+            vec![user_text("Summarize.")],
+        ),
+        thinking: &crate::thinking::plan(
+            ThinkingLevel::Off,
+            &crate::thinking::BeforeRequestPatch::default(),
+            &resolved.entry.thinking,
+            crate::thinking::RequestLimits {
+                max_tokens: 4096,
+                max_output: 4096,
+                temperature_allowed: true,
+            },
+        ),
+        grant: &grant,
+        max_output: resolved.entry.max_output,
+        reasoning_summary: resolved.entry.supports_reasoning_summaries,
+        display_supported: resolved.entry.display_supported,
+        session: SessionId::new_v7(),
+    })?;
+    assert!(
+        matches!(wire.route, crate::family::gitlab::ProxyRoute::Anthropic),
+        "the claude alias rides the Anthropic proxy"
+    );
+    assert!(
+        wire.url
+            .as_str()
+            .starts_with(crate::family::gitlab::ANTHROPIC_PROXY_BASE),
+        "the proxy URL is the pinned base, never the configured one"
+    );
+    let (name, value) = wire.headers.first().expect("grant bearer leads");
+    assert_eq!(*name, "authorization");
+    assert!(value.starts_with("Bearer "), "the grant rides bearer");
+    Ok(())
+}
+
+#[tokio::test]
+async fn gitlab_workflow_path_skips_grant_fetch_on_namespace_entries() -> TestResult {
+    let dir = TestDir::new()?;
+    // A grant endpoint that must never be hit: the workflow surface trades
+    // its own per-run token, never a `direct_access` grant.
+    let (grant_base, mut grant_server) =
+        server("", vec![gitlab_grant_reply("grant-never")]).await?;
+    let closed_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let closed_base = format!("http://{}", closed_listener.local_addr()?);
+    drop(closed_listener);
+    let _ = grant_base;
+    let mut wf_entry = entry(
+        "gitlab-wf",
+        Family::GitLab,
+        closed_base,
+        Some("GITLAB_TEST_TOKEN"),
+        2,
+        Transport::Https,
+    );
+    wf_entry.settings.namespace = Some("123".into());
+    let set = ProviderSet::new(
+        &config(vec![wf_entry], 0),
+        identity(),
+        EnvSnapshot::test(&[("GITLAB_TEST_TOKEN", "pat-token")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("gitlab-wf", Family::GitLab, "duo-agent"))?;
+    let stream = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::GitLab, "duo-agent", vec![user_text("Run.")]),
+            &[],
+            notice_sink(),
+            &CancellationToken::new(),
+        )
+        .await?;
+    let outcome = collect(stream).await;
+    // The workflow REST setup has no listener, so the turn fails closed at
+    // transport without ever fetching a proxy grant.
+    assert!(
+        matches!(outcome, Err(ProviderError::Transport { .. })),
+        "a namespace entry runs the workflow surface, not the proxy"
+    );
+    assert!(
+        grant_server.try_join_next().is_none(),
+        "the workflow path never touches the grant endpoint"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn gitlab_workflow_namespace_path_is_refused_typed() -> TestResult {
+    let dir = TestDir::new()?;
+    for namespace in [
+        "my-group/my-project",
+        "gid://gitlab/Group/",
+        "gid://gitlab/Group/abc",
+        "",
+    ] {
+        let mut path_entry = entry(
+            "gitlab-path",
+            Family::GitLab,
+            String::from("https://example.com"),
+            Some("GITLAB_TEST_TOKEN"),
+            2,
+            Transport::Https,
+        );
+        path_entry.settings.namespace = Some(namespace.into());
+        let set = ProviderSet::new(
+            &config(vec![path_entry], 0),
+            identity(),
+            EnvSnapshot::test(&[("GITLAB_TEST_TOKEN", "pat-token")]),
+            dir.path(),
+            dir.path(),
+        )?;
+        let provider = set.provider(resolved("gitlab-path", Family::GitLab, "duo-agent"))?;
+        let stream = provider
+            .open(
+                SessionId::new_v7(),
+                &request(Family::GitLab, "duo-agent", vec![user_text("Run.")]),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?;
+        let outcome = collect(stream).await;
+        assert!(
+            matches!(outcome, Err(ProviderError::InvalidRequest { .. })),
+            "namespace {namespace:?} is refused before any workflow call"
+        );
+    }
+    Ok(())
+}
+
 fn compact_request(model: &str) -> ModelRequest {
     let mut compact = request(Family::Responses, model, vec![user_text("Summarize.")]);
     compact.purpose = Purpose::Compact;
@@ -3674,6 +3926,186 @@ async fn a_plain_responses_entry_still_compacts_remotely() -> TestResult {
     let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
     assert!(head.starts_with("post /v1/responses/compact "), "{head}");
     assert!(head.contains("authorization: bearer plain-secret"), "{head}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult {
+    use crate::family::gitlab::workflow::support::{
+        RestCounts, action_frame, rest_router, test_timeouts,
+    };
+    use crate::family::gitlab::workflow::{WorkflowScope, WorkflowTurn, run_turn};
+    use dal_core::{AssistantPart, CallId, ReplaySource};
+    use futures::{SinkExt, StreamExt};
+    use std::sync::Mutex;
+
+    // Parks a workflow row in the set's own table through a real tool-action
+    // turn, then ends the session through the public ProviderSet call. The
+    // next turn must create a fresh workflow (creates == 2): without the
+    // forwarding line it would resume the parked row and creates would stay
+    // 1. The family proof covers the table seam directly; this covers the
+    // public call reaching it. Server rig is the family's shared support.
+    let dir = TestDir::new()?;
+    let rest = TcpListener::bind("127.0.0.1:0").await?;
+    let rest_base = format!("http://{}", rest.local_addr()?);
+    let ws = TcpListener::bind("127.0.0.1:0").await?;
+    let ws_base = format!("http://{}", ws.local_addr()?);
+    let counts = Arc::new(Mutex::new(RestCounts::default()));
+    counts.lock().unwrap().ws_base = ws_base;
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(rest_router(rest, Arc::clone(&counts)));
+    servers.spawn(async move {
+        // First socket: the parked turn. Read START, deliver the tool action,
+        // then hold until the client closes on end_session.
+        let (tcp, _) = ws.accept().await.unwrap();
+        let mut parked = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let start = parked.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(start.contains("\"startRequest\""));
+        parked
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                action_frame("r-1").into(),
+            ))
+            .await
+            .unwrap();
+        while parked.next().await.is_some() {}
+        // Second socket: the fresh workflow after end_session.
+        let (tcp, _) = ws.accept().await.unwrap();
+        let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let start = fresh.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(start.contains("\"workflowID\":\"w-2\""), "{start}");
+        fresh
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"status":"FINISHED"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        while fresh.next().await.is_some() {}
+    });
+    let set = ProviderSet::new(
+        &config(vec![], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let client = crate::http::build_client();
+    let cancel = CancellationToken::new();
+    let session = SessionId::new_v7();
+    let scope = WorkflowScope {
+        root_namespace_id: "42".into(),
+        namespace_path: Some("g".into()),
+        project_id: Some("11".into()),
+        project_path: None,
+        workflow_definition: None,
+    };
+    let tool_call = || ContextItem::Assistant {
+        source: ReplaySource {
+            family: Family::GitLab,
+            model: "duo-agent".into(),
+        },
+        parts: vec![AssistantPart::ToolCall {
+            call: CallId::new("r-1"),
+            name: "read".into(),
+            args: RawJson::parse(r#"{"q":"x"}"#).unwrap(),
+            replay: None,
+        }],
+        replay: None,
+    };
+    let turn_request = |context| ModelRequest {
+        purpose: Purpose::Turn,
+        model: ModelRoute::Api {
+            family: Family::GitLab,
+            model: "duo-agent".into(),
+        },
+        system: "Be terse.".into(),
+        tools: vec![ModelToolSpec {
+            name: "read".into(),
+            description: "reads".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).unwrap(),
+            grammar: None,
+            defer_loading: false,
+        }]
+        .into(),
+        context: context.into(),
+        params: RequestParams {
+            thinking: ThinkingLevel::Off,
+            effort: None,
+            temperature: None,
+            max_output_tokens: None,
+        },
+        cache_key: None,
+    };
+    // First turn parks on the tool action: the ToolUse stop proves the row
+    // was put back, so the creates == 1 check below is not vacuous.
+    let parked_request = turn_request(vec![user_text("go"), tool_call()]);
+    let turn = WorkflowTurn {
+        request: &parked_request,
+        model: "duo-agent",
+        base_url: &rest_base,
+        token: "gl-pat",
+        provider: "gitlab-duo-agent",
+        session,
+        scope: &scope,
+        tool_choice_none: false,
+        timeouts: test_timeouts(),
+        cancel: &cancel,
+        user_agent: "dalgon/test",
+    };
+    let stream = run_turn(&client, &set.inner.gitlab_workflows, &turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let (events, failure) = drain_stream(stream).await;
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(
+        matches!(
+            events.last(),
+            Some(StreamEvent::Stop {
+                reason: crate::stream::StopReason::ToolUse
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(counts.lock().unwrap().creates, 1);
+    // Ending the session through the public call must drop the parked row:
+    // the next turn starts a fresh workflow instead of resuming it. The
+    // timeout turns a missing forward into a failure instead of a hang.
+    set.end_session(&session);
+    let fresh_request = turn_request(vec![user_text("go again")]);
+    let turn = WorkflowTurn {
+        request: &fresh_request,
+        model: "duo-agent",
+        base_url: &rest_base,
+        token: "gl-pat",
+        provider: "gitlab-duo-agent",
+        session,
+        scope: &scope,
+        tool_choice_none: false,
+        timeouts: test_timeouts(),
+        cancel: &cancel,
+        user_agent: "dalgon/test",
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_turn(&client, &set.inner.gitlab_workflows, &turn),
+    )
+    .await
+    .map_err(|_| io::Error::other("the fresh turn never completed"))?
+    .unwrap()
+    .unwrap();
+    let (events, failure) = drain_stream(outcome).await;
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(
+        matches!(
+            events.last(),
+            Some(StreamEvent::Stop {
+                reason: crate::stream::StopReason::EndTurn
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(counts.lock().unwrap().creates, 2);
+    servers.abort_all();
     Ok(())
 }
 

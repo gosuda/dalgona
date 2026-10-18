@@ -16,7 +16,12 @@ use crate::{
     },
     catalog::ResolvedModel,
     error::ProviderError,
-    family::{azure, bedrock::auth::AwsCredentialResolver, copilot::IdentityCache},
+    family::{
+        azure,
+        bedrock::auth::AwsCredentialResolver,
+        copilot::IdentityCache,
+        gitlab::{DirectAccessCache, workflow::WorkflowSessions},
+    },
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
     scripted::Script,
@@ -75,6 +80,14 @@ pub(super) struct ProviderSetInner {
     /// captured environment, with its own proxy-bypassed HTTP client. No
     /// process-global state.
     pub(super) aws_resolver: Arc<AwsCredentialResolver>,
+    /// The one GitLab `direct_access` grant cache of this set; the refresh
+    /// engine holds the same instance, so sign-in rotation invalidates the
+    /// grants every live turn reads. There is no second cache.
+    pub(super) gitlab_grants: Arc<DirectAccessCache>,
+    /// The live GitLab workflow sockets of this set, keyed by session and
+    /// provider; a turn takes its row, drives it, and returns it only while
+    /// a tool action is pending.
+    pub(super) gitlab_workflows: WorkflowSessions,
 }
 
 pub(super) struct ProviderSlot {
@@ -190,11 +203,20 @@ impl ProviderSet {
         let (clients, providers, usage) =
             Self::build_provider_slots(&config.providers, &user_agent)?;
 
-        let refresher = Arc::new(Refresher::new(
-            user_agent.clone(),
-            data_dir.join("auth.json"),
-            endpoints,
-        ));
+        // One grant cache for the whole set: the refresh engine holds the
+        // same instance, so GitLab sign-in rotation invalidates the grants
+        // live proxy turns read. The sibling login module reaches it only
+        // through `ProviderSet::gitlab_grants`, never through these fields.
+        let gitlab_grants: Arc<DirectAccessCache> = Arc::default();
+        let refresher = Arc::new(
+            Refresher::new(
+                user_agent.clone(),
+                data_dir.join("auth.json"),
+                endpoints,
+                &env,
+            )
+            .with_gitlab_grants(Arc::clone(&gitlab_grants)),
+        );
         // The Bedrock chain resolves over the captured environment with its
         // own HTTP client: the crate's shared per-origin client must never
         // carry ambient proxy policy into ECS/IMDS credential HTTP. The
@@ -235,6 +257,8 @@ impl ProviderSet {
                 scripted,
                 copilot_identities: IdentityCache::default(),
                 aws_resolver,
+                gitlab_grants,
+                gitlab_workflows: WorkflowSessions::default(),
             }),
         })
     }
@@ -297,6 +321,16 @@ impl ProviderSet {
             slot.client.get(),
             self,
         )
+    }
+
+    /// The one `direct_access` grant cache of this set.
+    ///
+    /// The sibling login module cannot touch `inner` (it is `pub(super)` in
+    /// `provider/`), so this crate-internal getter is its only access: it
+    /// clones the same instance the refresh engine invalidates on sign-in
+    /// rotation, never a second cache.
+    pub(crate) fn gitlab_grants(&self) -> Arc<DirectAccessCache> {
+        Arc::clone(&self.inner.gitlab_grants)
     }
 
     /// Returns the shared replay script when `[providers.scripted]` is set.
@@ -416,9 +450,13 @@ impl ProviderSet {
         self.inner.refresher.shutdown().await;
     }
 
-    /// Clears all WebSocket and once-per-session notice state for `session`.
+    /// Clears all WebSocket, GitLab workflow, once-per-session notice, and
+    /// Antigravity state for `session`. A parked GitLab workflow row is
+    /// dropped with its socket; the family contract sends no workflow stop
+    /// from this synchronous path (see [`WorkflowSessions::end_session`]).
     pub fn end_session(&self, session: &SessionId) {
         self.inner.ws.end_session(session);
+        self.inner.gitlab_workflows.end_session(session);
         drop(lock(&self.inner.notices).remove(session));
     }
 }

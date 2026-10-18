@@ -27,6 +27,10 @@ use crate::{
         codex::CodexRequest,
         copilot::{self, CopilotKey, CopilotRequest, IdentityRetry, Integration},
         droid::{self, DroidRequest, RoutePolicy},
+        gitlab::{
+            self,
+            workflow::{self as gitlab_workflow, WorkflowScope, WorkflowTurn},
+        },
         responses::ResponsesRequest,
     },
     http::{self, Exchange},
@@ -158,6 +162,7 @@ pub(crate) async fn stream_attempt(
     }
     match context.family {
         Family::Bedrock => Box::pin(bedrock_attempt(&context, &credential, &cancel, &owner)).await,
+        Family::GitLab => gitlab_attempt(&context, &credential, &cancel, &owner).await,
         Family::Droid => droid_attempt(&context, &credential, &cancel).await,
         _ => {
             let parts =
@@ -431,6 +436,134 @@ fn bedrock_body_error(error: bedrock::BedrockBodyError) -> ProviderError {
             message: other.to_string(),
         },
     }
+}
+
+/// One GitLab attempt: the proxy surface through the family's builders and
+/// byte transport, or the workflow surface when the entry scopes a workflow
+/// session.
+///
+/// Both surfaces start from the GitLab credential, which never rides an
+/// inference request itself: the proxy exchanges it for the owner-cached
+/// `direct_access` grant, the workflow for a per-run token. The grant cache
+/// is the one `ProviderSet` instance the refresh engine invalidates on
+/// sign-in rotation. A 401/403 on the proxy drops that token's grants and
+/// returns the failure for the established refresh contract (OAuth refreshes
+/// once, anything else is final); nothing retries past delivery.
+async fn gitlab_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    let token = gitlab::require_token(credential).map_err(AttemptFailure::Provider)?;
+    let slot = owner.providers.get(&context.provider).ok_or_else(|| {
+        AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!("provider {} is not configured", context.provider),
+        })
+    })?;
+    if slot.entry.settings.namespace.is_some() {
+        return gitlab_workflow_attempt(context, token, cancel, owner, &slot.entry).await;
+    }
+    let grants = Arc::clone(&owner.gitlab_grants);
+    let grant = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(None),
+        grant = grants.ensure(
+            &context.client,
+            &context.base_url,
+            token,
+            &context.user_agent,
+        ) => grant.map_err(AttemptFailure::Provider)?,
+    };
+    let wire = gitlab::build_proxy(&gitlab::DuoProxyRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        grant: &grant,
+        max_output: context.entry.max_output,
+        reasoning_summary: context.entry.supports_reasoning_summaries,
+        display_supported: context.entry.display_supported,
+        session: context.session,
+    })
+    .map_err(AttemptFailure::Provider)?;
+    let outcome = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(None),
+        outcome = gitlab::open(&context.client, wire, &context.user_agent) => outcome,
+    };
+    match outcome {
+        Err(failure) if is_unauthorized(&failure) => {
+            grants.remove(token);
+            Err(failure)
+        }
+        outcome => outcome.map(Some),
+    }
+}
+
+/// One GitLab workflow turn: REST setup plus the stateful socket, driven
+/// through the set-owned resumable sessions. The scope comes from
+/// configuration (`providers.<id>.namespace`); workspace discovery would
+/// need process spawn, which the provider layer forbids.
+async fn gitlab_workflow_attempt(
+    context: &StreamContext,
+    token: &str,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let namespace = entry.settings.namespace.as_deref().ok_or_else(|| {
+        AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!(
+                "provider {} needs a namespace for a workflow session",
+                entry.id
+            ),
+        })
+    })?;
+    if !valid_workflow_namespace(namespace) {
+        return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!(
+                "provider {} names a namespace {namespace:?}; a workflow session needs digits or gid://gitlab/Group/<digits>",
+                entry.id
+            ),
+        }));
+    }
+    let scope = WorkflowScope {
+        root_namespace_id: namespace.to_owned(),
+        namespace_path: None,
+        project_id: None,
+        project_path: None,
+        workflow_definition: None,
+    };
+    let turn = WorkflowTurn {
+        request: &context.request,
+        model: context.model.as_ref(),
+        base_url: context.base_url.as_ref(),
+        token,
+        provider: context.provider.as_ref(),
+        session: context.session,
+        scope: &scope,
+        tool_choice_none: context.request.tools.is_empty(),
+        timeouts: gitlab_workflow::Timeouts::default(),
+        cancel,
+        user_agent: context.user_agent.as_ref(),
+    };
+    gitlab_workflow::run_turn(&context.client, &owner.gitlab_workflows, &turn).await
+}
+
+/// Whether a configured GitLab namespace scopes a workflow session: the
+/// family's contract admits a root namespace id only, digits or
+/// `gid://gitlab/Group/<digits>`. A namespace path would break workflow
+/// creation at the first turn, so it is refused here instead of passed
+/// through to the GraphQL and REST bodies.
+fn valid_workflow_namespace(namespace: &str) -> bool {
+    if !namespace.is_empty() && namespace.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    namespace
+        .strip_prefix("gid://gitlab/Group/")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Whether `entry` routes through the GitHub Copilot proxy.

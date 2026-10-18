@@ -2214,6 +2214,67 @@ fn bedrock_typed_carries_anthropic_contract() {
     assert!(body.is_ok(), "converse accepts catalog thinking: {body:?}");
 }
 
+#[test]
+fn gitlab_typed_thinking_follows_proxy_route() {
+    let made = provider("gitlab-duo", Family::GitLab, "https://gitlab.com");
+    let catalog = Catalog::with_sources(vec![(made, CatalogSource::Typed)], Vec::new());
+    let anthropic =
+        resolve(&catalog, &[], "gitlab-duo/duo-chat-sonnet-4-5").expect("anthropic route resolves");
+    assert!(matches!(
+        anthropic.entry.thinking,
+        ThinkingSupport::UnknownAdaptive
+    ));
+    let responses = resolve(&catalog, &[], "gitlab-duo/duo-chat-gpt-5-codex")
+        .expect("responses route resolves");
+    assert!(matches!(
+        responses.entry.thinking,
+        ThinkingSupport::OpenAi { .. }
+    ));
+    let completions = resolve(&catalog, &[], "gitlab-duo/duo-chat-gpt-5-mini")
+        .expect("completions route resolves");
+    assert!(matches!(
+        completions.entry.thinking,
+        ThinkingSupport::OpenAi { .. }
+    ));
+    assert_eq!(
+        crate::family::gitlab::proxy_route("duo-chat-sonnet-4-5"),
+        crate::family::gitlab::ProxyRoute::Anthropic
+    );
+    assert_eq!(
+        crate::family::gitlab::proxy_route("duo-chat-gpt-5-codex"),
+        crate::family::gitlab::ProxyRoute::Responses
+    );
+    assert_eq!(
+        crate::family::gitlab::proxy_route("duo-chat-gpt-5-mini"),
+        crate::family::gitlab::ProxyRoute::Completions
+    );
+    let limits = crate::thinking::RequestLimits {
+        max_tokens: 0,
+        max_output: 0,
+        temperature_allowed: false,
+    };
+    let anthropic_plan = crate::thinking::plan(
+        dal_core::ThinkingLevel::Off,
+        &BeforeRequestPatch::default(),
+        &anthropic.entry.thinking,
+        limits,
+    );
+    assert!(matches!(
+        anthropic_plan.wire,
+        crate::thinking::WireThinking::Anthropic { .. }
+    ));
+    let responses_plan = crate::thinking::plan(
+        dal_core::ThinkingLevel::Off,
+        &BeforeRequestPatch::default(),
+        &responses.entry.thinking,
+        limits,
+    );
+    assert!(matches!(
+        responses_plan.wire,
+        crate::thinking::WireThinking::OpenAi { .. }
+    ));
+}
+
 /// One request the scripted Gemini server answered: the request line and the
 /// lowercased request headers.
 type SeenRequest = (String, Vec<(String, String)>);
