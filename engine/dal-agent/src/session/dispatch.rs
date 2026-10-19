@@ -685,6 +685,28 @@ struct CallRuntime {
     cancel: CancellationToken,
 }
 
+impl CallRuntime {
+    /// Parks one detached child, attaching the command text the detaching
+    /// call ran when it did.
+    fn park_detached(&self, proc: Proc, command: Option<Arc<str>>) -> JobId {
+        let job = proc.job_id();
+        // A parked child never publishes again: the dispatch loop settles
+        // this call without the child, and detached output belongs to the
+        // job table, not to a live progress card.
+        let proc = proc.without_progress();
+        let park = ParkDetached {
+            jobs: Arc::clone(&self.jobs),
+            ledger: Arc::clone(&self.ledger),
+            call: self.call.clone(),
+            tool: self.tool.clone(),
+            command,
+            proc,
+        };
+        self.tasks.spawn(async move { park.run().await });
+        job
+    }
+}
+
 /// The bound digest of one approved call.
 #[derive(Clone, Copy)]
 struct AuthProof {
@@ -1216,20 +1238,11 @@ impl ToolCxRuntime for CallRuntime {
     }
 
     fn detach(&self, proc: Proc) -> JobId {
-        let job = proc.job_id();
-        // A parked child never publishes again: the dispatch loop settles
-        // this call without the child, and detached output belongs to the
-        // job table, not to a live progress card.
-        let proc = proc.without_progress();
-        let park = ParkDetached {
-            jobs: Arc::clone(&self.jobs),
-            ledger: Arc::clone(&self.ledger),
-            call: self.call.clone(),
-            tool: self.tool.clone(),
-            proc,
-        };
-        self.tasks.spawn(async move { park.run().await });
-        job
+        self.park_detached(proc, None)
+    }
+
+    fn detach_command(&self, proc: Proc, command: Arc<str>) -> JobId {
+        self.park_detached(proc, Some(command))
     }
 
     fn resolve(
@@ -2508,6 +2521,8 @@ struct ParkDetached {
     call: CallId,
     /// The detaching tool.
     tool: Name,
+    /// The command text the detaching call ran, when it supplied one.
+    command: Option<Arc<str>>,
     /// The detached child.
     proc: Proc,
 }
@@ -2520,6 +2535,7 @@ impl ParkDetached {
             ledger,
             call,
             tool,
+            command,
             proc,
         } = self;
         // Every park entry arrives stripped: a parked child never publishes
@@ -2553,6 +2569,10 @@ impl ParkDetached {
         drop(ledger);
         let cancel = CancellationToken::new();
         let record = crate::jobs::JobRecord::new(job, tool.as_str(), log_path, cancel.clone());
+        let record = match command {
+            Some(command) => record.with_command(command),
+            None => record,
+        };
         let mut table = jobs.lock().await;
         if table.reserve(record).is_err() || table.adopt_detached(job).is_err() {
             return;

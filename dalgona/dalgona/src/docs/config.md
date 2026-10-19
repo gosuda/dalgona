@@ -11,6 +11,7 @@
 | `rule_sets.enabled` | none | all shipped sets |
 | `[plugin.history].share` | none | `0.4` |
 | `[plugin.plan].enabled` | none | `true` |
+| `[plugin.procs].enabled` | none | `true` |
 | `[plugin.web].provider` | none | `brave` |
 | `[plugin.web].timeout_secs` | none | `30` |
 

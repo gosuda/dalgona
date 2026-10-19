@@ -45,7 +45,7 @@ plugin = dal.plugin(
 
 /// The normal product keeps its shared assembly and TTSR extension while the
 /// unrelated batteries and compiled rule packs stay out of this proof.
-const DISABLED_BATTERIES: &str = "[\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"web\", \"work\"]";
+const DISABLED_BATTERIES: &str = "[\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"web\", \"work\"]";
 
 fn install_plugin(root: &Path) -> io::Result<()> {
     let directory = root.join("plugins").join(PLUGIN_NAME);

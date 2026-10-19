@@ -297,13 +297,14 @@ pub async fn grant_bundled_extensions(
     Ok(())
 }
 
-/// The eleven battery extension names the product registers.
-pub const BATTERIES: [&str; 11] = [
+/// The battery extension names the product registers.
+pub const BATTERIES: [&str; 12] = [
     "ask",
     "history",
     "judged",
     "mcp",
     "orchestration",
+    "procs",
     "quality",
     "review",
     "skills",

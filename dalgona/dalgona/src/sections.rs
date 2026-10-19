@@ -10,6 +10,7 @@ use dalgona_batteries::history::{self, HistoryConfig};
 use dalgona_batteries::judged::JudgedConfig;
 use dalgona_batteries::mcp::McpSettings;
 use dalgona_batteries::orchestration::{self, OrchestrationConfig};
+use dalgona_batteries::procs::ProcsConfig;
 use dalgona_batteries::quality::QualityConfig;
 use dalgona_batteries::review::ReviewConfig;
 use dalgona_batteries::ttsr_rules;
@@ -47,6 +48,7 @@ pub(crate) struct Sections {
     pub(crate) judged: JudgedConfig,
     pub(crate) mcp: McpSettings,
     pub(crate) orchestration: OrchestrationConfig,
+    pub(crate) procs: ProcsConfig,
     pub(crate) quality: QualityConfig,
     pub(crate) review: ReviewConfig,
     pub(crate) plan: PlanConfig,
@@ -100,6 +102,8 @@ impl Sections {
                 .map_err(|source| section_error("plugin.mcp", source))?,
             orchestration: orchestration::parse_config(config.section("plugin.orchestration"))
                 .map_err(|source| section_error("plugin.orchestration", source))?,
+            procs: ProcsConfig::parse_config(config.section("plugin.procs"))
+                .map_err(|source| section_error("plugin.procs", source))?,
             quality: QualityConfig::parse_config(config.section("plugin.quality"))
                 .map_err(|source| section_error("plugin.quality", source))?,
             review: ReviewConfig::parse_config(config.section("plugin.review"))

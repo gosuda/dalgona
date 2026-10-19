@@ -44,7 +44,7 @@ fn ask_fails_closed_on_print_surface_without_answerer() -> support::TestResult<(
     ];
     let journal = support::run_scripted_print(
         &scratch,
-        "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]",
+        "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]",
         &steps,
         "ask me",
     )?;
@@ -287,7 +287,7 @@ async fn rpc_ask(
     questions: &str,
     answers: &[Value],
 ) -> support::TestResult<(String, Vec<String>)> {
-    const ASK_ONLY: &str = "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+    const ASK_ONLY: &str = "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
     let scratch = support::Scratch::new(label)?;
     let root = scratch.path().to_path_buf();
     std::fs::create_dir_all(root.join("workspace"))?;
@@ -440,7 +440,7 @@ fn ask_answers_on_tui_surface_with_shared_record() -> support::TestResult<()> {
         support::text_step("done"),
     ];
     let scratch = support::Scratch::new("ask-tui-answered")?;
-    let config = "model = \"openai/gpt-6-luna\"\napproval = \"all\"\ndisabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n";
+    let config = "model = \"openai/gpt-6-luna\"\napproval = \"all\"\ndisabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n";
     let run = support::Pane::start_scripted(scratch, config, &steps)?;
     {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);

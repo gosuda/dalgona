@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Detached jobs carry the command that started them. `exec` detaches now
+  report the validated command text on their job row (`JobStatus::command`,
+  absent when the starter supplied none), it survives settlement and the job
+  ledger across restarts, and extension code holding the `jobs` grant can
+  query it. Commandless jobs keep `command: None` and `ToolCx::detach`
+  unchanged; command-bearing detachers use the new `ToolCx::detach_command`.
 - Keep the `signature` of Mistral Conversations `thinking` chunks and send it
   back on the next request. The published `ThinkChunk` schema defines
   `signature` (`string | null`, "Signature to replay some reasoning blocks

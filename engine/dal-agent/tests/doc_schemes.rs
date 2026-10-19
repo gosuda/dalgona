@@ -86,7 +86,7 @@ impl Tool for DetachProbe {
                 Ok(proc) => proc,
                 Err(error) => return ToolOutcome::Err(error),
             };
-            let job = cx.detach(proc);
+            let job = cx.detach_command(proc, Arc::<str>::from("sleep 60"));
             *self.job.lock().unwrap_or_else(PoisonError::into_inner) = Some(job);
             ToolOutcome::Detached(job)
         })

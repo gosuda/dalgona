@@ -74,6 +74,8 @@
 - Fix MCP step-up authorization prompts repeated by concurrent tool calls: the server's "insufficient scope" reply now prompts the user once for the extra permission, and a declined or cancelled prompt answers later calls without asking again until a fresh token is stored.
 - Fix `/abort` and session end with orchestration children: every queued or running child and its descendants are cancelled, and a failed cancel or list no longer stops the sweep. `/abort` reports each failure with the child id, and `agents cancel` tries every named id and reports each refusal.
 - Fix `/abort` errors for missing orchestration grants: the message now names the plugin and the service and says to approve the grant request, then try again.
+- Add the `procs` battery, the twelfth bundled battery. It registers one deferred tool, `procs`, that lists this session's background jobs and greps their retained output; `tool_search` finds it and a first successful call by name promotes it. It asks for the `jobs` service only, and other sessions' jobs stay invisible. Set `[plugin.procs] enabled = false` or name `procs` in `disabled_batteries` to remove it. The page is `dalgona://procs`.
+- Show the command the starter ran in `procs` list rows, collapsed to one line and cut at 80 characters, and match `query` against the label or the full command, not the truncated display. A detached `exec` job carries its validated command; a job started without one shows its label.
 
 ## 0.1.0 (2026-09-26)
 

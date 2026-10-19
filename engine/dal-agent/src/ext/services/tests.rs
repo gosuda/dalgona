@@ -374,6 +374,10 @@ impl ToolCxRuntime for FakeRt {
         unreachable!("this test never detaches")
     }
 
+    fn detach_command(&self, _proc: Proc, _command: Arc<str>) -> JobId {
+        unreachable!("this test never detaches")
+    }
+
     fn resolve(
         &self,
         _uri: &str,

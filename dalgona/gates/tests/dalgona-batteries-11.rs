@@ -12,10 +12,10 @@ const WAIT: Duration = Duration::from_secs(30);
 /// encoding carries.
 const SYMBOL_OFF: &str =
     "search: mode \\\"symbol\\\" is off. Set search_symbols = true in dal.toml.";
-const NO_BATTERIES: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const NO_BATTERIES: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 /// The product wires the guard through the quality battery, so the guard
 /// halves keep it while every other battery stays off.
-const WITH_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const WITH_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 
 fn escape_json(text: &str) -> String {
     text.replace('\\', "\\\\")
@@ -187,7 +187,7 @@ fn defaults_reach_patch_search_and_guard() -> support::TestResult<()> {
     );
     let off = call_tool(
         "search-symbols-off",
-        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nsearch_symbols = false",
+        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nsearch_symbols = false",
         "s1",
         "search",
         symbol_args,
@@ -202,7 +202,7 @@ fn defaults_reach_patch_search_and_guard() -> support::TestResult<()> {
     let grep_on = call_tool("search-grep-on", NO_BATTERIES, "s1", "search", grep_args)?;
     let grep_off = call_tool(
         "search-grep-off",
-        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nsearch_symbols = false",
+        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nsearch_symbols = false",
         "s1",
         "search",
         grep_args,
@@ -225,7 +225,7 @@ fn defaults_reach_patch_search_and_guard() -> support::TestResult<()> {
     );
     let anchored = call_tool(
         "patch-anchor",
-        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nedit_style = \"anchor\"",
+        "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\nedit_style = \"anchor\"",
         "p1",
         "patch",
         r#"{"input":"this is not a patch"}"#,

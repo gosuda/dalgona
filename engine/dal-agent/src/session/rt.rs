@@ -216,6 +216,42 @@ impl SessionRt {
     }
 }
 
+impl SessionRt {
+    /// Parks one spawned child as a detached job, attaching the command text
+    /// the starter supplied when it did.
+    fn park(&self, proc: Proc, command: Option<Arc<str>>) -> JobId {
+        let job = proc.job_id();
+        let cancel = CancellationToken::new();
+        let mut record = JobRecord::new(
+            job,
+            "service",
+            proc.log_path().to_path_buf(),
+            cancel.clone(),
+        );
+        if let Some(command) = command {
+            record = record.with_command(command);
+        }
+        let jobs = Arc::clone(&self.jobs);
+        let procs = Arc::clone(&self.procs);
+        self.tasks.spawn(async move {
+            let mut table = jobs.lock().await;
+            if table.reserve(record).is_err() || table.adopt_detached(job).is_err() {
+                return;
+            }
+            drop(table);
+            let proc = {
+                let mut procs = procs.lock().await;
+                procs.insert(job, proc);
+                procs.remove(&job)
+            };
+            if let Some(proc) = proc {
+                crate::jobs::reap_detached(proc, jobs, cancel).await;
+            }
+        });
+        job
+    }
+}
+
 impl ToolCxRuntime for SessionRt {
     fn decide_run(&self) -> dal_core::Decision {
         let policy = Policy {
@@ -353,32 +389,11 @@ impl ToolCxRuntime for SessionRt {
     }
 
     fn detach(&self, proc: Proc) -> JobId {
-        let job = proc.job_id();
-        let cancel = CancellationToken::new();
-        let record = JobRecord::new(
-            job,
-            "service",
-            proc.log_path().to_path_buf(),
-            cancel.clone(),
-        );
-        let jobs = Arc::clone(&self.jobs);
-        let procs = Arc::clone(&self.procs);
-        self.tasks.spawn(async move {
-            let mut table = jobs.lock().await;
-            if table.reserve(record).is_err() || table.adopt_detached(job).is_err() {
-                return;
-            }
-            drop(table);
-            let proc = {
-                let mut procs = procs.lock().await;
-                procs.insert(job, proc);
-                procs.remove(&job)
-            };
-            if let Some(proc) = proc {
-                crate::jobs::reap_detached(proc, jobs, cancel).await;
-            }
-        });
-        job
+        self.park(proc, None)
+    }
+
+    fn detach_command(&self, proc: Proc, command: Arc<str>) -> JobId {
+        self.park(proc, Some(command))
     }
 
     fn resolve(

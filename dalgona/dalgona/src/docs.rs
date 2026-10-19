@@ -7,7 +7,8 @@ use std::sync::Arc;
 use dal_agent::ext::{Extension, ExtensionBuilder};
 use dal_core::{Origin, RegistrationError, ServiceSet};
 use dalgona_batteries::{
-    ask, eval, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work,
+    ask, eval, history, judged, mcp, orchestration, procs, quality, review, skills, ttsr_rules,
+    web, work,
 };
 
 const PAGES: &[(&str, &str)] = &[
@@ -34,6 +35,7 @@ const PAGES: &[(&str, &str)] = &[
     ("web", web::WEB_DOC),
     ("workflows", orchestration::docs::WORKFLOWS_DOC),
     ("plan", include_str!("docs/plan.md")),
+    ("procs", procs::PROCS_DOC),
     ("todo", include_str!("docs/todo.md")),
     ("work", work::PLAN_DOC),
 ];

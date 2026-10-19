@@ -9,9 +9,12 @@ Every battery is compiled Rust registered through the public extension API with 
 | judged | judge-fed hooks, search reranker | dalgona://judged |
 | mcp | MCP client | dalgona://mcp |
 | orchestration | goal, monitor, arbiter, and agent controls | dalgona://orchestration |
+| procs | tool `procs` (deferred) | dalgona://procs |
 | quality | guard findings, codemod offers, `quality_apply` | dalgona://quality |
 | review | tool `review`, command `/review` | dalgona://review |
 | skills | skills `find-anything`, `delegate-with-contracts`, `initializer-and-sprints` | dalgona://skills |
 | ttsr-rules | nineteen bundled rules in seven sets | dalgona://rules |
 | web | tools `web_fetch`, `web_search` | dalgona://web |
 | work | plan and todo tools, `/plan`, `/todos` | dalgona://work |
+
+The `dalgona` product entry (`dalgona`/`dg`, eval-first defaults) is not a battery: see dalgona://philosophy.

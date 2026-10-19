@@ -395,6 +395,9 @@ pub(crate) trait ToolCxRuntime: Send + Sync + 'static {
     ) -> Result<Proc, ToolError>;
     /// Parks a spawned child as a background job and returns its identity.
     fn detach(&self, proc: Proc) -> JobId;
+    /// Parks a spawned child that started from `command` as a background job
+    /// and returns its identity; the command text joins the job row.
+    fn detach_command(&self, proc: Proc, command: Arc<str>) -> JobId;
     /// Resolves one `scheme://` URI to its page text.
     fn resolve(
         &self,
@@ -632,6 +635,14 @@ impl ToolCx<'_> {
         self.rt.detach(proc)
     }
 
+    /// Parks a spawned child that started from `command` as a background job
+    /// and returns its identity. The validated command text the call ran
+    /// joins the job row so later `jobs` list rows and queries read it.
+    #[must_use]
+    pub fn detach_command(self, proc: Proc, command: Arc<str>) -> JobId {
+        self.rt.detach_command(proc, command)
+    }
+
     /// Borrows the host-minted caller needed for [`Services`] scoping.
     #[must_use]
     pub fn caller(&self) -> &Caller {
@@ -796,6 +807,10 @@ impl ToolCxRuntime for ForTestRuntime {
     }
 
     fn detach(&self, _proc: Proc) -> JobId {
+        JobId::new_v7()
+    }
+
+    fn detach_command(&self, _proc: Proc, _command: Arc<str>) -> JobId {
         JobId::new_v7()
     }
 

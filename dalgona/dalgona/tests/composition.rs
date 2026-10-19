@@ -395,6 +395,7 @@ fn the_manual_is_one_extension_with_every_page() -> Result<(), Box<dyn Error>> {
             "orchestration",
             "philosophy",
             "plan",
+            "procs",
             "quality",
             "review",
             "rules",
@@ -421,6 +422,7 @@ fn a_bad_section_fails_the_build_and_names_the_bad_key() -> Result<(), Box<dyn E
         ("[plugin.ask]\nmisspelled = true\n", "misspelled"),
         ("[plugin.skills]\nmisspelled = true\n", "misspelled"),
         ("[plugin.ttsr-rules]\nmisspelled = true\n", "misspelled"),
+        ("[plugin.procs]\nmisspelled = true\n", "misspelled"),
         ("[plugin.work]\nenabled = true\n", "plugin.plan"),
         ("[plugin.web]\nbogus = 1\n", "bogus"),
         (
@@ -452,6 +454,7 @@ fn each_enabled_switch_removes_only_its_battery() -> Result<(), Box<dyn Error>> 
         ("review", "[plugin.review]\nenabled = false\n"),
         ("mcp", "[plugin.mcp]\nenabled = false\n"),
         ("work", "[plugin.plan]\nenabled = false\n"),
+        ("procs", "[plugin.procs]\nenabled = false\n"),
     ] {
         let product = build(toml)?;
         let mut expected = all.clone();
@@ -614,40 +617,73 @@ fn detector_set_controls_real_streams_without_removing_quality_tools() -> Result
     Ok(())
 }
 
+const SORTED_BUNDLED: &[&str] = &[
+    "ask",
+    "history",
+    "judged",
+    "mcp",
+    "orchestration",
+    "procs",
+    "quality",
+    "review",
+    "skills",
+    "ttsr-rules",
+    "web",
+    "work",
+];
+
+// The battery run is every bundled battery plus the Builtin dalgona
+// manual, which compose() sorts into the same run. The manual is pushed
+// first, so without the sort it would sit before ask instead of between
+// ask and history: this tail pins the sort as well as the order.
+const SORTED_RUN: &[&str] = &[
+    "ask",
+    "dalgona",
+    "history",
+    "judged",
+    "mcp",
+    "orchestration",
+    "procs",
+    "quality",
+    "review",
+    "skills",
+    "ttsr-rules",
+    "web",
+    "work",
+];
+
+// Runs after removing one battery via "disabled_batteries".
+const WITHOUT_HISTORY: &[&str] = &[
+    "ask",
+    "dalgona",
+    "judged",
+    "mcp",
+    "orchestration",
+    "procs",
+    "quality",
+    "review",
+    "skills",
+    "ttsr-rules",
+    "web",
+    "work",
+];
+const WITHOUT_QUALITY: &[&str] = &[
+    "ask",
+    "dalgona",
+    "history",
+    "judged",
+    "mcp",
+    "orchestration",
+    "procs",
+    "review",
+    "skills",
+    "ttsr-rules",
+    "web",
+    "work",
+];
+
 #[test]
 fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<dyn Error>> {
-    const SORTED_BUNDLED: &[&str] = &[
-        "ask",
-        "history",
-        "judged",
-        "mcp",
-        "orchestration",
-        "quality",
-        "review",
-        "skills",
-        "ttsr-rules",
-        "web",
-        "work",
-    ];
-    // The battery run is the eleven bundled batteries plus the Builtin dalgona
-    // manual, which compose() sorts into the same run. The manual is pushed
-    // first, so without the sort it would sit before ask instead of between
-    // ask and history: this tail pins the sort as well as the order.
-    const SORTED_RUN: &[&str] = &[
-        "ask",
-        "dalgona",
-        "history",
-        "judged",
-        "mcp",
-        "orchestration",
-        "quality",
-        "review",
-        "skills",
-        "ttsr-rules",
-        "web",
-        "work",
-    ];
-
     fn battery_run(user_toml: &str) -> Result<Vec<String>, Box<dyn Error>> {
         let product = build(user_toml)?;
         let full: Vec<&str> = product
@@ -690,35 +726,11 @@ fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<
     // in its sorted slot.
     assert_eq!(
         battery_run("disabled_batteries = [\"history\"]\n")?,
-        expected(&[
-            "ask",
-            "dalgona",
-            "judged",
-            "mcp",
-            "orchestration",
-            "quality",
-            "review",
-            "skills",
-            "ttsr-rules",
-            "web",
-            "work",
-        ]),
+        expected(WITHOUT_HISTORY),
     );
     assert_eq!(
         battery_run("disabled_batteries = [\"quality\"]\n")?,
-        expected(&[
-            "ask",
-            "dalgona",
-            "history",
-            "judged",
-            "mcp",
-            "orchestration",
-            "review",
-            "skills",
-            "ttsr-rules",
-            "web",
-            "work",
-        ]),
+        expected(WITHOUT_QUALITY),
     );
     // History disabled through its own switch stays registered and keeps its
     // sorted slot between dalgona and judged.
