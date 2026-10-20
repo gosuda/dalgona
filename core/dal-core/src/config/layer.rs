@@ -346,6 +346,13 @@ impl Config {
         &self.serve
     }
 
+    /// Whether any configuration layer supplied `serve.bind`, so the address
+    /// is deliberate even when it spells the built-in default.
+    #[must_use]
+    pub fn serve_bind_explicit(&self) -> bool {
+        self.serve_bind_explicit
+    }
+
     /// Returns the effective `[rules]` table.
     #[must_use]
     pub fn rules(&self) -> &RulesConfig {
@@ -529,12 +536,13 @@ impl Config {
             ask_clamp: None,
             aliases: std::collections::BTreeMap::new(),
             serve: ServeConfig {
-                bind: Box::<str>::from(crate::config::types::SERVE_DEFAULT_BIND),
+                bind: Box::<str>::from("127.0.0.1"),
                 port: 7437,
                 token_file: data_root.join("serve.token"),
                 approval: ApprovalMode::Ask,
                 origins: Vec::new(),
             },
+            serve_bind_explicit: false,
             prices: std::collections::BTreeMap::new(),
             disabled_batteries: Vec::new(),
             experimental_batteries: Vec::new(),
@@ -603,7 +611,11 @@ impl Config {
         );
         replace_if_present(&mut self.eval, layer.eval.take());
         if let Some(mut serve) = layer.serve.take() {
-            replace_if_present(&mut self.serve.bind, serve.bind.take());
+            let bind = serve.bind.take();
+            if bind.is_some() {
+                self.serve_bind_explicit = true;
+            }
+            replace_if_present(&mut self.serve.bind, bind);
             if let Some(value) = serve.port.take() {
                 self.serve.port = value;
             }

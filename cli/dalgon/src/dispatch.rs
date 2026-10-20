@@ -8,7 +8,6 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use dal_agent::{Env, GrantStore, Host, Product};
-use dal_core::SERVE_DEFAULT_BIND;
 use dal_core::{ClientId, Config, Name, Origin};
 use tokio_util::sync::CancellationToken;
 
@@ -136,7 +135,7 @@ pub(crate) async fn serve(
     }
     let serve_config = serve::ServeConfig {
         bind: core_serve.bind.to_string(),
-        bind_was_explicit: core_serve.bind.as_ref() != SERVE_DEFAULT_BIND,
+        bind_was_explicit: config.serve_bind_explicit(),
         port: core_serve.port,
         token_file: core_serve.token_file.clone(),
         approval: cli.approval.map_or(core_serve.approval, map_approval),

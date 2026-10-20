@@ -100,9 +100,6 @@ pub struct ModeProjection {
     pub non_eval_only: bool,
 }
 
-/// Loopback address the endpoint binds when `serve.bind` is unset.
-pub const SERVE_DEFAULT_BIND: &str = "127.0.0.1";
-
 /// Configuration for serving the local control endpoint.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -205,6 +202,11 @@ pub struct Config {
     pub(super) ask_clamp: Option<AskTimeoutClamp>,
     pub(super) aliases: std::collections::BTreeMap<Box<str>, Box<str>>,
     pub(super) serve: ServeConfig,
+    /// Whether any configuration layer supplied `serve.bind`; `false` when
+    /// the address still is the built-in default.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(super) serve_bind_explicit: bool,
     pub(super) prices: std::collections::BTreeMap<Box<str>, crate::model::ModelPrice>,
     pub(super) disabled_batteries: Vec<Box<str>>,
     pub(super) experimental_batteries: Vec<Box<str>>,
