@@ -1803,6 +1803,20 @@ fn stored_login(access: &str) -> Credential {
     })
 }
 
+/// A stored OAuth login as the `WorkOS` device sign-in saves it: both tokens,
+/// no ID token and no account. That is the only OAuth member the
+/// `factory-droid` row can hold; `AuthStore::set` refuses one that binds an
+/// account, which only the Codex sign-in does.
+fn stored_workos_login(access: &str) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from(access),
+        refresh_token: SecretString::from("stored-refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: None,
+    })
+}
+
 /// The error of a lowering that had to refuse, for wire types without `Debug`.
 fn refusal<T>(result: Result<T, ProviderError>) -> ProviderError {
     match result {
@@ -5697,13 +5711,13 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
         (
             "factory-droid",
             Family::GoogleAntigravity,
-            Some(stored_login("ya29-test")),
+            Some(stored_workos_login("ya29-test")),
             true,
         ),
         (
             "factory-droid",
             Family::Droid,
-            Some(stored_login("workos-test")),
+            Some(stored_workos_login("workos-test")),
             true,
         ),
         ("factory-droid", Family::Droid, None, false),
@@ -6232,7 +6246,10 @@ async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResul
     for family in [Family::Droid, Family::GoogleAntigravity] {
         let dir = TestDir::new()?;
         let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
-        store.set("factory-droid", stored_login("admission-only-access"))?;
+        store.set(
+            "factory-droid",
+            stored_workos_login("admission-only-access"),
+        )?;
         store.store()?;
         let mut row = entry(
             "factory-droid",
