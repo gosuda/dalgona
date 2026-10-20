@@ -1042,7 +1042,9 @@ fn boot<A: TuiAgent>(
     if opts.env.debug {
         eprintln!("[t0] pre-paint {}ms", debug_start.elapsed().as_millis());
     }
-    surfaces.paint(io, state, &mut painter, opts, &palette)?;
+    surfaces
+        .paint(io, state, &mut painter, opts, &palette)
+        .map(|_| ())?;
     let probe = probe_terminal(
         io,
         state,
@@ -1069,7 +1071,9 @@ fn boot<A: TuiAgent>(
         },
         opts.images || surfaces.diagram_settings.enabled,
     ));
-    surfaces.paint(io, state, &mut painter, opts, &theme)?;
+    surfaces
+        .paint(io, state, &mut painter, opts, &theme)
+        .map(|_| ())?;
     if probe.kitty_keyboard {
         io.write(b"\x1b[>1u")
             .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
@@ -1143,6 +1147,7 @@ where
         boot(io, opts, state, agent, specs, view)?;
     let mut resolution_poll = Instant::now();
     let mut resumed = None;
+    let mut dialog_landed = false;
     loop {
         if io.shutdown_code().is_some() {
             break;
@@ -1208,11 +1213,11 @@ where
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
-        // The arming clock runs only while the dialog can be painted: a
-        // floored frame shows no dialog, so no key may arm off an unseen
-        // question. Skipping the tick keeps a floored dialog in `Shown`
-        // until resize re-arms it through the normal delay.
-        if !crate::render::below_floor(term_width, term_height) {
+        // Arming runs only off a frame that landed with the dialog on
+        // screen. A frame held while the caret measure is unanswered, or
+        // below the usable floor, shows no question, so it resets the
+        // delay below and no key can consent to an unseen question.
+        if dialog_landed {
             surfaces.dialog.tick(Instant::now());
         }
         resumed = surfaces.open_armed_resume(opts, &host);
@@ -1220,7 +1225,10 @@ where
             break;
         }
         surfaces.live.spin(now);
-        surfaces.paint(io, state, &mut painter, opts, &theme)?;
+        dialog_landed = surfaces.paint(io, state, &mut painter, opts, &theme)?;
+        if !dialog_landed {
+            surfaces.dialog.tick_without_dialog(Instant::now());
+        }
         if surfaces.session.cancel_settled
             || surfaces
                 .session
@@ -1460,7 +1468,8 @@ impl Surfaces {
         }
     }
 
-    /// Paints one frame over the surfaces' current state.
+    /// Paints one frame over the surfaces' current state, returning whether
+    /// the landed frame shows the dialog's request rows.
     fn paint(
         &mut self,
         io: &dyn TermIo,
@@ -1468,7 +1477,7 @@ impl Surfaces {
         painter: &mut Painter,
         opts: &TuiOptions,
         theme: &ResolvedTheme,
-    ) -> Result<(), TuiError> {
+    ) -> Result<bool, TuiError> {
         painter.paint(
             io,
             state,
@@ -2395,7 +2404,9 @@ fn probe_terminal(
                 (probe_width, probe_height),
             );
             // A key event requests an immediate frame that bypasses the batch.
-            surfaces.paint(io, state, painter, opts, palette)?;
+            surfaces
+                .paint(io, state, painter, opts, palette)
+                .map(|_| ())?;
         }
         if probe.da1 {
             let held = parser.finish();
@@ -3161,7 +3172,7 @@ fn repaint_live_region(
     surfaces: &mut Surfaces,
 ) -> Result<(), TuiError> {
     painter.invalidate();
-    surfaces.paint(io, state, painter, opts, theme)
+    surfaces.paint(io, state, painter, opts, theme).map(|_| ())
 }
 
 /// Re-enters raw mode and pushes every recorded terminal mode again, in

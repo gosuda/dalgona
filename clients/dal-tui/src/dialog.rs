@@ -455,7 +455,8 @@ impl DialogUi {
         self.queue.keys_disabled
     }
 
-    /// Advances the arming clock; call once per frame just before painting.
+    /// Advances the arming clock; call once per frame just before painting,
+    /// and only when the previous frame landed with this dialog on screen.
     ///
     /// The first call after a dialog appears starts the delay, and the call that
     /// finds [`ARM_DELAY`] elapsed arms it, so the frame painted right after
@@ -470,6 +471,16 @@ impl DialogUi {
             }
             _ => {}
         }
+    }
+
+    /// Advances the arming clock after a frame that did not land with the
+    /// dialog on screen: one held while the caret measure went unanswered,
+    /// discarded on a resize, or below the usable floor. The question is not
+    /// on screen, so arming resets and answer keys stay closed no matter how
+    /// long the request has been open.
+    pub fn tick_without_dialog(&mut self, now: Instant) {
+        self.arming = Arming::Fresh;
+        self.now = Some(now);
     }
 
     /// Whole minutes left on the shown request, from its raise instant.

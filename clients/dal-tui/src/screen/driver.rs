@@ -206,20 +206,23 @@ impl Painter {
     /// Windows), never by deriving rows from the old height. When no trusted
     /// position exists the frame holds: it writes nothing, keeps every queued
     /// commit and keystroke, and measures again next frame.
+    ///
+    /// Returns whether the frame that landed shows the dialog's request rows
+    /// on screen; the caller arms answer keys off this verdict alone.
     pub(crate) fn paint(
         &mut self,
         io: &dyn TermIo,
         state: &Arc<Mutex<TermState>>,
         input: FrameInput<'_>,
         overlay: bool,
-    ) -> Result<(), TuiError> {
+    ) -> Result<bool, TuiError> {
         let mut size = io.size().unwrap_or((80, 24));
         let mut epoch = io.resize_epoch();
 
         let relocated =
             self.relocate_block(io, input.screen, input.opts.env.width_mode, size, epoch)?;
         let Some((relocated_size, relocated_epoch, relocated_placement)) = relocated else {
-            return Ok(());
+            return Ok(false);
         };
         size = relocated_size;
         epoch = relocated_epoch;
@@ -253,7 +256,7 @@ impl Painter {
             } else {
                 let left = self.leave_overlay(io, size, epoch, placement)?;
                 let Some((left_size, left_epoch, left_placement)) = left else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 size = left_size;
                 epoch = left_epoch;
@@ -281,7 +284,11 @@ impl Painter {
         } else {
             self.fullscreen_bytes(&mut bytes, size, &rows, structural, theme);
         }
-        self.emit_frame(
+        // A frame below the usable floor renders only the narrow warning, so
+        // it never shows the dialog's rows; on any landed frame with the
+        // dialog open, the interactive tail carries its request rows.
+        let dialog_shown = input.dialog.is_open() && !crate::render::below_floor(size.0, size.1);
+        let landed = self.emit_frame(
             io,
             state,
             input.screen,
@@ -297,14 +304,15 @@ impl Painter {
                 committed_len,
             },
             theme,
-        )
+        )?;
+        Ok(landed && dialog_shown)
     }
 
     /// Draws frame images, parks the cursor, and writes the frame. Every model
     /// field that mirrors the screen (rows, size, epoch, commits, theme) moves
     /// only when the frame is known to land: an empty frame is already final,
     /// and a frame discarded on an epoch change leaves the model matching the
-    /// untouched screen.
+    /// untouched screen. Returns whether the frame landed.
     fn emit_frame(
         &mut self,
         io: &dyn TermIo,
@@ -312,7 +320,7 @@ impl Painter {
         input_screen: Screen,
         staged: StagedFrame,
         theme: &ResolvedTheme,
-    ) -> Result<(), TuiError> {
+    ) -> Result<bool, TuiError> {
         let StagedFrame {
             screen,
             size,
@@ -338,12 +346,12 @@ impl Painter {
         self.place_cursor(&mut bytes, size, top, &rows, overlay, park);
         if bytes.is_empty() {
             self.finish_frame(committed_len, size, epoch, rows, overlay, theme);
-            return Ok(());
+            return Ok(true);
         }
         // A resize signal between measurement and write discards the frame:
         // holding narrows the in-flight race to signal latency.
         if input_screen == Screen::Inline && !overlay && io.resize_epoch() != epoch {
-            return Ok(());
+            return Ok(false);
         }
         if self.sync {
             bytes.splice(..0, b"\x1b[?2026h".iter().copied());
@@ -371,7 +379,7 @@ impl Painter {
             }
             modes.set_transcript_overlay(overlay);
         }
-        result
+        result.map(|()| true)
     }
 
     /// Relocates the stale live block after a resize signal by measuring the
