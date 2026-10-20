@@ -1334,10 +1334,9 @@ pub(crate) fn entry_rows_timed(
                             diagram_cache,
                         ));
                     }
-                    Block::Reasoning { .. } => rows.push(RenderRow::new(
-                        "Thinking · ctrl+o to show reasoning",
-                        Role::Dim,
-                    )),
+                    Block::Reasoning { .. } => {
+                        rows.push(RenderRow::new(collapsed_thinking_text(), Role::Dim))
+                    }
                     // The call settles into one card from its result entry.
                     Block::ToolCall { .. } => {}
                 }
@@ -1779,21 +1778,25 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
         let text = escape(&cell.text);
         let start = row.text.len();
         row.text.push_str(&text);
-        let role = match cell.role {
-            ArtRole::Border => Role::Dim,
-            ArtRole::Text => Role::Text,
-            ArtRole::Edge | ArtRole::Title => Role::Accent,
-            ArtRole::EdgeLabel => Role::Warning,
+        // DESIGN.md Diagrams: border dim, text text, edge accent, edge label
+        // dim, title accent and bold.
+        let (role, bold) = match cell.role {
+            ArtRole::Border => (Role::Dim, false),
+            ArtRole::Text => (Role::Text, false),
+            ArtRole::Edge => (Role::Accent, false),
+            ArtRole::EdgeLabel => (Role::Dim, false),
+            ArtRole::Title => (Role::Accent, true),
         };
         if let Some(span) = row.spans.last_mut()
             && span.role == role
+            && span.bold == bold
         {
             span.range.end = row.text.len();
         } else {
             row.spans.push(RenderSpan {
                 range: start..row.text.len(),
                 role,
-                bold: false,
+                bold,
             });
         }
     }
@@ -1836,6 +1839,14 @@ fn tool_card_row(
         line
     };
     RenderRow::new(line, Role::Text)
+}
+
+/// The deck's collapsed thinking row. Reasoning blocks carry no timing, so
+/// `{dur}` renders empty and its doubled space collapses — the same collapse
+/// the expanded header performs for an empty duration.
+fn collapsed_thinking_text() -> String {
+    crate::copy::render(crate::copy::ids::THINKING_COLLAPSED, &[("dur", "")], 1)
+        .replace("  ·", " ·")
 }
 
 fn user_row(row: RenderRow) -> RenderRow {
@@ -2710,6 +2721,55 @@ mod tests {
             vec![0..fallback.text.len()],
             "the selectable fallback gets the same reverse-video focus: {fallback:?}"
         );
+    }
+
+    #[test]
+    fn art_cells_follow_the_design_role_map() {
+        use crate::diagram::{ArtCell, ArtRole};
+        use crate::theme::Role;
+
+        let cells: Vec<ArtCell> = [
+            (ArtRole::Border, "+"),
+            (ArtRole::Text, "x"),
+            (ArtRole::Edge, ">"),
+            (ArtRole::EdgeLabel, "label"),
+            (ArtRole::Title, "title"),
+        ]
+        .into_iter()
+        .map(|(role, text)| ArtCell {
+            text: text.to_owned(),
+            role,
+        })
+        .collect();
+        let row = super::art_row(&cells);
+        let styled: Vec<(&str, Role, bool)> = row
+            .spans
+            .iter()
+            .map(|span| (&row.text[span.range.clone()], span.role, span.bold))
+            .collect();
+        assert_eq!(
+            styled,
+            [
+                ("+", Role::Dim, false),
+                ("x", Role::Text, false),
+                (">", Role::Accent, false),
+                ("label", Role::Dim, false),
+                ("title", Role::Accent, true),
+            ],
+            "DESIGN.md Diagrams: border dim, text text, edge accent, edge label dim, title accent+bold"
+        );
+        // Adjacent same-role cells merge; a bold boundary never does.
+        let merged = super::art_row(&[
+            ArtCell {
+                text: "ab".to_owned(),
+                role: ArtRole::EdgeLabel,
+            },
+            ArtCell {
+                text: "cd".to_owned(),
+                role: ArtRole::EdgeLabel,
+            },
+        ]);
+        assert_eq!(merged.spans.len(), 1, "same-role cells share one span");
     }
 
     #[test]

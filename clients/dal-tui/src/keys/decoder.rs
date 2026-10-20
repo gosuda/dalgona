@@ -677,6 +677,24 @@ mod tests {
         );
         expect_action(b"\x1b[1;5:2A", &[Owner::App], Action::PrevPrompt);
     }
+
+    #[test]
+    fn documented_new_bindings_resolve_from_the_wire() {
+        let dialog = [Owner::Dialog];
+        for bytes in [&b"\x1b[Z"[..], b"\x1b[9;2u"] {
+            expect_action(bytes, &dialog, Action::DialogFocusLeft);
+        }
+        for (bytes, action) in [
+            (&b"\x1b[5~"[..], Action::DialogScrollUp),
+            (b"\x1b[6~", Action::DialogScrollDown),
+        ] {
+            expect_action(bytes, &dialog, action);
+        }
+        let picker = [Owner::Picker];
+        for bytes in [&b" "[..], b"\x1b[32;5u", &[0x00][..]] {
+            expect_action(bytes, &picker, Action::PickerToggle);
+        }
+    }
 }
 
 fn is_prefix(bytes: &[u8], marker: &[u8]) -> bool {

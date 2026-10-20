@@ -470,6 +470,13 @@ pub const BINDINGS: &[Binding] = &[
         legacy: Some(key(KeyCode::Char('_'), CTRL)),
     },
     Binding {
+        owner: Owner::Composer,
+        action: Action::Undo,
+        label: "Undo",
+        default: key(KeyCode::Char('-'), CTRL),
+        legacy: None,
+    },
+    Binding {
         owner: Owner::Editor,
         action: Action::CharLeft,
         label: "Move left",
@@ -502,6 +509,13 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::Undo,
         label: "Undo",
         default: key(KeyCode::Char('_'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Editor,
+        action: Action::Undo,
+        label: "Undo",
+        default: key(KeyCode::Char('-'), CTRL),
         legacy: None,
     },
     Binding {

@@ -47,11 +47,17 @@ impl HelpUi {
         let remaining = total - scroll - window;
         if remaining > 0 {
             let count = u64::try_from(remaining).unwrap_or(u64::MAX);
+            // The footer names the key that reads the rows it counts, the
+            // same affordance the dialog body's `... {n} more lines · pgdn`
+            // carries.
             rows.push(RenderRow::new(
-                crate::copy::render(
-                    crate::copy::ids::HELP_MORE,
-                    &[("n", &count.to_string())],
-                    count,
+                format!(
+                    "{} · pgdn",
+                    crate::copy::render(
+                        crate::copy::ids::HELP_MORE,
+                        &[("n", &count.to_string())],
+                        count,
+                    )
                 ),
                 Role::Dim,
             ));
@@ -114,7 +120,7 @@ mod tests {
         assert_eq!(rows.len(), total - 2);
         assert_eq!(
             rows.last().expect("the overflow footer").text,
-            "... 3 more keys"
+            "... 3 more keys · pgdn"
         );
         assert!(
             rows[..rows.len() - 1]

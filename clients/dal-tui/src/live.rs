@@ -402,9 +402,17 @@ impl Live {
             &crate::diagram::RenderCache,
         )>,
     ) -> Vec<crate::render::RenderRow> {
-        self.stream
-            .borrow_mut()
-            .rows(&self.assistant_text, cap, full, mode, limit, wire)
+        let mut rows =
+            self.stream
+                .borrow_mut()
+                .rows(&self.assistant_text, cap, full, mode, limit, wire);
+        if self.assistant_text.ends_with('\n')
+            && rows.len() > 1
+            && rows.last().is_some_and(|row| row.text.is_empty())
+        {
+            rows.pop();
+        }
+        rows
     }
 
     /// Returns how long the tool call `call` has run: the settled duration, or

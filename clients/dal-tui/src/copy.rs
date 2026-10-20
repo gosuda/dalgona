@@ -81,18 +81,12 @@ pub mod ids {
     pub const THINKING_COLLAPSED: &str = "Thinking {dur} · ctrl+o to show reasoning";
     /// Expanded reasoning header.
     pub const THINKING_OPEN: &str = "Thinking · {n} step|s · {dur} · ctrl+o to hide";
-    /// Remaining reasoning count.
-    pub const THINKING_MORE: &str = "... {n} more step|s";
     /// Successful settled tool card.
     pub const TOOL_OK: &str = "ok  {name} {summary} · {dur}";
     /// Failed settled tool card.
     pub const TOOL_FAILED: &str = "failed  {name} · {reason} · {dur}";
-    /// Tool expansion hint.
-    pub const TOOL_EXPAND: &str = "ctrl+o expands";
     /// Tool collapse hint.
     pub const TOOL_COLLAPSE: &str = "ctrl+o collapses";
-    /// Truncated tool output footer.
-    pub const TOOL_MORE: &str = "... {n} more line|s in the full output";
     /// Patch summary header.
     pub const DIFF_HEADER: &str = "patch {path} · +{add} -{del}";
     /// Truncated diff footer.
@@ -451,13 +445,9 @@ pub const DECK: &[(&str, &str)] = &[
     ("state.retrying", ids::STATE_RETRYING),
     ("state.waiting", ids::STATE_WAITING),
     ("thinking.collapsed", ids::THINKING_COLLAPSED),
-    ("thinking.open", ids::THINKING_OPEN),
-    ("thinking.more", ids::THINKING_MORE),
     ("tool.ok", ids::TOOL_OK),
     ("tool.failed", ids::TOOL_FAILED),
-    ("tool.expand", ids::TOOL_EXPAND),
     ("tool.collapse", ids::TOOL_COLLAPSE),
-    ("tool.more", ids::TOOL_MORE),
     ("diff.header", ids::DIFF_HEADER),
     ("diff.more", ids::DIFF_MORE),
     ("agents.header", ids::AGENTS_HEADER),

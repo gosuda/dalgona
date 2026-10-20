@@ -654,6 +654,11 @@ where
 }
 
 /// Cancels a turn that outlived the loop, then reports it on inline screens.
+///
+/// `run_loop` parked the caret on the last row of the live block with
+/// `Painter::rest_below_block`, so a leading CRLF steps below the block
+/// without moving to or erasing the top row (which can hold committed transcript
+/// or prior shell output) and leaves the caret ready for `write_exit`.
 fn cancel_active<A: TuiAgent>(
     opts: &TuiOptions,
     agent: &A,
