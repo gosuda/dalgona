@@ -94,6 +94,13 @@ struct RequestContext<'a> {
     who: &'a Caller,
     budgets: &'a Budgets,
     client_version: &'a str,
+    call_cancel: Option<&'a CancellationToken>,
+}
+
+impl RequestContext<'_> {
+    fn cancel(&self) -> &CancellationToken {
+        self.call_cancel.unwrap_or(&self.instance.cancel)
+    }
 }
 
 impl Instance {
@@ -167,7 +174,7 @@ impl Transport {
         let body = protocol::request_body(id, method, params, version, ctx.client_version)?;
         match self {
             Self::Stdio(transport) => {
-                let mut events = transport.send(id, &body, &ctx.instance.cancel).await?;
+                let mut events = transport.send(id, &body, ctx.cancel()).await?;
                 let response = await_reply(id, &mut events, ctx).await;
                 transport.finish(id).await;
                 if matches!(
@@ -187,6 +194,7 @@ impl Transport {
                     services: ctx.session.services.as_ref(),
                     who: ctx.who,
                     cancel: &ctx.instance.cancel,
+                    call_cancel: ctx.call_cancel,
                 };
                 transport
                     .exchange(
@@ -211,7 +219,7 @@ impl Transport {
         match self {
             Self::Stdio(transport) => {
                 let body = protocol::notification_body(method, version, ctx.client_version)?;
-                transport.notify(&body, &ctx.instance.cancel).await
+                transport.notify(&body, ctx.cancel()).await
             }
             Self::Http(transport) => {
                 let call = super::http::CallCx {
@@ -220,6 +228,7 @@ impl Transport {
                     services: ctx.session.services.as_ref(),
                     who: ctx.who,
                     cancel: &ctx.instance.cancel,
+                    call_cancel: ctx.call_cancel,
                 };
                 transport.notify(&ctx.instance.next_id, &call).await
             }
@@ -293,6 +302,7 @@ impl Client {
             who,
             budgets: &self.budgets,
             client_version: &self.config.client_version,
+            call_cancel: None,
         }
     }
 
@@ -796,6 +806,7 @@ impl Client {
         session: &Arc<Session>,
         who: &Caller,
         req: McpRequest,
+        cancel: &CancellationToken,
     ) -> Result<McpResponse, McpError> {
         self.reconcile(req.session, session)
             .await
@@ -810,7 +821,8 @@ impl Client {
                 Arc::new(Instance::new(key, server, session.cancel.child_token()))
             }))
         };
-        self.dispatch_call(session, who, &req, &instance).await
+        self.dispatch_call(session, who, &req, &instance, cancel)
+            .await
     }
 
     /// Runs one resolved request against its instance: grant marking, cache
@@ -821,6 +833,7 @@ impl Client {
         who: &Caller,
         req: &McpRequest,
         instance: &Arc<Instance>,
+        cancel: &CancellationToken,
     ) -> Result<McpResponse, McpError> {
         instance.granted.store(true, Ordering::SeqCst);
         let ready = self.ready(session, instance, who).await?;
@@ -859,7 +872,7 @@ impl Client {
             tool: req.tool.to_string(),
         })?;
         let result = self
-            .call_tool(&ready, instance, session, who, req, &remote)
+            .call_tool(&ready, instance, session, who, req, &remote, cancel)
             .await;
         if matches!(
             result,
@@ -906,10 +919,18 @@ impl Client {
         who: &Caller,
         req: &McpRequest,
         tool: &RemoteTool,
+        cancel: &CancellationToken,
     ) -> Result<McpResponse, McpError> {
+        let ctx = RequestContext {
+            call_cancel: Some(cancel),
+            ..self.context(instance, session, who)
+        };
         let mut responses: Option<String> = None;
         let mut request_state: Option<String> = None;
-        for _ in 0..=MRTR_MAX {
+        for attempt in 0..=MRTR_MAX {
+            if cancel.is_cancelled() {
+                return Err(map_transport(TransportError::Cancelled));
+            }
             let params = call_params(
                 &req.tool,
                 &req.arguments,
@@ -924,7 +945,7 @@ impl Client {
                     &ready.version,
                     &tool.headers,
                     Some(&req.arguments),
-                    self.context(instance, session, who),
+                    ctx,
                 )
                 .await
                 .map_err(map_transport)?;
@@ -933,8 +954,14 @@ impl Client {
                 .get("resultType")
                 .and_then(JsonValueTrait::as_str)
                 .unwrap_or("complete");
-            if result_type == "input_required" {
-                responses = Some(answer_inputs(&result, session, who).await?);
+            let input_required = result_type == "input_required";
+            // The reply of the last permitted request has no retry left to
+            // carry answers, so it is terminal before anything is asked.
+            if input_required && attempt == MRTR_MAX {
+                break;
+            }
+            if input_required {
+                responses = Some(answer_inputs(&result, session, who, cancel).await?);
                 request_state = result
                     .get("requestState")
                     .map(sonic_rs::to_string)
@@ -972,7 +999,7 @@ impl Client {
             return "no MCP servers in this session.".into();
         }
         let instances = session.instances.lock().await;
-        let mut lines = Vec::new();
+        let mut rows = Vec::new();
         for (key, decl) in declarations.iter() {
             let (state, count, grant) = if let Some(instance) = instances.get(key) {
                 let (state, count) = instance.status().await;
@@ -989,16 +1016,19 @@ impl Client {
                 McpServerDecl::Stdio { .. } => "stdio",
                 McpServerDecl::Http { .. } => "http",
             };
-            lines.push(format!(
-                "{} | {} | {} | {} tools | {grant}",
-                key.display(),
-                transport,
-                state,
-                count
-            ));
+            let display = key.display();
+            let row = format!("- {display} | {transport} | {state} | {count} tools | {grant}");
+            rows.push((display, row));
         }
-        lines.sort();
-        lines.join("\n")
+        // Rows order by display key byte order; keys are unique, so the key
+        // alone decides and the row text never does.
+        rows.sort();
+        let mut body = String::from("MCP servers in this session:");
+        for (_, row) in rows {
+            body.push('\n');
+            body.push_str(&row);
+        }
+        body
     }
 }
 
@@ -1007,6 +1037,7 @@ impl McpClient for Client {
         &'a self,
         who: &'a Caller,
         req: McpRequest,
+        cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<McpResponse, ServiceError>> {
         Box::pin(async move {
             let Some(session) = self.session(req.session).await else {
@@ -1019,8 +1050,8 @@ impl McpClient for Client {
                     .to_string(),
                 ));
             };
-            let result = self.call_server(&session, who, req).await;
-            if session.cancel.is_cancelled() {
+            let result = self.call_server(&session, who, req, &cancel).await;
+            if session.cancel.is_cancelled() || (result.is_err() && cancel.is_cancelled()) {
                 return Err(ServiceError::Cancelled);
             }
             result.map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))
@@ -1313,7 +1344,11 @@ async fn answer_inputs(
     result: &Value,
     session: &Session,
     who: &Caller,
+    cancel: &CancellationToken,
 ) -> Result<String, McpError> {
+    if cancel.is_cancelled() {
+        return Err(map_transport(TransportError::Cancelled));
+    }
     let Some(requests) = result
         .get("inputRequests")
         .and_then(|value| value.as_object())
@@ -1326,7 +1361,7 @@ async fn answer_inputs(
         let answer = if request.get("method").and_then(JsonValueTrait::as_str)
             == Some("elicitation/create")
         {
-            answer_elicitation(request, session, who).await?
+            answer_elicitation(request, session, who, cancel).await?
         } else {
             "{\"action\":\"decline\"}".into()
         };
@@ -1340,6 +1375,7 @@ async fn answer_elicitation(
     request: &Value,
     session: &Session,
     who: &Caller,
+    cancel: &CancellationToken,
 ) -> Result<String, McpError> {
     let params = request.get("params");
     let message = params
@@ -1351,6 +1387,9 @@ async fn answer_elicitation(
         .and_then(|value| value.get("properties"))
         .and_then(|value| value.as_object());
     let Some(properties) = properties else {
+        if cancel.is_cancelled() {
+            return Err(map_transport(TransportError::Cancelled));
+        }
         return Ok("{\"action\":\"decline\"}".into());
     };
     let mut content = Vec::new();
@@ -1386,6 +1425,9 @@ async fn answer_elicitation(
             ) {
                 return Err(McpError::NoAskFrontEnd);
             }
+            if cancel.is_cancelled() {
+                return Err(map_transport(TransportError::Cancelled));
+            }
             return Ok("{\"action\":\"decline\"}".into());
         };
         let name = sonic_rs::to_string(name).map_err(|error| protocol_error(error.to_string()))?;
@@ -1395,6 +1437,13 @@ async fn answer_elicitation(
         "{{\"action\":\"accept\",\"content\":{{{}}}}}",
         content.join(",")
     ))
+}
+
+async fn call_cancelled(cancel: Option<&CancellationToken>) {
+    match cancel {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Waits for a correlated reply; matching progress extends only this call's idle deadline.
@@ -1410,8 +1459,10 @@ async fn await_reply(
     loop {
         let effective = deadline.min(cap);
         let event = tokio::select! {
-            () = ctx.instance.cancel.cancelled() => return Err(TransportError::Cancelled),
+            biased;
             event = tokio::time::timeout_at(effective.into(), events.recv()) => event,
+            () = ctx.instance.cancel.cancelled() => return Err(TransportError::Cancelled),
+            () = call_cancelled(ctx.call_cancel) => return Err(TransportError::Cancelled),
         };
         let event = match event {
             Ok(Some(event)) => event,
@@ -1478,7 +1529,11 @@ pub(crate) enum StreamEvent {
 /// progress token `progress_token`. A matching progress notification and
 /// the correlated reply are the only events that act; every other message
 /// — unknown notification methods, foreign progress tokens, replies to
-/// other ids — is skipped as unknown traffic.
+/// other ids, and server-initiated requests — is skipped as unknown traffic.
+///
+/// A reply carries no `method`. A server request such as the legacy
+/// `elicitation/create` has its own id namespace, so a request whose id
+/// equals this call's id is still not this call's reply.
 pub(crate) fn classify_stream_event(value: &Value, id: u64, progress_token: &str) -> StreamEvent {
     let progress =
         value.get("method").and_then(JsonValueTrait::as_str) == Some("notifications/progress");
@@ -1490,7 +1545,8 @@ pub(crate) fn classify_stream_event(value: &Value, id: u64, progress_token: &str
     if progress && token == Some(progress_token) {
         return StreamEvent::Progress;
     }
-    if value.get("id").and_then(JsonValueTrait::as_u64) == Some(id) {
+    if value.get("method").is_none() && value.get("id").and_then(JsonValueTrait::as_u64) == Some(id)
+    {
         return StreamEvent::Reply;
     }
     StreamEvent::Ignored
@@ -1550,5 +1606,261 @@ impl ObserveHook<dal_core::SessionEnd> for SessionEndHook {
             client.end_session(input.session).await;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use dal_agent::{
+        error::ServiceError,
+        ext::{
+            Caller, Doc, EventStream, HookCx, RawValue, Services, Tool, ToolOutcome,
+            services::ServiceFuture,
+        },
+    };
+    use dal_core::{
+        AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
+        JobsReply, ModelRequest, Notice, PrivateEffect, Question, RawJson, RunOutput, RunRequest,
+        SessionId, SidecarOp, TurnOp, TurnOpReply,
+        ext::{
+            McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
+        },
+    };
+    use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        Budgets, DeclaredServer, Instance, McpError, RequestContext, Session, TransportError,
+        await_reply,
+    };
+    use crate::mcp::tools::Key;
+
+    struct TestServices;
+
+    fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
+        Box::pin(async {
+            Err(ServiceError::failed(
+                None,
+                "unavailable in the client unit fixture",
+            ))
+        })
+    }
+
+    impl Services for TestServices {
+        fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            unavailable()
+        }
+
+        fn fs_write(&self, _who: &Caller, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+            unavailable()
+        }
+
+        fn net(&self, _who: &Caller, _req: FetchRequest) -> ServiceFuture<'_, FetchResponse> {
+            unavailable()
+        }
+
+        fn run(&self, _who: &Caller, _req: RunRequest) -> ServiceFuture<'_, RunOutput> {
+            unavailable()
+        }
+
+        fn env(&self, _who: &Caller, _key: &str) -> ServiceFuture<'_, Option<String>> {
+            unavailable()
+        }
+
+        fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
+            unavailable()
+        }
+
+        fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
+            unavailable()
+        }
+
+        fn mcp_declarations(&self, _who: &Caller) -> ServiceFuture<'_, Vec<McpDeclaration>> {
+            unavailable()
+        }
+
+        fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+            unavailable()
+        }
+
+        fn jobs(&self, _who: &Caller, _op: JobsOp) -> ServiceFuture<'_, JobsReply> {
+            unavailable()
+        }
+
+        fn turn(&self, _who: &Caller, _op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
+            unavailable()
+        }
+
+        fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
+            unavailable()
+        }
+
+        fn add_session_tools(
+            &self,
+            _who: &Caller,
+            _tools: Vec<(Arc<dyn Tool>, Visibility)>,
+        ) -> ServiceFuture<'_, ()> {
+            unavailable()
+        }
+
+        fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
+            unavailable()
+        }
+
+        fn scheme(&self, _who: &Caller, _uri: &str) -> ServiceFuture<'_, Option<Doc>> {
+            unavailable()
+        }
+
+        fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
+            unavailable()
+        }
+
+        fn blob_get(&self, _who: &Caller, _digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            unavailable()
+        }
+
+        fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            unavailable()
+        }
+
+        fn state(
+            &self,
+            _who: &Caller,
+            _op: StateOp,
+        ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+            unavailable()
+        }
+
+        fn model_ready(
+            &self,
+            _who: &Caller,
+            _model: dal_core::ModelRoute,
+        ) -> ServiceFuture<'_, Option<dal_core::ModelRoute>> {
+            unavailable()
+        }
+
+        fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
+            unavailable()
+        }
+
+        fn infer_stream(
+            &self,
+            _who: &Caller,
+            _req: ModelRequest,
+        ) -> ServiceFuture<'_, EventStream> {
+            unavailable()
+        }
+
+        fn call_tool(
+            &self,
+            _who: &Caller,
+            _name: &str,
+            _args: Box<RawValue>,
+        ) -> ServiceFuture<'_, ToolOutcome> {
+            unavailable()
+        }
+
+        fn notify(&self, _who: &Caller, _notice: Notice) {}
+
+        fn append_record(
+            &self,
+            _who: &Caller,
+            _kind: &str,
+            _body: Box<RawValue>,
+        ) -> ServiceFuture<'_, EntryId> {
+            unavailable()
+        }
+
+        fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+            unavailable()
+        }
+
+        fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+            unavailable()
+        }
+    }
+
+    fn ctx<'a>(
+        instance: &'a Instance,
+        session: &'a Session,
+        budgets: &'a Budgets,
+        version: &'a str,
+        call_cancel: Option<&'a CancellationToken>,
+    ) -> RequestContext<'a> {
+        RequestContext {
+            instance,
+            session,
+            who: &session.caller,
+            budgets,
+            client_version: version,
+            call_cancel,
+        }
+    }
+
+    fn queued_reply() -> (mpsc::Receiver<Result<RawJson, McpError>>, u64) {
+        let reply = RawJson::parse(r#"{"jsonrpc":"2.0","id":7,"result":{}}"#).expect("reply JSON");
+        let (tx, rx) = mpsc::channel(8);
+        tx.try_send(Ok(reply)).expect("queue the reply");
+        (rx, 7)
+    }
+
+    #[tokio::test]
+    async fn queued_reply_wins_over_call_cancellation() {
+        let services: Arc<dyn Services> = Arc::new(TestServices);
+        let caller = HookCx::for_test(Arc::clone(&services), SessionId::new_v7(), None).caller;
+        let session = Session {
+            services,
+            caller,
+            cancel: CancellationToken::new(),
+            declarations: Mutex::new(HashMap::<Key, DeclaredServer>::new()),
+            instances: Mutex::new(HashMap::<Key, Arc<Instance>>::new()),
+            publishing: Mutex::new(()),
+        };
+        let key = Key {
+            session: SessionId::new_v7(),
+            skill: "test".into(),
+            server: "fixture".into(),
+        };
+        let endpoint =
+            dal_core::ext::McpEndpoint::parse("http://127.0.0.1:9/mcp").expect("fixture endpoint");
+        let instance = Instance::new(
+            key,
+            Arc::new(dal_core::ext::McpServerDecl::Http { endpoint }),
+            CancellationToken::new(),
+        );
+        let budgets = Budgets::default();
+        let version = "test-client".to_owned();
+        let fired = CancellationToken::new();
+        fired.cancel();
+        for _ in 0..32 {
+            let (mut events, id) = queued_reply();
+            let waiting = ctx(&instance, &session, &budgets, &version, Some(&fired));
+            let reply = await_reply(id, &mut events, waiting)
+                .await
+                .expect("a reply queued before cancellation returns Ok");
+            assert!(reply.as_str().contains("\"id\":7"));
+        }
+        let live = CancellationToken::new();
+        let (mut events, id) = queued_reply();
+        await_reply(
+            id,
+            &mut events,
+            ctx(&instance, &session, &budgets, &version, Some(&live)),
+        )
+        .await
+        .expect("a queued reply returns Ok while the call lives");
+        let (_held, mut empty) = mpsc::channel::<Result<RawJson, McpError>>(8);
+        let cancelled = await_reply(
+            7,
+            &mut empty,
+            ctx(&instance, &session, &budgets, &version, Some(&fired)),
+        )
+        .await;
+        assert!(
+            matches!(cancelled, Err(TransportError::Cancelled)),
+            "cancellation with no queued reply still cancels"
+        );
     }
 }

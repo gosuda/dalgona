@@ -16,14 +16,27 @@
 //! - otherwise one refresh request goes to the token endpoint, retried once
 //!   after [`RETRY_DELAY`] on a transient failure and never after a rejected
 //!   refresh token, and the new tokens are committed by the atomic rename of
-//!   [`AuthStore::store`].
+//!   [`AuthStore::store`]. A Factory Droid refresh checks the fresh access
+//!   token against the Factory session endpoint between the exchange and the
+//!   commit; a failed check is advisory and the tokens are still committed.
+//!
+//! The request body is JSON for the Claude and Codex rows and form-encoded for
+//! the Factory Droid and `GitLab` Duo rows. Each row's client id is resolved
+//! once, from the environment the binary captured, when the refresher is
+//! built, so a token issued to a configured application is refreshed as that
+//! application. A committed `GitLab` Duo refresh drops the replaced and the new
+//! token's direct-access grants from the shared cache.
 //!
 //! The commit is the last step. A caller can drop its future while it waits
 //! for either lock; the per-key slot keeps an in-flight task so a later caller
 //! awaits that same refresh. The task keeps the auth file lock through the
 //! bounded exchange and atomic commit. The commit runs on the blocking pool
 //! and all file I/O runs there. The file is never half-written, and a rotated
-//! refresh token is not discarded by cancellation.
+//! refresh token is not discarded by cancellation, with one exception: a
+//! Droid refresh that [`Refresher::shutdown`] cancelled before its commit
+//! was admitted stores nothing. The shutdown cancel is published under the
+//! refresher's commit gate, so it never races an admitted Droid commit: a
+//! commit that has been admitted always finishes before the cancel exists.
 //! Nothing here reads the environment or keeps process-global state, and no
 //! error text or log line carries a token.
 //!
@@ -52,11 +65,12 @@ pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Poll interval while another process holds `auth.json.lock`.
 pub(crate) const LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Longest wait for `auth.json.lock`: one full refresh by the holder (two
-/// attempts bounded by [`OAUTH_TIMEOUT`] plus the retry delay) with slack for
-/// its file writes.
+/// Longest wait for `auth.json.lock`: one full refresh by the holder. That
+/// is two exchange attempts bounded by [`OAUTH_TIMEOUT`] with [`RETRY_DELAY`]
+/// between them, plus one Droid session check bounded by [`OAUTH_TIMEOUT`],
+/// plus the same file-write and scheduling slack as before.
 pub(crate) const LOCK_WAIT: Duration =
-    Duration::from_secs(2 * OAUTH_TIMEOUT.as_secs() + RETRY_DELAY.as_secs() + 5);
+    Duration::from_secs(3 * OAUTH_TIMEOUT.as_secs() + RETRY_DELAY.as_secs() + 5);
 
 /// Token-endpoint error codes that mean the refresh token is dead; the user
 /// must sign in again and no retry can help.

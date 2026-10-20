@@ -55,8 +55,40 @@ fn secs_since(now: Timestamp, earlier: Timestamp) -> u64 {
     u64::try_from(total.div_euclid(1_000_000_000)).unwrap_or(u64::MAX)
 }
 
-/// One list line: `<id> <status> <age> <label>: <command>`, the command cut
-/// at [`COMMAND_CHARS`] characters.
+/// The command text one row shows: the starter's command when the job
+/// carries it, otherwise the label, collapsed to one line and cut at
+/// [`COMMAND_CHARS`] characters. Only the shown prefix is built, so a long
+/// command is never copied whole.
+pub(crate) fn command_text(job: &JobStatus) -> String {
+    collapsed_prefix(job.command.as_deref().unwrap_or(&job.label), COMMAND_CHARS)
+}
+
+/// `text` with every whitespace run collapsed to one space, cut at `max`
+/// characters; reads only as much of `text` as the cut needs.
+fn collapsed_prefix(text: &str, max: usize) -> String {
+    let mut collapsed = String::new();
+    let mut chars = 0;
+    for (index, word) in text.split_whitespace().enumerate() {
+        if index > 0 {
+            if chars == max {
+                break;
+            }
+            collapsed.push(' ');
+            chars += 1;
+        }
+        for character in word.chars() {
+            if chars == max {
+                return collapsed;
+            }
+            collapsed.push(character);
+            chars += 1;
+        }
+    }
+    collapsed
+}
+
+/// One list line: `<id> <status> <age> <label>: <command>`, the command
+/// collapsed to one line and cut at [`COMMAND_CHARS`] characters.
 pub(crate) fn list_line(job: &JobStatus, now: Timestamp, command: &str) -> String {
     format!(
         "{} {} {} {}: {}",

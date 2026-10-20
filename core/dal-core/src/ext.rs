@@ -55,8 +55,8 @@ pub use scopes::{
 };
 pub use sdk::{ExportId, ExportKind, NativeOp, OpId, OpSet, Phase, UsesError};
 pub use services::{
-    Capability, Claimant, CommandSpec, PluginSource, RegistrationError, RuleFile, Service,
-    ServiceSet, Site, SkillRecord, ToolSpec, valid_tool_parameters, valid_version,
+    Capability, Claimant, CommandSpec, PluginSource, PrivateEffect, RegistrationError, RuleFile,
+    Service, ServiceSet, Site, SkillRecord, ToolSpec, valid_tool_parameters, valid_version,
 };
 pub use skill_front::{Kind as SkillFrontKind, SkillFrontError, decode_skill_mcp};
 pub use state::{Revision, StateError, StateKey, StateKeyError, StateNs, StateOp, StateRecord};

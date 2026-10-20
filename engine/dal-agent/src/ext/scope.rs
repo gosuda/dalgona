@@ -327,6 +327,11 @@ pub(crate) struct Ledger {
 struct LedgerState {
     used: ScopeUsage,
     admitted: u64,
+    /// A finished inference measured nothing: no `Usage` event, or one with
+    /// every counter zero and no cost. Such a response is never a zero
+    /// charge; it exhausts token and USD budgets instead. Only the inference
+    /// path sets it: member sessions legitimately report no usage.
+    unmetered: bool,
     refusal: Option<ScopeError>,
 }
 
@@ -340,6 +345,7 @@ impl Ledger {
             state: Mutex::new(LedgerState {
                 used: ScopeUsage::default(),
                 admitted: 0,
+                unmetered: false,
                 refusal: None,
             }),
         })
@@ -398,11 +404,15 @@ impl Ledger {
                 .is_some_and(|parent| parent.requires_usd())
     }
 
-    fn over(&self, used: &ScopeUsage) -> bool {
+    fn over(&self, state: &LedgerState) -> bool {
         let budget = &self.budget;
-        budget
-            .input_tokens
-            .is_some_and(|limit| used.input_tokens >= limit)
+        let used = &state.used;
+        let spend_limited =
+            budget.input_tokens.is_some() || budget.output_tokens.is_some() || budget.usd.is_some();
+        (state.unmetered && spend_limited)
+            || budget
+                .input_tokens
+                .is_some_and(|limit| used.input_tokens >= limit)
             || budget
                 .output_tokens
                 .is_some_and(|limit| used.output_tokens >= limit)
@@ -417,13 +427,31 @@ impl Ledger {
         let exhausted = {
             let mut state = locked(&self.state);
             state.used.add(usage);
-            self.over(&state.used)
+            self.over(&state)
         };
         if exhausted {
             self.refuse(ScopeError::Exhausted);
         }
         if let Some(parent) = &self.parent {
             parent.charge(usage);
+        }
+    }
+
+    /// Accounts one successful inference that measured nothing. No counter
+    /// moves, so the response never lands as a zero charge; a token- or
+    /// USD-limited scope exhausts instead. The mark rolls up through every
+    /// enclosing scope like a measured charge does.
+    fn charge_unmetered(&self) {
+        let exhausted = {
+            let mut state = locked(&self.state);
+            state.unmetered = true;
+            self.over(&state)
+        };
+        if exhausted {
+            self.refuse(ScopeError::Exhausted);
+        }
+        if let Some(parent) = &self.parent {
+            parent.charge_unmetered();
         }
     }
 }
@@ -703,6 +731,10 @@ impl Scope {
 
     /// Starts one inference; it waits in FIFO order past `limit`.
     ///
+    /// A response that reports no usage, or only all-zero usage, is never
+    /// charged as zero: it exhausts a token- or USD-limited scope (and its
+    /// parents) instead. Request- and wall-only scopes are unaffected.
+    ///
     /// # Errors
     /// Returns [`ScopeError::UnpricedModel`] for an unpriced route under a
     /// USD budget, and the scope's refusal when it is exhausted or
@@ -721,17 +753,24 @@ impl Scope {
         let work: Work = Box::new(move |cancel| {
             Box::pin(async move {
                 let inference = rt.infer(request, ledger, cancel).await?;
-                let usage = inference
-                    .events
-                    .iter()
-                    .find_map(|event| match event {
-                        StreamEvent::Usage(usage) => Some(*usage),
-                        _ => None,
-                    })
-                    .map(|mut usage| {
+                let raw = inference.events.iter().find_map(|event| match event {
+                    StreamEvent::Usage(usage) => Some(*usage),
+                    _ => None,
+                });
+                // Judge the raw provider event before local pricing: pricing
+                // would value an all-zero usage at `Some(0.0)`, which reads
+                // as a reported measurement. A successful inference that
+                // measured nothing, or reported nothing, stays visibly
+                // unpriced so `finish` accounts it as unmetered. Only this
+                // path produces `Some`; member sessions keep `None`.
+                let usage = match raw {
+                    Some(raw) if raw.is_unreported() => Some(raw),
+                    Some(mut usage) => {
                         usage.cost_usd = usage.cost_usd(price.as_ref(), None);
-                        usage
-                    });
+                        Some(usage)
+                    }
+                    None => Some(zero_usage()),
+                };
                 Ok((ScopeValue::Inference(inference), usage))
             })
         });
@@ -844,6 +883,7 @@ fn zero_usage() -> Usage {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -903,6 +943,11 @@ fn finish(
         return;
     }
     let result = match outcome {
+        Ok((value, Some(usage))) if usage.is_unreported() => {
+            *locked(&state.usage) = usage;
+            shared.ledger.charge_unmetered();
+            Ok(value)
+        }
         Ok((value, usage)) => {
             if let Some(usage) = usage {
                 *locked(&state.usage) = usage;

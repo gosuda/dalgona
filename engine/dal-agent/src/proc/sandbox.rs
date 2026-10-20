@@ -24,7 +24,7 @@ use crate::error::ToolError;
 /// Setup inputs; every path decision stays inside this module so callers
 /// pass values instead of reconstructing the session layout with joins.
 pub(crate) struct SandboxInputs<'a> {
-    /// Whether `sandbox = "on"` was configured.
+    /// Whether `sandbox = true` was configured.
     pub sandbox_on: bool,
     /// The canonical session workspace root.
     pub workspace_root: &'a Path,
@@ -32,6 +32,8 @@ pub(crate) struct SandboxInputs<'a> {
     pub home: &'a Path,
     /// The platform cache directory.
     pub cache: &'a Path,
+    /// The process temporary directory captured for this launch.
+    pub temp: PathBuf,
     /// `sandbox_writable` entries in config order.
     pub sandbox_writable: &'a [Box<str>],
     /// dal/dalgona config and data roots a writable path must not overlap.
@@ -74,8 +76,8 @@ impl std::error::Error for SandboxSetupError {}
 
 /// Fails closed when the macOS Seatbelt utility is absent.
 ///
-/// Every launch path wraps commands in process-lifetime restrictions, so
-/// `sandbox = "off"` cannot substitute for the missing system utility.
+/// When the sandbox is enabled, commands run under macOS Seatbelt, which
+/// requires the system utility `/usr/bin/sandbox-exec`.
 #[cfg(target_os = "macos")]
 fn require_seatbelt() -> Result<(), SandboxSetupError> {
     require_seatbelt_at(Path::new("/usr/bin/sandbox-exec"))
@@ -95,8 +97,6 @@ fn require_seatbelt_at(seatbelt: &Path) -> Result<(), SandboxSetupError> {
 
 /// Resolves the session launcher, failing closed before any child starts.
 pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, SandboxSetupError> {
-    #[cfg(target_os = "macos")]
-    require_seatbelt()?;
     if !inputs.sandbox_on {
         return Ok(Launcher::Direct);
     }
@@ -117,6 +117,7 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     {
         #[cfg(target_os = "macos")]
         {
+            require_seatbelt()?;
             Ok(Launcher::Sandbox {
                 helper: None,
                 roots: roots.into_boxed_slice(),
@@ -152,23 +153,21 @@ pub(crate) fn session_launcher(
     helper: Option<&Path>,
 ) -> Result<Launcher, SandboxSetupError> {
     if !config.sandbox() {
-        // Direct launches stay under the mandatory lifetime policy on
-        // macOS, so the Seatbelt utility is required here as well.
-        #[cfg(target_os = "macos")]
-        require_seatbelt()?;
         return Ok(Launcher::Direct);
     }
     let home = platform_home(vars).ok_or_else(|| {
         SandboxSetupError::new(
-            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in dal.toml.",
+            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = false in dal.toml.",
         )
     })?;
     let cache = platform_cache(vars, &home);
+    let temp = platform_temp(vars, &home);
     resolve_launcher(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
         home: &home,
         cache: &cache,
+        temp,
         sandbox_writable: config.sandbox_writable(),
         protected_roots,
         helper,
@@ -191,11 +190,13 @@ pub fn sandbox_notice(
     }
     let home = platform_home(vars)?;
     let cache = platform_cache(vars, &home);
+    let temp = platform_temp(vars, &home);
     let roots = resolve_roots(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
         home: &home,
         cache: &cache,
+        temp,
         sandbox_writable: writable,
         protected_roots,
         helper: None,
@@ -228,7 +229,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
     // Automatic roots that do not exist are skipped: a missing path is
     // never created, and omitting it denies it like a raw path would while
     // the Linux helper can still open every root it is handed.
-    if let Ok(temp) = std::fs::canonicalize(std::env::temp_dir()) {
+    if let Ok(temp) = std::fs::canonicalize(&inputs.temp) {
         push_unique(temp, &mut roots);
     }
     if let Ok(cache) = std::fs::canonicalize(inputs.cache) {
@@ -241,7 +242,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
             std::fs::canonicalize(&expanded).map_err(|source| cannot_open(raw, &source))?;
         if home.starts_with(&canonical) {
             return Err(SandboxSetupError::new(format!(
-                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = \"off\" in dal.toml.",
+                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = false in dal.toml.",
                 canonical.display(),
                 home.display(),
             )));
@@ -252,7 +253,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
                 || protected.starts_with(&canonical)
             {
                 return Err(SandboxSetupError::new(format!(
-                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = \"off\" in dal.toml.",
+                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = false in dal.toml.",
                     canonical.display(),
                     protected.display(),
                 )));
@@ -292,7 +293,7 @@ fn cannot_open(path: &str, source: &std::io::Error) -> SandboxSetupError {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn abi_error(number: impl Display) -> SandboxSetupError {
     SandboxSetupError::new(format!(
-        "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
+        "sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
     ))
 }
 
@@ -381,6 +382,35 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
             Some(dir) if !dir.is_empty() && Path::new(dir).is_absolute() => PathBuf::from(dir),
             _ => home.join(".cache"),
         }
+    }
+}
+
+/// Resolves the temporary directory from the captured variables, never the
+/// ambient process environment: `TMPDIR` then `/tmp` on Unix, `TMP` then
+/// `TEMP` then the captured home's `AppData/Local/Temp` on Windows. Only
+/// absolute non-empty entries are honored.
+pub(crate) fn platform_temp(vars: &BTreeMap<OsString, OsString>, home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        for name in ["TMP", "TEMP"] {
+            if let Some(dir) = vars.get(OsStr::new(name)) {
+                if !dir.is_empty() && Path::new(dir).is_absolute() {
+                    return PathBuf::from(dir);
+                }
+            }
+        }
+        home.join("AppData").join("Local").join("Temp")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = home;
+        if let Some(dir) = vars.get(OsStr::new("TMPDIR"))
+            && !dir.is_empty()
+            && Path::new(dir).is_absolute()
+        {
+            return PathBuf::from(dir);
+        }
+        PathBuf::from("/tmp")
     }
 }
 
@@ -526,6 +556,7 @@ mod tests {
             workspace_root: workspace,
             home,
             cache,
+            temp: home.join("temp"),
             sandbox_writable: writable,
             protected_roots: protected,
             helper,
@@ -539,6 +570,7 @@ mod tests {
             workspace_root: Path::new("/nonexistent-workspace"),
             home: Path::new("/nonexistent-home"),
             cache: Path::new("/nonexistent-cache"),
+            temp: PathBuf::from("/nonexistent-temp"),
             sandbox_writable: &[],
             protected_roots: &[],
             helper: None,
@@ -552,6 +584,8 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cache = home.path().join("cache");
         std::fs::create_dir(&cache).expect("cache dir");
+        let temp = home.path().join("temp");
+        std::fs::create_dir(&temp).expect("temp dir");
         let extra = tempfile::tempdir().expect("extra writable");
         let writable: Vec<Box<str>> = vec![
             "~/extra".into(),
@@ -562,7 +596,7 @@ mod tests {
         let inputs = inputs(workspace.path(), home.path(), &cache, &writable, &[], None);
         let roots = resolve_roots(&inputs).expect("roots resolve");
         let workspace_root = std::fs::canonicalize(workspace.path()).expect("canonical");
-        let temp = canonical_or_raw(&std::env::temp_dir());
+        let temp = std::fs::canonicalize(&temp).expect("canonical temp");
         let cache_root = std::fs::canonicalize(&cache).expect("canonical cache");
         let extra_root = std::fs::canonicalize(extra.path()).expect("canonical extra");
         assert_eq!(roots[0], workspace_root);
@@ -643,7 +677,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = \"off\" in dal.toml.",
+                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = false in dal.toml.",
                 home_root.display(),
                 home_root.display(),
             ),
@@ -695,9 +729,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn platform_temp_prefers_captured_vars_over_ambient() {
+        let home = tempfile::tempdir().expect("home");
+        let captured = tempfile::tempdir().expect("captured temp");
+        let vars = BTreeMap::from([
+            (
+                OsString::from("TMPDIR"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TEMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), captured.path());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn platform_temp_on_unix_uses_tmpdir_then_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        let captured = tempfile::tempdir().expect("captured temp");
+        assert_eq!(
+            platform_temp(&BTreeMap::new(), home.path()),
+            PathBuf::from("/tmp"),
+        );
+        for invalid in [OsString::from(""), OsString::from("relative/tmp")] {
+            let vars = BTreeMap::from([(OsString::from("TMPDIR"), invalid)]);
+            assert_eq!(platform_temp(&vars, home.path()), PathBuf::from("/tmp"));
+        }
+        let vars = BTreeMap::from([
+            (
+                OsString::from("TMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("TEMP"),
+                captured.path().as_os_str().to_owned(),
+            ),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), PathBuf::from("/tmp"));
+        let vars = BTreeMap::from([(
+            OsString::from("TMPDIR"),
+            captured.path().as_os_str().to_owned(),
+        )]);
+        assert_eq!(platform_temp(&vars, home.path()), captured.path());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn platform_temp_on_windows_uses_tmp_then_temp_then_home() {
+        let home = tempfile::tempdir().expect("home");
+        let first = tempfile::tempdir().expect("first temp");
+        let second = tempfile::tempdir().expect("second temp");
+        let fallback = home.path().join("AppData").join("Local").join("Temp");
+        assert_eq!(platform_temp(&BTreeMap::new(), home.path()), fallback);
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let vars = BTreeMap::from([(
+            OsString::from("TMPDIR"),
+            elsewhere.path().as_os_str().to_owned(),
+        )]);
+        assert_eq!(platform_temp(&vars, home.path()), fallback);
+        let vars = BTreeMap::from([
+            (OsString::from("TMP"), OsString::from("relative/tmp")),
+            (OsString::from("TEMP"), second.path().as_os_str().to_owned()),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), second.path());
+        let vars = BTreeMap::from([
+            (OsString::from("TMP"), first.path().as_os_str().to_owned()),
+            (OsString::from("TEMP"), second.path().as_os_str().to_owned()),
+        ]);
+        assert_eq!(platform_temp(&vars, home.path()), first.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_temp_accepts_non_unicode_tmpdir() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let home = tempfile::tempdir().expect("home");
+        let mut bytes = home.path().as_os_str().as_encoded_bytes().to_vec();
+        bytes.extend_from_slice(b"/tmp-\xff");
+        let dir = OsString::from_vec(bytes);
+        assert!(Path::new(&dir).is_absolute());
+        let expected = PathBuf::from(&dir);
+        let vars = BTreeMap::from([(OsString::from("TMPDIR"), dir)]);
+        assert_eq!(platform_temp(&vars, home.path()), expected);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
-    fn missing_seatbelt_fails_closed_for_both_launch_modes() {
+    fn missing_seatbelt_fails_closed_when_sandbox_enabled() {
         let error = require_seatbelt_at(Path::new("/dal-probe/missing-seatbelt"))
             .expect_err("a missing utility is rejected");
         assert_eq!(
@@ -705,6 +832,27 @@ mod tests {
             "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.",
         );
         require_seatbelt_at(Path::new("/")).expect("an existing path resolves");
+    }
+
+    #[test]
+    fn session_launcher_sandbox_off_returns_direct_without_seatbelt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = dal_core::Config::load(
+            dal_core::ConfigProduct::Dalgon,
+            temp.path(),
+            "",
+            Some("sandbox = false"),
+        )
+        .expect("config");
+        let vars = BTreeMap::new();
+        let launcher = session_launcher(
+            &config,
+            &vars,
+            Path::new("/nonexistent-workspace"),
+            &[],
+            None,
+        );
+        assert!(matches!(launcher, Ok(Launcher::Direct)));
     }
 
     #[cfg(target_os = "macos")]
@@ -755,7 +903,7 @@ mod tests {
         let error = resolve_launcher(&stale).expect_err("abi 1 fails closed");
         assert_eq!(
             error.to_string(),
-            "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI 1.",
+            "sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI 1.",
         );
     }
 
@@ -790,5 +938,51 @@ mod tests {
         );
         let launcher = resolve_launcher(&with_helper).expect("abi 3 resolves");
         assert!(matches!(launcher, Launcher::Sandbox { .. }));
+    }
+    #[test]
+    fn sandbox_notice_reports_roots_when_on_and_none_when_off_or_unresolvable() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let temp = tempfile::tempdir().expect("temp");
+        let vars = BTreeMap::from([
+            (OsString::from("HOME"), home.path().as_os_str().to_owned()),
+            (
+                OsString::from("XDG_CACHE_HOME"),
+                cache.path().as_os_str().to_owned(),
+            ),
+            (OsString::from("TMPDIR"), temp.path().as_os_str().to_owned()),
+            (OsString::from("TMP"), temp.path().as_os_str().to_owned()),
+            (OsString::from("TEMP"), temp.path().as_os_str().to_owned()),
+        ]);
+        let empty: Vec<Box<str>> = vec![];
+        let notice = sandbox_notice(true, &vars, workspace.path(), &empty, &[])
+            .expect("resolvable roots render a notice");
+        assert!(
+            notice.starts_with("Sandbox on. Commands can write only under: "),
+            "unexpected notice: {notice}",
+        );
+        let canonical = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        assert!(
+            notice.contains(canonical.to_string_lossy().as_ref()),
+            "the notice names the workspace root: {notice}",
+        );
+        let temp_canonical = std::fs::canonicalize(temp.path()).expect("canonical temp");
+        assert!(
+            notice.contains(temp_canonical.to_string_lossy().as_ref()),
+            "the notice names the captured temp root: {notice}",
+        );
+        assert!(sandbox_notice(false, &vars, workspace.path(), &empty, &[]).is_none());
+        assert!(sandbox_notice(true, &BTreeMap::new(), workspace.path(), &empty, &[]).is_none());
+        assert!(
+            sandbox_notice(
+                true,
+                &vars,
+                Path::new("/nonexistent-workspace"),
+                &empty,
+                &[]
+            )
+            .is_none()
+        );
     }
 }

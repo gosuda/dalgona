@@ -6,7 +6,7 @@ use dalgona_gates::support;
 use std::{collections::BTreeSet, time::Duration};
 
 #[test]
-fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
+fn product_registers_every_bundled_battery() -> support::TestResult<()> {
     let scratch = support::Scratch::new("dalgona-battery-set")?;
     let data_root = scratch.path().to_path_buf();
     let product = support::build_product(data_root.clone(), None)?;

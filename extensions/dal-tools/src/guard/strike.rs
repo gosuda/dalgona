@@ -14,13 +14,6 @@ pub(super) fn call_key(tool: &str, args: &Value) -> [u8; 16] {
     key
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "renders a strike key for reports; asserted by guard/tests.rs"
-    )
-)]
 pub(super) fn display_key(tool: &str, key: &[u8; 16]) -> String {
     format!(
         "{tool} {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -132,28 +125,59 @@ pub(super) fn round3(value: f64) -> f64 {
     }
 }
 
+/// Strike count at which a repeated mutating call stops the turn.
+const MAX_STRIKES: u8 = 3;
+
+/// What the repeat guard decides for one mutating call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Step {
+    /// The call may run; `strikes` is the count after this call.
+    Run { strikes: u8 },
+    /// The turn is exhausted: this call and every later mutating call of the
+    /// turn stay blocked, whatever their arguments.
+    Stop,
+}
+
+/// One turn's repeat state. A new turn starts a fresh `Stream`, which is the
+/// only reset.
 #[derive(Default)]
 pub(super) struct Stream {
     last: Option<[u8; 16]>,
     strikes: u8,
     last_errored: bool,
     last_sequence: Option<u128>,
+    stopped: bool,
 }
 
 impl Stream {
-    pub(super) fn on_call(&mut self, key: [u8; 16], sequence: u128) -> u8 {
+    /// Counts one mutating call. An identical call adds one strike, or two
+    /// after an errored identical call; a different call restarts at one.
+    /// Reaching three strikes stops the turn for good.
+    pub(super) fn on_call(&mut self, key: [u8; 16], sequence: u128) -> Step {
+        if self.stopped {
+            return Step::Stop;
+        }
         if self.last == Some(key) {
             let increment = if self.last_errored { 2 } else { 1 };
-            self.strikes = self.strikes.saturating_add(increment).min(3);
+            self.strikes = self.strikes.saturating_add(increment).min(MAX_STRIKES);
         } else {
             self.last = Some(key);
             self.strikes = 1;
         }
         self.last_sequence = Some(sequence);
         self.last_errored = false;
-        self.strikes
+        if self.strikes >= MAX_STRIKES {
+            self.stopped = true;
+            return Step::Stop;
+        }
+        Step::Run {
+            strikes: self.strikes,
+        }
     }
 
+    /// Records whether the call numbered `sequence` failed. A result that
+    /// arrives after a later call has been counted is ignored, so the guard
+    /// can only under-count.
     pub(super) fn on_result(&mut self, key: [u8; 16], sequence: u128, ok: bool) {
         if self.last == Some(key) && self.last_sequence == Some(sequence) {
             self.last_errored = !ok;
@@ -162,5 +186,9 @@ impl Stream {
 
     pub(super) fn strikes(&self) -> u8 {
         self.strikes
+    }
+
+    pub(super) fn stopped(&self) -> bool {
+        self.stopped
     }
 }

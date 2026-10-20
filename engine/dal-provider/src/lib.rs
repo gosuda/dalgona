@@ -1,6 +1,7 @@
 //! Provider transport values and SSE framing for dal.
 
 mod auth;
+pub mod capability;
 mod catalog;
 mod claude_fingerprint;
 mod compact;
@@ -11,6 +12,7 @@ mod lifecycle;
 mod provider;
 mod replay;
 mod retry;
+mod run;
 mod scripted;
 mod sse;
 mod stream;
@@ -45,17 +47,20 @@ pub use family::anthropic::supports_tool_search;
 pub use http::{
     BODY_LIMIT, COMPACT_TIMEOUT, CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, NON_STREAM_TOTAL_TIMEOUT,
     OAUTH_TIMEOUT, RESPONSE_HEADER_TIMEOUT, STREAM_IDLE_TIMEOUT, USAGE_TIMEOUT, WS_MESSAGE_LIMIT,
-    build_client, build_client_no_redirect, check_base_url, endpoint, read_body, send, user_agent,
+    build_client, build_client_http2_prior_knowledge, build_client_no_redirect, check_base_url,
+    endpoint, read_body, send, user_agent,
 };
 pub use provider::{
     AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,
-    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity, ProviderSet,
-    QueryValue, Redirect, ScriptedSelection, Shape, Transport, find,
+    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity,
+    ProviderReadiness, ProviderSet, ProviderSettings, QueryValue, Redirect, ScriptedSelection,
+    Shape, Transport, find,
 };
 pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, record};
 pub use retry::{
     MAX_RETRY_WAIT, RequestState, RetryAfterTooLong, RetryDecision, classify, delay_for_attempt,
 };
+pub use run::{HostToolResult, KeepAlive, ProviderRun, RunLostReason, RunState};
 pub use scripted::{Operation, Script, ScriptError, ScriptStep, StepKind};
 pub use sse::{SSE_EVENT_LIMIT, SSE_LINE_LIMIT, SseEvent, decode_stream, encode};
 pub use stream::{

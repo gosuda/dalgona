@@ -595,7 +595,7 @@ fn messages<'a>(
                 }
                 ("user", blocks)
             }
-            ContextItem::Assistant { source, parts } => {
+            ContextItem::Assistant { source, parts, .. } => {
                 let continues = messages.last().is_some_and(|last| last.role == "assistant");
                 let in_progress_tool_turn = active_assistant_range
                     .is_some_and(|(start, end)| start <= index && index < end);
@@ -762,8 +762,8 @@ fn assistant_blocks<'a>(
     let mut blocks = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
-            AssistantPart::Text { text } if text.is_empty() => {}
-            AssistantPart::Text { text } => blocks.push(Block::Typed(Typed::Text {
+            AssistantPart::Text { text, .. } if text.is_empty() => {}
+            AssistantPart::Text { text, .. } => blocks.push(Block::Typed(Typed::Text {
                 text,
                 cache_control: None,
             })),
@@ -772,7 +772,9 @@ fn assistant_blocks<'a>(
                 ..
             } if replay_ok => replayed_blocks(stored, trust, in_progress_tool_turn, &mut blocks),
             AssistantPart::Thinking { .. } => {}
-            AssistantPart::ToolCall { call, name, args } => {
+            AssistantPart::ToolCall {
+                call, name, args, ..
+            } => {
                 blocks.push(Block::Typed(Typed::ToolUse {
                     id: call.as_str(),
                     name: wire_tool_name(name, oauth),
@@ -1114,6 +1116,7 @@ impl UsageState {
                 .saturating_sub(self.thinking.unwrap_or(0)),
             reasoning_tokens: self.thinking,
             cache_write_tokens: cache_write,
+            premium_requests: None,
             cost_usd: None,
         }
     }

@@ -192,4 +192,8 @@ impl Services for RelayServices {
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unavailable()
+    }
 }

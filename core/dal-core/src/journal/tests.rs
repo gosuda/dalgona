@@ -1,4 +1,5 @@
 use super::*;
+use crate::update::ResolutionCause;
 
 /// Every canonical vector whose members are spec-shaped. The
 /// `req_0142`/`job_0091` lines are shorthand the document uses for
@@ -80,9 +81,11 @@ fn assistant_entry(model: &str, route: Option<AssistantRoute>) -> Entry {
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
             route,
+            replay: None,
         },
     }
 }
@@ -147,6 +150,99 @@ fn resolved_and_extended_records_round_trip() -> Result<(), Box<dyn std::error::
         );
     }
     Ok(())
+}
+
+const RESOLVED_HEAD: &str = "{\"v\":1,\"type\":\"resolved\",\"at\":\"2026-09-25T10:15:36.000Z\",\"request\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"answer\":\"cancel\",\"by\":\"core\"";
+
+/// Every resolution cause beside its durable literal.
+const RESOLUTION_CAUSES: [(ResolutionCause, &str); 5] = [
+    (ResolutionCause::Answered, "answered"),
+    (ResolutionCause::TimedOut, "timed_out"),
+    (ResolutionCause::Cancelled, "cancelled"),
+    (ResolutionCause::Withdrawn, "withdrawn"),
+    (ResolutionCause::NoController, "no_controller"),
+];
+
+fn resolved_line(tail: &str) -> String {
+    format!("{RESOLVED_HEAD}{tail}}}\n")
+}
+
+fn resolved_record(
+    was_default: bool,
+    cause: Option<ResolutionCause>,
+) -> Result<Record, Box<dyn std::error::Error>> {
+    Ok(Record::Resolved {
+        at: "2026-09-25T10:15:36.000Z".parse()?,
+        request: RequestId::parse("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f")?,
+        answer: Answer::Cancel,
+        by: ClientId::new("core"),
+        was_default,
+        cause,
+    })
+}
+
+#[test]
+fn resolved_cause_round_trips_every_literal_through_the_codec()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (cause, literal) in RESOLUTION_CAUSES {
+        for (was_default, default_member) in [(false, ""), (true, ",\"was_default\":true")] {
+            let line = resolved_line(&format!("{default_member},\"cause\":\"{literal}\""));
+            let record = resolved_record(was_default, Some(cause))?;
+            assert_eq!(decode(line.as_bytes())?.record, record, "{line}");
+            assert_eq!(encode(&record)?.as_slice(), line.as_bytes(), "{line}");
+        }
+    }
+
+    // Decoding ignores member order; encoding always writes the declared
+    // order, with `cause` after `was_default`.
+    let reordered = resolved_line(",\"cause\":\"timed_out\",\"was_default\":true");
+    let canonical = resolved_line(",\"was_default\":true,\"cause\":\"timed_out\"");
+    let record = resolved_record(true, Some(ResolutionCause::TimedOut))?;
+    assert_eq!(decode(reordered.as_bytes())?.record, record);
+    assert_eq!(encode(&record)?.as_slice(), canonical.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn legacy_resolved_records_have_no_cause_and_re_encode_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (tail, was_default) in [("", false), (",\"was_default\":true", true)] {
+        let line = resolved_line(tail);
+        let legacy = resolved_record(was_default, None)?;
+        assert_eq!(decode(line.as_bytes())?.record, legacy, "{line}");
+        assert_eq!(encode(&legacy)?.as_slice(), line.as_bytes(), "{line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn resolved_cause_rejects_unknown_literals_and_non_string_members() {
+    // A present member never reads as a missing cause: the closed payload
+    // refuses a corrupt or future spelling instead of fabricating `None`.
+    let cases = [
+        "\"soon\"",
+        "\"\"",
+        "\"Answered\"",
+        "\"timed-out\"",
+        "\"answered \"",
+        "null",
+        "7",
+        "true",
+        "[\"answered\"]",
+        "{\"answered\":true}",
+    ];
+    for bad in cases {
+        let line = resolved_line(&format!(",\"cause\":{bad}"));
+        let marker = "\"cause\":";
+        let expected_offset = line.find(marker).unwrap() + marker.len();
+        assert!(
+            matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if offset == expected_offset
+            ),
+            "{bad}"
+        );
+    }
 }
 
 #[test]
@@ -328,6 +424,7 @@ fn turn_end_with_cost(cost_usd: f64) -> Record {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: Some(cost_usd),
+            premium_requests: None,
         }),
         changes: Vec::new(),
     }
@@ -438,6 +535,7 @@ fn model_record_keeps_format1_api_bytes() -> Result<(), Box<dyn std::error::Erro
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-6-luna".into(),
+                provider: None,
             },
         }
     );
@@ -816,6 +914,7 @@ fn empty_model_id_is_rejected_both_ways() -> Result<(), Box<dyn std::error::Erro
             route: ModelRoute::Api {
                 family: Family::Anthropic,
                 model: "".into(),
+                provider: None,
             },
         },
     });
@@ -967,6 +1066,7 @@ fn invalid_cost_is_rejected_not_nulled() -> Result<(), Box<dyn std::error::Error
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: Some(f64::NAN),
+            premium_requests: None,
         }),
         changes: Vec::new(),
     };
@@ -1280,6 +1380,10 @@ fn decode_an_empty_object_is_missing_version_not_trailing_bytes() {
     assert!(matches!(decode(b"{}"), Err(DecodeError::MissingVersion)));
     // A truncated line still fails as malformed.
     assert!(matches!(decode(b"{"), Err(DecodeError::Invalid { .. })));
+    assert!(matches!(
+        decode(b"{\"v\":3,\"type\":42,\"garbage\":[}"),
+        Err(DecodeError::Invalid { .. })
+    ));
 }
 
 #[test]
@@ -1313,4 +1417,1448 @@ fn reservation_format_preserves_legacy_bytes_and_rejects_old_version()
         Err(DecodeError::UnsupportedVersion { found: 3 })
     ));
     Ok(())
+}
+
+fn assistant_with_replay(content: Vec<Block>, replay: Option<RawJson>) -> Record {
+    Record::Assistant(Entry {
+        id: EntryId::new(nz(5)),
+        parent: None,
+        at: "2026-09-25T10:15:35.410Z"
+            .parse()
+            .expect("valid fixture timestamp"),
+        kind: EntryKind::Assistant {
+            api: Family::Anthropic,
+            model: "m".into(),
+            content,
+            usage: Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                premium_requests: None,
+            },
+            stop: AssistantStop::Done,
+            route: None,
+            replay,
+        },
+    })
+}
+
+/// Legacy assistant bytes predate block and entry replay: a text
+/// `"replay":null` reads as absent, a tool call with no replay member stays
+/// absent, and the entry carries no replay. The line re-encodes byte for byte.
+#[test]
+fn legacy_assistant_blocks_without_replay_re_encode_identically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let line = "{\"v\":1,\"type\":\"assistant\",\"id\":5,\"parent\":4,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"I will read the lexer.\",\"replay\":null},{\"type\":\"tool_call\",\"id\":\"toolu_01\",\"name\":\"read\",\"input\":{\"path\":\"lib/lexer.ml\"}}],\"usage\":{\"input\":1200,\"output\":85,\"cache_read\":0,\"cache_write\":1100,\"reasoning\":null,\"cost_micro_usd\":4210},\"stop\":\"tool_use\"}\n";
+    let decoded = decode(line.as_bytes())?;
+    let Record::Assistant(entry) = &decoded.record else {
+        return Err("expected an assistant record".into());
+    };
+    let EntryKind::Assistant {
+        content, replay, ..
+    } = &entry.kind
+    else {
+        return Err("expected an assistant entry".into());
+    };
+    assert_eq!(*replay, None);
+    assert!(matches!(
+        content.as_slice(),
+        [Block::Text { text, replay: None }, Block::ToolCall { replay: None, .. }]
+        if text.as_ref() == "I will read the lexer."
+    ));
+    assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+    Ok(())
+}
+
+/// A present replay payload is opaque bytes: interior whitespace, escapes and
+/// non-ASCII survive the round trip on text blocks, tool calls and the
+/// assistant entry alike, and decode hands back the same value.
+#[test]
+fn present_replay_payloads_survive_byte_for_byte() -> Result<(), Box<dyn std::error::Error>> {
+    let raw = "{\"b\":2,  \"a\":\"h\u{00e9}llo \\\"w\u{00f6}rld\\\"\\n \u{2603} \u{00e9}\"}";
+    let replay = || RawJson::parse(raw);
+    let record = Record::Assistant(Entry {
+        id: EntryId::new(nz(5)),
+        parent: None,
+        at: "2026-09-25T10:15:35.410Z".parse()?,
+        kind: EntryKind::Assistant {
+            api: Family::Anthropic,
+            model: "m".into(),
+            content: vec![
+                Block::Text {
+                    text: "hi".into(),
+                    replay: Some(replay()?),
+                },
+                Block::ToolCall {
+                    id: CallId::new("toolu_01"),
+                    name: "read".into(),
+                    input: RawJson::parse("{}")?,
+                    replay: Some(replay()?),
+                },
+            ],
+            usage: Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                premium_requests: None,
+            },
+            stop: AssistantStop::Done,
+            route: None,
+            replay: Some(replay()?),
+        },
+    });
+    let line = String::from_utf8(encode(&record)?)?;
+    assert_eq!(line.matches(raw).count(), 3, "replay bytes changed: {line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(
+        encode(&decode(line.as_bytes())?.record)?,
+        line.as_bytes(),
+        "a replay-bearing line re-encodes identically"
+    );
+    Ok(())
+}
+
+/// An explicit entry-level replay null is malformed, not absent: like `route`,
+/// a present member never reads as a missing one.
+#[test]
+fn assistant_entry_rejects_an_explicit_replay_null() {
+    let line = assistant_line("m", None)
+        .replace("\"stop\":\"done\"}", "\"stop\":\"done\",\"replay\":null}");
+    assert!(
+        matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+        "{line}"
+    );
+}
+
+/// The direct `EntryKind` serde path keeps entry replay: a present payload
+/// round-trips through the derived spelling and the wire line alike, instead
+/// of dropping silently while the journal decoder preserves it.
+#[test]
+fn assistant_replay_round_trips_through_direct_entry_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let payload = RawJson::parse(r#"{"api":"anthropic"}"#)?;
+    let record = assistant_with_replay(Vec::new(), Some(payload));
+    let Record::Assistant(entry) = &record else {
+        return Err("expected an assistant record".into());
+    };
+    let serde_text = sonic_rs::to_string(&entry.kind)?;
+    assert!(
+        serde_text.contains(r#""replay":{"api":"anthropic"}"#),
+        "{serde_text}"
+    );
+    assert_eq!(sonic_rs::from_str::<EntryKind>(&serde_text)?, entry.kind);
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(line.contains(r#""replay":{"api":"anthropic"}"#), "{line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    Ok(())
+}
+
+/// A present `null` entry replay is malformed on the direct serde path too:
+/// only an absent member reads as missing replay.
+#[test]
+fn direct_entry_decode_rejects_an_explicit_replay_null() -> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(Vec::new(), None);
+    let Record::Assistant(entry) = &record else {
+        return Err("expected an assistant record".into());
+    };
+    let serde_text = sonic_rs::to_string(&entry.kind)?;
+    assert!(!serde_text.contains("\"replay\""), "{serde_text}");
+    let injected = format!("{},\"replay\":null}}", &serde_text[..serde_text.len() - 1]);
+    assert!(
+        sonic_rs::from_str::<EntryKind>(&injected).is_err(),
+        "{injected}"
+    );
+    Ok(())
+}
+
+/// The encoder refuses a caller-built null entry replay: the member is
+/// skip-None, so `Some(null)` would write the explicit null the decoder
+/// rejects. The value is reported, never normalized to absent.
+#[test]
+fn encode_rejects_null_assistant_replay_the_decoder_would_reject() {
+    let record = assistant_with_replay(Vec::new(), Some(RawJson::null()));
+    assert!(matches!(encode(&record), Err(EncodeError::NullReplay)));
+}
+
+/// A tool call without replay writes no replay member: the encoded line and
+/// the serde spelling both stay free of it, and both paths round-trip.
+#[test]
+fn tool_call_without_replay_writes_no_replay_member() -> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(
+        vec![Block::ToolCall {
+            id: CallId::new("toolu_01"),
+            name: "read".into(),
+            input: RawJson::parse("{}")?,
+            replay: None,
+        }],
+        None,
+    );
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(!line.contains("replay"), "{line}");
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    let serde_text = sonic_rs::to_string(&Block::ToolCall {
+        id: CallId::new("toolu_01"),
+        name: "read".into(),
+        input: RawJson::parse("{}")?,
+        replay: None,
+    })?;
+    assert!(!serde_text.contains("replay"), "{serde_text}");
+    assert_eq!(
+        sonic_rs::from_str::<Block>(&serde_text)?,
+        Block::ToolCall {
+            id: CallId::new("toolu_01"),
+            name: "read".into(),
+            input: RawJson::parse("{}")?,
+            replay: None,
+        }
+    );
+    Ok(())
+}
+/// The fold writes `Block::Reasoning { replay: RawJson::null() }` for reasoning
+/// text a provider streamed without a replay event, and the encoder spells it
+/// `"replay":null`. The reader accepts every line the writer emits: the
+/// placeholder survives line decode, re-encodes byte for byte, and the entry
+/// level replay stays absent.
+#[test]
+fn reasoning_block_with_null_placeholder_replay_round_trips()
+-> Result<(), Box<dyn std::error::Error>> {
+    let record = assistant_with_replay(
+        vec![Block::Reasoning {
+            text: "weighing the options".into(),
+            replay: RawJson::null(),
+        }],
+        None,
+    );
+    let line = String::from_utf8(encode(&record)?)?;
+    assert!(
+        line.contains(r#"{"type":"reasoning","text":"weighing the options","replay":null}"#),
+        "{line}"
+    );
+    let decoded = decode(line.as_bytes())?;
+    assert_eq!(decoded.record, record);
+    assert_eq!(encode(&decoded.record)?, line.as_bytes());
+    Ok(())
+}
+
+/// A reasoning block keeps requiring its `replay` member: only an explicit
+/// `null` reads as the placeholder, an absent member is still malformed.
+/// Block-level `null` on text and tool calls still collapses to absent, and
+/// the entry-level `null` stays an error beside a null reasoning block.
+#[test]
+fn reasoning_replay_null_is_accepted_but_absent_is_not() -> Result<(), Box<dyn std::error::Error>> {
+    let with_content = |content: &str| {
+        assistant_line("m", None).replace("\"content\":[]", &format!("\"content\":[{content}]"))
+    };
+
+    let null = with_content(r#"{"type":"reasoning","text":"t","replay":null}"#);
+    let Record::Assistant(Entry {
+        kind: EntryKind::Assistant {
+            content, replay, ..
+        },
+        ..
+    }) = decode(null.as_bytes())?.record
+    else {
+        return Err("expected an assistant record".into());
+    };
+    assert_eq!(replay, None);
+    assert_eq!(
+        content,
+        vec![Block::Reasoning {
+            text: "t".into(),
+            replay: RawJson::null(),
+        }]
+    );
+
+    let spaced = with_content(r#"{"type":"reasoning","text":"t","replay": null }"#);
+    assert!(decode(spaced.as_bytes()).is_ok(), "{spaced}");
+
+    let absent = with_content(r#"{"type":"reasoning","text":"t"}"#);
+    assert!(
+        matches!(decode(absent.as_bytes()), Err(DecodeError::Invalid { .. })),
+        "{absent}"
+    );
+
+    let entry_null = null.replace("\"stop\":\"done\"}", "\"stop\":\"done\",\"replay\":null}");
+    assert!(
+        matches!(
+            decode(entry_null.as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ),
+        "{entry_null}"
+    );
+
+    let collapsed = with_content(
+        r#"{"type":"text","text":"a","replay":null},{"type":"tool_call","id":"c","name":"read","input":{},"replay":null}"#,
+    );
+    let Record::Assistant(Entry {
+        kind: EntryKind::Assistant { content, .. },
+        ..
+    }) = decode(collapsed.as_bytes())?.record
+    else {
+        return Err("expected an assistant record".into());
+    };
+    assert!(matches!(
+        content.as_slice(),
+        [
+            Block::Text { replay: None, .. },
+            Block::ToolCall { replay: None, .. }
+        ]
+    ));
+    Ok(())
+}
+
+/// The direct `Block` serde path is the twin of the line decoder: a reasoning
+/// block's `replay: null` is the placeholder, an absent `replay` is an error.
+#[test]
+fn direct_block_decode_accepts_reasoning_replay_null() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Block::Reasoning {
+        text: "t".into(),
+        replay: RawJson::null(),
+    };
+    let serde_text = sonic_rs::to_string(&block)?;
+    assert_eq!(
+        serde_text,
+        r#"{"type":"reasoning","text":"t","replay":null}"#
+    );
+    assert_eq!(sonic_rs::from_str::<Block>(&serde_text)?, block);
+    assert!(sonic_rs::from_str::<Block>(r#"{"type":"reasoning","text":"t"}"#).is_err());
+    Ok(())
+}
+
+/// End to end inside the core: a turn whose provider streamed reasoning text
+/// and no replay event journals the null placeholder, and the lines the fold
+/// emitted re-open as a session. Every record the writer produced must read
+/// back through the journal decoder.
+#[test]
+fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        Effect, Event, Inference, ModelRoute, Record, Session, Stop, StreamChannel, StreamEvent,
+    };
+
+    let stamp = crate::Timestamp::UNIX_EPOCH;
+    let mut session = Session::replay([], stamp)?.0;
+    let mut effects = Vec::new();
+    let turn = drive_reasoning_turn(&mut session, &mut effects, stamp)?;
+
+    session.step(
+        Event::StreamEnded {
+            turn,
+            model: ModelRoute::Api {
+                family: Family::Chat,
+                model: "test-model".into(),
+                provider: None,
+            },
+            family: Family::Chat,
+            result: Ok(Inference {
+                events: vec![
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Thinking,
+                        text: "weighing ".into(),
+                    },
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Thinking,
+                        text: "it".into(),
+                    },
+                    StreamEvent::Delta {
+                        channel: StreamChannel::Text,
+                        text: "done".into(),
+                    },
+                    StreamEvent::Usage(Usage {
+                        input_tokens: 10,
+                        cached_input_tokens: 0,
+                        output_tokens: 1,
+                        reasoning_tokens: None,
+                        cache_write_tokens: 0,
+                        premium_requests: None,
+                        cost_usd: None,
+                    }),
+                    StreamEvent::Stop(Stop::EndTurn),
+                ],
+            }),
+            partial: None,
+        },
+        stamp,
+        &mut effects,
+    )?;
+
+    let mut records = Vec::new();
+    for effect in &effects {
+        if let Effect::Emit(emit) = effect {
+            records.extend(emit.records.iter().cloned());
+        }
+    }
+    let content = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Assistant(Entry {
+                kind: EntryKind::Assistant { content, .. },
+                ..
+            }) => Some(content.clone()),
+            _ => None,
+        })
+        .ok_or("the stream journaled no assistant entry")?;
+    assert!(
+        matches!(
+            content.as_slice(),
+            [Block::Reasoning { text, replay }, Block::Text { .. }]
+            if text.as_ref() == "weighing it" && replay.as_str() == "null"
+        ),
+        "{content:?}"
+    );
+
+    let lines = records.iter().map(encode).collect::<Result<Vec<_>, _>>()?;
+    for (record, line) in records.iter().zip(&lines) {
+        assert_eq!(&decode(line)?.record, record);
+    }
+    Session::replay_lines(lines.iter().map(Vec::as_slice), stamp)?;
+    Ok(())
+}
+
+/// Opens a turn on `session` the way the fold does for a plain prompt and
+/// returns the reserved turn id; the caller finishes the stream.
+fn drive_reasoning_turn(
+    session: &mut crate::fold::Session,
+    effects: &mut Vec<crate::Effect>,
+    stamp: crate::Timestamp,
+) -> Result<crate::TurnId, Box<dyn std::error::Error>> {
+    use crate::{
+        ClientId, Command, Event, Expect, HookEvent, HookOutcome, HookVerdict, Part, Phase,
+    };
+
+    session.step(
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "question".into(),
+                }],
+            },
+            by: ClientId::new("test"),
+        },
+        stamp,
+        effects,
+    )?;
+    let Phase::Opening { turn, .. } = session.phase() else {
+        return Err("the prompt did not open a turn".into());
+    };
+    let turn = *turn;
+    session.step(
+        Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))?,
+        },
+        stamp,
+        effects,
+    )?;
+    Ok(turn)
+}
+
+// Private audit records: v1 wire, rejection, parity spot-check, branch omission.
+// Full old-journal byte parity lives in `canonical_vectors_round_trip_byte_for_byte`
+// and `resolved_and_extended_records_round_trip`; the spot check below only proves
+// the private codec did not perturb old lines. Wire order follows the landed
+// codec: private_loop type/at/loop/who/turn?, private_start
+// type/at/loop/token/who/turn?/round/call/name/args, private_end
+// type/at/loop/token/outcome with settled {type/is_error/parts} and closed
+// indeterminate, all v1, absent turn means None.
+fn private_loop_id(value: &str) -> PrivateLoopId {
+    PrivateLoopId::parse(value).expect("valid fixture loop id")
+}
+
+fn private_token_id(value: &str) -> PrivateEffectId {
+    PrivateEffectId::parse(value).expect("valid fixture token id")
+}
+
+fn private_owner() -> Owner {
+    Owner::Extension {
+        name: "fusion".into(),
+        origin: "bundled".into(),
+    }
+}
+
+fn private_at() -> jiff::Timestamp {
+    "2026-09-25T10:15:35.420Z"
+        .parse()
+        .expect("valid fixture timestamp")
+}
+
+fn private_settled_parts() -> Vec<JournalPart> {
+    let digest = "0123456789abcdef".repeat(4);
+    vec![
+        JournalPart::Text {
+            text: "checked 3 files".into(),
+        },
+        JournalPart::Blob {
+            mime: "application/pdf".into(),
+            blob: digest.as_str().into(),
+            bytes: 9,
+        },
+    ]
+}
+
+fn private_round_trip_ids() -> (PrivateLoopId, PrivateEffectId, Owner) {
+    (
+        private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f"),
+        private_token_id("01927f40-0000-7000-8000-000000000002"),
+        private_owner(),
+    )
+}
+
+#[test]
+fn private_loop_and_start_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, who) = private_round_trip_ids();
+
+    let loop_rec = Record::PrivateLoop {
+        at: private_at(),
+        r#loop: loop_a,
+        who: who.clone(),
+        turn: None,
+    };
+    let encoded = encode(&loop_rec)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(
+        text.starts_with(r#"{"v":1,"type":"private_loop""#),
+        "{text}"
+    );
+    assert!(!text.contains("\"turn\""), "{text}");
+    assert_eq!(loop_rec.tag(), "private_loop");
+    assert!(loop_rec.entry().is_none());
+    assert_eq!(decode(&encoded)?.record, loop_rec);
+    assert_eq!(encode(&decode(&encoded)?.record)?, encoded);
+
+    let args = RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?;
+    let args_text = args.as_str().to_owned();
+    let start = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        who: who.clone(),
+        turn: None,
+        round: 2,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args,
+    };
+    let encoded = encode(&start)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(
+        text.starts_with(r#"{"v":1,"type":"private_start""#),
+        "{text}"
+    );
+    assert!(!text.contains("\"turn\""), "{text}");
+    assert!(text.contains(r#""round":2"#), "{text}");
+    assert!(text.contains(r#""call":"toolu_01""#), "{text}");
+    assert_eq!(start.tag(), "private_start");
+    assert!(start.entry().is_none());
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, start);
+    assert_eq!(encode(&decoded)?, encoded);
+    let Record::PrivateStart {
+        r#loop,
+        token,
+        turn,
+        round,
+        call,
+        name,
+        args,
+        ..
+    } = &decoded
+    else {
+        return Err("expected a private start".into());
+    };
+    assert_eq!(*r#loop, loop_a);
+    assert_eq!(*token, token_a);
+    assert_eq!(*turn, None);
+    assert_eq!(*round, 2);
+    assert_eq!(call.as_str(), "toolu_01");
+    assert_eq!(name.as_ref(), "read");
+    assert_eq!(args.as_str(), args_text.as_str());
+    Ok(())
+}
+
+#[test]
+fn private_records_round_trip_settled() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, _) = private_round_trip_ids();
+
+    let settled = Record::PrivateEnd {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        outcome: PrivateOutcome::Settled {
+            is_error: false,
+            parts: private_settled_parts(),
+        },
+    };
+    let encoded = encode(&settled)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(text.starts_with(r#"{"v":1,"type":"private_end""#), "{text}");
+    assert!(text.contains(r#""type":"settled""#), "{text}");
+    assert_eq!(settled.tag(), "private_end");
+    assert!(settled.entry().is_none());
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, settled);
+    assert_eq!(encode(&decoded)?, encoded);
+    let Record::PrivateEnd {
+        r#loop,
+        token,
+        outcome,
+        ..
+    } = &decoded
+    else {
+        return Err("expected a private end".into());
+    };
+    assert_eq!(*r#loop, loop_a);
+    assert_eq!(*token, token_a);
+    let PrivateOutcome::Settled { is_error, parts } = outcome else {
+        return Err("expected settled parts".into());
+    };
+    assert!(!*is_error);
+    assert_eq!(parts.as_slice(), private_settled_parts().as_slice());
+    Ok(())
+}
+
+#[test]
+fn private_records_round_trip_indeterminate() -> Result<(), Box<dyn std::error::Error>> {
+    let (loop_a, token_a, _) = private_round_trip_ids();
+
+    let open = Record::PrivateEnd {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        outcome: PrivateOutcome::Indeterminate,
+    };
+    let encoded = encode(&open)?;
+    let text = String::from_utf8(encoded.clone())?;
+    assert!(text.contains(r#""type":"indeterminate""#), "{text}");
+    assert!(!text.contains("\"parts\""), "{text}");
+    let decoded = decode(&encoded)?.record;
+    assert_eq!(decoded, open);
+    assert_eq!(encode(&decoded)?, encoded);
+    assert!(matches!(
+        decoded,
+        Record::PrivateEnd {
+            outcome: PrivateOutcome::Indeterminate,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn private_turn_present_and_shared_call_across_loops() -> Result<(), Box<dyn std::error::Error>> {
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let loop_b = private_loop_id("01927f40-0000-7000-8000-000000000001");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let token_b = private_token_id("01927f40-0000-7000-8000-000000000003");
+    let turn = Some(TurnId::new(nz(1)));
+
+    let loop_turned = Record::PrivateLoop {
+        at: private_at(),
+        r#loop: loop_a,
+        who: private_owner(),
+        turn,
+    };
+    let text = String::from_utf8(encode(&loop_turned)?)?;
+    assert!(text.contains("\"turn\":1"), "{text}");
+    assert_eq!(decode(text.as_bytes())?.record, loop_turned);
+
+    let start_a = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_a,
+        token: token_a,
+        who: private_owner(),
+        turn,
+        round: 0,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args: RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?,
+    };
+    let start_b = Record::PrivateStart {
+        at: private_at(),
+        r#loop: loop_b,
+        token: token_b,
+        who: private_owner(),
+        turn,
+        round: 1,
+        call: CallId::new("toolu_01"),
+        name: "read".into(),
+        args: RawJson::parse(r#"{"path":"lib/parser.ml"}"#)?,
+    };
+    let decoded_a = decode(&encode(&start_a)?)?.record;
+    let decoded_b = decode(&encode(&start_b)?)?.record;
+    assert_eq!(decoded_a, start_a);
+    assert_eq!(decoded_b, start_b);
+    let (
+        Record::PrivateStart {
+            r#loop: got_a,
+            token: tok_a,
+            turn: turn_a,
+            call: call_a,
+            ..
+        },
+        Record::PrivateStart {
+            r#loop: got_b,
+            token: tok_b,
+            turn: turn_b,
+            call: call_b,
+            ..
+        },
+    ) = (&decoded_a, &decoded_b)
+    else {
+        return Err("expected two private starts".into());
+    };
+    assert_ne!(*got_a, *got_b);
+    assert_ne!(*tok_a, *tok_b);
+    assert_eq!(*turn_a, turn);
+    assert_eq!(*turn_b, turn);
+    assert_eq!(call_a.as_str(), "toolu_01");
+    assert_eq!(call_b.as_str(), "toolu_01");
+    Ok(())
+}
+
+#[test]
+fn private_outcome_rejects_unknown_and_malformed_shapes() {
+    let head = "{\"v\":1,\"type\":\"private_end\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\",\"outcome\":";
+    let cases = [
+        // Unknown outcome type.
+        "{\"type\":\"queued\"}",
+        // Settled without a required member.
+        "{\"type\":\"settled\",\"parts\":[]}",
+        "{\"type\":\"settled\",\"is_error\":false}",
+        // Settled with an undeclared member.
+        "{\"type\":\"settled\",\"is_error\":false,\"parts\":[],\"extra\":1}",
+        // Indeterminate takes no other member.
+        "{\"type\":\"indeterminate\",\"parts\":[]}",
+        "{\"type\":\"indeterminate\",\"is_error\":false}",
+        // Outcome without its type member.
+        "{\"is_error\":false,\"parts\":[]}",
+        // Missing and null outcomes.
+        "null",
+        "7",
+        "\"settled\"",
+    ];
+    for outcome in cases {
+        let line = format!("{head}{outcome}}}\n");
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+    let missing = "{\"v\":1,\"type\":\"private_end\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\"}\n";
+    assert!(matches!(
+        decode(missing.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+    // An absent turn reads as None; a present null never does.
+    let loop_head = "{\"v\":1,\"type\":\"private_loop\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"who\":\"core\"";
+    let absent = format!("{loop_head}}}\n");
+    let decoded = decode(absent.as_bytes()).expect("absent turn is None");
+    assert!(matches!(
+        decoded.record,
+        Record::PrivateLoop { turn: None, .. }
+    ));
+    let null_turn = format!("{loop_head},\"turn\":null}}\n");
+    assert!(
+        matches!(
+            decode(null_turn.as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ),
+        "{null_turn}"
+    );
+    let start_null_turn = "{\"v\":1,\"type\":\"private_start\",\"at\":\"2026-09-25T10:15:35.420Z\",\"loop\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"token\":\"01927f40-0000-7000-8000-000000000002\",\"who\":\"core\",\"turn\":null,\"round\":0,\"call\":\"toolu_01\",\"name\":\"read\",\"args\":{}}\n";
+    assert!(matches!(
+        decode(start_null_turn.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn private_records_reject_format_2_and_stay_non_tree() -> Result<(), Box<dyn std::error::Error>> {
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let records = [
+        Record::PrivateLoop {
+            at: private_at(),
+            r#loop: loop_a,
+            who: Owner::Core,
+            turn: None,
+        },
+        Record::PrivateStart {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            who: Owner::Core,
+            turn: Some(TurnId::new(nz(1))),
+            round: 0,
+            call: CallId::new("toolu_01"),
+            name: "read".into(),
+            args: RawJson::parse(r"{}")?,
+        },
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ];
+    for record in records {
+        assert!(record.entry().is_none());
+        let v1 = String::from_utf8(encode(&record)?)?;
+        assert!(v1.starts_with("{\"v\":1,"), "{v1}");
+        assert_eq!(scan_head(v1.as_bytes()), None);
+        let v2 = v1.replacen("\"v\":1", "\"v\":2", 1);
+        assert!(
+            matches!(decode(v2.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{v2}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn branch_omits_private_non_tree_records() -> Result<(), Box<dyn std::error::Error>> {
+    let header = Header {
+        id: SessionId::new_v7(),
+        at: "2026-09-25T10:15:30.000Z".parse()?,
+        workspace: harness_workspace()?,
+        product: Product::Dal,
+        from: None,
+    };
+    let loop_a = private_loop_id("01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f");
+    let token_a = private_token_id("01927f40-0000-7000-8000-000000000002");
+    let who = private_owner();
+    let records = vec![
+        Record::User(user_entry(1, None, "first")),
+        Record::PrivateLoop {
+            at: private_at(),
+            r#loop: loop_a,
+            who: who.clone(),
+            turn: None,
+        },
+        Record::User(user_entry(2, Some(1), "second")),
+        Record::PrivateStart {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            who: who.clone(),
+            turn: None,
+            round: 0,
+            call: CallId::new("toolu_01"),
+            name: "read".into(),
+            args: RawJson::parse(r#"{"path":"lib/lexer.ml"}"#)?,
+        },
+        Record::User(user_entry(3, Some(2), "third")),
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Settled {
+                is_error: false,
+                parts: vec![JournalPart::Text { text: "ok".into() }],
+            },
+        },
+        Record::Label {
+            at: private_at(),
+            entry: EntryId::new(nz(1)),
+            label: Some("kept".into()),
+        },
+        Record::PrivateEnd {
+            at: private_at(),
+            r#loop: loop_a,
+            token: token_a,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ];
+    let is_private = |record: &Record| {
+        matches!(
+            record,
+            Record::PrivateLoop { .. } | Record::PrivateStart { .. } | Record::PrivateEnd { .. }
+        )
+    };
+    let forked = branch(
+        &records,
+        Some(EntryId::new(nz(3))),
+        BranchMode::Fork {
+            at: EntryId::new(nz(2)),
+        },
+        &header,
+    )?;
+    assert!(
+        !forked.records.iter().any(is_private),
+        "fork drops private audit records"
+    );
+    let ids: Vec<u64> = forked
+        .records
+        .iter()
+        .filter_map(|record| record.entry().map(|entry| entry.id.get()))
+        .collect();
+    assert_eq!(ids, vec![1]);
+    assert_eq!(
+        forked.anchor_parts,
+        vec![JournalPart::Text {
+            text: "second".into()
+        }]
+    );
+    let cloned = branch(
+        &records,
+        Some(EntryId::new(nz(3))),
+        BranchMode::Clone,
+        &header,
+    )?;
+    assert!(
+        !cloned.records.iter().any(is_private),
+        "clone drops private audit records"
+    );
+    let ids: Vec<u64> = cloned
+        .records
+        .iter()
+        .filter_map(|record| record.entry().map(|entry| entry.id.get()))
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(cloned.anchor_parts, []);
+    Ok(())
+}
+
+fn usage_with_premium(premium_requests: Option<f64>) -> Usage {
+    Usage {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        cost_usd: None,
+        premium_requests,
+    }
+}
+
+fn premium_fixture_at() -> jiff::Timestamp {
+    "2026-09-25T10:16:02.000Z"
+        .parse()
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+}
+
+fn assistant_with_premium(premium_requests: Option<f64>) -> Record {
+    let mut entry = assistant_entry("m", None);
+    if let EntryKind::Assistant { usage, .. } = &mut entry.kind {
+        usage.premium_requests = premium_requests;
+    }
+    Record::Assistant(entry)
+}
+
+fn inferred_with_premium(premium_requests: Option<f64>) -> Record {
+    Record::Inferred {
+        at: premium_fixture_at(),
+        who: Owner::Core,
+        purpose: InferredPurpose::Synthetic {
+            id: "dalgona/fusion".into(),
+        },
+        usage: usage_with_premium(premium_requests),
+    }
+}
+
+fn compaction_entry(usage: Option<Usage>) -> Record {
+    Record::Compaction(Entry {
+        id: EntryId::new(nz(58)),
+        parent: Some(EntryId::new(nz(57))),
+        at: premium_fixture_at(),
+        kind: EntryKind::Compaction {
+            summary: None,
+            first_kept: None,
+            tokens_before: 1,
+            replay: None,
+            usage,
+            parts: Vec::new(),
+            parts_tokens: 0,
+        },
+    })
+}
+
+fn compaction_with_premium(premium_requests: Option<f64>) -> Record {
+    compaction_entry(Some(usage_with_premium(premium_requests)))
+}
+
+fn compaction_without_usage() -> Record {
+    compaction_entry(None)
+}
+
+fn turn_end_with_premium(premium_requests: Option<f64>) -> Record {
+    Record::TurnEnd {
+        at: premium_fixture_at(),
+        turn: TurnId::new(nz(1)),
+        stop: TurnEndStop::Done,
+        usage: Some(usage_with_premium(premium_requests)),
+        changes: Vec::new(),
+    }
+}
+
+fn decoded_premium(line: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    Ok(match decode(line.as_bytes())?.record {
+        Record::Assistant(entry) => match entry.kind {
+            EntryKind::Assistant { usage, .. } => usage.premium_requests,
+            _ => return Err("expected an assistant entry".into()),
+        },
+        Record::Inferred { usage, .. } => usage.premium_requests,
+        Record::Compaction(entry) => match entry.kind {
+            EntryKind::Compaction { usage, .. } => usage.and_then(|inner| inner.premium_requests),
+            _ => return Err("expected a compaction entry".into()),
+        },
+        Record::TurnEnd { usage, .. } => usage.and_then(|inner| inner.premium_requests),
+        _ => return Err("expected a usage record".into()),
+    })
+}
+
+#[test]
+fn premium_requests_round_trip_each_record_family() -> Result<(), Box<dyn std::error::Error>> {
+    for record in [
+        assistant_with_premium(Some(2.5)),
+        inferred_with_premium(Some(2.5)),
+        compaction_with_premium(Some(2.5)),
+        turn_end_with_premium(Some(2.5)),
+    ] {
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(line.contains("\"premium_requests\":2.5"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_none_preserves_legacy_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    for record in [
+        assistant_with_premium(None),
+        inferred_with_premium(None),
+        compaction_with_premium(None),
+        compaction_without_usage(),
+        turn_end_with_premium(None),
+    ] {
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(!line.contains("premium_requests"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_absent_decodes_to_none() -> Result<(), Box<dyn std::error::Error>> {
+    for line in [
+        assistant_line("m", None),
+        "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-25T10:16:02.000Z\",\"who\":\"core\",\"purpose\":{\"synthetic\":{\"id\":\"dalgona/fusion\"}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}\n".to_string(),
+        "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}\n".to_string(),
+        "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":null}\n".to_string(),
+        "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"changes\":[]}\n".to_string(),
+    ] {
+        assert_eq!(decoded_premium(&line)?, None, "{line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_float_boundary_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        0.0,
+        -0.0,
+        0.000_000_4,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        1.0,
+        f64::from_bits(1.0_f64.to_bits() + 1),
+        0.1,
+        1.0 / 3.0,
+        f64::MAX,
+    ];
+    for value in cases {
+        let record = turn_end_with_premium(Some(value));
+        let line = String::from_utf8(encode(&record)?)?;
+        assert!(line.contains("\"premium_requests\":"), "{line}");
+        assert_eq!(decode(line.as_bytes())?.record, record);
+        assert_eq!(decoded_premium(&line)?, Some(value));
+    }
+    Ok(())
+}
+
+#[test]
+fn premium_encode_rejects_invalid_values() {
+    for premium in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.000_001] {
+        assert!(
+            matches!(
+                encode(&turn_end_with_premium(Some(premium))),
+                Err(EncodeError::InvalidPremium)
+            ),
+            "{premium}"
+        );
+    }
+}
+
+#[test]
+fn premium_decode_rejects_invalid_members() {
+    let base = assistant_line("m", None);
+    for raw in [
+        "\"1\"",
+        "\"2.5\"",
+        "-1",
+        "-0.000001",
+        "-0.5",
+        "true",
+        "false",
+        "null",
+        "1e400",
+        "1e500",
+        "9e999",
+    ] {
+        let line = base.replace(
+            "\"stop\":\"done\"}",
+            &format!("\"stop\":\"done\",\"premium_requests\":{raw}}}"),
+        );
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+    // The nested usage object stays closed: premium rides top-level only.
+    let nested = base.replace(
+        "\"cost_micro_usd\":null",
+        "\"cost_micro_usd\":null,\"premium_requests\":1.0",
+    );
+    assert!(matches!(
+        decode(nested.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn premium_without_optional_usage_is_rejected() {
+    let compaction = "{\"v\":1,\"type\":\"compaction\",\"id\":58,\"parent\":57,\"at\":\"2026-09-25T10:16:02.000Z\",\"summary\":null,\"first_kept\":null,\"tokens_before\":1,\"replay\":null,\"usage\":null,\"premium_requests\":1.0}\n";
+    assert!(matches!(
+        decode(compaction.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+    let turn_end = "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":null,\"changes\":[],\"premium_requests\":1.0}\n";
+    assert!(matches!(
+        decode(turn_end.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_vectors_encoded_len_matches_encode_len() -> Result<(), Box<dyn std::error::Error>> {
+    for line in VECTORS {
+        let decoded = decode(line.as_bytes())?;
+        let encoded = encode(&decoded.record)?;
+        let measured_len = encoded_len(&decoded.record)?;
+        assert_eq!(measured_len, encoded.len(), "vector line: {line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn representative_records_encoded_len_matches_encode_len() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Raw/non-ASCII replay
+    let replay_raw = RawJson::parse(
+        r#"{"api":"anthropic","text":"hello \n \t \u0000 🚀 \"world\"","nested":{"flag":true}}"#,
+    )?;
+    let raw_record = assistant_with_replay(Vec::new(), Some(replay_raw));
+    let encoded = encode(&raw_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, raw_record);
+    assert_eq!(encoded_len(&raw_record)?, encoded.len());
+
+    // Escaped user_entry text
+    let user_record = Record::User(user_entry(
+        42,
+        Some(1),
+        "Line 1\nLine 2\t\r\"escaped quotes\" and backslash \\ and unicode \u{1F980} & \u{00E9}",
+    ));
+    let encoded = encode(&user_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, user_record);
+    assert_eq!(encoded_len(&user_record)?, encoded.len());
+
+    // v:2 turn_reserved
+    let reserved_record = Record::TurnReserved {
+        at: "2026-10-13T00:00:00.000Z"
+            .parse()
+            .map_err(|error: jiff::Error| error.to_string())?,
+        turn: TurnId::new(nz(2)),
+    };
+    let encoded = encode(&reserved_record)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, reserved_record);
+    assert_eq!(encoded_len(&reserved_record)?, encoded.len());
+
+    // Routed assistant (API and synthetic)
+    let api_routed = Record::Assistant(assistant_entry(
+        "probe/model",
+        Some(AssistantRoute::Api(Family::Chat)),
+    ));
+    let encoded = encode(&api_routed)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, api_routed);
+    assert_eq!(encoded_len(&api_routed)?, encoded.len());
+
+    let synthetic_routed = Record::Assistant(assistant_entry(
+        "probe/model",
+        Some(AssistantRoute::Synthetic),
+    ));
+    let encoded = encode(&synthetic_routed)?;
+    let decoded = decode(&encoded)?;
+    assert_eq!(decoded.record, synthetic_routed);
+    assert_eq!(encoded_len(&synthetic_routed)?, encoded.len());
+
+    Ok(())
+}
+
+#[test]
+fn encoded_len_and_encode_error_parity() {
+    // NullReplay: explicit null replay in assistant entry
+    let null_replay = assistant_with_replay(Vec::new(), Some(RawJson::null()));
+    let len_err = encoded_len(&null_replay);
+    let enc_err = encode(&null_replay);
+    assert_eq!(len_err, Err(EncodeError::NullReplay));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // EmptyModel: empty model id on assistant entry
+    let empty_model = Record::Assistant(assistant_entry("", None));
+    let len_err = encoded_len(&empty_model);
+    let enc_err = encode(&empty_model);
+    assert_eq!(len_err, Err(EncodeError::EmptyModel));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // InvalidRoute: synthetic grammar violation
+    let invalid_route =
+        Record::Assistant(assistant_entry("Upper/x", Some(AssistantRoute::Synthetic)));
+    let len_err = encoded_len(&invalid_route);
+    let enc_err = encode(&invalid_route);
+    assert_eq!(
+        len_err,
+        Err(EncodeError::InvalidRoute(RouteError::InvalidSyntheticId {
+            id: "Upper/x".into(),
+        }))
+    );
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+
+    // InvalidCost: negative dollar cost
+    let invalid_cost = turn_end_with_cost(-0.000_001);
+    let len_err = encoded_len(&invalid_cost);
+    let enc_err = encode(&invalid_cost);
+    assert_eq!(len_err, Err(EncodeError::InvalidCost));
+    assert_eq!(enc_err.map(|v| v.len()), len_err);
+}
+
+fn provider_model_record(route: ModelRoute) -> Record {
+    Record::Model(Entry {
+        id: EntryId::new(nz(1)),
+        parent: None,
+        at: "2026-09-25T10:15:30.125Z"
+            .parse()
+            .expect("valid fixture timestamp"),
+        kind: EntryKind::Model { route },
+    })
+}
+
+#[test]
+fn model_record_with_provider_round_trips_byte_exactly() -> Result<(), Box<dyn std::error::Error>> {
+    let route = ModelRoute::Api {
+        family: Family::Responses,
+        model: "gpt-6-luna".into(),
+        provider: Some("acme".into()),
+    };
+    let record = provider_model_record(route.clone());
+    let line = "{\"v\":1,\"type\":\"model\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.125Z\",\"api\":\"openai_responses\",\"model\":\"gpt-6-luna\",\"provider\":\"acme\"}\n";
+    let encoded = encode(&record)?;
+    assert_eq!(encoded.as_slice(), line.as_bytes());
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(decoded_route(line)?, route);
+    Ok(())
+}
+
+#[test]
+fn provider_less_api_record_keeps_its_legacy_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let record = provider_model_record(ModelRoute::Api {
+        family: Family::Anthropic,
+        model: "claude-opus".into(),
+        provider: None,
+    });
+    let line = "{\"v\":1,\"type\":\"model\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.125Z\",\"api\":\"anthropic\",\"model\":\"claude-opus\"}\n";
+    assert!(!line.contains("provider"));
+    assert_eq!(encode(&record)?.as_slice(), line.as_bytes());
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(decoded_route(line)?.provider(), None);
+    Ok(())
+}
+
+#[test]
+fn model_record_rejects_bad_provider_members() {
+    for tail in [
+        r#""api":"anthropic","model":"m","provider":"""#,
+        r#""api":"anthropic","model":"m","provider":null"#,
+        r#""api":"anthropic","model":"m","provider":7"#,
+        r#""api":"anthropic","model":"m","provider":true"#,
+        r#""api":"anthropic","model":"m","provider":["acme"]"#,
+        r#""route":{"synthetic":{"id":"a/b"}},"provider":"acme""#,
+    ] {
+        let line = model_line(tail);
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn encode_refuses_an_empty_provider_id() {
+    let record = provider_model_record(ModelRoute::Api {
+        family: Family::Chat,
+        model: "m".into(),
+        provider: Some("".into()),
+    });
+    assert!(matches!(encode(&record), Err(EncodeError::EmptyProvider)));
+}
+
+#[test]
+fn synthetic_and_harness_model_records_never_carry_a_provider()
+-> Result<(), Box<dyn std::error::Error>> {
+    for route in [
+        ModelRoute::synthetic("a/b").expect("valid fixture id"),
+        ModelRoute::harness("dalgon/normal").expect("valid fixture id"),
+    ] {
+        assert_eq!(route.provider(), None);
+        assert_eq!(route.with_provider("acme"), route);
+        let record = provider_model_record(route);
+        let encoded = encode(&record)?;
+        let text = std::str::from_utf8(&encoded)?;
+        assert!(!text.contains("provider"), "{text}");
+        assert_eq!(decode(&encoded)?.record, record);
+    }
+    Ok(())
+}
+
+fn turn_end_line_with_micro(micro: &str) -> String {
+    format!(
+        "{{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":{micro}}},\"changes\":[]}}\n"
+    )
+}
+
+/// A stored cost is whole micro-dollars read into an `f64` dollar amount.
+/// Measured: every count through 2^51 (about $2.25 billion) comes back byte
+/// for byte, and from 2^52 the float starts to round, so only the exact
+/// region is pinned. The member keeps its unsigned-integer type: a negative,
+/// fractional, exponent, quoted, boolean or past-`u64` spelling is refused at
+/// its value, never rounded in.
+#[test]
+fn micro_dollar_costs_round_trip_byte_exactly_through_two_to_the_fifty_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    for micro in [
+        "null",
+        "0",
+        "1",
+        "999999",
+        "1000000",
+        "1125899906842623",
+        "1125899906842624",
+        "2251799813685247",
+        "2251799813685248",
+        "2251799813685249",
+    ] {
+        let line = turn_end_line_with_micro(micro);
+        let decoded = decode(line.as_bytes())?;
+        assert_eq!(
+            encode(&decoded.record)?.as_slice(),
+            line.as_bytes(),
+            "{micro}"
+        );
+    }
+    for bad in [
+        "18446744073709551616",
+        "-1",
+        "1.5",
+        "1e3",
+        "\"5\"",
+        "true",
+        "[]",
+    ] {
+        let line = turn_end_line_with_micro(bad);
+        let marker = "\"cost_micro_usd\":";
+        let expected = line.find(marker).map(|at| at + marker.len());
+        assert!(
+            matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if Some(offset) == expected
+            ),
+            "{bad}"
+        );
+    }
+    Ok(())
+}
+
+/// Bytes a corrupting edit may write: digits and signs, exponent and null
+/// spellings, structure characters, an escape and a NUL.
+#[cfg(unix)]
+const CORRUPTING_BYTES: &[u8] = b"0123456789-+.eEnul\"\\,:{}[] \t/\x00truefalsenull";
+
+#[cfg(unix)]
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(4000))]
+
+    /// The decoder is the only gate a stored line passes. Every line it
+    /// accepts after one to three corrupting edits of a canonical vector must
+    /// encode, the encoded line must decode, and encoding that again must give
+    /// the same bytes: the writer normalizes (millisecond timestamps, dropped
+    /// unknown members) once and then holds still. A refusal or a drifting
+    /// second encoding means the reader accepted what the writer cannot keep.
+    #[test]
+    fn a_line_the_decoder_accepts_re_encodes_to_a_fixed_point(
+        index in 0..VECTORS.len(),
+        edits in proptest::collection::vec(
+            (0_usize..4096, 0_u8..3, proptest::sample::select(CORRUPTING_BYTES.to_vec())),
+            1..4,
+        ),
+    ) {
+        let mut line = VECTORS[index].as_bytes().to_vec();
+        for (at, kind, byte) in edits {
+            if line.is_empty() {
+                break;
+            }
+            let at = at % line.len();
+            match kind {
+                0 => {
+                    line.remove(at);
+                }
+                1 => line[at] = byte,
+                _ => line.insert(at, byte),
+            }
+        }
+        let Ok(decoded) = decode(&line) else {
+            return Ok(());
+        };
+        let shown = || String::from_utf8_lossy(&line).into_owned();
+        let first = encode(&decoded.record).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the decoder accepted {} but the encoder refuses it: {error:?}",
+                shown()
+            ))
+        })?;
+        let again = decode(&first).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the encoder wrote a line the decoder refuses ({error:?}) from {}",
+                shown()
+            ))
+        })?;
+        let second = encode(&again.record).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the second encoding failed ({error:?}) from {}",
+                shown()
+            ))
+        })?;
+        proptest::prop_assert_eq!(second, first, "from {}", shown());
+    }
 }

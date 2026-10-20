@@ -11,8 +11,9 @@ use std::sync::Arc;
 use dal_core::{
     AgentsOp, AgentsReply, Answer, ApprovalMode, AutoCompaction, EntryId, EntryView, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, Mode, ModelRequest, ModelRoute, Name, Notice,
-    Origin, Page, Question, RunOutput, RunRequest, ServiceSet, SessionId, SessionSummary,
-    SidecarOp, StateError, StateOp, StateRecord, ThinkingLevel, TurnOp, TurnOpReply,
+    Origin, Page, PrivateEffect, Question, RunOutput, RunRequest, ServiceSet, SessionId,
+    SessionSummary, SidecarOp, StateError, StateOp, StateRecord, ThinkingLevel, TurnOp,
+    TurnOpReply,
 };
 use dal_core::{SessionInfo, SettingsView, Stats, TreeOutline, TurnState, Usage, UsageView, View};
 use tokio::sync::watch;
@@ -138,6 +139,9 @@ impl Services for FakeServices {
         unreachable!("publish path never calls services")
     }
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+        unreachable!("publish path never calls services")
+    }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
         unreachable!("publish path never calls services")
     }
 }
@@ -340,6 +344,7 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
             created_at: None,
             archived: None,
             last_seq: None,
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {
@@ -355,6 +360,7 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
+            scoped_models: None,
         },
         open: Vec::new(),
         changes: Vec::new(),
@@ -365,6 +371,7 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
                 output_tokens: 0,
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
+                premium_requests: None,
                 cost_usd: None,
             },
             context_tokens: 0,

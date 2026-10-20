@@ -81,6 +81,8 @@ mod edge;
 
 /// Exit-code mapping for command and signal outcomes.
 mod exit;
+/// The bounded process log sink.
+mod log;
 
 /// Commands that inspect and persist configured plugin grants.
 pub mod plugin_cmd;
@@ -146,6 +148,9 @@ pub fn run(factory: ProductFactory) -> ExitCode {
         Ok(captured) => captured,
         Err(code) => return code,
     };
+    // The tracing dispatcher is process lifetime: from here, product
+    // events on every thread and task forward into the installed sink.
+    log::install_tracing();
     // `dalgon dev` drives its own data root and workspace: broken user
     // configuration or product assembly must not block journal surgery
     // or a scenario run, so it dispatches before either is built.
@@ -165,16 +170,27 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     if let Some(cli::Commands::Docs(args)) = &cli.command {
         return dispatch::docs(args.clone(), factory.binary, (factory.docs)());
     }
+    let sink = open_log_sink(
+        edge::parse_log_level(&startup.vars).ok().flatten(),
+        &startup.data_root,
+    );
     let product = match build_once(&factory, startup.data_root.clone(), &startup.config) {
         Ok(product) => product,
-        Err(code) => return code,
+        Err(code) => {
+            flush_log(sink.as_ref(), exit::flush_budget());
+            return code;
+        }
     };
     let runtime = match tokio_runtime(&startup.vars, factory.binary) {
         Ok(runtime) => runtime,
-        Err(code) => return code,
+        Err(code) => {
+            flush_log(sink.as_ref(), exit::flush_budget());
+            return code;
+        }
     };
     let code = runtime.block_on(run_command(factory, cli, startup, product));
-    runtime.shutdown_timeout(Duration::from_millis(500));
+    runtime.shutdown_timeout(exit::runtime_budget());
+    flush_log(sink.as_ref(), exit::flush_budget());
     code
 }
 
@@ -302,7 +318,7 @@ async fn run_headless(
     // Print mode runs without a terminal: under `ask` the run cannot answer
     // approval requests, so it emits the once-per-run headless notice and
     // denies gated calls instead of waiting out the broker timeout.
-    let headless_approval = config.approval() == dal_core::ApprovalMode::Ask;
+    let approval = config.approval();
     let session = session_ref(cli, workspace);
     let host = match Host::start(
         product,
@@ -333,7 +349,7 @@ async fn run_headless(
         prompt: parts,
         stdout_is_tty: snapshot.stdout_tty,
         stderr_is_tty: snapshot.stderr_tty,
-        headless_approval,
+        approval,
         stop: stop.clone(),
         quiet_wait: (!cli.json).then_some(print::QUIET_WAIT),
     };
@@ -518,16 +534,47 @@ fn clap_exit(error: &clap::Error) -> ExitCode {
 
 /// Renders one configuration failure with its fix line.
 fn config_exit(binary: &str, error: &ConfigError) -> ExitCode {
-    if let Some([first, second]) = error.rules_lines(binary) {
-        return two_lines([first, second], exit::ExitKind::RequestedFailure);
-    }
     two_lines(
-        [
-            format!("{binary}: {error}"),
-            cli::texts::CONFIG_FIX_HINT.into(),
-        ],
+        config_error_lines(error, binary),
         exit::ExitKind::RequestedFailure,
     )
+}
+
+/// Renders one configuration failure to its two diagnostic lines without
+/// exiting: the shared body of [`config_exit`].
+///
+/// The unknown-key catalog names the closest key at suggestion distance or
+/// lists the product's key table in table order; both end with the config
+/// docs pointer. Any other error keeps its rendered text and the fix hint.
+fn config_error_lines(error: &ConfigError, binary: &str) -> [String; 2] {
+    if let Some([first, second]) = error.rules_lines(binary) {
+        return [first, second];
+    }
+    if let ConfigError::UnknownKey {
+        key,
+        suggestion,
+        known_keys,
+    } = error
+    {
+        let first = format!(
+            "{binary}: {}: unknown key \"{key}\"",
+            edge::CONFIG_FILE_NAME
+        );
+        let second = match suggestion.as_deref() {
+            Some(nearest) => {
+                format!("Did you mean \"{nearest}\"? See dalgon docs dal://config.")
+            }
+            None => format!(
+                "Known keys: {} See dalgon docs dal://config.",
+                known_keys.join(", ")
+            ),
+        };
+        return [first, second];
+    }
+    [
+        format!("{binary}: {error}"),
+        cli::texts::CONFIG_FIX_HINT.into(),
+    ]
 }
 
 /// Renders one host startup or open failure with its fix line.
@@ -596,6 +643,49 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
         ));
     }
     Ok((vars, cwd))
+}
+
+/// Opens the family log sink once after the roots resolve and installs it.
+///
+/// An unavailable log must not stop the product: the failure is reported on
+/// stderr and the run continues without the sink rather than failing the
+/// command.
+fn open_log_sink(level: Option<edge::LogLevel>, data_root: &Path) -> Option<log::LogSink> {
+    let log_path = edge::data_root_log_path(data_root);
+    match log::LogSink::open(level, &log_path) {
+        Ok(sink) => {
+            // A second run in one process keeps the first sink in the slot;
+            // this run still flushes its own handle.
+            let _ = sink.install();
+            Some(sink)
+        }
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "dalgon: the log at {} is unavailable: {error}",
+                log_path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Flushes the process log sink at shutdown, after the runtime has stopped,
+/// waiting at most `budget`.
+///
+/// The drop summary (`dropped <n> log lines`) is appended by the writer when
+/// the count is non-zero; a flush failure is reported on stderr but never
+/// changes the exit code.
+pub(crate) fn flush_log(sink: Option<&log::LogSink>, budget: Duration) {
+    let Some(sink) = sink else {
+        return;
+    };
+    if let Err(error) = sink.flush(budget) {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "dalgon: the log did not finish flushing: {error}"
+        );
+    }
 }
 
 /// Resolves roots, the workspace, and the layered configuration.
@@ -752,5 +842,115 @@ fn build_once(
             ],
             exit::ExitKind::RequestedFailure,
         )),
+    }
+}
+
+#[cfg(test)]
+mod config_exit_tests {
+    use super::config_error_lines;
+    use dal_core::{ConfigError, ConfigProduct};
+    use std::path::Path;
+
+    /// Loads a one-key user config that must fail.
+    fn load_error(user_toml: &str) -> ConfigError {
+        dal_core::Config::load(ConfigProduct::Dalgon, Path::new("/t"), "", Some(user_toml))
+            .unwrap_err()
+    }
+
+    /// Loads a one-key user config and renders its failure lines.
+    fn lines_for(user_toml: &str) -> [String; 2] {
+        config_error_lines(&load_error(user_toml), "dalgon")
+    }
+
+    #[test]
+    fn near_miss_unknown_key_names_the_closest_key() {
+        let lines = lines_for("modle = \"normal\"\n");
+        assert_eq!(
+            lines[0],
+            format!(
+                "dalgon: {}: unknown key \"modle\"",
+                crate::edge::CONFIG_FILE_NAME
+            )
+        );
+        assert_eq!(
+            lines[1],
+            "Did you mean \"mode\"? See dalgon docs dal://config."
+        );
+    }
+
+    #[test]
+    fn distant_unknown_key_lists_the_key_table_in_table_order() {
+        let error = dal_core::Config::load(
+            ConfigProduct::Dalgon,
+            Path::new("/t"),
+            "",
+            Some("zzz = 1\n"),
+        )
+        .unwrap_err();
+        let ConfigError::UnknownKey { known_keys, .. } = &error else {
+            panic!("expected UnknownKey, got {error:?}");
+        };
+        let lines = config_error_lines(&error, "dalgon");
+        assert_eq!(
+            lines[0],
+            format!(
+                "dalgon: {}: unknown key \"zzz\"",
+                crate::edge::CONFIG_FILE_NAME
+            )
+        );
+        let expected = format!(
+            "Known keys: {} See dalgon docs dal://config.",
+            known_keys.join(", ")
+        );
+        assert_eq!(lines[1], expected, "the table follows the schema order");
+    }
+
+    #[test]
+    fn subtable_unknown_keys_carry_their_suggestion() {
+        let lines = lines_for("[rules]\nwach = true\n");
+        assert_eq!(
+            lines[0],
+            format!(
+                "dalgon: {}: unknown key \"rules.wach\"",
+                crate::edge::CONFIG_FILE_NAME
+            )
+        );
+        assert_eq!(
+            lines[1],
+            "Did you mean \"rules.watch\"? See dalgon docs dal://config."
+        );
+    }
+
+    /// An invalid `[rules]` value renders as exactly two lines: the key and
+    /// the value in TOML form, then the fix. A string keeps its quotes, so a
+    /// quoted number is not reported as if the number itself were out of
+    /// range, and a number stays bare. It never falls back to the generic
+    /// text and hint.
+    #[test]
+    fn rules_values_keep_their_rules_lines() {
+        for (body, first, second) in [
+            (
+                "max_retries = \"3\"",
+                "dalgon: dal.toml: rules.max_retries \"3\" is invalid",
+                "Use a whole number from 0 to 20.",
+            ),
+            (
+                "max_retries = 50",
+                "dalgon: dal.toml: rules.max_retries 50 is invalid",
+                "Use a whole number from 0 to 20.",
+            ),
+        ] {
+            let lines = lines_for(&format!("[rules]\n{body}\n"));
+            assert_eq!(lines, [first.to_owned(), second.to_owned()], "{body}");
+        }
+    }
+
+    #[test]
+    fn non_rules_invalid_values_keep_the_generic_fallback() {
+        let lines = lines_for("mode = \"jit\"\n");
+        assert_eq!(
+            lines[0],
+            "dalgon: invalid config value jit for mode: normal, eval-first, eval-only"
+        );
     }
 }

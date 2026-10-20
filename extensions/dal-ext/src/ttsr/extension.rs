@@ -5,22 +5,30 @@ use std::sync::{Arc, Mutex};
 
 use dal_agent::error::SchemeError;
 use dal_agent::ext::{
-    BoxFuture, Extension, ExtensionBuilder, HookError, PromptOrder, PromptSection, SchemeCx,
-    SchemeResolver, SectionCx, SectionFn, SessionCx, SessionInstalls, SessionSetup,
+    BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook, PromptOrder,
+    PromptSection, SchemeCx, SchemeResolver, SectionCx, SectionFn, SessionCx, SessionInstalls,
+    SessionSetup,
 };
+use dal_core::ext::{SessionEnd, Settled};
 use dal_core::{Notice, RegistrationError, ServiceSet};
 
 use super::build::{self, RuleBuildInput, RuleSet, for_agent, set_for_with_judged};
 use super::gate::Gate;
 use super::judged::{self, JudgeGate};
+use super::lane::Lanes;
 use super::record::RecordSource;
 use super::texts::{RulesProduct, load_problems_note};
 use super::watch::factory::{EditStylePicker, TtsrWatchFactory};
+
 /// Product-provided dependencies for the TTSR session lifecycle.
 #[derive(Clone)]
 pub struct TtsrDeps {
     /// Selects the patch argument dialect for one resolved model route.
     pub pick_edit_style: EditStylePicker,
+    /// Whether the product composes the built-in repetitive-turns lane
+    /// (decision D-21: off in dal, on in dalgona). When `false`, no lane
+    /// hook registers and no request's watch delivers a lane fire.
+    pub lane: bool,
 }
 
 impl std::fmt::Debug for TtsrDeps {
@@ -28,6 +36,7 @@ impl std::fmt::Debug for TtsrDeps {
         formatter
             .debug_struct("TtsrDeps")
             .field("pick_edit_style", &"<product closure>")
+            .field("lane", &self.lane)
             .finish()
     }
 }
@@ -46,16 +55,24 @@ pub struct TtsrSessionState {
 #[derive(Clone, Debug)]
 struct TtsrSetup {
     deps: TtsrDeps,
+    /// The shared lane store, present only when the product composes the
+    /// repetitive-turns lane.
+    lanes: Option<Arc<Lanes>>,
 }
 
 impl SessionSetup for TtsrSetup {
     fn open(&self, cx: SessionCx) -> BoxFuture<'static, Result<SessionInstalls, HookError>> {
         let deps = self.deps.clone();
-        Box::pin(async move { open_session(deps, cx).await })
+        let lanes = self.lanes.clone();
+        Box::pin(async move { open_session(deps, lanes, cx).await })
     }
 }
 
-async fn open_session(deps: TtsrDeps, cx: SessionCx) -> Result<SessionInstalls, HookError> {
+async fn open_session(
+    deps: TtsrDeps,
+    lanes: Option<Arc<Lanes>>,
+    cx: SessionCx,
+) -> Result<SessionInstalls, HookError> {
     let judge_config =
         crate::judge::JudgeConfig::from_config(&cx.config).map_err(|error| HookError::Failed {
             message: format!("dal.toml: {error}").into(),
@@ -97,6 +114,10 @@ async fn open_session(deps: TtsrDeps, cx: SessionCx) -> Result<SessionInstalls, 
         deps.pick_edit_style,
         Some(judge.clone()),
     );
+    let factory = match lanes {
+        Some(lanes) => factory.with_lane(lanes),
+        None => factory,
+    };
     let mut notices = Vec::new();
     let product = if cx.product == "dalgona" {
         RulesProduct::Dalgona
@@ -163,6 +184,38 @@ fn rules_for_session(cx: &SessionCx) -> RuleSet {
     )
 }
 
+/// The `settled` hook: folds the settled reply into the session's
+/// repetitive-turns lane and, when the lane fires, parks one fire excerpt
+/// for the session. The next request's watch delivers it through the same
+/// journal, gate, and text path a stream fire uses, with subject `reply`.
+#[derive(Clone, Debug)]
+struct LaneSettledHook {
+    lanes: Arc<Lanes>,
+}
+
+impl ObserveHook<Settled> for LaneSettledHook {
+    fn call(&self, input: Settled, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        let _ = self
+            .lanes
+            .observe(cx.session, input.turn, &input.reply_text);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+/// The `session_end` hook: evicts the session's lane window and its parked
+/// fire excerpt, so a reopened session starts with clean repetition state.
+#[derive(Clone, Debug)]
+struct LaneSessionEndHook {
+    lanes: Arc<Lanes>,
+}
+
+impl ObserveHook<SessionEnd> for LaneSessionEndHook {
+    fn call(&self, input: SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        self.lanes.end_session(input.session);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
 #[derive(Debug)]
 struct RulePrompt;
 
@@ -224,14 +277,27 @@ impl SchemeResolver for RuleResolver {
 /// Returns [`RegistrationError`] when the host rejects the extension or one of
 /// its owned prompt, setup, or scheme registrations.
 pub fn extension(deps: TtsrDeps) -> Result<Extension, RegistrationError> {
-    ExtensionBuilder::new("ttsr", env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
-        .session_setup(TtsrSetup { deps })
+    let lanes = deps.lane.then(|| Arc::new(Lanes::new()));
+    let mut builder = ExtensionBuilder::new("ttsr", env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
+        .session_setup(TtsrSetup {
+            deps,
+            lanes: lanes.clone(),
+        })
         .prompt_section(PromptSection::session(
             PromptOrder::Rules,
             Arc::new(RulePrompt),
         ))
-        .scheme("rule", Arc::new(RuleResolver))
-        .build()
+        .scheme("rule", Arc::new(RuleResolver));
+    if let Some(lanes) = &lanes {
+        builder = builder
+            .on_settled(LaneSettledHook {
+                lanes: Arc::clone(lanes),
+            })
+            .on_session_end(LaneSessionEndHook {
+                lanes: Arc::clone(lanes),
+            });
+    }
+    builder.build()
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,21 @@ pub use probe::{
     Probe, ReplyParser, parse_da1, parse_decrpm, parse_kitty_keyboard, parse_osc11, parse_replies,
     startup_probe,
 };
+
+/// The terminal's answer to a caret-position query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorReport {
+    /// The 1-based (row, column) the terminal reported directly before the
+    /// status sentinel answer.
+    Position(u16, u16),
+    /// The terminal answered the status sentinel, but no position report sat
+    /// directly before it (for example, a key arrived between the answers).
+    /// The terminal is alive; asking again later is safe and never latches.
+    Unpaired,
+    /// No answer arrived within the timeout, or the adapter cannot ask.
+    /// Callers hold the frame instead of painting at an unmeasured row.
+    Silent,
+}
 
 /// I/O boundary for terminal setup, probes, and the input byte stream.
 pub trait TermIo: Send {
@@ -39,7 +55,12 @@ pub trait TermIo: Send {
     /// # Errors
     /// Returns the terminal I/O error when the read fails.
     fn read(&self, timeout: Duration) -> io::Result<Vec<u8>>;
-    /// Raises `SIGTSTP` on POSIX; does nothing on Windows.
+    /// Requests a `SIGTSTP` stop on POSIX; does nothing on Windows.
+    ///
+    /// The caller restores the terminal first and re-enters its modes after
+    /// this returns. Linux and Android prefer the raising thread; a default,
+    /// unblocked SIGTSTP stops a non-orphaned foreground group before return.
+    /// Other POSIX systems signal the process; the stop may still be pending.
     fn raise_tstp(&self);
     /// Returns the process-edge shutdown status, when a signal requested exit.
     fn shutdown_code(&self) -> Option<u8> {
@@ -48,6 +69,25 @@ pub trait TermIo: Send {
     /// Consumes a process-edge resize notification.
     fn take_resize(&self) -> bool {
         false
+    }
+    /// Counts process-edge resize notifications; never decreases. A change
+    /// between two paints means the terminal may have moved the screen even
+    /// when the size is unchanged again.
+    fn resize_epoch(&self) -> u64 {
+        0
+    }
+    /// Asks the terminal for the caret position, waiting at most `timeout`.
+    /// Input read while waiting is kept, in arrival order, for the next
+    /// `read`, minus the consumed answer pair or lone status packet.
+    ///
+    /// The default reports [`CursorReport::Silent`], which maps to hold: no
+    /// live bytes are written at an unmeasured position.
+    ///
+    /// # Errors
+    /// Returns the terminal I/O error when the query write or input read fails.
+    fn cursor_position(&self, timeout: Duration) -> io::Result<CursorReport> {
+        let _ = timeout;
+        Ok(CursorReport::Silent)
     }
     /// Asks the desktop to open `url` in a browser. The default declines, so
     /// a terminal without a desktop edge only shows the URL.
@@ -115,6 +155,12 @@ impl TermState {
     /// Records grapheme-width terminal mode.
     pub fn set_grapheme(&mut self, enabled: bool) {
         self.grapheme = enabled;
+    }
+
+    /// Reports whether grapheme-width mode is active.
+    #[must_use]
+    pub const fn grapheme(&self) -> bool {
+        self.grapheme
     }
 
     /// Records alternate-screen ownership.
@@ -241,6 +287,12 @@ pub(crate) fn terminal_error(message: &str) -> TuiError {
 pub struct CrosstermTermIo {
     #[cfg(unix)]
     stdin: io::Stdin,
+    /// Input bytes consumed during a caret-position query that belong to the
+    /// key stream; the next `read` drains them before polling again.
+    #[cfg(unix)]
+    pending: Mutex<Vec<u8>>,
+    /// Resize events observed while reading input (Windows `Event::Resize`).
+    resize_epoch: Arc<AtomicU64>,
 }
 
 impl CrosstermTermIo {
@@ -259,7 +311,58 @@ impl CrosstermTermIo {
         Self {
             #[cfg(unix)]
             stdin,
+            #[cfg(unix)]
+            pending: Mutex::new(Vec::new()),
+            resize_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Drains `bytes` into the preserved-input queue in arrival order.
+    #[cfg(unix)]
+    fn push_pending(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+    }
+
+    /// Reads stdin for at most `timeout` (the former unix `read` body).
+    #[cfg(unix)]
+    fn read_stdin(&self, timeout: Duration) -> io::Result<Vec<u8>> {
+        let stdin = self.stdin.lock();
+        let timeout = rustix::event::Timespec::try_from(timeout)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let mut descriptors = [rustix::event::PollFd::new(
+            &stdin,
+            rustix::event::PollFlags::IN,
+        )];
+        match rustix::event::poll(&mut descriptors, Some(&timeout)) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => return Ok(Vec::new()),
+            Err(error) => return Err(io::Error::from(error)),
+        }
+        if !descriptors[0]
+            .revents()
+            .contains(rustix::event::PollFlags::IN)
+        {
+            return Ok(Vec::new());
+        }
+        let mut buffer = [0_u8; 4096];
+        let bytes_read = match rustix::io::read(&stdin, &mut buffer) {
+            Ok(bytes) => bytes,
+            Err(rustix::io::Errno::INTR) => return Ok(Vec::new()),
+            Err(error) => return Err(io::Error::from(error)),
+        };
+        if bytes_read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed",
+            ));
+        }
+        Ok(buffer[..bytes_read].to_vec())
     }
 }
 
@@ -285,37 +388,16 @@ impl TermIo for CrosstermTermIo {
     fn read(&self, timeout: Duration) -> io::Result<Vec<u8>> {
         #[cfg(unix)]
         {
-            let stdin = self.stdin.lock();
-            let timeout = rustix::event::Timespec::try_from(timeout)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let mut descriptors = [rustix::event::PollFd::new(
-                &stdin,
-                rustix::event::PollFlags::IN,
-            )];
-            match rustix::event::poll(&mut descriptors, Some(&timeout)) {
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => return Ok(Vec::new()),
-                Err(error) => return Err(io::Error::from(error)),
+            let pending = std::mem::take(
+                &mut *self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            if !pending.is_empty() {
+                return Ok(pending);
             }
-            if !descriptors[0]
-                .revents()
-                .contains(rustix::event::PollFlags::IN)
-            {
-                return Ok(Vec::new());
-            }
-            let mut buffer = [0_u8; 4096];
-            let bytes_read = match rustix::io::read(&stdin, &mut buffer) {
-                Ok(bytes) => bytes,
-                Err(rustix::io::Errno::INTR) => return Ok(Vec::new()),
-                Err(error) => return Err(io::Error::from(error)),
-            };
-            if bytes_read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal input closed",
-                ));
-            }
-            Ok(buffer[..bytes_read].to_vec())
+            self.read_stdin(timeout)
         }
         #[cfg(not(unix))]
         {
@@ -334,18 +416,76 @@ impl TermIo for CrosstermTermIo {
                     bytes.extend_from_slice(b"\x1b[201~");
                     Ok(bytes)
                 }
+                Event::Resize(_, _) => {
+                    self.resize_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Vec::new())
+                }
                 _ => Ok(Vec::new()),
             }
+        }
+    }
+
+    fn resize_epoch(&self) -> u64 {
+        self.resize_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Unix: DSR-6 plus a DSR-5 ordering sentinel in one write, then bounded
+    /// polls. Every byte that is not the consumed adjacent answer pair (or
+    /// one lone status packet) is queued for the next `read` in arrival
+    /// order. Windows: the synchronous console API answers with no wire
+    /// bytes, so the input stream is untouched by construction.
+    fn cursor_position(&self, timeout: Duration) -> io::Result<CursorReport> {
+        #[cfg(unix)]
+        {
+            self.write(b"\x1b[6n\x1b[5n")?;
+            let deadline = Instant::now() + timeout;
+            let mut buffered = Vec::new();
+            loop {
+                match take_position_report(&mut buffered) {
+                    PositionScan::Found(row, column) => {
+                        self.push_pending(&buffered);
+                        return Ok(CursorReport::Position(row, column));
+                    }
+                    PositionScan::StatusOnly => {
+                        self.push_pending(&buffered);
+                        return Ok(CursorReport::Unpaired);
+                    }
+                    PositionScan::Waiting => {}
+                }
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    self.push_pending(&buffered);
+                    return Ok(CursorReport::Silent);
+                };
+                match self.read_stdin(remaining) {
+                    Ok(chunk) => buffered.extend_from_slice(&chunk),
+                    Err(error) => {
+                        self.push_pending(&buffered);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            // GetConsoleScreenBufferInfo through crossterm: no wire bytes.
+            let (column, row) = crossterm::cursor::position()?;
+            Ok(CursorReport::Position(
+                row.saturating_add(1),
+                column.saturating_add(1),
+            ))
         }
     }
 
     fn raise_tstp(&self) {
         #[cfg(unix)]
         {
-            let _ = rustix::process::kill_process(
-                rustix::process::getpid(),
-                rustix::process::Signal::TSTP,
-            );
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let target = rustix::thread::gettid();
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let target = rustix::process::getpid();
+            let _ = rustix::process::kill_process(target, rustix::process::Signal::TSTP);
         }
     }
 }
@@ -385,6 +525,143 @@ fn encode_key(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
         bytes.insert(0, 0x1b);
     }
     bytes
+}
+
+/// What [`take_position_report`] extracted from queued input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PositionScan {
+    /// Removed an adjacent `CSI row ; col R` and `CSI 0n`/`CSI 3n` pair.
+    Found(u16, u16),
+    /// Removed one status packet that had no adjacent position report.
+    StatusOnly,
+    /// No consumable answer yet; keep reading until the deadline.
+    Waiting,
+}
+
+/// Removes from `bytes` the first `CSI row ; column R` that is immediately
+/// followed by `CSI 0 n` or `CSI 3 n`, together with that status packet
+/// ([`PositionScan::Found`]). Otherwise removes the first status packet that
+/// has no adjacent position report ([`PositionScan::StatusOnly`]).
+///
+/// Bytes inside `CSI 200 ~` … `CSI 201 ~` paste payloads are never scanned.
+/// A lone `CSI 1;m R` key or any other input stays in order. Row and column
+/// must parse as `u16 >= 1` with no private marker.
+pub(crate) fn take_position_report(bytes: &mut Vec<u8>) -> PositionScan {
+    let mut index = 0;
+    let mut in_paste = false;
+    while index < bytes.len() {
+        if in_paste {
+            match find_bytes(bytes, index, b"\x1b[201~") {
+                Some(end) => {
+                    index = end + 6;
+                    in_paste = false;
+                }
+                None => return PositionScan::Waiting,
+            }
+            continue;
+        }
+        let Some(start) = find_bytes(bytes, index, b"\x1b[") else {
+            return PositionScan::Waiting;
+        };
+        match parse_response_csi(&bytes[start..]) {
+            ResponseCsi::Partial => return PositionScan::Waiting,
+            ResponseCsi::Aborted => index = start + 2,
+            ResponseCsi::PasteOpen(end) => {
+                in_paste = true;
+                index = start + end;
+            }
+            ResponseCsi::Other(end) => index = start + end,
+            ResponseCsi::Status(end) => {
+                bytes.drain(start..start + end);
+                return PositionScan::StatusOnly;
+            }
+            ResponseCsi::Report(row, column, end) => {
+                let pair = status_packet_len(&bytes[start + end..]);
+                if pair > 0 {
+                    bytes.drain(start..start + end + pair);
+                    return PositionScan::Found(row, column);
+                }
+                index = start + end;
+            }
+        }
+    }
+    PositionScan::Waiting
+}
+
+/// Returns the byte length of a leading `CSI 0n`/`CSI 3n` packet, else 0.
+fn status_packet_len(bytes: &[u8]) -> usize {
+    match bytes {
+        [0x1b, b'[', b'0' | b'3', b'n', ..] => 4,
+        _ => 0,
+    }
+}
+
+/// Returns the first index of `needle` in `haystack` at or after `from`.
+fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset)
+}
+
+/// One CSI sequence recognized while scanning query responses.
+enum ResponseCsi {
+    /// The sequence has no final byte yet.
+    Partial,
+    /// Another `ESC` restarted the sequence; the bare `ESC[` is ordinary input.
+    Aborted,
+    /// `CSI 200~` opened a bracketed paste.
+    PasteOpen(usize),
+    /// `CSI row ; col R` with both parameters valid `u16 >= 1`.
+    Report(u16, u16, usize),
+    /// `CSI 0n` or `CSI 3n` device status.
+    Status(usize),
+    /// Any other complete CSI; length given so the scan can step over it.
+    Other(usize),
+}
+
+/// Parses the CSI sequence at `bytes[0] == ESC, bytes[1] == '['`.
+fn parse_response_csi(bytes: &[u8]) -> ResponseCsi {
+    for (offset, byte) in bytes.iter().enumerate().skip(2) {
+        match byte {
+            0x1b => return ResponseCsi::Aborted,
+            b'@'..=b'~' => return classify_response(&bytes[2..offset], *byte, offset + 1),
+            _ => {}
+        }
+    }
+    ResponseCsi::Partial
+}
+
+/// Classifies a complete CSI by parameter bytes and final byte.
+fn classify_response(parameters: &[u8], final_byte: u8, length: usize) -> ResponseCsi {
+    if parameters == b"200" && final_byte == b'~' {
+        return ResponseCsi::PasteOpen(length);
+    }
+    if parameters
+        .iter()
+        .any(|byte| !byte.is_ascii_digit() && *byte != b';')
+    {
+        return ResponseCsi::Other(length);
+    }
+    if final_byte == b'n' && matches!(parameters, b"0" | b"3") {
+        return ResponseCsi::Status(length);
+    }
+    if final_byte == b'R'
+        && let Some((row, column)) = parse_report_parameters(parameters)
+    {
+        return ResponseCsi::Report(row, column, length);
+    }
+    ResponseCsi::Other(length)
+}
+
+/// Parses `row ; column` report parameters; both must be `u16 >= 1`.
+fn parse_report_parameters(parameters: &[u8]) -> Option<(u16, u16)> {
+    let text = std::str::from_utf8(parameters).ok()?;
+    let (row, column) = text.split_once(';')?;
+    let row = row.parse::<u16>().ok()?;
+    let column = column.parse::<u16>().ok()?;
+    (row >= 1 && column >= 1).then_some((row, column))
 }
 
 /// Creates a deterministic terminal adapter from delayed byte reads.
@@ -479,8 +756,8 @@ fn colorfgbg_theme(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TermIo, TermState, parse_da1, parse_decrpm, parse_osc11, parse_replies, restore_bytes,
-        startup_probe,
+        CursorReport, PositionScan, TermIo, TermState, parse_da1, parse_decrpm, parse_osc11,
+        parse_replies, restore_bytes, startup_probe, take_position_report,
     };
     use std::time::Duration;
 
@@ -547,6 +824,54 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_report_pair_is_removed_in_order() {
+        let mut bytes = b"a\x1b[9;3R\x1b[0nb".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::Found(9, 3));
+        assert_eq!(bytes, b"ab");
+    }
+
+    #[test]
+    fn preceding_lone_f3_key_stays_while_later_pair_is_found() {
+        let mut bytes = b"\x1b[1;5Rx\x1b[9;3R\x1b[0n".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::Found(9, 3));
+        assert_eq!(bytes, b"\x1b[1;5Rx");
+    }
+
+    #[test]
+    fn key_interleaved_between_answers_yields_status_only() {
+        let mut bytes = b"\x1b[9;3Rx\x1b[0n".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::StatusOnly);
+        assert_eq!(bytes, b"\x1b[9;3Rx");
+    }
+
+    #[test]
+    fn lone_status_packet_is_status_only() {
+        let mut bytes = b"k\x1b[0nrest".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::StatusOnly);
+        assert_eq!(bytes, b"krest");
+    }
+
+    #[test]
+    fn report_pair_inside_paste_is_never_scanned() {
+        let mut bytes = b"\x1b[200~\x1b[9;3R\x1b[0n\x1b[201~\x1b[0n".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::StatusOnly);
+        assert_eq!(bytes, b"\x1b[200~\x1b[9;3R\x1b[0n\x1b[201~");
+    }
+
+    #[test]
+    fn partial_sequence_waits() {
+        let mut bytes = b"\x1b[9;3".to_vec();
+        assert_eq!(take_position_report(&mut bytes), PositionScan::Waiting);
+        assert_eq!(bytes, b"\x1b[9;3");
+        let mut malformed = b"\x1b[0;5R\x1b[0n".to_vec();
+        assert_eq!(
+            take_position_report(&mut malformed),
+            PositionScan::StatusOnly
+        );
+        assert_eq!(malformed, b"\x1b[0;5R");
+    }
+
+    #[test]
     fn delayed_probe_bytes_partition_through_the_reply_parser() {
         let delayed = b"\x1b[?2026;1$y\x1b[?1uhello".to_vec();
         let io = super::fake_term_io(vec![(Duration::from_millis(5), delayed)]);
@@ -555,5 +880,16 @@ mod tests {
         assert!(probe.sync_update, "{probe:?}");
         assert!(probe.kitty_keyboard, "{probe:?}");
         assert_eq!(replay, b"hello");
+    }
+
+    #[test]
+    fn default_cursor_position_is_silent() {
+        let io = super::fake_term_io(Vec::new());
+        assert_eq!(
+            io.cursor_position(Duration::from_millis(1))
+                .unwrap_or(CursorReport::Unpaired),
+            CursorReport::Silent
+        );
+        assert_eq!(io.resize_epoch(), 0);
     }
 }

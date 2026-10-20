@@ -208,7 +208,9 @@ fn assistant_items<'a>(parts: &'a [AssistantPart], replay: bool, items: &mut Vec
     let mut text = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text { text: slice } => text.push(Content::OutputText { text: slice }),
+            AssistantPart::Text { text: slice, .. } => {
+                text.push(Content::OutputText { text: slice });
+            }
             AssistantPart::Thinking {
                 replay: Some(item), ..
             } if replay => {
@@ -216,7 +218,9 @@ fn assistant_items<'a>(parts: &'a [AssistantPart], replay: bool, items: &mut Vec
                 items.push(Input::Reasoning(item));
             }
             AssistantPart::Thinking { .. } => {}
-            AssistantPart::ToolCall { call, name, args } => {
+            AssistantPart::ToolCall {
+                call, name, args, ..
+            } => {
                 flush_text(&mut text, items);
                 items.push(Input::FunctionCall(FunctionCall {
                     kind: "function_call",
@@ -293,7 +297,7 @@ fn input_items<'a>(
                     .collect::<Result<Vec<_>, _>>()?;
                 items.push(message("user", blocks));
             }
-            ContextItem::Assistant { source, parts } => {
+            ContextItem::Assistant { source, parts, .. } => {
                 let replay = source.family == family && source.model.as_ref() == model;
                 assistant_items(parts, replay, &mut items);
             }
@@ -340,7 +344,7 @@ pub(crate) fn request_body(
     thinking: WireThinking,
     reasoning_summary: bool,
 ) -> Result<Vec<u8>, ProviderError> {
-    let ModelRoute::Api { family, model } = &request.model else {
+    let ModelRoute::Api { family, model, .. } = &request.model else {
         return Err(invalid("a Responses body needs an API model route"));
     };
     if !matches!(family, Family::Responses | Family::Codex) {
@@ -394,6 +398,7 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
     let ModelRoute::Api {
         family: Family::Responses,
         model,
+        ..
     } = &input.request.model
     else {
         return Err(invalid(
@@ -401,16 +406,28 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
         ));
     };
     let body = request_body(input.request, input.thinking, input.reasoning_summary)?;
+    if input.auth == AuthStyle::None && !matches!(input.credential, Credential::None) {
+        return Err(invalid("credential-less entries carry no auth header"));
+    }
     let (auth_header, oauth, secret) = match input.credential {
         Credential::ApiKey { key } => {
             let secret = key.expose().to_owned().into_boxed_str();
             let auth_header = match input.auth {
                 AuthStyle::Bearer => ("authorization", format!("Bearer {}", secret.as_ref())),
                 AuthStyle::XApiKey => ("x-api-key", secret.to_string()),
+                AuthStyle::ApiKey => ("api-key", secret.to_string()),
+                AuthStyle::None => {
+                    return Err(invalid("credential-less entries carry no auth header"));
+                }
             };
             (Some(auth_header), false, secret)
         }
         Credential::OAuth(credential) => {
+            if input.auth == AuthStyle::ApiKey {
+                return Err(invalid(
+                    "an OAuth credential cannot use the api-key header style",
+                ));
+            }
             let secret = credential.access_token.expose().to_owned().into_boxed_str();
             (
                 Some(("authorization", format!("Bearer {}", secret.as_ref()))),
@@ -551,6 +568,7 @@ fn usage(wire: Option<WireUsage>) -> Usage {
         cache_write_tokens: input
             .and_then(|details| details.cache_write_tokens)
             .unwrap_or(0),
+        premium_requests: None,
         cost_usd: None,
     }
 }

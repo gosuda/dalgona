@@ -15,7 +15,8 @@
 //!   [`send`] races the response head against a caller-supplied timer.
 //! - Totals ([`NON_STREAM_TOTAL_TIMEOUT`], [`COMPACT_TIMEOUT`],
 //!   [`USAGE_TIMEOUT`], [`OAUTH_TIMEOUT`]): the per-request deadline of
-//!   [`Exchange::Json`], covering connect through the last body byte.
+//!   [`Exchange::Json`] and of [`Exchange::Bytes`] when it carries one,
+//!   covering connect through the last body byte.
 //! - [`LOGIN_WAIT`]: the sign-in flow's own wait for a callback; no request
 //!   here enforces it.
 
@@ -79,6 +80,16 @@ pub enum Exchange {
         /// Deadline from connect through the last body byte.
         total: Duration,
     },
+    /// One binary response: `accept` carries the caller's media range and the
+    /// body is bounded end to end by `total` when present, with no total
+    /// deadline at all when it is `None`.
+    Bytes {
+        /// Value sent as the request's `accept` header.
+        accept: &'static str,
+        /// Deadline from connect through the last body byte, or no total
+        /// deadline.
+        total: Option<Duration>,
+    },
 }
 
 /// Builds the one client a host keeps per provider set.
@@ -102,6 +113,66 @@ pub enum Exchange {
     reason = "the builder fails only when the compiled TLS backend cannot initialize"
 )]
 pub fn build_client() -> reqwest::Client {
+    client_builder()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// A [`build_client`] client for AWS credential resolution that never uses a
+/// proxy.
+///
+/// The shared builder sets no proxy policy, so reqwest would otherwise honor
+/// ambient `HTTP(S)_PROXY` and route ECS/IMDS credential HTTP bearing
+/// container and metadata tokens to egress. Disabling the proxy keeps that
+/// traffic direct. Redirects, timeouts, retries, referrer policy, and cookie
+/// handling are exactly [`build_client`]'s: both come from one builder.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+pub(crate) fn build_resolver_client() -> reqwest::Client {
+    client_builder()
+        .no_proxy()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// A [`build_client`] client that speaks HTTP/2 from the first byte, with
+/// prior knowledge of the peer.
+///
+/// Over `https` [`build_client`] already reaches an HTTP/2 server: reqwest
+/// offers ALPN `h2` before `http/1.1`. A cleartext socket has no ALPN, so the
+/// only way to HTTP/2 there is to open with the HTTP/2 connection preface.
+/// This client does that on every connection, and an HTTP/1.1-only peer
+/// fails the exchange instead of being downgraded to. Every other rule
+/// (timeouts, redirects, no retries, trust boundary in [`send`]) is exactly
+/// [`build_client`]'s: both come from one builder.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+pub fn build_client_http2_prior_knowledge() -> reqwest::Client {
+    client_builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
+/// The one policy every [`build_client`] variant shares; a variant overrides
+/// only the field it exists to change.
+fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(STREAM_IDLE_TIMEOUT)
@@ -113,8 +184,6 @@ pub fn build_client() -> reqwest::Client {
         }))
         .referer(false)
         .retry(reqwest::retry::never())
-        .build()
-        .expect("the reqwest TLS backend initializes")
 }
 
 /// A [`build_client`] client that returns every redirect to the caller
@@ -131,12 +200,8 @@ pub fn build_client() -> reqwest::Client {
     reason = "the builder fails only when the compiled TLS backend cannot initialize"
 )]
 pub fn build_client_no_redirect() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(STREAM_IDLE_TIMEOUT)
+    client_builder()
         .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .retry(reqwest::retry::never())
         .build()
         .expect("the reqwest TLS backend initializes")
 }
@@ -244,8 +309,9 @@ pub fn check_base_url(family: Family, base: &str) -> Result<(), ProviderError> {
 /// Before any connection attempt the final URL passes the plain-HTTP rule. The
 /// request then carries `user-agent: <user_agent>`, the `accept` value of
 /// `exchange`, `content-type: application/json` when it has a body and names
-/// no content type, and the total deadline of [`Exchange::Json`] (a stream has
-/// none). `sleep` is the caller's timer, called once with
+/// no content type, and the total deadline of [`Exchange::Json`] or
+/// [`Exchange::Bytes`] when it carries one (a stream, or `Bytes` with no
+/// total, has none). `sleep` is the caller's timer, called once with
 /// [`RESPONSE_HEADER_TIMEOUT`]; when it completes before the response head
 /// arrives, the request is dropped. A timer that is already complete refuses
 /// the request without touching the network.
@@ -284,6 +350,8 @@ where
 }
 
 /// Reads a whole non-streaming response body, at most [`BODY_LIMIT`] bytes.
+/// This is `read_body_limited` with the repository policy bound; an
+/// overflow reports [`LimitError::Body`], never the request-scaled wording.
 ///
 /// # Errors
 ///
@@ -292,11 +360,53 @@ where
 /// when reading fails or the total deadline passes.
 pub async fn read_body(
     family: Family,
-    mut response: reqwest::Response,
+    response: reqwest::Response,
 ) -> Result<Vec<u8>, ProviderError> {
-    let over = |length| u64::try_from(BODY_LIMIT).is_ok_and(|limit| length > limit);
-    if response.content_length().is_some_and(over) {
-        return Err(ProviderError::Limit(LimitError::Body));
+    read_capped(family, response, BODY_LIMIT, LimitError::Body).await
+}
+
+/// Reads a whole request-scaled buffered response body, at most `limit` bytes.
+///
+/// Every wire whose bound comes from the request rather than the repository
+/// policy passes its own limit here and reads the [`Exchange::Bytes`] body it
+/// asked for. The refused error carries the limit that was actually applied,
+/// so a caller that sees it can split the request or raise its bound.
+///
+/// # Errors
+///
+/// [`ProviderError::Limit`] with [`LimitError::Payload`] carrying `limit` as
+/// soon as the declared length or the bytes read pass `limit`;
+/// [`ProviderError::Transport`] when reading fails or the total deadline
+/// passes. A failure never returns the bytes read so far.
+#[cfg(test)]
+async fn read_body_limited(
+    family: Family,
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    let refused = LimitError::Payload {
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    };
+    read_capped(family, response, limit, refused).await
+}
+
+/// The one byte-read loop behind [`read_body`] and `read_body_limited`.
+/// `refused` is the exact error an overflow reports. A declared length over
+/// the bound refuses the body before any byte is read; a read failure or a
+/// passed total deadline drops the bytes read so far and reports
+/// [`ProviderError::Transport`], never a partial body.
+async fn read_capped(
+    family: Family,
+    mut response: reqwest::Response,
+    limit: usize,
+    refused: LimitError,
+) -> Result<Vec<u8>, ProviderError> {
+    let bound = u64::try_from(limit).unwrap_or(u64::MAX);
+    if response
+        .content_length()
+        .is_some_and(|length| length > bound)
+    {
+        return Err(ProviderError::Limit(refused));
     }
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -304,15 +414,23 @@ pub async fn read_body(
         .await
         .map_err(|error| from_reqwest(family, error))?
     {
-        append_capped(&mut body, &chunk)?;
+        append_capped(&mut body, &chunk, limit, refused)?;
     }
     Ok(body)
 }
 
-/// Appends `chunk` unless the body would pass [`BODY_LIMIT`].
-fn append_capped(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ProviderError> {
-    if chunk.len() > BODY_LIMIT - body.len() {
-        return Err(ProviderError::Limit(LimitError::Body));
+/// Appends `chunk` unless the body would pass `limit`, reporting `refused`.
+/// `body` never holds more than `limit` bytes, so the subtraction cannot
+/// underflow; [`u64::MAX`] saturation in the callers keeps the bound check
+/// total on every platform.
+fn append_capped(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+    limit: usize,
+    refused: LimitError,
+) -> Result<(), ProviderError> {
+    if chunk.len() > limit.saturating_sub(body.len()) {
+        return Err(ProviderError::Limit(refused));
     }
     body.extend_from_slice(chunk);
     Ok(())
@@ -338,10 +456,16 @@ fn prepare(
     let headers = request.headers_mut();
     headers.insert(USER_AGENT, agent);
     let (accept, total) = match exchange {
-        Exchange::Stream => ("text/event-stream", None),
-        Exchange::Json { total } => ("application/json", Some(total)),
+        Exchange::Stream => (HeaderValue::from_static("text/event-stream"), None),
+        Exchange::Json { total } => (HeaderValue::from_static("application/json"), Some(total)),
+        Exchange::Bytes { accept, total } => {
+            let value = HeaderValue::from_str(accept).map_err(|_| {
+                transport(family, format!("accept {accept:?} is not a header value"))
+            })?;
+            (value, total)
+        }
     };
-    headers.insert(ACCEPT, HeaderValue::from_static(accept));
+    headers.insert(ACCEPT, accept);
     if has_body && !headers.contains_key(CONTENT_TYPE) {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }

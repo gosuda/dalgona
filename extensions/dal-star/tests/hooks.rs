@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use dal_agent::{Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    ClientId, Command, Config, ConfigProduct, Expect, PageReq, Part, Reply, ToolOutcomeView,
-    UpdateKind, Workspace,
+    Answer, ClientId, Command, Config, ConfigProduct, Expect, Output, PageReq, Part, Reply,
+    ToolOutcomeView, UpdateKind, Workspace,
 };
 use support::system_with_plugin;
 
@@ -135,26 +135,83 @@ async fn dictionary_tool_call_hook_result_fails_closed() {
     );
 }
 
+/// The start hook records what the event told it in durable session state;
+/// the end hook raises its event as a notice, which is how an observer
+/// failure reaches a client.
 const LIFECYCLE_PLUGIN: &str = r#"load("@dal/v1", "dal")
 
 def on_start(ctx, event):
+    seen = ctx.state.read(key = "lifecycle")
+    marks = []
+    if seen.present:
+        marks = [mark for mark in seen.value]
+    marks.append("start resumed=" + ("yes" if event.resumed else "no") + " session=" + event.session + " workspace=" + event.workspace)
+    ctx.state.write(key = "lifecycle", value = marks, expected = seen.revision)
     return None
 
 def on_end(ctx, event):
-    return None
+    fail("end reason=" + event.reason + " session=" + event.session)
+
+def show(ctx, args):
+    seen = ctx.state.read(key = "lifecycle")
+    if not seen.present:
+        return "no marks"
+    return "\n".join(seen.value)
+
+marks_tool = dal.tool(description = "Show the lifecycle marks.", input = dal.schema(), uses = ["state.read"], run = show)
 
 plugin = dal.plugin(
     name = "lifecycle",
     version = "0.1.0",
-    hooks = [dal.on("session_start", on_start), dal.on("session_end", on_end)],
+    tools = {"marks": marks_tool},
+    commands = {"marks": dal.command(tool = marks_tool)},
+    hooks = [
+        dal.on("session_start", on_start, uses = ["state.read", "state.write"]),
+        dal.on("session_end", on_end),
+    ],
 )
 "#;
 
-/// Opens a session over the lifecycle plugin and returns every notice the
-/// session published up to `window`.
-async fn lifecycle_notices(
-    window: std::time::Duration,
-) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+/// Runs `/lifecycle:marks`, approving the state grant it asks for (a
+/// persistent one, so later sessions inherit it), and returns the text it
+/// printed.
+async fn lifecycle_marks(agent: &dal_agent::Agent) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let mut updates = agent.subscribe(None)?;
+    let command = agent.submit(Command::Run {
+        name: "lifecycle:marks".into(),
+        args: String::new().into(),
+        expected: None,
+    });
+    tokio::pin!(command);
+    let reply = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                biased;
+                delivery = updates.next() => {
+                    let Some(Delivery::Update(update)) = delivery else {
+                        return Err::<Reply, Box<dyn Error + Send + Sync>>(
+                            std::io::Error::other("marks subscription ended early").into(),
+                        );
+                    };
+                    if let UpdateKind::RequestOpened(request) = &update.kind {
+                        agent.answer(request.id, Answer::Approve).await?;
+                    }
+                }
+                result = &mut command => break Ok(result?),
+            }
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::other("marks command timed out"))??;
+    let Reply::Done(Output::Text(text)) = reply else {
+        return Err(std::io::Error::other(format!("unexpected marks reply: {reply:?}")).into());
+    };
+    Ok(text.into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_lifecycle_hooks_receive_their_event_and_a_working_script_context()
+-> Result<(), Box<dyn Error + Send + Sync>> {
     let (data, system) = system_with_plugin("lifecycle", LIFECYCLE_PLUGIN);
     let extensions = system.extensions()?;
     let data_root = data.path().to_path_buf();
@@ -162,7 +219,7 @@ async fn lifecycle_notices(
     let fixture = data_root.join("lifecycle-scripted.jsonl");
     std::fs::write(&fixture, "")?;
     let user = format!(
-        "model = \"openai/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
+        "approval = \"all\"\nmodel = \"openai/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
         fixture.to_string_lossy()
     );
     let config = Config::load(ConfigProduct::Dalgon, &data_root, "", Some(&user))?;
@@ -179,43 +236,85 @@ async fn lifecycle_notices(
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await?;
+    let workspace_ref = Workspace::new(workspace.path().to_path_buf())?;
+    let shown = workspace_ref.as_path().display().to_string();
+
+    // A new session starts before any client can grant the plugin state, so
+    // its own start hook may not be able to record anything. Asking for the
+    // marks is what obtains the grant that the resumed session inherits.
     let agent = host
         .open(
-            SessionRef::Ephemeral {
-                workspace: Workspace::new(workspace.path().to_path_buf())?,
+            SessionRef::New {
+                workspace: workspace_ref.clone(),
+                name: None,
             },
             ClientId::new("lifecycle-test"),
         )
         .await?;
+    let session = agent.session();
+    let first = lifecycle_marks(&agent).await?;
+    assert!(
+        first == "no marks"
+            || first
+                .lines()
+                .all(|line| line.starts_with("start resumed=no ")),
+        "only a fresh start may precede the resume: {first}"
+    );
+
+    // Closing the session ends it: the end hook sees the close reason and
+    // the same session identity.
     let mut subscription = agent.subscribe(None)?;
+    host.close(session).await?;
     let mut notices = Vec::new();
-    let deadline = tokio::time::Instant::now() + window;
     while let Ok(Some(Delivery::Update(update))) =
-        tokio::time::timeout_at(deadline, subscription.next()).await
+        tokio::time::timeout(Duration::from_secs(5), subscription.next()).await
     {
         if let UpdateKind::Notice(notice) = &update.kind {
-            notices.push(notice.text.to_string());
+            notices.push((notice.kind.to_string(), notice.text.to_string()));
         }
     }
-    let _ = host.shutdown(Duration::from_secs(2)).await;
-    Ok(notices)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn session_lifecycle_hooks_receive_a_script_context() {
-    let notices = lifecycle_notices(Duration::from_secs(2))
-        .await
-        .expect("lifecycle session runs");
-
-    let failed = notices
+    let ended: Vec<&(String, String)> = notices
         .iter()
-        .filter(|text| text.contains("hook \"lifecycle\" failed"))
-        .cloned()
-        .collect::<Vec<_>>();
+        .filter(|(kind, _)| kind == "hook.session_end")
+        .collect();
+    let [(_, text)] = ended.as_slice() else {
+        panic!("exactly one session_end notice expected: {notices:?}");
+    };
     assert!(
-        failed.is_empty(),
-        "session lifecycle hooks must run; got: {failed:?}"
+        text.contains(&format!(
+            "error: fail: end reason=close session={session}\n"
+        )),
+        "{text}"
     );
+
+    // Reopening the stored session is a resume, and the new start hook sees
+    // the marks the first one persisted.
+    let resumed = host
+        .open(
+            SessionRef::Resume {
+                key: session.to_string().into(),
+                workspace: workspace_ref,
+            },
+            ClientId::new("lifecycle-resume"),
+        )
+        .await?;
+    assert_eq!(resumed.session(), session);
+    let marks = lifecycle_marks(&resumed).await?;
+    assert_eq!(
+        marks.lines().last(),
+        Some(format!("start resumed=yes session={session} workspace={shown}").as_str()),
+        "the resumed session's start hook must see its own event: {marks}"
+    );
+    assert_eq!(
+        marks
+            .lines()
+            .filter(|line| line.contains("resumed=yes"))
+            .count(),
+        1,
+        "{marks}"
+    );
+    let _ = host.shutdown(Duration::from_secs(2)).await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -188,7 +188,7 @@ pub fn guard_extension(cfg: GuardConfig) -> Result<GuardParts, RegistrationError
     .on_session_end(SessionEndHook(Arc::clone(&engine)))
     .on_before_turn(BeforeTurnHook(Arc::clone(&engine)))
     .on_tool_call(ToolCallHook(Arc::clone(&engine)))
-    .on_tool_result(ToolResultHook(Arc::clone(&engine)))
+    .on_tool_result_lossless(ToolResultHook(Arc::clone(&engine)))
     .on_turn_end(TurnEndHook(Arc::clone(&engine)))
     .output_stream(Arc::new(stream::Router::new(Arc::clone(&engine))))
     .scheme("guard", Arc::new(FindingsScheme(Arc::clone(&engine))))
@@ -279,20 +279,60 @@ pub(super) struct Engine {
 
 struct State {
     sessions: HashMap<SessionId, Session>,
-    turns: HashMap<TurnId, SessionId>,
+    /// Last turn epoch handed out; an epoch names one turn instance even when
+    /// a resumed session reuses a turn id.
+    last_epoch: u64,
+}
+
+/// One-time summary lines owed by the session: the reset announcement from a
+/// resumed start plus the calibration `cannot_block` lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SummaryDues {
+    reset_due: bool,
+    announced_blocks: bool,
+}
+
+impl SummaryDues {
+    fn new(resumed: bool) -> Self {
+        Self {
+            reset_due: resumed,
+            announced_blocks: false,
+        }
+    }
 }
 
 struct Session {
-    reset_due: bool,
+    dues: SummaryDues,
     seen_warnings: HashSet<(Box<str>, Box<str>)>,
     turn: Option<TurnState>,
     pending: Option<Arc<str>>,
-    announced_blocks: bool,
     last: Option<Arc<GuardFindings>>,
+    /// Cleared for the rest of the session once `fs.read` is denied; the
+    /// warning router then scans result previews only.
+    fs_read: bool,
+    /// Set once the `turn` denial notice was sent for this session.
+    turn_denied_noted: bool,
+}
+
+impl Session {
+    fn new(resumed: bool) -> Self {
+        Self {
+            dues: SummaryDues::new(resumed),
+            seen_warnings: HashSet::new(),
+            turn: None,
+            pending: None,
+            last: None,
+            fs_read: true,
+            turn_denied_noted: false,
+        }
+    }
 }
 
 pub(super) struct TurnState {
     id: TurnId,
+    /// Names this turn instance; asynchronous work that read state before an
+    /// await commits only when the session's current turn still has it.
+    epoch: u64,
     reduction_ask: bool,
     counted: HashSet<CallId>,
     added: u64,
@@ -303,6 +343,8 @@ pub(super) struct TurnState {
     churn: BTreeMap<Box<str>, u32>,
     strikes: strike::Stream,
     last_error: Option<Box<str>>,
+    /// The block reason once the repeat guard stopped the turn.
+    exhaustion: Option<Box<str>>,
     pending_notices: Vec<String>,
     sequence: u128,
     calls: HashMap<CallId, (CallNote, u128)>,
@@ -317,6 +359,35 @@ pub(super) struct TurnState {
 }
 
 impl TurnState {
+    fn new(id: TurnId, epoch: u64, reduction_ask: bool) -> Self {
+        Self {
+            id,
+            epoch,
+            reduction_ask,
+            counted: HashSet::new(),
+            added: 0,
+            deleted: 0,
+            files: BTreeSet::new(),
+            new_files: BTreeSet::new(),
+            deletions: BTreeMap::new(),
+            churn: BTreeMap::new(),
+            strikes: strike::Stream::default(),
+            last_error: None,
+            exhaustion: None,
+            pending_notices: Vec::new(),
+            sequence: 0,
+            calls: HashMap::new(),
+            first_pre: BTreeMap::new(),
+            last_post: BTreeMap::new(),
+            bands: Vec::new(),
+            warnings: Vec::new(),
+            stream_counts: BTreeMap::new(),
+            fired: BTreeSet::new(),
+            findings: BTreeMap::new(),
+            notices: HashSet::new(),
+        }
+    }
+
     fn touch(&mut self, path: Box<str>) {
         self.churn
             .entry(path)
@@ -337,7 +408,7 @@ impl Engine {
             cfg,
             state: Mutex::new(State {
                 sessions: HashMap::new(),
-                turns: HashMap::new(),
+                last_epoch: 0,
             }),
         }
     }

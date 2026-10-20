@@ -244,6 +244,80 @@ fn framing_fields_and_comments_keep_exact_values() {
 }
 
 #[test]
+fn near_miss_field_names_are_ignored() {
+    let wire = concat!(
+        "datax: no\n",
+        "dat: no\n",
+        "DATA: no\n",
+        "Data: no\n",
+        " data: no\n",
+        "data : no\n",
+        "data\t: no\n",
+        "database: no\n",
+        "eventx: ignored\n",
+        "EVENT: ignored\n",
+        " event: ignored\n",
+        "event : ignored\n",
+        "data: yes\n",
+        "\n",
+    );
+    assert_eq!(
+        decode_frames(vec![wire.as_bytes().to_vec()]),
+        vec![frame(None, "yes")]
+    );
+}
+
+#[test]
+fn a_line_without_a_colon_is_a_field_with_an_empty_value() {
+    assert_eq!(decode_frames(vec![b"data\n\n".to_vec()]), []);
+    assert_eq!(
+        decode_frames(vec![b"data\ndata: x\n\n".to_vec()]),
+        vec![frame(None, "\nx")]
+    );
+    assert_eq!(
+        decode_frames(vec![b"data\ndata\n\n".to_vec()]),
+        vec![frame(None, "\n")]
+    );
+    assert_eq!(
+        decode_frames(vec![b"event\ndata: x\n\n".to_vec()]),
+        vec![frame(Some(""), "x")]
+    );
+}
+
+#[test]
+fn every_mix_of_line_terminators_decodes_like_pure_lf() {
+    const TERMINATORS: [&str; 3] = ["\n", "\r", "\r\n"];
+    let lines = ["event: a", "data: 1", "", "data: 2", ""];
+    let expected = vec![frame(Some("a"), "1"), frame(None, "2")];
+    let mut checked = 0_usize;
+    for combination in 0..TERMINATORS.len().pow(5) {
+        let picks: Vec<&str> = (0..5)
+            .map(|line| TERMINATORS[combination / TERMINATORS.len().pow(line) % TERMINATORS.len()])
+            .collect();
+        // A CR directly followed by the LF of the next (empty) line is one
+        // CRLF terminator, not two lines, so that mix is a different stream.
+        let merged = |line: usize| {
+            picks[line] == "\r" && lines[line + 1].is_empty() && picks[line + 1].starts_with('\n')
+        };
+        if merged(1) || merged(3) {
+            continue;
+        }
+        let wire: String = lines
+            .iter()
+            .zip(&picks)
+            .flat_map(|(line, end)| [*line, *end])
+            .collect();
+        let bytes = wire.as_bytes();
+        assert_eq!(decode_frames(vec![bytes.to_vec()]), expected, "{wire:?}");
+        let one_byte: Vec<Vec<u8>> = bytes.iter().map(|byte| vec![*byte]).collect();
+        assert_eq!(decode_frames(one_byte), expected, "{wire:?} byte by byte");
+        checked += 1;
+    }
+    // 243 mixes, minus 27 + 27 - 3 = 51 that merge a CR with the next LF.
+    assert_eq!(checked, 192);
+}
+
+#[test]
 fn empty_data_semantics() {
     assert_eq!(decode_frames(vec![b"data:\n\n".to_vec()]), []);
     assert_eq!(decode_frames(vec![b"data: \n\n".to_vec()]), []);

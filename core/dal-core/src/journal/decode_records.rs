@@ -1,15 +1,17 @@
 use super::decode::{
     blocks_member, bool_member, entry_id_member, i32_member, invalid, is_null, json_member,
     model_id_member, model_route_members, need, object_members, opt_entry_id_member,
-    opt_raw_json_member, opt_text_member, owner_member, parts_member, purpose_member, text_member,
-    u64_member, usage_member, want,
+    opt_raw_json_member, opt_text_member, opt_usage_with_premium, owner_member, parts_member,
+    purpose_member, raw_json_member, text_member, u64_member, usage_with_premium, want,
 };
 use super::scan::{Member, Members};
 use super::{
     Answer, ApprovalMode, AssistantRoute, AssistantStop, ClientId, DecodeError, Decoded, Entry,
-    EntryId, EntryKind, Header, JobEvent, JobOutcome, Mail, Mode, NonZeroU64, Product, RawJson,
-    Record, ScannedHead, SessionId, Source, TreeKind, TurnEndStop, TurnId, VERSION,
+    EntryId, EntryKind, Header, JobEvent, JobOutcome, Mail, Mode, NonZeroU64, PrivateEffectId,
+    PrivateLoopId, PrivateOutcome, Product, RawJson, Record, ScannedHead, SessionId, Source,
+    TreeKind, TurnEndStop, TurnId, VERSION,
 };
+use crate::update::ResolutionCause;
 
 pub(super) fn answer_member(member: &Member<'_>) -> Result<Answer, DecodeError> {
     let (offset, raw) = (member.offset, member.value);
@@ -43,6 +45,16 @@ pub(super) fn assistant_route_member(
         .check_id(model)
         .map_err(|error| invalid(offset, error.to_string()))?;
     Ok(route)
+}
+
+/// Reads the assistant replay member: one raw JSON payload kept exactly as
+/// written. Absence is the caller's legacy case; a present `null` is
+/// malformed, like a present `null` route.
+pub(super) fn assistant_replay_member(member: &Member<'_>) -> Result<RawJson, DecodeError> {
+    if is_null(member) {
+        return Err(invalid(member.offset, "member `replay` must not be null"));
+    }
+    raw_json_member(member, "replay")
 }
 
 pub(super) fn assistant_stop_member(member: &Member<'_>) -> Result<AssistantStop, DecodeError> {
@@ -90,6 +102,25 @@ pub(super) fn turn_end_stop_member(member: &Member<'_>) -> Result<TurnEndStop, D
         .transpose()?
         .ok_or_else(|| invalid(offset, "a `stop` object needs a `failed` member"))?;
     Ok(TurnEndStop::Failed { message: failed })
+}
+
+/// Reads a resolved record's `cause`: one of the five durable literals.
+/// Absence is the caller's legacy case; a member that is present stays
+/// strict, so `null`, a non-string, or an unknown literal is an invalid
+/// record rather than a cause that was never written.
+pub(super) fn cause_member(member: &Member<'_>) -> Result<ResolutionCause, DecodeError> {
+    let literal = text_member(member, "cause")?;
+    match literal.as_ref() {
+        "answered" => Ok(ResolutionCause::Answered),
+        "timed_out" => Ok(ResolutionCause::TimedOut),
+        "cancelled" => Ok(ResolutionCause::Cancelled),
+        "withdrawn" => Ok(ResolutionCause::Withdrawn),
+        "no_controller" => Ok(ResolutionCause::NoController),
+        other => Err(invalid(
+            member.offset,
+            format!("unknown resolution cause literal `{other}`"),
+        )),
+    }
 }
 
 pub(super) fn job_outcome_member(member: &Member<'_>) -> Result<JobOutcome, DecodeError> {
@@ -270,8 +301,14 @@ pub fn scan_head(line: &[u8]) -> Option<ScannedHead> {
 
 /// Decodes one complete journal line.
 ///
-/// The `"v"` member is validated before anything else; `"type"` must then
-/// name a format-1 kind. Members the record does not declare are dropped
+/// The line must first scan as one JSON object: malformed JSON, a duplicate
+/// `"v"` member, and trailing bytes stay [`DecodeError::Invalid`]. Once the
+/// envelope scans, the `"v"` member is validated before `"type"` and the
+/// payload, so an unsupported version reports
+/// [`DecodeError::UnsupportedVersion`] even when the type is duplicated,
+/// missing, or malformed, or the payload would also fail. `"type"` must
+/// then name a kind this format reads.
+/// Members the record does not declare are dropped
 /// so a reader survives fields a later format adds; the closed nested
 /// payloads (`usage`, parts, blocks, `who`, `purpose`, `answer`, `from`,
 /// `outcome`, `stop`) still reject unknown members, and `cost_usd` inside
@@ -419,6 +456,7 @@ pub(super) fn decode_record(kind: &str, members: &mut Members<'_>) -> Result<Rec
         .or_else(|| decode_control(kind, members))
         .or_else(|| decode_grants(kind, members))
         .or_else(|| decode_effects(kind, members))
+        .or_else(|| decode_private(kind, members))
         .unwrap_or_else(|| Err(DecodeError::UnknownRecordKind { kind: kind.into() }))
 }
 
@@ -502,7 +540,7 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                 at: json_member(&need(members, "at")?)?,
                 turn: json_member(&need(members, "turn")?)?,
                 stop: turn_end_stop_member(&need(members, "stop")?)?,
-                usage: usage_member(&need(members, "usage")?)?,
+                usage: opt_usage_with_premium(members)?,
                 changes: json_member(&need(members, "changes")?)?,
             }),
             "rule_fired" => Ok(Record::RuleFired {
@@ -519,6 +557,10 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                 was_default: match want(members, "was_default") {
                     Some(member) => bool_member(&member, "was_default")?,
                     None => false,
+                },
+                cause: match want(members, "cause") {
+                    Some(member) => Some(cause_member(&member)?),
+                    None => None,
                 },
             }),
             "before_request_mut" => Ok(Record::BeforeRequestMut {
@@ -631,8 +673,7 @@ fn decode_effects(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                 at: json_member(&need(members, "at")?)?,
                 who: owner_member(&need(members, "who")?)?,
                 purpose: purpose_member(&need(members, "purpose")?)?,
-                usage: usage_member(&need(members, "usage")?)?
-                    .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
+                usage: usage_with_premium(members)?,
             }),
             _ => unreachable!("the tag filter above admits only this group's kinds"),
         }
@@ -640,6 +681,94 @@ fn decode_effects(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
     Some(record)
 }
 
+/// Reads the private `outcome` member: exactly one `type` plus the members
+/// that type owns. Unknown `type`, missing `is_error`/`parts`, or any extra
+/// member on `indeterminate` is Invalid, not a default.
+pub(super) fn private_outcome_member(member: &Member<'_>) -> Result<PrivateOutcome, DecodeError> {
+    let (offset, raw) = (member.offset, member.value);
+    let mut inner = object_members(raw, offset, &["type", "is_error", "parts"])?;
+    let Some(ty) = want(&mut inner, "type") else {
+        return Err(invalid(offset, "an `outcome` object needs a `type` member"));
+    };
+    let ty = text_member(&ty, "type")?;
+    if ty.as_ref() == "indeterminate" {
+        if !inner.is_empty() {
+            return Err(invalid(
+                offset,
+                "an `indeterminate` outcome takes no other member",
+            ));
+        }
+        return Ok(PrivateOutcome::Indeterminate);
+    }
+    if ty.as_ref() != "settled" {
+        return Err(invalid(
+            offset,
+            format!("unknown private outcome type `{ty}`"),
+        ));
+    }
+    let Some(is_error) = want(&mut inner, "is_error") else {
+        return Err(invalid(offset, "a `settled` outcome needs `is_error`"));
+    };
+    let Some(parts) = want(&mut inner, "parts") else {
+        return Err(invalid(offset, "a `settled` outcome needs `parts`"));
+    };
+    if !inner.is_empty() {
+        return Err(invalid(offset, "unknown member in `settled` outcome"));
+    }
+    Ok(PrivateOutcome::Settled {
+        is_error: bool_member(&is_error, "is_error")?,
+        parts: parts_member(&parts)?,
+    })
+}
+
+/// Owner-scoped private audit records. Non-tree, format 1, no entry id, no
+/// turn accounting. Each arm consumes exactly its wire members; anything
+/// else at top level stays dropped per the `decode()` forward-compat rule.
+fn decode_private(kind: &str, members: &mut Members<'_>) -> Option<Result<Record, DecodeError>> {
+    if !matches!(kind, "private_loop" | "private_start" | "private_end") {
+        return None;
+    }
+    let record = (|| -> Result<Record, DecodeError> {
+        match kind {
+            "private_loop" => Ok(Record::PrivateLoop {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                who: owner_member(&need(members, "who")?)?,
+                turn: match want(members, "turn") {
+                    Some(member) => Some(json_member::<TurnId>(&member)?),
+                    None => None,
+                },
+            }),
+            "private_start" => Ok(Record::PrivateStart {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                token: json_member::<PrivateEffectId>(&need(members, "token")?)?,
+                who: owner_member(&need(members, "who")?)?,
+                turn: match want(members, "turn") {
+                    Some(member) => Some(json_member::<TurnId>(&member)?),
+                    None => None,
+                },
+                round: u32::try_from(u64_member(&need(members, "round")?, "round")?)
+                    .map_err(|_| invalid(0, "member `round` exceeds u32"))?,
+                call: json_member(&need(members, "call")?)?,
+                name: text_member(&need(members, "name")?, "name")?,
+                args: {
+                    let member = need(members, "args")?;
+                    RawJson::parse(member.value)
+                        .map_err(|error| invalid(member.offset, error.to_string()))?
+                },
+            }),
+            "private_end" => Ok(Record::PrivateEnd {
+                at: json_member(&need(members, "at")?)?,
+                r#loop: json_member::<PrivateLoopId>(&need(members, "loop")?)?,
+                token: json_member::<PrivateEffectId>(&need(members, "token")?)?,
+                outcome: private_outcome_member(&need(members, "outcome")?)?,
+            }),
+            _ => unreachable!("the tag filter above admits only this group's kinds"),
+        }
+    })();
+    Some(record)
+}
 pub(super) fn decode_entry_kind(
     kind: &str,
     members: &mut Members<'_>,
@@ -657,10 +786,12 @@ pub(super) fn decode_entry_kind(
                 api: json_member(&need(members, "api")?)?,
                 model,
                 content: blocks_member(&need(members, "content")?)?,
-                usage: usage_member(&need(members, "usage")?)?
-                    .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
+                usage: usage_with_premium(members)?,
                 stop: assistant_stop_member(&need(members, "stop")?)?,
                 route,
+                replay: want(members, "replay")
+                    .map(|member| assistant_replay_member(&member))
+                    .transpose()?,
             }
         }
         "tool_result" => EntryKind::ToolResult {
@@ -695,7 +826,7 @@ pub(super) fn decode_entry_kind(
             first_kept: opt_entry_id_member(&need(members, "first_kept")?, "first_kept")?,
             tokens_before: u64_member(&need(members, "tokens_before")?, "tokens_before")?,
             replay: opt_raw_json_member(&need(members, "replay")?, "replay")?,
-            usage: usage_member(&need(members, "usage")?)?,
+            usage: opt_usage_with_premium(members)?,
             parts: want(members, "parts")
                 .map(|member| parts_member(&member))
                 .transpose()?

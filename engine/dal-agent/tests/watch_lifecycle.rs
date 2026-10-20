@@ -116,6 +116,7 @@ impl DropProbe {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         };
         let events = if attempt == 0 {
             vec![
@@ -295,7 +296,7 @@ fn journaled_texts(view: &View) -> (Reminders, String) {
             }
             EntryKind::Assistant { content, .. } => {
                 for block in content {
-                    if let Block::Text { text } = block {
+                    if let Block::Text { text, .. } = block {
                         assistant.push_str(text);
                     }
                 }

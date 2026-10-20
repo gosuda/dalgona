@@ -180,6 +180,7 @@ impl ModelHandler for EntryCounter {
                         reasoning_tokens: None,
                         cache_write_tokens: 0,
                         cost_usd: None,
+                        premium_requests: None,
                     },
                 }),
                 Ok(StreamEvent::Stop {
@@ -966,9 +967,19 @@ async fn queued_follow_up_is_discarded_by_a_cancel_then_runs_fresh() {
     let gone = agent
         .submit(Command::CancelQueued { turn: queued_turn })
         .await;
+    let Err(gone) = gone else {
+        panic!("the discarded follow-up must leave no queue entry");
+    };
     assert!(
-        gone.is_err(),
-        "the discarded follow-up leaves no queue entry: {gone:?}"
+        matches!(gone, dal_agent::AgentError::Invalid(_)),
+        "a missing queue entry is a validation refusal: {gone:?}"
+    );
+    assert_eq!(
+        gone.to_string(),
+        format!(
+            "turn {queued_turn} has no queued follow-up. If the follow-up already started, cancel its turn instead."
+        ),
+        "the refusal names the turn with no queue entry"
     );
     let second = assert_accepted(
         &agent.submit(prompt("second prompt")).await.expect("submit"),
@@ -1178,17 +1189,39 @@ async fn discarded_reservations_are_not_reused_after_reopen() {
         fresh > discarded,
         "an acknowledged identity must never be reassigned"
     );
-    assert!(
-        agent
-            .submit(Command::CancelQueued { turn: discarded })
-            .await
-            .is_err()
+    let Err(reissued) = agent
+        .submit(Command::CancelQueued { turn: discarded })
+        .await
+    else {
+        panic!("a discarded reservation must not be cancellable after reopen");
+    };
+    assert_eq!(
+        reissued.to_string(),
+        format!(
+            "turn {discarded} has no queued follow-up. If the follow-up already started, cancel its turn instead."
+        ),
+        "the reopened session holds no entry for the discarded turn"
     );
     assert_eq!(
         drain_until_ended(&mut subscription, fresh).await.stop,
         Some(dal_core::Stop::EndTurn)
     );
     held.live.host.close(session).await.expect("close reopened");
+}
+
+/// A failed journal sync refuses the follow-up as a validation error that
+/// names the failed write, not as a wrong-turn or closed-session refusal.
+fn assert_sync_refusal(reply: &Result<dal_core::Reply, dal_agent::AgentError>, what: &str) {
+    let Err(error @ dal_agent::AgentError::Invalid(_)) = reply else {
+        panic!("{what}: expected a validation refusal, got {reply:?}");
+    };
+    let text = error.to_string();
+    assert!(
+        text.starts_with("journal write failed:")
+            && text.contains("injected sync failure")
+            && text.contains("removed the partial record"),
+        "{what}: the refusal names the failed journal write: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1210,21 +1243,17 @@ async fn failed_reservation_sync_never_acknowledges_a_queued_turn() {
             }],
         })
         .await;
-    assert!(
-        reply.is_err(),
-        "a failed sync cannot return a queued identity: {reply:?}"
-    );
-    assert!(
-        held.agent
-            .submit(Command::FollowUp {
-                turn: held.turn,
-                content: vec![Part::Text {
-                    text: "must fail closed".into()
-                }],
-            })
-            .await
-            .is_err()
-    );
+    assert_sync_refusal(&reply, "a failed sync cannot return a queued identity");
+    let again = held
+        .agent
+        .submit(Command::FollowUp {
+            turn: held.turn,
+            content: vec![Part::Text {
+                text: "must fail closed".into(),
+            }],
+        })
+        .await;
+    assert_sync_refusal(&again, "the broken session keeps failing closed");
     held.live
         .host
         .close(session)

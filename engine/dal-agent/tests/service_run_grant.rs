@@ -529,8 +529,9 @@ async fn an_approved_call_covers_its_own_preflight_and_run_calls_until_its_job_e
         )
         .await?;
     assert!(
-        other_argv.outcome.is_err(),
-        "an argv outside the grant prefix is not covered"
+        declined(&other_argv.outcome),
+        "an argv outside the grant prefix is not covered: {:?}",
+        other_argv.outcome
     );
 
     let outside = session.rig.data.parent().ok_or("no parent")?.to_path_buf();
@@ -541,8 +542,9 @@ async fn an_approved_call_covers_its_own_preflight_and_run_calls_until_its_job_e
         )
         .await?;
     assert!(
-        escaped.outcome.is_err(),
-        "a directory outside the grant roots is not covered"
+        declined(&escaped.outcome),
+        "a directory outside the grant roots is not covered: {:?}",
+        escaped.outcome
     );
 
     let settled = session.send("approved", Cmd::Settle).await?;
@@ -554,9 +556,80 @@ async fn an_approved_call_covers_its_own_preflight_and_run_calls_until_its_job_e
         )
         .await?;
     assert!(
-        after.outcome.is_err(),
-        "the grant ends with the job the call started"
+        declined(&after.outcome),
+        "the grant ends with the job the call started: {:?}",
+        after.outcome
     );
+    Ok(())
+}
+
+/// Whether the declining front end refused the run: the question a grant did
+/// not answer reached it and came back as the user's decline, not as an
+/// unrelated failure such as a spawn error or a nonzero exit.
+fn declined(outcome: &Result<(), String>) -> bool {
+    matches!(
+        outcome,
+        Err(text) if text.starts_with("Denied(OutOfScope")
+            && text.contains("run was declined by probe")
+    )
+}
+
+/// A grant root covers the directory it names, judged by where a working
+/// directory really is: a nested directory and a `..` walk that stays inside
+/// are covered; a sibling whose name starts with the workspace's name, a `..`
+/// walk out to that sibling, and a symlink inside the workspace that leads
+/// out are each refused and reach the front end as a question.
+#[tokio::test]
+async fn a_grant_root_covers_the_directory_it_names_not_look_alike_paths() -> TestResult {
+    let mut session = start_turn(&["approved"]).await?;
+    session.finish_turn(&Answer::Approve).await?;
+    session.next_seen().await?;
+    let workspace = session.workspace.clone();
+    let parent = workspace.parent().ok_or("no parent")?.to_path_buf();
+    let mut sibling_name = workspace.file_name().ok_or("no name")?.to_owned();
+    sibling_name.push("-evil");
+    let sibling = parent.join(&sibling_name);
+    let nested = workspace.join("nested").join("deep");
+    let outside = parent.join("outside");
+    std::fs::create_dir_all(&sibling)?;
+    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(&outside)?;
+    let link = workspace.join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&link)?;
+    let walk_in = nested.join("..").join("..");
+    let walk_out = workspace.join("..").join(&sibling_name);
+
+    for (label, cwd) in [("nested", &nested), ("walk-inside", &walk_in)] {
+        let seen = session
+            .send(
+                "approved",
+                Session::run_cmd(label, &["git", "--version"], cwd),
+            )
+            .await?;
+        assert_eq!(seen.outcome, Ok(()), "{label} stays inside the root");
+    }
+    let mut escapes = vec![
+        ("name-prefix-sibling", &sibling),
+        ("walk-out-to-sibling", &walk_out),
+    ];
+    #[cfg(unix)]
+    escapes.push(("symlink-out", &link));
+    for (label, cwd) in escapes {
+        let seen = session
+            .send(
+                "approved",
+                Session::run_cmd(label, &["git", "--version"], cwd),
+            )
+            .await?;
+        assert!(
+            declined(&seen.outcome),
+            "{label} is outside the root and must be asked about: {:?}",
+            seen.outcome
+        );
+    }
     Ok(())
 }
 
@@ -575,8 +648,9 @@ async fn a_call_without_its_own_approval_gets_nothing_from_a_sibling_calls_grant
         )
         .await?;
     assert!(
-        sibling.outcome.is_err(),
-        "a grant belongs to the call that earned it, not to its extension"
+        declined(&sibling.outcome),
+        "a grant belongs to the call that earned it, not to its extension: {:?}",
+        sibling.outcome
     );
     let own = session
         .send(
@@ -594,8 +668,9 @@ async fn a_call_without_its_own_approval_gets_nothing_from_a_sibling_calls_grant
         )
         .await?;
     assert!(
-        still.outcome.is_err(),
-        "ending the approved call's job does not hand its grant to the sibling"
+        declined(&still.outcome),
+        "ending the approved call's job does not hand its grant to the sibling: {:?}",
+        still.outcome
     );
     Ok(())
 }
@@ -631,8 +706,9 @@ async fn a_grant_root_in_the_data_root_covers_only_this_sessions_directory() -> 
         )
         .await?;
     assert!(
-        foreign.outcome.is_err(),
-        "another session's directory under the data root is not covered"
+        declined(&foreign.outcome),
+        "another session's directory under the data root is not covered: {:?}",
+        foreign.outcome
     );
     Ok(())
 }
@@ -662,8 +738,9 @@ async fn a_child_job_does_not_keep_the_grant_alive_after_its_run_job_ends() -> T
         )
         .await?;
     assert!(
-        after.outcome.is_err(),
-        "the grant ends with the run job, not with its last child"
+        declined(&after.outcome),
+        "the grant ends with the run job, not with its last child: {:?}",
+        after.outcome
     );
     Ok(())
 }
@@ -716,8 +793,9 @@ async fn a_late_top_level_job_cannot_revive_an_ended_calls_grant() -> TestResult
         )
         .await?;
     assert!(
-        after.outcome.is_err(),
-        "only the run minted while the call was live can keep its grant"
+        declined(&after.outcome),
+        "only the run minted while the call was live can keep its grant: {:?}",
+        after.outcome
     );
     Ok(())
 }
@@ -754,8 +832,9 @@ async fn a_workspace_in_the_shared_worktree_root_does_not_grant_other_sessions()
         )
         .await?;
     assert!(
-        foreign.outcome.is_err(),
-        "preserving the checkout must not preserve the whole shared worktree tree"
+        declined(&foreign.outcome),
+        "preserving the checkout must not preserve the whole shared worktree tree: {:?}",
+        foreign.outcome
     );
     Ok(())
 }

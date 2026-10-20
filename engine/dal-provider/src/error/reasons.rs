@@ -17,6 +17,11 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
+    /// One request-scaled buffered response body grew past its applied limit.
+    Payload {
+        /// The exact limit in bytes that was applied to this response.
+        limit: u64,
+    },
     /// One response carried more than 128 MiB of cumulative event data.
     StreamBytes,
     /// One response contained more than 65536 events.
@@ -33,7 +38,11 @@ impl LimitError {
     #[must_use]
     pub fn fix(&self) -> String {
         match self {
-            Self::SseLine | Self::SseEvent | Self::WsMessage | Self::Body => {
+            Self::SseLine
+            | Self::SseEvent
+            | Self::WsMessage
+            | Self::Body
+            | Self::Payload { .. } => {
                 String::from("Retry the request, or ask for a smaller reply.")
             }
             Self::StreamBytes | Self::StreamEvents | Self::StreamItems => {
@@ -50,6 +59,7 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
+            Self::Payload { limit } => write!(f, "response body exceeds its {limit} byte limit."),
             Self::StreamBytes => f.write_str("provider stream exceeds 128 MiB of event data."),
             Self::StreamEvents => f.write_str("provider stream exceeds 65536 events."),
             Self::StreamItems => f.write_str("provider stream exceeds 16384 retained items."),
@@ -117,6 +127,24 @@ pub enum ResolveError {
     },
     /// No model was given and no default model is configured.
     NoDefault,
+    /// A route names a provider the catalog does not configure.
+    ///
+    /// A route that names its provider never falls back to another provider
+    /// that happens to list the same native model id.
+    UnknownProvider {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
+    /// A route names a provider that serves a different API family than the
+    /// route's own.
+    ProviderFamilyMismatch {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
 }
 
 impl ResolveError {
@@ -131,6 +159,9 @@ impl ResolveError {
                 let first = candidates.split(", ").next().unwrap_or_default();
                 Some(format!("Use {first}."))
             }
+            Self::UnknownProvider { .. } | Self::ProviderFamilyMismatch { .. } => Some(
+                String::from("Configure that provider or pick another model with /model."),
+            ),
             Self::NoDefault => None,
         }
     }
@@ -144,6 +175,13 @@ impl fmt::Display for ResolveError {
                 write!(f, "model id {id} matches several providers: {candidates}")
             }
             Self::NoDefault => f.write_str("no default model is configured"),
+            Self::UnknownProvider { provider, model } => {
+                write!(f, "provider {provider} is not configured for model {model}")
+            }
+            Self::ProviderFamilyMismatch { provider, model } => write!(
+                f,
+                "provider {provider} does not serve the API family of model {model}"
+            ),
         }
     }
 }

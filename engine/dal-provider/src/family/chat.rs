@@ -56,6 +56,7 @@ const NO_USAGE: Usage = Usage {
     output_tokens: 0,
     reasoning_tokens: None,
     cache_write_tokens: 0,
+    premium_requests: None,
     cost_usd: None,
 };
 
@@ -200,6 +201,7 @@ pub(crate) fn request_body(
     let ModelRoute::Api {
         family: Family::Chat,
         model,
+        ..
     } = &request.model
     else {
         return Err(ChatBodyError::NotChat {
@@ -260,7 +262,9 @@ fn messages(request: &ModelRequest) -> Result<Vec<Message<'_>>, ChatBodyError> {
             ContextItem::User { parts } => messages.push(Message::User {
                 content: parts.iter().map(content_part).collect::<Result<_, _>>()?,
             }),
-            ContextItem::Assistant { source: _, parts } => {
+            ContextItem::Assistant {
+                source: _, parts, ..
+            } => {
                 if let Some(message) = assistant(parts) {
                     messages.push(message);
                 }
@@ -324,9 +328,11 @@ fn assistant(parts: &[AssistantPart]) -> Option<Message<'_>> {
     let mut tool_calls = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text { text } => texts.push(text),
+            AssistantPart::Text { text, .. } => texts.push(text),
             AssistantPart::Thinking { .. } => {}
-            AssistantPart::ToolCall { call, name, args } => tool_calls.push(WireCall {
+            AssistantPart::ToolCall {
+                call, name, args, ..
+            } => tool_calls.push(WireCall {
                 id: call.as_str(),
                 kind: "function",
                 function: WireCallFunction {
@@ -429,6 +435,7 @@ fn normalize(usage: &WireUsage) -> Usage {
             .saturating_sub(reasoning.unwrap_or(0)),
         reasoning_tokens: reasoning,
         cache_write_tokens: prompt.and_then(|p| p.cache_write_tokens).unwrap_or(0),
+        premium_requests: None,
         cost_usd: None,
     }
 }

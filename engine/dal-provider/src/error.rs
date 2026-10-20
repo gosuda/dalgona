@@ -31,6 +31,18 @@ pub(crate) fn family_label(family: Family) -> &'static str {
         Family::Chat | Family::Responses => "openai",
         Family::Codex => "codex",
         Family::Anthropic => "anthropic",
+        Family::Bedrock => "bedrock",
+        Family::Cursor => "cursor",
+        Family::Devin => "devin",
+        Family::Droid => "droid",
+        Family::GitLab => "gitlab",
+        Family::GoogleGenerativeAi => "google-generative-ai",
+        Family::GoogleVertex => "google-vertex",
+        Family::GoogleGeminiCli => "google-gemini-cli",
+        Family::GoogleAntigravity => "google-antigravity",
+        Family::Mistral => "mistral",
+        Family::Ollama => "ollama",
+        Family::PiMessages => "pi-messages",
     }
 }
 

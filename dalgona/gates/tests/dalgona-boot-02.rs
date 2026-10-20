@@ -9,7 +9,7 @@ use dalgona_gates::support;
 use std::process::Command;
 
 #[test]
-fn plugin_list_shows_the_eleven_bundled_batteries() -> support::TestResult<()> {
+fn plugin_list_shows_every_bundled_battery() -> support::TestResult<()> {
     let scratch = support::Scratch::new("plugin-list-batteries")?;
     let output = support::run_command(
         Command::new(support::dalgona_binary()?)

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dal_core::Config;
 use dal_provider::{EnvSnapshot, ProviderConfig, ProviderIdentity, ProviderSet};
 
-use super::{Env, Host, HostShared, HostState, Product};
+use super::{DefaultAuthority, Env, Host, HostShared, HostState, Product};
 use crate::admission::{Admission, Limits};
 use crate::error::HostError;
 use crate::ext::generation::{Generation, ValidatedExtensions};
@@ -19,12 +19,31 @@ impl Host {
     /// # Errors
     /// Returns [`HostError::Config`] when extension registrations or provider
     /// configuration cannot be validated or initialized.
+    pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
+        Self::start_with_defaults(product, config, env, DefaultAuthority::Disabled).await
+    }
+
+    /// Builds the host state with an explicit default-write authority.
+    ///
+    /// Local CLI hosts pass `DefaultAuthority::Local` with the edge-resolved
+    /// user configuration path so `Save::SessionAndDefault` persists; wire,
+    /// serve, and A2A hosts pass `Disabled` and fail such saves truthfully
+    /// without touching the server file.
+    ///
+    /// # Errors
+    /// Returns [`HostError::Config`] when extension registrations or provider
+    /// configuration cannot be validated or initialized.
     #[expect(
         clippy::unused_async,
         clippy::unused_async_trait_impl,
         reason = "the public startup API is awaited by callers across the workspace; startup validation stays async for one composition shape"
     )]
-    pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
+    pub async fn start_with_defaults(
+        product: Product,
+        config: Config,
+        env: Env,
+        authority: DefaultAuthority,
+    ) -> Result<Self, HostError> {
         raise_fd_soft_limit();
         let attaches: Vec<crate::ext::Attach> = product
             .extensions
@@ -50,6 +69,7 @@ impl Host {
             .collect();
         let (generation_tx, _) = tokio::sync::watch::channel(Arc::new(generation));
         let plugin_base = HostShared::base_names(&generation_tx.borrow());
+        let snapshot = dal_provider::EnvSnapshot::from_vars(&env.vars).with_cwd(env.cwd.clone());
         let login_site = dal_provider::LoginSite::new(
             product.data_root.join("auth.json"),
             product.data_root.join("cache"),
@@ -59,11 +79,15 @@ impl Host {
                 "",
                 std::env::consts::ARCH,
             ),
+            &snapshot,
         )
         .map_err(HostError::Provider)?;
         let providers = provider_set(&config, &env, &product.data_root)?;
         let shared = Arc::new(HostShared {
-            config,
+            config: config.clone(),
+            defaults: std::sync::RwLock::new(config),
+            default_authority: authority,
+            default_write: tokio::sync::Mutex::new(()),
             env: Arc::new(env),
             product_name: product.name,
             data_root: product.data_root,

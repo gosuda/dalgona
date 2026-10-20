@@ -1,5 +1,9 @@
 //! A hook minted in a subagent session carries the parent session id; at
 //! the root the parent is absent.
+#![expect(
+    clippy::expect_used,
+    reason = "test fixtures abort at the failed boundary"
+)]
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -7,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_agent::ext::HookCx;
-use dal_agent::{Env, Host, Product, SessionRef};
+use dal_agent::{Env, Host, HostError, Product, SessionRef};
 use dal_core::{
     CallId, ClientId, Command, Config, ConfigProduct, Expect, Part, SessionId, Workspace,
 };
@@ -60,17 +64,25 @@ async fn run_prompt(agent: &dal_agent::Agent) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-#[tokio::test]
-async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
+/// One host with the parent-recording hook and three scripted turns.
+struct Harness {
+    host: Host,
+    workspace: Workspace,
+    seen: Arc<Mutex<Vec<Option<SessionId>>>>,
+    _tmp: tempfile::TempDir,
+}
+
+/// Starts the host; `agents` is appended to the user configuration.
+async fn harness(agents: &str) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
     std::fs::create_dir_all(&data).expect("data dir");
     std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
     let fixture = data.join("script.jsonl");
-    std::fs::write(&fixture, format!("{STEP_END}{STEP_END}")).expect("fixture");
+    std::fs::write(&fixture, STEP_END.repeat(3)).expect("fixture");
     let user = format!(
-        "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n{agents}",
         fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
@@ -97,18 +109,56 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await.expect("host");
-    let workspace = Workspace::new(workspace_dir.clone()).expect("workspace");
+    let workspace = Workspace::new(workspace_dir).expect("workspace");
+    Harness {
+        host,
+        workspace,
+        seen,
+        _tmp: tmp,
+    }
+}
 
-    let root = host
-        .open(
-            SessionRef::New {
-                workspace: workspace.clone(),
-                name: None,
-            },
-            ClientId::new("probe"),
-        )
-        .await
-        .expect("open root");
+impl Harness {
+    async fn open_root(&self) -> dal_agent::Agent {
+        self.host
+            .open(
+                SessionRef::New {
+                    workspace: self.workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("probe"),
+            )
+            .await
+            .expect("open root")
+    }
+
+    async fn open_child(
+        &self,
+        parent: SessionId,
+        call: &str,
+    ) -> Result<dal_agent::Agent, HostError> {
+        self.host
+            .open(
+                SessionRef::Child {
+                    parent,
+                    call: CallId::new(call),
+                    workspace: self.workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("probe"),
+            )
+            .await
+    }
+
+    fn seen(&self) -> Vec<Option<SessionId>> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+#[tokio::test]
+async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
+    let rig = harness("").await;
+    let root = rig.open_root().await;
     run_prompt(&root).await.expect("root prompt");
     let root_id = root
         .view(dal_core::PageReq::default())
@@ -116,20 +166,12 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
         .session
         .id;
 
-    let child = host
-        .open(
-            SessionRef::Child {
-                parent: root_id,
-                call: CallId::new("parent-probe"),
-                workspace: workspace.clone(),
-                name: None,
-            },
-            ClientId::new("probe"),
-        )
+    let child = rig
+        .open_child(root_id, "parent-probe")
         .await
         .expect("open child");
     run_prompt(&child).await.expect("child prompt");
-    let seen = seen.lock().expect("seen lock").clone();
+    let seen = rig.seen();
     // `before_turn` mints once per turn at the Opening phase; one prompt on
     // each session is two fires total.
     assert_eq!(seen.len(), 2, "one fire per turn: seen={seen:?}");
@@ -140,5 +182,50 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
     assert!(
         seen[1..].iter().all(|parent| *parent == Some(root_id)),
         "subagent turn sees the root as parent: seen={seen:?}"
+    );
+}
+
+/// The parent a hook is handed is the session that started its session, not
+/// the root of the tree: under `agents.max_depth = 2` a grandchild's hook
+/// sees the child. At the default depth of 1 that grandchild is refused with
+/// the depth limit named.
+#[tokio::test]
+async fn hook_parent_is_the_immediate_parent_and_depth_one_refuses_a_grandchild() {
+    let deep = harness("\n[agents]\nmax_depth = 2\n").await;
+    let root = deep.open_root().await;
+    let root_id = root.session();
+    let child = deep
+        .open_child(root_id, "to-child")
+        .await
+        .expect("depth 1 opens under max_depth 2");
+    let child_id = child.session();
+    let grandchild = deep
+        .open_child(child_id, "to-grandchild")
+        .await
+        .expect("depth 2 opens under max_depth 2");
+    for agent in [&root, &child, &grandchild] {
+        run_prompt(agent).await.expect("prompt");
+    }
+    assert_eq!(
+        deep.seen(),
+        vec![None, Some(root_id), Some(child_id)],
+        "each session's hook sees the session that started it"
+    );
+
+    let shallow = harness("").await;
+    let root = shallow.open_root().await;
+    let child = shallow
+        .open_child(root.session(), "to-child")
+        .await
+        .expect("depth 1 opens under the default limit");
+    let Err(HostError::Config { message }) =
+        shallow.open_child(child.session(), "to-grandchild").await
+    else {
+        panic!("a grandchild must be refused at the default depth limit");
+    };
+    assert_eq!(
+        message.as_ref(),
+        HostError::max_depth(1).to_string(),
+        "the refusal names the depth limit"
     );
 }

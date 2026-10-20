@@ -31,6 +31,8 @@ pub fn exec_reads_only(command: &str, _cwd: Option<&str>) -> bool {
         "env" => guards::env_ok(&mut tokens),
         "fd" => guards::fd_ok(&mut tokens),
         "rg" => guards::rg_ok(&mut tokens),
+        "tree" => guards::no_writer_flag(&mut tokens, 'o', None),
+        "file" => guards::no_writer_flag(&mut tokens, 'C', Some("compile")),
         _ => tokens.finish(),
     }
 }
@@ -431,6 +433,41 @@ mod guards {
                 || super::shell_word_starts_with(argument, "--exec=")
                 || super::shell_word_starts_with(argument, "--exec-batch=")
             {
+                return false;
+            }
+        }
+    }
+
+    /// `tree -o FILE` and `file -C` write files. Reject the writer's short
+    /// letter anywhere in a short-option cluster, any abbreviation of its long
+    /// name, an option whose leading dash is quoted, and expansions that could
+    /// produce an option.
+    pub(super) fn no_writer_flag(
+        tokens: &mut super::Tokens<'_>,
+        letter: char,
+        long: Option<&str>,
+    ) -> bool {
+        loop {
+            let argument = match tokens.next() {
+                Ok(Some(argument)) => argument,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            if super::has_shell_expansion_or_glob(argument) {
+                return false;
+            }
+            if !super::shell_word_starts_with(argument, "-") {
+                continue;
+            }
+            if !argument.starts_with('-') {
+                return false;
+            }
+            if let Some(name) = argument.strip_prefix("--") {
+                let name = name.split('=').next().unwrap_or_default();
+                if long.is_some_and(|long| !name.is_empty() && long.starts_with(name)) {
+                    return false;
+                }
+            } else if argument[1..].contains(letter) {
                 return false;
             }
         }

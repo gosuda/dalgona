@@ -1,8 +1,9 @@
-use super::helpers::{part_to_journal, truncated_args};
+use super::helpers::{characters_billed_as, part_to_journal, truncated_args};
 use super::types::MAX_STEERS;
 
 use super::*;
 use crate::journal::AssistantRoute;
+use crate::update::ResolutionCause;
 use std::{num::NonZeroU64, path::PathBuf};
 
 fn id(value: u64) -> TurnId {
@@ -41,6 +42,7 @@ fn route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
+        provider: None,
     }
 }
 
@@ -51,6 +53,7 @@ fn usage(tokens: u64) -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -332,6 +335,7 @@ fn session_grant_accepts_a_mapped_tool_name() {
             &Answer::ApproveForSession,
             Some(client()),
             false,
+            ResolutionCause::Answered,
             stamp(),
             &mut emit,
         )
@@ -447,6 +451,7 @@ fn turn_cancel_keeps_turnless_questions_waiting() {
             answer: Answer::Approve,
             by: Some(client()),
             was_default: false,
+            cause: ResolutionCause::Answered,
         },
     )
     .unwrap();
@@ -579,7 +584,8 @@ fn adjacent_text_deltas_journal_as_one_block() {
     assert_eq!(
         content,
         vec![Block::Text {
-            text: "Hello streamed world.".into()
+            text: "Hello streamed world.".into(),
+            replay: None,
         }]
     );
 }
@@ -1409,6 +1415,7 @@ fn stream_end_reserves_partial_tool_results() {
             id: CallId::new("partial-capacity"),
             name: "read_file".into(),
             input: RawJson::parse("{}").unwrap(),
+            replay: None,
         }],
         usage: usage(0),
     };
@@ -1489,6 +1496,165 @@ fn stream_end_reserves_failed_calls_for_each_stop() {
             "duplicate call identifiers need one failed result"
         );
     }
+}
+
+#[test]
+fn cancel_partial_without_a_route_is_refused_before_reminders_clear() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::StreamReminder {
+            turn,
+            rule: "route".into(),
+            text: "route reminder".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(session.active_model(), None, "no request has started yet");
+    assert_eq!(session.turn_flags.pending_reminders.len(), 1);
+    let before = session.clone();
+    let refused = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: Some(PartialResponse {
+                content: vec![Block::Text {
+                    text: "cut off".into(),
+                    replay: None,
+                }],
+                usage: usage(1),
+            }),
+        },
+    );
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused cancel dropped the reminders");
+}
+
+#[test]
+fn cancel_reserves_every_failed_call_result_before_changing_anything() {
+    let calls = [("first", "read_file"), ("second", "read_file")];
+    // The cancel event and the cancel command end the turn the same way.
+    let cancel = |turn, form: usize| match form {
+        0 => Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+        _ => Event::Command {
+            cmd: Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            },
+            by: client(),
+        },
+    };
+    for form in 0..2 {
+        let mut session = session();
+        let turn = begin(&mut session);
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &calls, 1));
+        // One free entry id for two failed results.
+        session.next_entry = Some(entry(u64::MAX));
+        let before = session.clone();
+        let refused = send(&mut session, cancel(turn, form));
+        assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+        assert_eq!(
+            session, before,
+            "refused cancel form {form} journaled a result"
+        );
+
+        // One free entry id for one failed result is enough.
+        let mut session = self::session();
+        let turn = begin(&mut session);
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &calls[..1], 1));
+        session.next_entry = Some(entry(u64::MAX));
+        send(&mut session, cancel(turn, form)).unwrap();
+        assert!(matches!(session.phase(), Phase::Idle));
+    }
+}
+
+/// A turn whose only call is dispatched and started, so its settlement is the
+/// last one and runs the boundary.
+fn with_one_started_call() -> (Session, TurnId) {
+    let mut session = session();
+    let turn = begin(&mut session);
+    stream_result(
+        &mut session,
+        turn,
+        inference(Stop::EndTurn, &[("only", "read_file")], 1),
+    );
+    let resolved = resolved_call("only", "read_file", false, Ok(ToolClass::Read));
+    send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![resolved],
+            answerer_attached: false,
+        },
+    )
+    .unwrap();
+    send(
+        &mut session,
+        Event::CallStarted {
+            turn,
+            call: CallId::new("only"),
+        },
+    )
+    .unwrap();
+    (session, turn)
+}
+
+#[test]
+fn the_last_settling_call_reserves_the_boundary_entries_it_runs() {
+    let settle = |turn| Event::Settled {
+        turn,
+        call: CallId::new("only"),
+        outcome: SettledOutcome::Ok {
+            text: "ok".into(),
+            data: None,
+        },
+        elapsed_ms: None,
+    };
+    // A queued steer is journaled at the boundary: two entries, one id left.
+    let (mut session, turn) = with_one_started_call();
+    send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "steer".into(),
+        },
+    )
+    .unwrap();
+    session.next_entry = Some(entry(u64::MAX));
+    let before = session.clone();
+    let refused = send(&mut session, settle(turn));
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused settle journaled its result");
+
+    // With nothing queued the result is the only entry, and the last id fits it.
+    let (mut session, turn) = with_one_started_call();
+    session.next_entry = Some(entry(u64::MAX));
+    send(&mut session, settle(turn)).unwrap();
+}
+
+#[test]
+fn resolved_reserves_every_failed_call_result_before_changing_anything() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let calls = [("a", "read_file"), ("b", "read_file")];
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &calls, 1));
+    // One free entry id for two failed results.
+    session.next_entry = Some(entry(u64::MAX));
+    let before = session.clone();
+    let failed = |call| resolved_call(call, "read_file", false, Err(ResolveError::Unknown));
+    let refused = send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![failed("a"), failed("b")],
+            answerer_attached: false,
+        },
+    );
+    assert!(matches!(refused, Err(Rejection::Invalid { .. })));
+    assert_eq!(session, before, "a refused resolve journaled one result");
 }
 
 #[test]
@@ -1777,6 +1943,7 @@ fn context_measurement_tracks_selected_model_and_family() {
                 content: Vec::new(),
                 usage: usage(5500),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         }),
     ];
@@ -1793,6 +1960,7 @@ fn context_measurement_tracks_selected_model_and_family() {
                     model: ModelRoute::Api {
                         family,
                         model: model.into(),
+                        provider: None,
                     },
                     save: crate::Save::SessionOnly,
                 },
@@ -1836,9 +2004,11 @@ fn replay_repairs_aborted_turn() {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             }],
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     };
     let records = [
@@ -1911,9 +2081,11 @@ fn replay_declared_keeps_the_open_turn_unrepaired() {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             }],
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     };
     let records = [
@@ -2025,10 +2197,12 @@ fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
                     id: CallId::new(*call),
                     name: "read_file".into(),
                     input: RawJson::parse("{}").unwrap(),
+                    replay: None,
                 })
                 .collect(),
             usage: usage(1),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }
@@ -2715,6 +2889,7 @@ fn projection_matches_replay_after_branch_selection() {
             content: Vec::new(),
             usage: usage(90_000),
             stop: AssistantStop::Done,
+            replay: None,
         },
     }));
     let mut live = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
@@ -2748,20 +2923,11 @@ fn projection_matches_replay_after_branch_selection() {
 #[test]
 fn projection_excludes_replaced_prefix_and_compactor_metadata() {
     let compacted = Session::replay_declared(projection_journal(None)).unwrap();
-    let equivalent = Session::replay_declared([Record::User(Entry {
-        id: entry(1),
-        parent: None,
-        at: stamp(),
-        kind: EntryKind::User {
-            parts: vec![JournalPart::Text {
-                text: "replacement".into(),
-            }],
-        },
-    })])
-    .unwrap();
     assert_eq!(
         compacted.tokens_since_last_compaction(),
-        equivalent.tokens_since_last_compaction(),
+        3,
+        "only the replacement counts, at its stored bill: not the replaced prefix, the \
+         superseded summary, or the replay payload"
     );
 }
 
@@ -2780,22 +2946,187 @@ fn projection_includes_first_kept_prefix_and_later_entries() {
     let mut records = projection_journal(Some(entry(3)));
     records.push(Record::User(later));
     let compacted = Session::replay_declared(records).unwrap();
-    let equivalent = Session::replay_declared([Record::User(Entry {
+    let kept_and_later = u64::try_from("kept context".len() + "later question".len()).unwrap();
+    assert_eq!(
+        compacted.tokens_since_last_compaction(),
+        crate::tokens::estimate_tokens(kept_and_later.saturating_add(characters_billed_as(3))),
+        "the replacement at its stored bill, then the kept prefix and later entries as text"
+    );
+}
+
+/// A one-page replacement: a label and a stored PNG of `png_bytes` bytes.
+fn png_page(png_bytes: u64) -> Vec<JournalPart> {
+    vec![
+        JournalPart::Text {
+            text: "letter://history/1.1".into(),
+        },
+        JournalPart::ImageBlob {
+            mime: "image/png".into(),
+            blob: "0".repeat(64).into(),
+            bytes: png_bytes,
+        },
+    ]
+}
+
+/// A session whose only live context is a compaction that replaced the whole
+/// path with `parts`, billed at `parts_tokens`, in a 100 000 token window
+/// that compacts at 85 000 tokens. No usage is measured, so the context size
+/// is the unmeasured estimate.
+fn session_with_parts_compaction(parts: Vec<JournalPart>, parts_tokens: u64) -> Session {
+    let records = [
+        Record::User(Entry {
+            id: entry(1),
+            parent: None,
+            at: stamp(),
+            kind: EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "question".into(),
+                }],
+            },
+        }),
+        Record::Compaction(Entry {
+            id: entry(2),
+            parent: Some(entry(1)),
+            at: stamp(),
+            kind: EntryKind::Compaction {
+                summary: None,
+                first_kept: None,
+                tokens_before: 40_000,
+                replay: None,
+                usage: None,
+                parts,
+                parts_tokens,
+            },
+        }),
+    ];
+    let mut session = Session::replay(records, stamp()).unwrap().0;
+    send(&mut session, limits(0)).unwrap();
+    session
+}
+
+#[test]
+fn characters_billed_as_is_the_exact_inverse_of_the_token_estimate() {
+    for tokens in [0, 1, 2, 3, 4, 5, 6, 7, 2_996, 85_000, u64::from(u32::MAX)] {
+        assert_eq!(
+            crate::tokens::estimate_tokens(characters_billed_as(tokens)),
+            tokens,
+            "{tokens} tokens"
+        );
+    }
+    assert_eq!(characters_billed_as(u64::MAX), u64::MAX / 2, "saturates");
+}
+
+#[test]
+fn a_parts_compaction_is_estimated_at_its_bill_not_at_its_image_bytes() {
+    // Three million bytes of PNG, billed as one image of 3 000 tokens. Read as
+    // prose those bytes are 857 143 estimated tokens, ten times the window.
+    let session = session_with_parts_compaction(png_page(3_000_000), 3_000);
+    assert_eq!(session.measured_context_tokens(), None);
+    assert_eq!(session.tokens_since_last_compaction(), 3_000);
+    assert_eq!(
+        session.should_compact(),
+        None,
+        "3 000 billed tokens in a 100 000 token window are far under the 85 000 threshold"
+    );
+}
+
+#[test]
+fn a_parts_compaction_triggers_when_its_bill_reaches_the_threshold() {
+    let under = session_with_parts_compaction(png_page(1), 80_000);
+    assert_eq!(under.tokens_since_last_compaction(), 80_000);
+    assert_eq!(under.should_compact(), None);
+
+    let over = session_with_parts_compaction(png_page(1), 90_000);
+    assert_eq!(over.tokens_since_last_compaction(), 90_000);
+    assert_eq!(
+        over.should_compact(),
+        Some(CompactionReason::Threshold),
+        "the bill alone crosses the threshold, however few bytes the images hold"
+    );
+}
+
+#[test]
+fn a_zero_bill_weighs_zero_as_it_does_at_the_cut_point() {
+    let session = session_with_parts_compaction(png_page(3_000_000), 0);
+    assert_eq!(session.tokens_since_last_compaction(), 0);
+    assert_eq!(session.should_compact(), None);
+}
+
+#[test]
+fn an_unbounded_bill_saturates_instead_of_wrapping() {
+    let session = session_with_parts_compaction(png_page(1), u64::MAX);
+    assert!(session.tokens_since_last_compaction() > 1 << 60);
+    assert_eq!(session.should_compact(), Some(CompactionReason::Threshold));
+}
+
+#[test]
+fn a_live_parts_compaction_is_estimated_like_its_replay() {
+    let mut records = vec![Record::User(Entry {
         id: entry(1),
         parent: None,
         at: stamp(),
         kind: EntryKind::User {
-            parts: ["replacement", "kept context", "later question"]
-                .into_iter()
-                .map(|text| JournalPart::Text { text: text.into() })
-                .collect(),
+            parts: vec![JournalPart::Text {
+                text: "question".into(),
+            }],
         },
-    })])
+    })];
+    let mut live = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
+    send(&mut live, limits(0)).unwrap();
+    let out = send(
+        &mut live,
+        Event::Command {
+            cmd: Command::Compact { focus: None },
+            by: client(),
+        },
+    )
     .unwrap();
-    assert_eq!(
-        compacted.tokens_since_last_compaction(),
-        equivalent.tokens_since_last_compaction(),
+    append_emitted(&out, &mut records);
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000002").unwrap();
+    let settled = CompactionSummary {
+        compactor: name("history"),
+        tokens_before: 40_000,
+        tokens_after: 3_100,
+        summary: None,
+        first_kept: Some(entry(1)),
+        replay: None,
+        usage: None,
+        parts: png_page(3_000_000),
+        parts_tokens: 3_000,
+        letters: Vec::new(),
+    };
+    for event in [
+        Event::JobStarted {
+            job,
+            kind: JobKind::Compaction,
+        },
+        Event::CompactionSettled {
+            turn: None,
+            outcome: Ok(settled),
+        },
+        Event::JobSettled {
+            job,
+            outcome: JobOutcome::Exited { code: 0 },
+        },
+    ] {
+        let out = send(&mut live, event).unwrap();
+        append_emitted(&out, &mut records);
+    }
+    let replayed = Session::replay_declared(records).unwrap();
+    let expected = crate::tokens::estimate_tokens(
+        u64::try_from("question".len())
+            .unwrap()
+            .saturating_add(characters_billed_as(3_000)),
     );
+    assert_eq!(
+        (
+            live.tokens_since_last_compaction(),
+            replayed.tokens_since_last_compaction()
+        ),
+        (expected, expected),
+        "the kept question as text plus the replacement at its bill"
+    );
+    assert_eq!(live.should_compact(), None);
 }
 
 #[test]
@@ -2813,6 +3144,7 @@ fn projection_tracks_latest_compaction_on_selected_branch() {
                 content: Vec::new(),
                 usage: usage(90_000),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         }),
         Record::Compaction(Entry {
@@ -3056,11 +3388,13 @@ fn interrupted_stream_records_partial_assistant_and_call_result_once() {
         content: vec![
             Block::Text {
                 text: "partial answer".into(),
+                replay: None,
             },
             Block::ToolCall {
                 id: call.clone(),
                 name: "read_file".into(),
                 input: RawJson::parse("{}").unwrap(),
+                replay: None,
             },
         ],
         usage: usage(7),
@@ -3739,6 +4073,7 @@ fn turn_end_sums_usage_across_tool_rounds() {
             output_tokens: 2,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         })
     );
@@ -3834,6 +4169,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 3,
             reasoning_tokens: Some(4),
             cache_write_tokens: 1,
+            premium_requests: Some(0.5),
             cost_usd: Some(0.5),
         })
         .unwrap();
@@ -3843,9 +4179,10 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             input_tokens: 15,
             cached_input_tokens: 2,
             output_tokens: 4,
-            reasoning_tokens: None,
+            reasoning_tokens: Some(4),
             cache_write_tokens: 1,
-            cost_usd: None,
+            premium_requests: Some(0.5),
+            cost_usd: Some(0.5),
         })
     );
     let mut known = super::types::TurnTotals::default();
@@ -3856,6 +4193,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 1,
             reasoning_tokens: Some(4),
             cache_write_tokens: 1,
+            premium_requests: Some(0.5),
             cost_usd: Some(0.5),
         })
         .unwrap();
@@ -3866,6 +4204,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 1,
             reasoning_tokens: Some(6),
             cache_write_tokens: 1,
+            premium_requests: Some(0.25),
             cost_usd: Some(0.25),
         })
         .unwrap();
@@ -3877,6 +4216,7 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             output_tokens: 2,
             reasoning_tokens: Some(10),
             cache_write_tokens: 2,
+            premium_requests: Some(0.75),
             cost_usd: Some(0.75),
         })
     );
@@ -3916,6 +4256,80 @@ fn turn_totals_merge_changes_and_track_known_flags() {
             },
         ]
     );
+}
+
+#[test]
+fn turn_premium_measured_zero_stays_known_while_missing_is_unknown() {
+    let measured = |premium| Usage {
+        premium_requests: Some(premium),
+        ..usage(1)
+    };
+    let mut totals = super::types::TurnTotals::default();
+    totals.add_usage(measured(0.0)).unwrap();
+    totals.add_usage(measured(0.0)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        Some(0.0)
+    );
+    totals.add_usage(measured(1.5)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        Some(1.5)
+    );
+    totals.add_usage(usage(1)).unwrap();
+    assert_eq!(
+        totals.usage().and_then(|usage| usage.premium_requests),
+        None
+    );
+}
+
+#[test]
+fn turn_premium_rejects_invalid_and_overflowing_measurements() {
+    for premium in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut totals = super::types::TurnTotals::default();
+        let rejected = totals.add_usage(Usage {
+            premium_requests: Some(premium),
+            ..usage(1)
+        });
+        assert!(
+            matches!(rejected, Err(Rejection::Invalid { .. })),
+            "premium {premium:?} is rejected"
+        );
+        assert_eq!(
+            totals.usage(),
+            None,
+            "a rejected premium measurement folds none of its members"
+        );
+    }
+    let mut totals = super::types::TurnTotals::default();
+    totals
+        .add_usage(Usage {
+            premium_requests: Some(f64::MAX),
+            ..usage(1)
+        })
+        .unwrap();
+    let before = totals.clone();
+    let overflowing = Usage {
+        premium_requests: Some(f64::MAX),
+        ..usage(1)
+    };
+    assert!(
+        totals.check_usage(overflowing).is_err(),
+        "the preflight check refuses the same premium sum"
+    );
+    assert!(
+        totals.add_usage(overflowing).is_err(),
+        "a premium sum that stops being finite is rejected"
+    );
+    assert_eq!(
+        totals, before,
+        "a refused premium sum leaves the token members it passed unfolded"
+    );
+}
+
+#[test]
+fn zero_usage_carries_no_premium_measurement() {
+    assert_eq!(super::helpers::zero_usage().premium_requests, None);
 }
 
 #[test]
@@ -3964,34 +4378,45 @@ fn replay_rejects_out_of_order_turn_ids() {
 }
 
 #[test]
-fn tokens_since_compaction_estimate_uses_the_shared_character_rate() {
-    let text = "a".repeat(35);
-    let mut session = session();
-    let mut journal = Vec::new();
-    let prompted = send(
-        &mut session,
-        Event::Command {
-            cmd: Command::Prompt {
-                expect: Expect::Idle,
-                content: vec![Part::Text {
-                    text: text.clone().into(),
-                }],
+fn tokens_since_compaction_estimate_rounds_up_at_three_and_a_half_characters_per_token() {
+    // One token per 3.5 characters, rounded up: ceil(2n / 7). The expected
+    // counts are the literal rate, never the estimator under test; each pair
+    // of neighbours straddles a rounding boundary.
+    for (characters, tokens) in [
+        (1_usize, 1_u64),
+        (7, 2),
+        (8, 3),
+        (34, 10),
+        (35, 10),
+        (36, 11),
+        (70, 20),
+        (71, 21),
+    ] {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Command {
+                cmd: Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text {
+                        text: "a".repeat(characters).into(),
+                    }],
+                },
+                by: client(),
             },
-            by: client(),
-        },
-    )
-    .unwrap();
-    append_emitted(&prompted, &mut journal);
-    let turn = match session.phase() {
-        Phase::Opening { turn, .. } => *turn,
-        phase => panic!("prompt did not open a turn: {phase:?}"),
-    };
-    append_emitted(&send(&mut session, guard(turn)).unwrap(), &mut journal);
-    // The branch estimate and the shared estimator agree on the same text.
-    assert_eq!(
-        session.tokens_since_last_compaction(),
-        crate::tokens::estimate_text_tokens(&text),
-    );
+        )
+        .unwrap();
+        let turn = match session.phase() {
+            Phase::Opening { turn, .. } => *turn,
+            phase => panic!("prompt did not open a turn: {phase:?}"),
+        };
+        send(&mut session, guard(turn)).unwrap();
+        assert_eq!(
+            session.tokens_since_last_compaction(),
+            tokens,
+            "{characters} characters"
+        );
+    }
 }
 
 #[test]
@@ -4224,6 +4649,7 @@ fn route_assistant(
             content: Vec::new(),
             usage: usage(tokens),
             stop: AssistantStop::Done,
+            replay: None,
         },
     })
 }
@@ -4301,6 +4727,7 @@ fn restore_uses_newest_provenance_among_colliding_spellings() {
     let api = ModelRoute::Api {
         family: Family::Chat,
         model: spelling.into(),
+        provider: None,
     };
     let synthetic = ModelRoute::Synthetic {
         id: spelling.into(),
@@ -4377,10 +4804,12 @@ fn restored_route_family_is_independent_of_wire_family() {
     let chat = ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
+        provider: None,
     };
     let anthropic = ModelRoute::Api {
         family: Family::Anthropic,
         model: "test-model".into(),
+        provider: None,
     };
     let mut live = Session::replay_declared(records.iter().cloned()).unwrap();
     select_model(&mut live, &chat);
@@ -4419,6 +4848,7 @@ fn newer_assistant_without_provenance_invalidates_older_usage() {
         &ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         },
     );
     assert_eq!(live.measured_context_tokens(), None);
@@ -4444,6 +4874,7 @@ fn partial_assistant_measurement_matches_across_reopen() {
     let partial = PartialResponse {
         content: vec![Block::Text {
             text: "partial answer".into(),
+            replay: None,
         }],
         usage: usage(90_000),
     };
@@ -4470,9 +4901,11 @@ fn partial_assistant_measurement_matches_across_reopen() {
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "partial answer".into(),
+                replay: None,
             }],
             usage: usage(90_000),
             stop: AssistantStop::Cancelled,
+            replay: None,
         },
     );
     let records = decode_journal(&records);
@@ -4541,6 +4974,7 @@ fn completed_routes_survive_reopen_across_all_kinds() {
             ModelRoute::Api {
                 family: Family::Chat,
                 model: "api-model".into(),
+                provider: None,
             },
             AssistantRoute::Api(Family::Chat),
             6_000_u64,
@@ -4627,6 +5061,7 @@ fn last_response_model_follows_the_leaf_chain() {
         Some(ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         }),
         "a complete user-to-assistant chain returns that assistant route"
     );
@@ -4681,4 +5116,1469 @@ fn declared_fold_mirrors_job_records_into_session_jobs() {
         session.ended_jobs.as_slice(),
         [(id, JobOutcome::Exited { code: 0 })] if *id == job
     ));
+}
+#[cfg(test)]
+mod threshold_estimate_fallback {
+    //! ENG-17 C-05: the automatic-threshold trigger must estimate from the
+    //! projected branch whenever measured usage is absent, stale (pre-dating a
+    //! compaction), or tied to another model, using the shared token-estimation
+    //! owner in `crate::tokens`. A change in the turn outcome (a `Compact`
+    //! effect firing or not) is the observable, so deleting the fallback
+    //! breaks these tests instead of just uninvoking a helper.
+    use super::*;
+
+    /// Drives a real prompt turn to the trigger point. `open_round` runs
+    /// inside the guard event (`begin_turn` -> boundary -> `open_round`), so
+    /// the guard's effects are the observable: `Effect::Compact` means the
+    /// threshold fired.
+    fn open_prompt_turn(session: &mut Session, text: &str) -> (TurnId, Vec<Effect>) {
+        send(
+            session,
+            Event::Command {
+                cmd: Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text { text: text.into() }],
+                },
+                by: client(),
+            },
+        )
+        .unwrap();
+        let turn = match session.phase() {
+            Phase::Opening { turn, .. } => *turn,
+            phase => panic!("prompt did not open a turn: {phase:?}"),
+        };
+        let out = send(session, guard(turn)).unwrap();
+        (turn, out)
+    }
+
+    fn compacted(out: &[Effect]) -> bool {
+        out.iter()
+            .any(|effect| matches!(effect, Effect::Compact { .. }))
+    }
+
+    /// ~455 projected KiB -> estimate = ceil(2 * bytes / 7) ~= 149k tokens,
+    /// above the 85% line of a 100k window with `min_tokens` = 1.
+    fn heavy_text() -> String {
+        "context ".repeat(65_000)
+    }
+
+    /// ~228 projected KiB -> estimate ~= 74k tokens: below the 85k line
+    /// alone, past it when one more entry of the same size joins.
+    fn medium_text() -> String {
+        "context ".repeat(32_500)
+    }
+
+    #[test]
+    fn unmeasured_projected_context_crossing_threshold_compacts() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        assert_eq!(session.last_usage, None, "precondition: no usage yet");
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            compacted(&out),
+            "unmeasured context above the estimate threshold must compact"
+        );
+        assert!(session.pending_compaction.is_some());
+    }
+
+    #[test]
+    fn unmeasured_context_below_threshold_does_not_compact() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (_, out) = open_prompt_turn(&mut session, "tiny question");
+        assert!(
+            !compacted(&out),
+            "a small unmeasured context must not trigger compaction"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn min_tokens_floor_gates_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(200_000)).unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            !compacted(&out),
+            "the estimate must respect limits.compact.min_tokens"
+        );
+    }
+
+    #[test]
+    fn model_changed_context_compacts_on_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "small question");
+        let out = stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 500));
+        assert!(
+            !compacted(&out),
+            "measured same-model usage below the threshold must not compact"
+        );
+        send(&mut session, Event::Boundary { turn }).unwrap();
+        // Switch the requested model: the stored measurement now belongs to
+        // another route, so only the estimate remains valid.
+        select_model(
+            &mut session,
+            &ModelRoute::Api {
+                family: Family::Anthropic,
+                model: "other-model".into(),
+                provider: None,
+            },
+        );
+        // Grow the projected branch stream-free in sub-threshold steps
+        // (200 000 bytes -> 57 143 estimated tokens each): the first
+        // post-switch turn must not fire, the second crosses the 85k line
+        // on the estimate alone.
+        let mid_text = "context ".repeat(25_000);
+        let (turn, out) = open_prompt_turn(&mut session, &mid_text);
+        assert!(
+            !compacted(&out),
+            "the first sub-threshold estimate must not compact"
+        );
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &mid_text);
+        assert!(
+            compacted(&out),
+            "a stale measurement from another model must fall back to the estimate"
+        );
+    }
+
+    #[test]
+    fn measured_eligible_usage_still_takes_precedence() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "question");
+        let out = one_read_round(&mut session, turn, "precedence", 90_000);
+        // 90_000 measured tokens >= 85_000 with a tiny projection: the
+        // measured value must decide, not the estimate.
+        assert_eq!(session.tokens_since_last_compaction(), 90_000);
+        assert!(
+            compacted(&out),
+            "eligible measured usage must still trigger compaction"
+        );
+    }
+
+    #[test]
+    fn zero_window_still_disables_the_trigger() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 0,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: true,
+                    compactor_available: true,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "window == 0 must disable the trigger");
+    }
+
+    #[test]
+    fn disabled_flag_still_suppresses_the_estimate_trigger() {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 100_000,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: false,
+                    compactor_available: true,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "compact.enabled = false must suppress");
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn missing_compactor_keeps_the_estimate_only_notifying() {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Limits {
+                window: 100_000,
+                max_steps: 0,
+                compact: CompactLimits {
+                    threshold: 0.85,
+                    min_tokens: 1,
+                    keep_tokens: 20_000,
+                    enabled: true,
+                    compactor_available: false,
+                },
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out));
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+        assert!(
+            out.iter().any(|effect| matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "compaction_none")))),
+            "an eligible trigger with no compactor must notify compaction_none"
+        );
+    }
+
+    #[test]
+    fn open_breaker_suppresses_the_estimate_trigger() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        session.breaker_open = true;
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(!compacted(&out), "an open breaker must suppress");
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn breaker_arms_when_estimate_driven_compactions_fail_three_times() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        // Stream-free: every measured_context_tokens() stays None, so each
+        // round is judged by the estimate alone.
+        for index in 0..3 {
+            let (turn, out) = open_prompt_turn(&mut session, &heavy_text());
+            assert!(
+                compacted(&out),
+                "estimate-driven compaction {index} must fire"
+            );
+            let out = send(
+                &mut session,
+                Event::CompactionSettled {
+                    turn: Some(turn),
+                    outcome: Err("compactor unavailable".into()),
+                },
+            )
+            .unwrap();
+            assert!(
+                out.iter().any(|effect| matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "compaction_ended")))),
+                "failed compaction {index} must emit compaction_ended"
+            );
+            if index < 2 {
+                assert!(session.auto_compaction_on(), "breaker closed after {index}");
+            }
+            send(
+                &mut session,
+                Event::Cancel {
+                    scope: CancelScope::Turn(turn),
+                    partial: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(
+            !session.auto_compaction_on(),
+            "breaker must arm on the third failure"
+        );
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            !compacted(&out),
+            "the open breaker must suppress estimate-driven compaction"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn resolved_compaction_consumes_the_estimate_so_no_loop_fires() {
+        // Stream-free so measured_context_tokens() stays None. The context is
+        // split across two ~260 KiB user entries (~74k estimated tokens
+        // each): one alone stays under the 85k line, both together cross it,
+        // and dropping the older one brings the projection back under.
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, out) = open_prompt_turn(&mut session, &medium_text());
+        assert!(
+            !compacted(&out),
+            "a single sub-threshold entry must not compact"
+        );
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, &medium_text());
+        assert!(
+            compacted(&out),
+            "two entries past the line must fire on the estimate"
+        );
+        let turn = match session.phase() {
+            Phase::Running { turn, .. } => *turn,
+            phase => panic!("compaction did not pause the turn: {phase:?}"),
+        };
+        // Keep only the newest user entry (first_kept = entry 2): the
+        // projected bytes collapse back to ~74k estimated tokens, so the next
+        // trigger point must infer, not re-compact.
+        let mut summary = compact_summary(148_000, 74_000);
+        summary.first_kept = Some(entry(2));
+        send(
+            &mut session,
+            Event::CompactionSettled {
+                turn: Some(turn),
+                outcome: Ok(summary),
+            },
+        )
+        .unwrap();
+        assert_eq!(session.compactions(), 1);
+        send(
+            &mut session,
+            Event::Cancel {
+                scope: CancelScope::Turn(turn),
+                partial: None,
+            },
+        )
+        .unwrap();
+        let (_, out) = open_prompt_turn(&mut session, "next");
+        assert!(
+            !compacted(&out),
+            "a resolved compaction must not re-trigger on its own summary"
+        );
+        assert!(out.iter().any(|effect| matches!(effect, Effect::Infer(_))));
+    }
+
+    #[test]
+    fn stale_pre_compaction_usage_falls_back_to_the_estimate() {
+        let mut session = session();
+        send(&mut session, limits(1)).unwrap();
+        let (turn, _) = open_prompt_turn(&mut session, "before compaction");
+        stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 500));
+        send(&mut session, Event::Boundary { turn }).unwrap();
+        send(
+            &mut session,
+            Event::Command {
+                cmd: Command::Compact { focus: None },
+                by: client(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(session.phase(), Phase::Compacting { .. }));
+        settle_manual_compaction(&mut session, 1_000, 100);
+        assert_eq!(session.compactions(), 1);
+        // The stored usage predates compaction 1: measured_context_tokens()
+        // now returns None and the estimate must decide.
+        assert_eq!(session.measured_context_tokens(), None);
+        let (_, out) = open_prompt_turn(&mut session, &heavy_text());
+        assert!(
+            compacted(&out),
+            "stale pre-compaction usage must fall back to the estimate"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private-effect fold: births, pairing, terminals, repair.
+//
+// Private turns are attribution only: no test below reserves or opens a
+// turn, pinning that private records never consult the turn sequence.
+// ---------------------------------------------------------------------------
+
+fn private_owner(name: &str) -> crate::Owner {
+    crate::Owner::Extension {
+        name: name.into(),
+        origin: "user".into(),
+    }
+}
+
+fn private_birth(id: crate::PrivateLoopId, who: crate::Owner, turn: Option<TurnId>) -> Record {
+    Record::PrivateLoop {
+        at: stamp(),
+        r#loop: id,
+        who,
+        turn,
+    }
+}
+
+fn private_begin(
+    id: crate::PrivateLoopId,
+    token: crate::PrivateEffectId,
+    who: crate::Owner,
+    turn: Option<TurnId>,
+    round: u32,
+    call: &str,
+    tool: &str,
+) -> Record {
+    Record::PrivateStart {
+        at: stamp(),
+        r#loop: id,
+        token,
+        who,
+        turn,
+        round,
+        call: CallId::new(call),
+        name: tool.into(),
+        args: RawJson::parse(r#"{"x":1}"#).unwrap(),
+    }
+}
+
+fn private_close(
+    id: crate::PrivateLoopId,
+    token: crate::PrivateEffectId,
+    outcome: crate::PrivateOutcome,
+) -> Record {
+    Record::PrivateEnd {
+        at: stamp(),
+        r#loop: id,
+        token,
+        outcome,
+    }
+}
+
+fn settled_outcome() -> crate::PrivateOutcome {
+    crate::PrivateOutcome::Settled {
+        is_error: false,
+        parts: vec![JournalPart::Text { text: "ok".into() }],
+    }
+}
+
+fn private_ends(records: &[Record]) -> Vec<(crate::PrivateLoopId, crate::PrivateEffectId)> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::PrivateEnd { r#loop, token, .. } => Some((*r#loop, *token)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn private_transitions_contradict_exactly_once_per_shape() {
+    let owner_a = private_owner("a");
+    let owner_b = private_owner("b");
+    let born = crate::PrivateLoopId::new_v7();
+    let other = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+
+    // UnbornLoop: a start or an end with no prior birth, even childless.
+    assert!(contradicts(vec![private_begin(
+        born,
+        token,
+        owner_a.clone(),
+        None,
+        0,
+        "c",
+        "tool"
+    )]));
+    assert!(contradicts(vec![private_close(
+        born,
+        token,
+        settled_outcome()
+    )]));
+
+    // LoopBornTwice: a childless duplicate birth contradicts ...
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_birth(born, owner_a.clone(), None),
+    ]));
+    // ... and so does a re-birth after the loop settled.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_birth(born, owner_a.clone(), None),
+    ]));
+
+    // EffectStartedTwice: one (loop, token) starts once.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_begin(born, token, owner_a.clone(), None, 1, "c", "tool"),
+    ]));
+
+    // LoopMismatch: the start must repeat the birth's owner and turn.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_b.clone(), None, 0, "c", "tool"),
+    ]));
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), Some(id(1))),
+        private_begin(born, token, owner_a.clone(), Some(id(2)), 0, "c", "tool"),
+    ]));
+
+    // EndWithoutStart: the birth exists but no start does; the cross-loop
+    // end (same token, other loop) finds no row either.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_close(born, token, settled_outcome()),
+    ]));
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_birth(other, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(other, token, settled_outcome()),
+    ]));
+
+    // EndedTwice: one (loop, token) ends once.
+    assert!(contradicts(vec![
+        private_birth(born, owner_a.clone(), None),
+        private_begin(born, token, owner_a.clone(), None, 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_close(born, token, settled_outcome()),
+    ]));
+
+    // Control: the same wire call id under two loops settles disjointly.
+    let second = crate::PrivateEffectId::new_v7();
+    assert!(!contradicts(vec![
+        private_birth(born, owner_a.clone(), Some(id(1))),
+        private_birth(other, owner_a.clone(), Some(id(1))),
+        private_begin(born, token, owner_a.clone(), Some(id(1)), 0, "c", "tool"),
+        private_begin(other, second, owner_a.clone(), Some(id(1)), 0, "c", "tool"),
+        private_close(born, token, settled_outcome()),
+        private_close(other, second, settled_outcome()),
+    ]));
+}
+
+#[test]
+fn private_same_wire_call_across_loops_settles_in_end_order() {
+    let owner = private_owner("a");
+    let first = crate::PrivateLoopId::new_v7();
+    let second_loop = crate::PrivateLoopId::new_v7();
+    let first_token = crate::PrivateEffectId::new_v7();
+    let second_token = crate::PrivateEffectId::new_v7();
+    let journal = vec![
+        private_birth(first, owner.clone(), Some(id(1))),
+        private_birth(second_loop, owner.clone(), Some(id(1))),
+        private_begin(
+            first,
+            first_token,
+            owner.clone(),
+            Some(id(1)),
+            0,
+            "c",
+            "tool",
+        ),
+        private_begin(
+            second_loop,
+            second_token,
+            owner.clone(),
+            Some(id(1)),
+            0,
+            "c",
+            "tool",
+        ),
+        // Ends arrive latest-loop-first; terminals follow end order.
+        private_close(second_loop, second_token, settled_outcome()),
+        private_close(first, first_token, settled_outcome()),
+    ];
+    let (session, _) = Session::replay(journal, stamp()).unwrap();
+    assert_eq!(session.private_terminal_len(), 2);
+    let terminals = session.private_terminals_since(0);
+    assert_eq!(terminals[0].token, second_token);
+    assert_eq!(terminals[1].token, first_token);
+    assert_eq!(terminals[0].r#loop, second_loop);
+    let facts: Vec<_> = session.private_facts().collect();
+    assert!(facts.iter().all(|fact| fact.outcome.is_some()));
+}
+
+#[test]
+fn private_repair_marks_each_unresolved_start_exactly_once() {
+    let owner = private_owner("a");
+    let first = crate::PrivateLoopId::new_v7();
+    let second_loop = crate::PrivateLoopId::new_v7();
+    let first_token = crate::PrivateEffectId::new_v7();
+    let second_token = crate::PrivateEffectId::new_v7();
+    let mut journal = vec![
+        private_birth(first, owner.clone(), None),
+        private_birth(second_loop, owner.clone(), None),
+        private_begin(first, first_token, owner.clone(), None, 0, "c", "tool"),
+        private_begin(
+            second_loop,
+            second_token,
+            owner.clone(),
+            None,
+            3,
+            "c",
+            "tool",
+        ),
+        private_close(first, first_token, settled_outcome()),
+    ];
+    let (session, effects) = Session::replay(journal.clone(), stamp()).unwrap();
+    // Exactly one repair end, in row order, for the unresolved start.
+    let [Effect::Emit(repair)] = effects.as_slice() else {
+        panic!("replay must return one repair batch")
+    };
+    let ends = private_ends(&repair.records);
+    assert_eq!(ends, [(second_loop, second_token)]);
+    assert!(matches!(
+        &repair.records[0],
+        Record::PrivateEnd {
+            outcome: crate::PrivateOutcome::Indeterminate,
+            ..
+        }
+    ));
+    // The repair end is terminal like any other: the settled row first,
+    // then the indeterminate repair, both in end journal order.
+    let terminals = session.private_terminals_since(0);
+    assert_eq!(terminals.len(), 2);
+    assert!(matches!(
+        terminals[0].outcome,
+        crate::PrivateOutcome::Settled { .. }
+    ));
+    assert!(matches!(
+        terminals[1].outcome,
+        crate::PrivateOutcome::Indeterminate
+    ));
+    assert_eq!(
+        (terminals[1].r#loop, terminals[1].token),
+        (second_loop, second_token)
+    );
+
+    // A second open over the persisted repair mints nothing new.
+    journal.extend(repair.records.iter().cloned());
+    let (reopened, again) = Session::replay(journal, stamp()).unwrap();
+    let [Effect::Emit(second)] = again.as_slice() else {
+        panic!("replay must return one repair batch")
+    };
+    assert_eq!(private_ends(&second.records), []);
+    assert_eq!(reopened.private_terminal_len(), 2);
+}
+
+#[test]
+fn private_declared_replay_never_repairs() {
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+    let session = Session::replay_declared(vec![
+        private_birth(id, owner.clone(), None),
+        private_begin(id, token, owner.clone(), None, 0, "c", "tool"),
+    ])
+    .unwrap();
+    // Inspection sees the started row but no terminal and no repair.
+    assert_eq!(session.private_terminal_len(), 0);
+    assert_eq!(session.private_terminals_since(0), []);
+    let facts: Vec<_> = session.private_facts().collect();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].outcome, None);
+    assert_eq!((facts[0].r#loop, facts[0].token), (id, token));
+}
+
+#[test]
+fn private_absent_records_leave_no_terminals() {
+    // A journal that predates private records replays with an empty
+    // terminal log ...
+    let journal = vec![Record::Ext {
+        at: stamp(),
+        ext: "a".into(),
+        kind: "k".into(),
+        body: RawJson::parse(r"{}").unwrap(),
+    }];
+    let (session, _) = Session::replay(journal, stamp()).unwrap();
+    assert_eq!(session.private_terminal_len(), 0);
+    assert_eq!(session.private_terminals_since(0), []);
+
+    // ... and so does a fork view, which carries entry-path records only:
+    // branch() drops non-entry private records, so the clone starts empty
+    // while the source keeps its audit.
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+    let source = vec![
+        private_birth(id, owner.clone(), None),
+        private_begin(id, token, owner.clone(), None, 0, "c", "tool"),
+        private_close(id, token, settled_outcome()),
+    ];
+    let (before, _) = Session::replay(source.clone(), stamp()).unwrap();
+    assert_eq!(before.private_terminal_len(), 1);
+    let fork_view: Vec<Record> = source
+        .into_iter()
+        .filter(|record| record.entry().is_some())
+        .collect();
+    let (forked, _) = Session::replay(fork_view, stamp()).unwrap();
+    assert_eq!(forked.private_terminal_len(), 0);
+}
+
+#[test]
+fn private_live_check_then_fold_publishes_once() {
+    let mut live = session();
+    let owner = private_owner("a");
+    let id = crate::PrivateLoopId::new_v7();
+    let token = crate::PrivateEffectId::new_v7();
+
+    assert!(live.check_private_loop(id).is_ok());
+    live.fold_private_loop(id, owner.clone(), None);
+    assert!(live.check_private_start(id, token, &owner, None).is_ok());
+    live.fold_private_start(id, token, &owner, None, 2, "tool");
+    // The started row is in flight: invisible to publication.
+    assert_eq!(live.private_terminal_len(), 0);
+    assert_eq!(live.private_terminals_since(0), []);
+    assert!(live.check_private_end(id, token).is_ok());
+    live.fold_private_end(id, token, settled_outcome());
+    assert_eq!(live.private_terminal_len(), 1);
+    assert_eq!(live.private_terminals_since(0).len(), 1);
+    assert_eq!(live.private_terminals_since(1), []);
+
+    // A rejected write changes nothing.
+    assert_eq!(
+        live.check_private_loop(id),
+        Err(crate::PrivateConflict::LoopBornTwice)
+    );
+    assert_eq!(live.private_terminal_len(), 1);
+}
+
+#[test]
+#[should_panic(expected = "private publication cursor")]
+fn private_terminal_cursor_beyond_len_fails_closed() {
+    let live = session();
+    let _ = live.private_terminals_since(1);
+}
+
+#[test]
+fn types_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    assert_send_sync::<Session>();
+    assert_send_sync::<Event>();
+    assert_send_sync::<Effect>();
+    assert_send_sync::<ReplayError>();
+    assert_send_sync::<ResolveError>();
+    assert_send_sync::<PrivateConflict>();
+    assert_send_sync::<crate::DenyReason>();
+    assert_send_sync::<crate::ConfigError>();
+    assert_send_sync::<crate::DecodeError>();
+    assert_send_sync::<crate::EncodeError>();
+    assert_send_sync::<crate::Rejection>();
+}
+
+/// Provider replay capture policy, driven through `Session::step`.
+///
+/// The fold decides once per completed response whether a provider capture
+/// rides the closing assistant entry: a `Captured` payload is measured as the
+/// exact journal line and journals only when that line fits `MAX_RECORD`; a
+/// `Refused` capture (or an over-bound line) journals the content without a
+/// payload and fails the turn once; a capture on a tool-call response is
+/// ignored.
+///
+/// Duplicate and post-usage captures are `debug_assert!`ed protocol
+/// violations (`helpers.rs`), not recoverable input. The policy test choice
+/// (GAP-3c): debug builds prove the assertion fires (`#[should_panic]`);
+/// builds without debug assertions prove the documented release behavior
+/// (first capture wins, a capture after the usage is dropped). Each cfg
+/// compiles only its own half, so a default `cargo test` exercises the debug
+/// half and a profile with `debug-assertions = false` exercises the other.
+mod capture_policy {
+    use super::*;
+    use crate::fold::helpers::assistant_stop;
+    use crate::journal::{MAX_RECORD, decode, encode};
+    use crate::model::{ReplayCapture, ReplayRefusal};
+
+    const BODY: &str = "Texte diffuse.";
+    const STOPS: [Stop; 6] = [
+        Stop::EndTurn,
+        Stop::Length,
+        Stop::Filter,
+        Stop::MaxSteps,
+        Stop::Cancelled,
+        Stop::Failed,
+    ];
+    /// Every refusal an adapter can report; `LineBound` is the fold's own.
+    const ADAPTER_REFUSALS: [ReplayRefusal; 7] = [
+        ReplayRefusal::RecordNotUtf8,
+        ReplayRefusal::RecordNotRoundtrip,
+        ReplayRefusal::RecordNotJson,
+        ReplayRefusal::UserRecordNotFound,
+        ReplayRefusal::NoRecords,
+        ReplayRefusal::CheckpointNotCoveringTurn,
+        ReplayRefusal::RouteMixed,
+    ];
+
+    fn text() -> StreamEvent {
+        StreamEvent::Delta {
+            channel: StreamChannel::Text,
+            text: BODY.into(),
+        }
+    }
+
+    fn captured(payload: &str) -> StreamEvent {
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Captured {
+                payload: RawJson::parse(payload).unwrap(),
+            },
+        }
+    }
+
+    fn refused(reason: ReplayRefusal) -> StreamEvent {
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Refused { reason },
+        }
+    }
+
+    fn tool_call() -> StreamEvent {
+        StreamEvent::ToolCall {
+            call: CallId::new("call-1"),
+            name: "read_file".into(),
+            args: RawJson::parse("{}").unwrap(),
+        }
+    }
+
+    /// The body text, `between` events, then the usage and the stop: the
+    /// capture sits inside the grammar's window, before the usage.
+    fn closing(between: Vec<StreamEvent>, stop: Stop) -> Inference {
+        let mut events = vec![text()];
+        events.extend(between);
+        events.push(StreamEvent::Usage(usage(10)));
+        events.push(StreamEvent::Stop(stop));
+        Inference { events }
+    }
+
+    /// A response whose capture arrives after its usage: outside the window.
+    fn late(capture: StreamEvent) -> Inference {
+        Inference {
+            events: vec![
+                text(),
+                StreamEvent::Usage(usage(10)),
+                capture,
+                StreamEvent::Stop(Stop::EndTurn),
+            ],
+        }
+    }
+
+    /// One response whose capture is a JSON string of `chars` characters.
+    fn padded(chars: usize) -> Inference {
+        let mut json = String::with_capacity(chars + 2);
+        json.push('"');
+        json.push_str(&"a".repeat(chars));
+        json.push('"');
+        closing(vec![captured(&json)], Stop::EndTurn)
+    }
+
+    fn run(response: Inference) -> (Session, TurnId, Vec<Effect>) {
+        let mut session = session();
+        let turn = begin(&mut session);
+        let out = stream_result(&mut session, turn, response);
+        (session, turn, out)
+    }
+
+    fn records(out: &[Effect]) -> impl Iterator<Item = &Record> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Emit(emit) => Some(emit.records.iter()),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    fn only_assistant(out: &[Effect]) -> (&Record, &EntryKind) {
+        let mut found = records(out).filter_map(|record| match record {
+            Record::Assistant(entry) => Some((record, &entry.kind)),
+            _ => None,
+        });
+        let first = found
+            .next()
+            .expect("the response journals an assistant entry");
+        assert!(
+            found.next().is_none(),
+            "the response journals exactly one assistant entry"
+        );
+        first
+    }
+
+    fn turn_ends(out: &[Effect]) -> Vec<&TurnEndStop> {
+        records(out)
+            .filter_map(|record| match record {
+                Record::TurnEnd { stop, .. } => Some(stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn stop_effects(out: &[Effect]) -> Vec<Stop> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Stop { stop, .. } => Some(*stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ended_updates(out: &[Effect]) -> Vec<Stop> {
+        out.iter()
+            .filter_map(|effect| match effect {
+                Effect::Emit(emit) => Some(emit.updates.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|update| match update {
+                UpdateKind::TurnEnded { stop, .. } => Some(*stop),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn replay_of(kind: &EntryKind) -> Option<&RawJson> {
+        match kind {
+            EntryKind::Assistant { replay, .. } => replay.as_ref(),
+            other => panic!("expected an assistant entry kind: {other:?}"),
+        }
+    }
+
+    fn content_of(kind: &EntryKind) -> &[Block] {
+        match kind {
+            EntryKind::Assistant { content, .. } => content,
+            other => panic!("expected an assistant entry kind: {other:?}"),
+        }
+    }
+
+    fn body() -> [Block; 1] {
+        [Block::Text {
+            text: BODY.into(),
+            replay: None,
+        }]
+    }
+
+    fn failed_token(stop: &TurnEndStop) -> &str {
+        match stop {
+            TurnEndStop::Failed { message } => message,
+            other => panic!("expected a failed turn end, got {other:?}"),
+        }
+    }
+
+    /// No emitted record may exceed the store's record bound.
+    fn every_record_fits(out: &[Effect]) {
+        for record in records(out) {
+            let len = crate::journal::encoded_len(record).unwrap();
+            assert!(
+                u64::try_from(len).unwrap() <= MAX_RECORD,
+                "a {len}-byte record is over the record bound: {:?}",
+                std::mem::discriminant(record)
+            );
+        }
+    }
+
+    #[test]
+    fn the_record_bound_admits_an_exact_line_and_refuses_one_byte_more() {
+        let bound = usize::try_from(MAX_RECORD).unwrap();
+
+        // Measure the candidate line with a one-character payload, then pad
+        // the payload by exactly the headroom left to the bound.
+        let (_, _, probe) = run(padded(1));
+        let (probe_record, _) = only_assistant(&probe);
+        let probe_len = encode(probe_record).unwrap().len();
+        assert!(probe_len < bound, "the probe line must leave headroom");
+        let exact_chars = 1 + (bound - probe_len);
+        drop(probe);
+
+        // Exactly at the bound: the entry journals with its payload.
+        let (session, _, out) = run(padded(exact_chars));
+        let (record, kind) = only_assistant(&out);
+        let line = encode(record).unwrap();
+        assert_eq!(
+            line.len(),
+            bound,
+            "the padded line must be exactly the record bound, line feed included"
+        );
+        let payload = replay_of(kind).expect("a line exactly at the bound journals its capture");
+        assert_eq!(
+            payload.as_str().len(),
+            exact_chars + 2,
+            "the whole payload rides the entry"
+        );
+        assert_eq!(content_of(kind), body());
+        assert!(
+            turn_ends(&out).is_empty() && stop_effects(&out).is_empty(),
+            "a capture that fits fails nothing: {:?}",
+            turn_ends(&out)
+        );
+        assert!(
+            !matches!(session.phase(), Phase::Idle),
+            "the turn continues past an accepted capture"
+        );
+        assert!(
+            decode(&line).unwrap().record == *record,
+            "the reader must accept the exact-bound line the writer emitted"
+        );
+        every_record_fits(&out);
+
+        // The same entry with one more payload character is one byte over.
+        let mut candidate = match record {
+            Record::Assistant(entry) => entry.clone(),
+            other => panic!("expected an assistant record: {other:?}"),
+        };
+        if let EntryKind::Assistant { replay, .. } = &mut candidate.kind {
+            let mut json = String::with_capacity(exact_chars + 3);
+            json.push('"');
+            json.push_str(&"a".repeat(exact_chars + 1));
+            json.push('"');
+            *replay = Some(RawJson::parse(&json).unwrap());
+        }
+        let measured = encode(&Record::Assistant(candidate)).unwrap().len();
+        assert_eq!(
+            measured,
+            bound + 1,
+            "the over-bound candidate is one byte over"
+        );
+        drop((session, out, line));
+
+        // One byte over: the content journals without the payload and the
+        // turn ends Failed once, naming the token, the measured line and
+        // the bound.
+        let (session, _, out) = run(padded(exact_chars + 1));
+        let (_, kind) = only_assistant(&out);
+        assert!(
+            replay_of(kind).is_none(),
+            "an over-bound capture journals no payload"
+        );
+        assert_eq!(content_of(kind), body());
+        let ends = turn_ends(&out);
+        let [end] = ends.as_slice() else {
+            panic!("the refusal ends the turn exactly once: {ends:?}");
+        };
+        let message = failed_token(end);
+        assert!(
+            message.contains(ReplayRefusal::LineBound.token()),
+            "{message}"
+        );
+        assert!(message.contains(&measured.to_string()), "{message}");
+        assert!(message.contains(&MAX_RECORD.to_string()), "{message}");
+        assert_eq!(stop_effects(&out), [Stop::Failed]);
+        assert_eq!(ended_updates(&out), [Stop::Failed]);
+        assert!(matches!(session.phase(), Phase::Idle));
+        every_record_fits(&out);
+    }
+
+    #[test]
+    fn a_refusal_fails_the_turn_once_under_every_provider_stop() {
+        for stop in STOPS {
+            for reason in ADAPTER_REFUSALS {
+                let case = format!("{stop:?} with {reason:?}");
+                let (mut session, turn, out) = run(closing(vec![refused(reason)], stop));
+
+                // The streamed content journals once, unchanged and without
+                // a payload, under the provider's own stop.
+                let (_, kind) = only_assistant(&out);
+                assert!(replay_of(kind).is_none(), "{case}");
+                assert_eq!(content_of(kind), body(), "{case}");
+                let EntryKind::Assistant { stop: entry, .. } = kind else {
+                    panic!("{case}: expected an assistant entry kind");
+                };
+                assert_eq!(*entry, assistant_stop(stop), "{case}");
+
+                // One failed end naming the token; the provider's stop does
+                // not end the turn a second time.
+                let ends = turn_ends(&out);
+                let [end] = ends.as_slice() else {
+                    panic!("{case}: expected one turn end, got {ends:?}");
+                };
+                let message = failed_token(end);
+                assert!(message.contains(reason.token()), "{case}: {message}");
+                assert_eq!(stop_effects(&out), [Stop::Failed], "{case}");
+                assert_eq!(ended_updates(&out), [Stop::Failed], "{case}");
+                assert!(
+                    !records(&out).any(|record| matches!(record, Record::ToolResult(_))),
+                    "{case}: no call exists to settle"
+                );
+                assert!(matches!(session.phase(), Phase::Idle), "{case}");
+
+                // A late repeat of the stream end finds no streaming turn.
+                let again = send(
+                    &mut session,
+                    Event::StreamEnded {
+                        turn,
+                        model: route(),
+                        family: Family::Chat,
+                        result: Ok(closing(vec![], stop)),
+                        partial: None,
+                    },
+                )
+                .unwrap();
+                assert!(again.is_empty(), "{case}: a second end_turn ran: {again:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capture_on_a_tool_call_response_is_ignored_under_every_stop() {
+        for stop in STOPS {
+            let (baseline_session, _, baseline) = run(closing(vec![tool_call()], stop));
+            for capture in [
+                captured(r#"{"records":["r1"]}"#),
+                refused(ReplayRefusal::NoRecords),
+            ] {
+                // The capture event sits on either side of the call.
+                for (before, after) in [(true, false), (false, true)] {
+                    let mut between = Vec::new();
+                    if before {
+                        between.push(capture.clone());
+                    }
+                    between.push(tool_call());
+                    if after {
+                        between.push(capture.clone());
+                    }
+                    let (session, _, out) = run(closing(between, stop));
+                    assert_eq!(
+                        out, baseline,
+                        "{stop:?}: the capture changed the fold's effects"
+                    );
+                    assert_eq!(
+                        session, baseline_session,
+                        "{stop:?}: the capture changed the session"
+                    );
+                }
+            }
+            let (_, kind) = only_assistant(&baseline);
+            assert!(replay_of(kind).is_none(), "{stop:?}");
+            assert!(
+                !turn_ends(&baseline).iter().any(|end| matches!(
+                    end,
+                    TurnEndStop::Failed { message }
+                        if ADAPTER_REFUSALS.iter().any(|reason| message.contains(reason.token()))
+                )),
+                "{stop:?}: no refusal token may surface"
+            );
+        }
+        let (session, _, _) = run(closing(
+            vec![tool_call(), refused(ReplayRefusal::NoRecords)],
+            Stop::EndTurn,
+        ));
+        assert!(
+            matches!(
+                session.phase(),
+                Phase::Running {
+                    stage: TurnStage::Resolving { .. },
+                    ..
+                }
+            ),
+            "the call is still pending after a refusal on its response: {:?}",
+            session.phase()
+        );
+    }
+
+    #[test]
+    fn a_capture_alone_opens_no_entry_and_needs_no_entry_id() {
+        // No stop and no content: the capture is not visible output, so the
+        // preflight reserves no entry, the fold journals none, and the
+        // response ends the turn as a stream without a stop.
+        let mut session = session();
+        let turn = begin(&mut session);
+        session.next_entry = None;
+        let out = stream_result(
+            &mut session,
+            turn,
+            Inference {
+                events: vec![captured(r#"{"records":["r1"]}"#)],
+            },
+        );
+        assert!(
+            !records(&out).any(|record| matches!(record, Record::Assistant(_))),
+            "a capture alone opens no entry"
+        );
+        let ends = turn_ends(&out);
+        let [TurnEndStop::Failed { .. }] = ends.as_slice() else {
+            panic!("a stop-less response fails the turn once: {ends:?}");
+        };
+        assert!(matches!(session.phase(), Phase::Idle));
+    }
+
+    #[test]
+    fn a_capture_with_a_stop_reserves_the_one_entry_it_rides() {
+        let response = || Inference {
+            events: vec![
+                captured(r#"{"records":["r1"]}"#),
+                StreamEvent::Usage(usage(10)),
+                StreamEvent::Stop(Stop::EndTurn),
+            ],
+        };
+        let mut session = session();
+        let turn = begin(&mut session);
+        session.next_entry = None;
+        let before = session.clone();
+        let error = send(
+            &mut session,
+            Event::StreamEnded {
+                turn,
+                model: route(),
+                family: Family::Chat,
+                result: Ok(response()),
+                partial: None,
+            },
+        )
+        .expect_err("the closing entry needs an id before the fold changes state");
+        assert!(matches!(error, Rejection::Invalid { .. }));
+        assert_eq!(session, before, "a rejected stream end changed the session");
+
+        // The last id of the space is enough for the entry and its capture.
+        session.next_entry = Some(entry(u64::MAX));
+        let out = stream_result(&mut session, turn, response());
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(
+            replay_of(kind).map(RawJson::as_str),
+            Some(r#"{"records":["r1"]}"#)
+        );
+        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+    }
+
+    /// Debug half of GAP-3c: the protocol violations trip their assertions.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate message replay event")]
+    fn a_duplicate_capture_trips_the_debug_assertion() {
+        let _ = run(closing(
+            vec![
+                captured(r#"{"records":["first"]}"#),
+                captured(r#"{"records":["second"]}"#),
+            ],
+            Stop::EndTurn,
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "after its response's usage")]
+    fn a_capture_after_the_usage_trips_the_debug_assertion() {
+        let _ = run(late(captured(r#"{"records":["late"]}"#)));
+    }
+
+    /// Release half of GAP-3c: the first capture decides and is never
+    /// overwritten, whichever kinds follow it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_second_capture_never_overwrites_the_first() {
+        let first = r#"{"records":["first"]}"#;
+        let second = r#"{"records":["second"]}"#;
+
+        let (_, _, out) = run(closing(
+            vec![captured(first), captured(second)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
+        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+
+        let (_, _, out) = run(closing(
+            vec![captured(first), refused(ReplayRefusal::NoRecords)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
+        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+
+        let (_, _, out) = run(closing(
+            vec![refused(ReplayRefusal::NoRecords), captured(second)],
+            Stop::EndTurn,
+        ));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        let ends = turn_ends(&out);
+        let [end] = ends.as_slice() else {
+            panic!("the first capture's refusal ends the turn once: {ends:?}");
+        };
+        assert!(failed_token(end).contains(ReplayRefusal::NoRecords.token()));
+    }
+
+    /// Release half of GAP-3c: a capture outside the window is dropped, and
+    /// never displaces one accepted inside it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_capture_after_the_usage_is_dropped() {
+        let (_, _, out) = run(late(captured(r#"{"records":["late"]}"#)));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+
+        let (_, _, out) = run(late(refused(ReplayRefusal::NoRecords)));
+        let (_, kind) = only_assistant(&out);
+        assert!(replay_of(kind).is_none());
+        assert!(
+            turn_ends(&out).is_empty(),
+            "a late refusal must not fail the turn"
+        );
+
+        let early = r#"{"records":["early"]}"#;
+        let mut response = closing(vec![captured(early)], Stop::EndTurn);
+        let stop = response.events.pop().unwrap();
+        response.events.push(captured(r#"{"records":["late"]}"#));
+        response.events.push(stop);
+        let (_, _, out) = run(response);
+        let (_, kind) = only_assistant(&out);
+        assert_eq!(replay_of(kind).map(RawJson::as_str), Some(early));
+        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+    }
+}
+
+fn provider_scoped_route(provider: &str) -> ModelRoute {
+    ModelRoute::Api {
+        family: Family::Chat,
+        model: "test-model".into(),
+        provider: Some(provider.into()),
+    }
+}
+
+fn measured_fixture() -> Vec<Record> {
+    vec![
+        user_question(1, None),
+        route_assistant(
+            2,
+            Some(entry(1)),
+            Some(AssistantRoute::Api(Family::Chat)),
+            Family::Chat,
+            "test-model",
+            5_500,
+        ),
+    ]
+}
+
+fn select_model_recorded(session: &mut Session, journal: &mut Vec<Record>, route: ModelRoute) {
+    let out = send(
+        session,
+        Event::Command {
+            cmd: Command::SetModel {
+                model: route,
+                save: crate::Save::SessionOnly,
+            },
+            by: client(),
+        },
+    )
+    .expect("selecting a model stays idle");
+    append_emitted(&out, journal);
+}
+
+#[test]
+fn context_measurement_accepts_a_gained_provider_not_a_changed_one() {
+    let bare = ModelRoute::Api {
+        family: Family::Chat,
+        model: "test-model".into(),
+        provider: None,
+    };
+    let renamed = ModelRoute::Api {
+        family: Family::Chat,
+        model: "other-model".into(),
+        provider: Some("acme".into()),
+    };
+    let other_family = ModelRoute::Api {
+        family: Family::Responses,
+        model: "test-model".into(),
+        provider: None,
+    };
+    // Usage journaled before providers travelled on routes names no provider,
+    // so it has nothing to disagree with: every same family+model route
+    // measures, whatever provider it names. Only a different model id or a
+    // different family (or kind) breaks continuity here.
+    let fixture = measured_fixture();
+    for (route, expected) in [
+        (bare.clone(), Some(5_500)),
+        (provider_scoped_route("acme"), Some(5_500)),
+        (provider_scoped_route("other"), Some(5_500)),
+        (renamed.clone(), None),
+        (other_family.clone(), None),
+    ] {
+        let mut live = Session::replay_declared(fixture.iter().cloned()).expect("fixture replays");
+        let mut journal = decode_journal(&fixture);
+        select_model_recorded(&mut live, &mut journal, route.clone());
+        let journal = decode_journal(&journal);
+        let replayed = Session::replay_declared(journal.iter().cloned()).expect("journal replays");
+        assert_eq!(live.measured_context_tokens(), expected, "{route:?}");
+        assert_eq!(replayed.measured_context_tokens(), expected, "{route:?}");
+        if let Some(tokens) = expected {
+            assert_eq!(live.tokens_since_last_compaction(), tokens, "{route:?}");
+            assert_eq!(replayed.tokens_since_last_compaction(), tokens, "{route:?}");
+        } else {
+            assert_eq!(
+                live.tokens_since_last_compaction(),
+                replayed.tokens_since_last_compaction(),
+                "{route:?} must estimate identically live and replayed",
+            );
+        }
+    }
+    // A turn answered by a provider-scoped route records that provider on its
+    // usage, so selecting another provider for the same family+model rejects
+    // the measurement while the bare and same-provider routes still accept.
+    // Replay rebuilds usage identity from provenance, which carries no
+    // provider, so only the live side can tell two providers apart; the
+    // replayed side is asserted solely where both sides must agree.
+    let mut live = session();
+    let mut journal = Vec::new();
+    let turn = open_turn(&mut live, &mut journal);
+    let scoped = provider_scoped_route("acme");
+    let streamed = send(
+        &mut live,
+        Event::StreamEnded {
+            turn,
+            model: scoped.clone(),
+            family: Family::Chat,
+            result: Ok(inference(Stop::EndTurn, &[], 5_500)),
+            partial: None,
+        },
+    )
+    .expect("the scoped response streams");
+    append_emitted(&streamed, &mut journal);
+    let ended = send(&mut live, Event::Boundary { turn }).expect("the turn ends");
+    append_emitted(&ended, &mut journal);
+    assert!(matches!(live.phase(), Phase::Idle));
+    assert_eq!(live.measured_context_tokens(), Some(5_500));
+    for (route, expected) in [
+        (bare, Some(5_500)),
+        (scoped, Some(5_500)),
+        (provider_scoped_route("other"), None),
+        (renamed, None),
+        (other_family, None),
+    ] {
+        let mut branched = live.clone();
+        let mut branch_journal = decode_journal(&journal);
+        select_model_recorded(&mut branched, &mut branch_journal, route.clone());
+        assert_eq!(branched.measured_context_tokens(), expected, "{route:?}");
+        if let Some(tokens) = expected {
+            assert_eq!(branched.tokens_since_last_compaction(), tokens, "{route:?}");
+            let branch_journal = decode_journal(&branch_journal);
+            let replayed =
+                Session::replay_declared(branch_journal.iter().cloned()).expect("journal replays");
+            assert_eq!(replayed.measured_context_tokens(), expected, "{route:?}");
+            assert_eq!(replayed.tokens_since_last_compaction(), tokens, "{route:?}");
+        }
+    }
+}
+
+#[test]
+fn leaf_switch_keeps_the_full_provider_route() {
+    let scoped = provider_scoped_route("acme");
+    let mut live = Session::replay_declared(measured_fixture()).expect("fixture replays");
+    let mut journal = decode_journal(&measured_fixture());
+    select_model_recorded(&mut live, &mut journal, scoped.clone());
+    let model_entry = journal
+        .iter()
+        .find_map(|record| match record {
+            Record::Model(entry) => Some(entry.id),
+            _ => None,
+        })
+        .expect("SetModel journals a model record");
+    assert_eq!(live.requested_model(), Some(&scoped));
+    // `Fork` never runs inside the fold (the driver owns the copy), so the
+    // in-fold leaf switch is `MoveLeaf`: the requested route is a setting,
+    // not branch state, and must survive moving off the branch that set it.
+    for leaf in [entry(1), model_entry] {
+        let out = send(
+            &mut live,
+            Event::Command {
+                cmd: Command::MoveLeaf(leaf),
+                by: client(),
+            },
+        )
+        .expect("leaf switch stays idle");
+        append_emitted(&out, &mut journal);
+        assert_eq!(
+            live.requested_model(),
+            Some(&scoped),
+            "leaf {leaf} keeps the route",
+        );
+    }
+    let journal = decode_journal(&journal);
+    let rebuilt = Session::replay_declared(journal.iter().cloned()).expect("journal replays");
+    assert_eq!(rebuilt.requested_model(), Some(&scoped));
 }

@@ -9,6 +9,7 @@ fn priced_usage() -> Usage {
         output_tokens: 1_000_000,
         reasoning_tokens: Some(500_000),
         cache_write_tokens: 100_000,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -19,6 +20,7 @@ fn price(input: f64, cached_input: f64, output: f64, reasoning: f64) -> ModelPri
         cached_input,
         output,
         reasoning,
+        cache_write: None,
         tiers: Box::default(),
     }
 }
@@ -98,6 +100,7 @@ fn usage_price_formula_does_not_double_count_cached_or_reasoning_tokens() {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     };
     assert_eq!(zero.cost_usd(None, None), None);
@@ -119,6 +122,7 @@ fn uniform_rate_is_independent_of_cached_split() {
                     output_tokens: u64::from(output),
                     reasoning_tokens: Some(7),
                     cache_write_tokens: 0,
+                    premium_requests: None,
                     cost_usd: None,
                 };
                 assert_eq!(
@@ -131,13 +135,76 @@ fn uniform_rate_is_independent_of_cached_split() {
 }
 
 #[test]
+fn premium_only_usage_is_unreported_but_prices_unknown() {
+    let priced = price(1.0, 0.5, 2.0, 0.25);
+    for premium in [0.0, 2.5] {
+        let usage = Usage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(premium),
+            cost_usd: None,
+        };
+        assert!(usage.is_unreported());
+        assert_eq!(priced.cost_usd(&usage), None);
+        assert_eq!(usage.cost_usd(Some(&priced), None), None);
+    }
+    let reported = Usage {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        premium_requests: Some(2.5),
+        cost_usd: Some(7.25),
+    };
+    assert_eq!(reported.cost_usd(Some(&priced), None), Some(7.25));
+}
+
+#[test]
+fn premium_requests_defaults_when_absent_and_roundtrips_when_present() -> TestResult {
+    let unmeasured = priced_usage();
+    let encoded = sonic_rs::to_string(&unmeasured)?;
+    assert!(!encoded.contains("premium_requests"));
+    assert_eq!(sonic_rs::from_str::<Usage>(&encoded)?, unmeasured);
+    let legacy = r#"{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}"#;
+    assert_eq!(sonic_rs::from_str::<Usage>(legacy)?.premium_requests, None);
+    let measured = Usage {
+        premium_requests: Some(2.5),
+        ..unmeasured
+    };
+    let encoded = sonic_rs::to_string(&measured)?;
+    assert_eq!(sonic_rs::from_str::<Usage>(&encoded)?, measured);
+    Ok(())
+}
+
+#[test]
+fn base_cache_write_defaults_when_absent_and_roundtrips_when_present() -> TestResult {
+    let legacy = r#"{"input":1.0,"cached_input":0.5,"output":2.0,"reasoning":0.25,"tiers":[]}"#;
+    let decoded: ModelPrice = sonic_rs::from_str(legacy)?;
+    assert_eq!(decoded.cache_write, None);
+    assert_eq!(decoded, price(1.0, 0.5, 2.0, 0.25));
+    let measured = ModelPrice {
+        cache_write: Some(5.0),
+        ..price(1.0, 0.5, 2.0, 0.25)
+    };
+    let encoded = sonic_rs::to_string(&measured)?;
+    assert_eq!(sonic_rs::from_str::<ModelPrice>(&encoded)?, measured);
+    Ok(())
+}
+
+#[test]
 fn model_info_context_window_roundtrips_unknown_zero_and_known() -> TestResult {
     let model_with_context = |context_window| ModelInfo {
         route: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         name: "GPT-5".into(),
+        provider: "".into(),
         caps: Caps {
             context_window,
             thinking: Vec::new().into_boxed_slice(),
@@ -192,6 +259,7 @@ fn routes_validate_id_grammars_and_wire_names() -> TestResult {
     let api = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-5".into(),
+        provider: None,
     };
     assert_eq!(api.id(), "gpt-5");
     assert_eq!(
@@ -202,6 +270,22 @@ fn routes_validate_id_grammars_and_wire_names() -> TestResult {
         sonic_rs::from_str::<ModelRoute>(&sonic_rs::to_string(&api)?)?,
         api
     );
+    let scoped = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("acme-proxy".into()),
+    };
+    assert_eq!(scoped.provider(), Some("acme-proxy"));
+    assert_eq!(api.provider(), None);
+    assert_eq!(
+        sonic_rs::to_string(&scoped)?,
+        r#"{"kind":"api","family":"openai_chat","model":"gpt-5","provider":"acme-proxy"}"#
+    );
+    assert_eq!(
+        sonic_rs::from_str::<ModelRoute>(&sonic_rs::to_string(&scoped)?)?,
+        scoped
+    );
+    assert_ne!(api, scoped);
     Ok(())
 }
 
@@ -282,6 +366,11 @@ fn native_tags_preserve_raw_args_and_nested_replay() -> TestResult {
         encoded.matches(arg_json).count(),
         2,
         "raw nested values changed: {encoded}"
+    );
+    assert_eq!(
+        encoded.matches("\"replay\"").count(),
+        1,
+        "the tool call without replay stays absent: {encoded}"
     );
     assert_eq!(sonic_rs::from_str::<ContextItem>(&encoded)?, context);
     let thinking_at = encoded
@@ -416,6 +505,7 @@ fn request_and_inference_round_trip_through_nested_carriers() -> TestResult {
                 text: "plan".into(),
                 replay: Some(RawJson::parse(r#"{"z":1e+02, "a":2}"#)?),
             }],
+            replay: None,
         }]),
         params: RequestParams {
             thinking: ThinkingLevel::Xhigh,
@@ -497,5 +587,140 @@ fn thinking_replay_event_preserves_raw_payload_after_delta() -> TestResult {
         "replay payload changed: {encoded}"
     );
     assert_eq!(sonic_rs::from_str::<Inference>(&encoded)?, inference);
+    Ok(())
+}
+
+/// `MessageReplay` nests its discriminant under `capture.status`: the capture
+/// is never flattened into the event's own `type` tag, so a flattened or
+/// mistagged capture is rejected rather than misread.
+#[test]
+fn message_replay_keeps_its_nested_status_discriminant() -> TestResult {
+    let payload = r#"{"records":[]}"#;
+    let captured = StreamEvent::MessageReplay {
+        capture: ReplayCapture::Captured {
+            payload: RawJson::parse(payload)?,
+        },
+    };
+    let encoded = sonic_rs::to_string(&captured)?;
+    assert_eq!(
+        encoded,
+        format!(
+            r#"{{"type":"message_replay","capture":{{"status":"captured","payload":{payload}}}}}"#
+        ),
+        "message replay changed shape: {encoded}"
+    );
+    assert_eq!(sonic_rs::from_str::<StreamEvent>(&encoded)?, captured);
+    let refused = StreamEvent::MessageReplay {
+        capture: ReplayCapture::Refused {
+            reason: ReplayRefusal::LineBound,
+        },
+    };
+    let encoded = sonic_rs::to_string(&refused)?;
+    assert_eq!(
+        encoded,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":"line_bound"}}"#,
+        "refusal changed shape: {encoded}"
+    );
+    assert_eq!(sonic_rs::from_str::<StreamEvent>(&encoded)?, refused);
+    for text in [
+        r#"{"type":"message_replay"}"#,
+        r#"{"type":"message_replay","capture":{"status":"alien","payload":{}}}"#,
+        r#"{"type":"message_replay","capture":{"type":"captured","payload":{}}}"#,
+        r#"{"type":"message_replay","capture":{"status":"captured"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":"alien"}}"#,
+        r#"{"type":"message_replay","capture":{"status":"refused","reason":null}}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<StreamEvent>(text).is_err(),
+            "accepted {text}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn same_model_treats_a_missing_provider_as_no_disagreement() -> TestResult {
+    let bare = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: None,
+    };
+    let scoped = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("acme".into()),
+    };
+    let other = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("other".into()),
+    };
+    assert!(bare.same_model(&scoped));
+    assert!(scoped.same_model(&bare));
+    assert!(scoped.same_model(&scoped.clone()));
+    assert!(!scoped.same_model(&other));
+    assert!(!other.same_model(&scoped));
+    assert!(
+        !bare.same_model(&ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-5".into(),
+            provider: None,
+        }),
+        "a different family names a different model"
+    );
+    assert!(
+        !bare.same_model(&ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6".into(),
+            provider: None,
+        }),
+        "a different native id names a different model"
+    );
+    let synthetic = ModelRoute::synthetic("a/b")?;
+    assert!(synthetic.same_model(&ModelRoute::synthetic("a/b")?));
+    assert!(!synthetic.same_model(&ModelRoute::synthetic("a/c")?));
+    let harness = ModelRoute::harness("dalgon/normal")?;
+    assert!(harness.same_model(&ModelRoute::harness("dalgon/normal")?));
+    assert!(!harness.same_model(&ModelRoute::harness("dalgon/eval-only")?));
+    assert!(!synthetic.same_model(&harness));
+    assert!(!bare.same_model(&synthetic));
+    Ok(())
+}
+
+#[test]
+fn api_route_json_rejects_an_empty_provider() -> TestResult {
+    let bare: ModelRoute =
+        sonic_rs::from_str(r#"{"kind":"api","family":"openai_chat","model":"m"}"#)?;
+    assert_eq!(bare.provider(), None);
+    let error = sonic_rs::from_str::<ModelRoute>(
+        r#"{"kind":"api","family":"openai_chat","model":"m","provider":""}"#,
+    )
+    .expect_err("an empty provider must not decode");
+    assert!(
+        error
+            .to_string()
+            .contains("model route `provider` must not be empty"),
+        "wrong error: {error}"
+    );
+    assert!(
+        sonic_rs::from_str::<ModelRoute>(
+            r#"{"kind":"api","family":"openai_chat","model":"m","provider":7}"#
+        )
+        .is_err(),
+        "a non-string provider must not decode"
+    );
+    assert!(
+        sonic_rs::from_str::<ModelRoute>(
+            r#"{"kind":"api","family":"openai_chat","model":"m","provider":null}"#
+        )
+        .is_err(),
+        "null is malformed, not an absent provider"
+    );
+    let scoped: ModelRoute = sonic_rs::from_str(
+        r#"{"kind":"api","family":"openai_chat","model":"m","provider":"acme"}"#,
+    )?;
+    assert_eq!(scoped.provider(), Some("acme"));
+    assert_ne!(bare, scoped);
     Ok(())
 }

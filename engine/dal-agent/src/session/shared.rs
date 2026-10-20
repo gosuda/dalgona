@@ -14,8 +14,8 @@ use std::sync::{
 };
 
 use dal_core::{
-    ApprovalMode, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, Seq, Session,
-    ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
+    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, PrivateTerminal,
+    Seq, Session, ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
 };
 
 use super::projection::{Projection, SnapshotArgs};
@@ -31,6 +31,18 @@ struct ExtSnap {
     key: Option<(Option<EntryId>, usize)>,
     rows: Arc<[ExtRecord]>,
 }
+
+/// The published private terminal outcomes in End journal order.
+///
+/// Position `i` always corresponds to fold terminal index `i`: terminals are
+/// appended once and never rewritten, so a read between advances observes
+/// the same allocations.
+struct PrivatePub {
+    /// How many fold terminals have been published so far.
+    published: usize,
+    /// One shared payload per published terminal, in source order.
+    terminal: Vec<Arc<PrivateTerminal>>,
+}
 /// Per-session setup products, keyed by validated extension owner name.
 struct SetupState {
     owners: BTreeSet<Name>,
@@ -39,10 +51,23 @@ struct SetupState {
     notices: Vec<Notice>,
 }
 
+/// The prompt customization one child session carries across turns and
+/// reloads, journaled by its start and replayed with the journal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ChildPromptPolicy {
+    /// Replaces the product-owned base sections of the system prompt;
+    /// extension-contributed sections still render.
+    System(Box<str>),
+    /// Appends one prompt section after the assembled base prompt, so
+    /// siblings on one model share the cached prefix.
+    Role(Box<str>),
+}
+
 /// Synchronous snapshot of one live session.
 pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
     ext: Mutex<ExtSnap>,
+    private: Mutex<PrivatePub>,
     setup: Mutex<SetupState>,
     rule_seeds: Mutex<Arc<[GateSeed]>>,
     can_interrupt_stream: AtomicBool,
@@ -50,6 +75,7 @@ pub(crate) struct Shared {
     promoted: Mutex<Arc<BTreeSet<Name>>>,
     allow_always: Mutex<Arc<BTreeSet<Name>>>,
     tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
+    child_prompt_policy: OnceLock<ChildPromptPolicy>,
     /// The tool-round bound the next turn takes; the turn consumes it.
     next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
     service_grants: ServiceGrants,
@@ -64,9 +90,10 @@ struct SharedInner {
 }
 
 impl Shared {
-    /// Returns the sequence of the most recently published update; zero
-    /// before the first publish. Observation cutoffs and delivery marks
-    /// share this cursor.
+    /// Returns the sequence of the most recently published update; one
+    /// before the first publish (the empty-snapshot sentinel; no update
+    /// carries it). Observation cutoffs and delivery marks share this
+    /// cursor.
     pub(crate) fn cursor(&self) -> u64 {
         self.inner
             .lock()
@@ -93,12 +120,16 @@ impl Shared {
                 generation,
                 projection: Projection::seed(thinking, approval, mode),
                 ring: ReplayRing::new(caps, generation, None),
-                next_seq: 1,
+                next_seq: 2,
                 subscribers: Vec::new(),
             }),
             ext: Mutex::new(ExtSnap {
                 key: None,
                 rows: Arc::from([]),
+            }),
+            private: Mutex::new(PrivatePub {
+                published: 0,
+                terminal: Vec::new(),
             }),
             setup: Mutex::new(SetupState {
                 owners: BTreeSet::new(),
@@ -112,6 +143,7 @@ impl Shared {
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
             allow_always: Mutex::new(Arc::new(BTreeSet::new())),
             tool_allowlist: OnceLock::new(),
+            child_prompt_policy: OnceLock::new(),
             next_turn_step_cap: Mutex::new(None),
             service_grants: ServiceGrants::default(),
         }
@@ -166,6 +198,17 @@ impl Shared {
         self.tool_allowlist.get().map(Arc::clone)
     }
 
+    /// Sets the child prompt policy; the first policy stands and a later
+    /// call cannot replace it.
+    pub(crate) fn set_child_prompt_policy(&self, policy: ChildPromptPolicy) {
+        let _ = self.child_prompt_policy.set(policy);
+    }
+
+    /// The child prompt policy, when the session carries one.
+    pub(crate) fn child_prompt_policy(&self) -> Option<&ChildPromptPolicy> {
+        self.child_prompt_policy.get()
+    }
+
     /// The run grants approved calls lent their extensions in this session.
     pub(crate) fn service_grants(&self) -> &ServiceGrants {
         &self.service_grants
@@ -181,8 +224,13 @@ impl Shared {
     }
 
     /// Refreshes fold-owned promotion and always-allowed sets on every call,
-    /// then republishes current-leaf extension records when the fold's leaf
-    /// or record count moved since the last publication.
+    /// publishes newly settled private terminals, then republishes
+    /// current-leaf extension records when the fold's leaf or record count
+    /// moved since the last publication.
+    ///
+    /// The private publication runs before the extension-record memo guard:
+    /// a private-End-only advance moves neither leaf nor ext length, so any
+    /// placement after that early return would serve stale live reads.
     ///
     /// The actor is the only caller; readers get immutable snapshots and
     /// never wait on the actor, so a hook awaiting the actor cannot block a
@@ -193,6 +241,7 @@ impl Shared {
         self.sync_rule_seeds(fold);
         self.can_interrupt_stream
             .store(fold.can_interrupt_stream(), Ordering::Release);
+        self.sync_private(fold);
         let key = (fold.leaf_entry(), fold.ext_len());
         {
             let mut snap = self
@@ -330,13 +379,86 @@ impl Shared {
         )
     }
 
+    /// Publishes every fold terminal not yet shared, oldest first.
+    ///
+    /// Relies on the append-only invariant: the published cursor never
+    /// exceeds the fold terminal length. The live fold only grows, and
+    /// `restore_fold` replays the same session, so the cursor stays valid.
+    ///
+    /// Each terminal payload is cloned into its `Arc` exactly once per
+    /// session lifetime, on first publication (including repair terminals at
+    /// open). Unchanged state costs one lock plus a length compare with no
+    /// allocation.
+    pub(crate) fn sync_private(&self, fold: &Session) {
+        let mut published = self
+            .private
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fresh = fold.private_terminals_since(published.published);
+        if fresh.is_empty() {
+            return;
+        }
+        published
+            .terminal
+            .extend(fresh.iter().map(|terminal| Arc::new(terminal.clone())));
+        published.published += fresh.len();
+    }
+
+    /// Returns the shared payloads matching `pred`, oldest first.
+    ///
+    /// Only matching `Arc`s are cloned (pointer copies, no payload bytes);
+    /// the lock is released before the caller clones any payload. The
+    /// predicate is supplied by the backend call site, so filtering stays
+    /// backend-owned.
+    pub(crate) fn private_terminal_select(
+        &self,
+        pred: impl Fn(&PrivateTerminal) -> bool,
+    ) -> Vec<Arc<PrivateTerminal>> {
+        self.private
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal
+            .iter()
+            .filter(|terminal| pred(terminal.as_ref()))
+            .cloned()
+            .collect()
+    }
+
     /// Applies one update kind, publishes it, and offers it to subscribers.
     pub(crate) fn publish(&self, kind: UpdateKind) {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::publish_locked(&mut inner, kind);
+    }
+
+    /// Commits the authoritative scoped-model list `SetScopedModels` set and
+    /// publishes the settings carrying it, verbatim (an empty list is a
+    /// clear). The settings are read and republished under one lock, so a
+    /// concurrent fold settings update can never be reverted by this one.
+    pub(crate) fn publish_scope(&self, scope: Vec<Box<str>>) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let settings = inner.projection.set_scope(scope);
+        Self::publish_locked(&mut inner, UpdateKind::Settings(settings));
+    }
+
+    /// Applies, sequences, rings, and offers one update under the held lock.
+    ///
+    /// A settings update is offered as the projection's effective settings,
+    /// not as it arrived. The fold authors settings with `scoped_models:
+    /// None` (inherit); the projection merges that with the committed scope,
+    /// and a subscriber that adopts the update wholesale must see the merged
+    /// value or it would drop a scope another client committed.
+    fn publish_locked(inner: &mut SharedInner, kind: UpdateKind) {
         inner.projection.apply(&kind);
+        let kind = match kind {
+            UpdateKind::Settings(_) => UpdateKind::Settings(inner.projection.effective_settings()),
+            other => other,
+        };
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
         inner.next_seq = inner.next_seq.max(1).saturating_add(1);
         inner.projection.note_seq(seq);
@@ -517,6 +639,18 @@ impl Shared {
     }
 }
 
+/// Process progress rides the keyed publication: each subscriber queue
+/// replaces its unsent row for the same call, so a running child leaves
+/// one transient card per watcher.
+impl crate::proc::ProgressPort for Shared {
+    fn publish_progress(&self, call: &CallId, tail: Box<str>) {
+        self.publish(UpdateKind::ToolProgress {
+            call: call.clone(),
+            tail,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +680,70 @@ mod tests {
             shared
                 .allow_always()
                 .contains(&Name::parse("run").expect("run name parses"))
+        );
+    }
+
+    /// The fold authors settings with `scoped_models: None` (inherit). The
+    /// owner offers subscribers the effective settings, so a client that
+    /// adopts the update wholesale keeps a scope another client committed,
+    /// and an explicit clear stays `Some([])` instead of reading as inherit.
+    #[test]
+    fn settings_updates_publish_the_effective_scope() {
+        let generation = Gen::new(NonZeroU64::MIN);
+        let shared = Shared::new(
+            false,
+            generation,
+            ThinkingLevel::Medium,
+            ApprovalMode::Ask,
+            Mode::Normal,
+        );
+        let fold_settings = |thinking| dal_core::SettingsView {
+            model: None,
+            thinking,
+            approval: ApprovalMode::Ask,
+            mode: Mode::Normal,
+            name: None,
+            scoped_models: None,
+        };
+        let published_after = |seen: u64| {
+            let inner = shared
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cursor = (
+                generation,
+                Seq::new(NonZeroU64::new(seen).expect("sequence numbers start at one")),
+            );
+            match inner.ring.replay(Some(cursor)) {
+                Replay::Suffix(mut suffix) => match suffix.next().map(|update| update.kind.clone())
+                {
+                    Some(UpdateKind::Settings(settings)) => settings,
+                    other => panic!("expected a retained settings update, got {other:?}"),
+                },
+                other => panic!("expected a retained suffix, got {other:?}"),
+            }
+        };
+
+        shared.publish_scope(vec!["openai/gpt-6".into()]);
+        let at_scope = shared.cursor();
+        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::High)));
+        let after_fold = published_after(at_scope);
+        assert_eq!(after_fold.thinking, ThinkingLevel::High);
+        assert_eq!(
+            after_fold.scoped_models,
+            Some(vec!["openai/gpt-6".into()]),
+            "a fold settings update keeps the committed scope"
+        );
+
+        shared.publish_scope(Vec::new());
+        let at_clear = shared.cursor();
+        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::Low)));
+        let after_clear = published_after(at_clear);
+        assert_eq!(after_clear.thinking, ThinkingLevel::Low);
+        assert_eq!(
+            after_clear.scoped_models,
+            Some(Vec::new()),
+            "an explicit clear stays committed as an empty list"
         );
     }
 }

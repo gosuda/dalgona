@@ -8,12 +8,14 @@
 //! fires mid-turn is deferred to the settled path, and consolidation never
 //! runs while a turn is active.
 //!
-//! Open seams (owned by sibling parts, recorded in the node report): the
-//! `dream.json` sidecar uses the sidecar file-name grammar, and letter body
-//! text for the judge summary (letter records carry ids, digests, spans, and
-//! prior summaries, but no journal text, so the shared context is assembled
-//! from what the records carry until the prompt skills and letter part shares
-//! its text assembly).
+//! The judge shared context carries the prior dream summaries, then each
+//! unreflected letter's stored text resolved through `letter://`, oldest
+//! first, fitted as a prefix of the judge budget. A job consumes only the
+//! letters that were fitted and submitted, and only after the dream record
+//! is durable. A context that cannot be built never consumes letters: an
+//! oldest letter that cannot fit the budget, or letter text that is missing
+//! or unreadable, is a non-retryable failure with a sanitized text; a
+//! cancelled read is neutral; any other service failure is transient.
 
 mod consolidate;
 
@@ -62,6 +64,14 @@ impl JobMode {
     fn failure(self) -> DreamEvent {
         match self {
             Self::Normal => DreamEvent::JobTransientFailure,
+            Self::Probe => DreamEvent::ProbeFailed,
+        }
+    }
+
+    /// The event for a non-retryable failure with sanitized `text`.
+    fn non_retryable(self, text: String) -> DreamEvent {
+        match self {
+            Self::Normal => DreamEvent::JobIdenticalFailure(text),
             Self::Probe => DreamEvent::ProbeFailed,
         }
     }
@@ -338,5 +348,22 @@ impl Task {
             text: text.into(),
         };
         self.services.notify(&self.caller, notice);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DreamEvent, JobMode};
+
+    #[test]
+    fn non_retryable_failure_is_identical_in_a_job_and_a_probe_failure_in_a_probe() {
+        assert_eq!(
+            JobMode::Normal.non_retryable("text".to_string()),
+            DreamEvent::JobIdenticalFailure("text".to_string())
+        );
+        assert_eq!(
+            JobMode::Probe.non_retryable("text".to_string()),
+            DreamEvent::ProbeFailed
+        );
     }
 }

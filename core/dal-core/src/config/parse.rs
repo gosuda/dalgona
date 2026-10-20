@@ -2,8 +2,8 @@ use super::partial::{FileText, ParsedLayer};
 use super::prices::parse_prices;
 use super::values::{
     parse_aliases, parse_approval, parse_bool, parse_edit_style, parse_guard, parse_mode,
-    parse_nonempty_string, parse_nonempty_strings, parse_number, parse_rules, parse_screen,
-    parse_serve, parse_thinking,
+    parse_model_route, parse_nonempty_string, parse_nonempty_strings, parse_number, parse_rules,
+    parse_screen, parse_serve, parse_thinking,
 };
 use super::{ConfigError, ConfigProduct, TuiConfig, invalid_value, value_text};
 
@@ -29,11 +29,19 @@ pub(super) const RULES_KEYS: &[&str] = &[
     "disabled",
     "judge",
 ];
-pub(super) const PRICE_KEYS: &[&str] = &["input", "cached_input", "output", "reasoning", "tiers"];
+pub(super) const PRICE_KEYS: &[&str] = &[
+    "input",
+    "cached_input",
+    "cache_write",
+    "output",
+    "reasoning",
+    "tiers",
+];
 
 pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "mode",
     "model",
+    "model_route",
     "thinking",
     "approval",
     "screen",
@@ -59,6 +67,7 @@ pub(super) const KNOWN_KEY_ORDER: &[&str] = &[
     "prices",
     "prices.<model-id>.input",
     "prices.<model-id>.cached_input",
+    "prices.<model-id>.cache_write",
     "prices.<model-id>.output",
     "prices.<model-id>.reasoning",
     "prices.<model-id>.tiers",
@@ -198,20 +207,15 @@ pub(super) fn parse_file_text(
 ) -> Result<ParsedLayer, ConfigError> {
     let mut layer = ParsedLayer::default();
     capture_raw_sections(&mut layer, &mut file);
-    if let Some(value) = layer.sections.get("judge")
-        && !matches!(value, toml::Value::Table(_))
-    {
-        return Err(invalid_value(
-            "judge",
-            value_text(value),
-            "Use a [judge] table with gate, model, timeout_ms, max_concurrent, max_per_turn.",
-        ));
-    }
+    validate_judge_section(&layer)?;
     if let Some(value) = file.mode {
         layer.mode = Some(parse_mode(value)?);
     }
     if let Some(value) = file.model {
         layer.model = Some(parse_nonempty_string("model", value, "non-empty model id")?);
+    }
+    if let Some(value) = file.model_route {
+        layer.model_route = Some(parse_model_route(value)?);
     }
     if let Some(value) = file.thinking {
         layer.thinking = Some(parse_thinking(value)?);
@@ -294,6 +298,21 @@ pub(super) fn parse_file_text(
         )?);
     }
     Ok(layer)
+}
+
+/// Rejects a raw `judge` section that is not a table before extension
+/// validation sees it.
+fn validate_judge_section(layer: &ParsedLayer) -> Result<(), ConfigError> {
+    if let Some(value) = layer.sections.get("judge")
+        && !matches!(value, toml::Value::Table(_))
+    {
+        return Err(invalid_value(
+            "judge",
+            value_text(value),
+            "Use a [judge] table with gate, model, timeout_ms, max_concurrent, max_per_turn.",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_tui(product: ConfigProduct, value: toml::Value) -> Result<TuiConfig, ConfigError> {

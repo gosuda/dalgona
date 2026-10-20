@@ -129,19 +129,25 @@ impl Found {
 
     /// The namespace part of the model id.
     pub(crate) fn provider(&self) -> Box<str> {
-        let id = self.record.id.as_str();
-        id.split_once('/')
-            .map_or(id, |(namespace, _)| namespace)
-            .into()
+        namespace(self.record.id.as_str()).into()
     }
+}
+
+/// The namespace of a synthetic model id: the segment before the first `/`,
+/// or the whole id when it has none. The one owner of that split: the
+/// catalog row ([`entry_for`]), the found model, its listing row, and its
+/// running identity all read the provider from here, so they agree by
+/// construction.
+fn namespace(id: &str) -> &str {
+    id.split_once('/').map_or(id, |(namespace, _)| namespace)
 }
 
 fn entry_for(record: &ModelRecord) -> CatalogEntry {
     let caps = &record.caps;
     let id = record.id.as_str();
-    let (provider, name) = id.split_once('/').unwrap_or((id, id));
+    let name = id.split_once('/').map_or(id, |(_, name)| name);
     CatalogEntry {
-        provider: provider.into(),
+        provider: namespace(id).into(),
         id: name.into(),
         display: id.into(),
         listing: Listing::Listed,
@@ -163,6 +169,8 @@ fn entry_for(record: &ModelRecord) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: caps.custom_grammar,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -177,6 +185,7 @@ pub(crate) fn listed(generation: &Generation) -> Vec<ModelInfo> {
                 id: record.id.as_str().into(),
             },
             name: record.id.as_str().into(),
+            provider: namespace(record.id.as_str()).into(),
             caps: record.caps.clone(),
         })
         .collect()
@@ -367,6 +376,7 @@ pub(crate) async fn open(
         info: ModelInfo {
             route: found.route(),
             name: found.record.id.as_str().into(),
+            provider: found.provider(),
             caps: found.record.caps.clone(),
         },
         generation: Arc::clone(&found.generation),
@@ -753,6 +763,10 @@ impl Loop {
                 cache_write_tokens: total
                     .cache_write_tokens
                     .saturating_add(next.cache_write_tokens),
+                premium_requests: total
+                    .premium_requests
+                    .zip(next.premium_requests)
+                    .map(|(left, right)| left + right),
                 cost_usd: total
                     .cost_usd
                     .zip(next.cost_usd)
@@ -811,6 +825,7 @@ impl Loop {
         if !self.round.text.is_empty() {
             parts.push(dal_core::AssistantPart::Text {
                 text: std::mem::take(&mut self.round.text).into(),
+                replay: None,
             });
         }
         for replay in std::mem::take(&mut self.round.replays) {
@@ -829,6 +844,7 @@ impl Loop {
                 call: CallId::new(call.id.as_str()),
                 name: call.name.as_str().into(),
                 args: args.clone(),
+                replay: None,
             });
             let (is_error, text) =
                 call_private(&self.tools, &self.private_cx, &self.workspace, &call, &args).await;
@@ -840,7 +856,11 @@ impl Loop {
             });
         }
         let mut context: Vec<ContextItem> = self.request.context.iter().cloned().collect();
-        context.push(ContextItem::Assistant { source, parts });
+        context.push(ContextItem::Assistant {
+            source,
+            parts,
+            replay: None,
+        });
         context.extend(results);
         self.request.context = context.into();
     }

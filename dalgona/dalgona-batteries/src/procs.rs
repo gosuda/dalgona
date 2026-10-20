@@ -16,8 +16,8 @@ use self::tool::ProcsTool;
 pub const PROCS_DOC: &str = concat!(
     "# procs\n\n",
     "One deferred tool over the background jobs of this session. Other sessions' ",
-    "jobs are invisible. A first call by name promotes it, and a promoted tool ",
-    "never leaves the tool list mid-session. The battery asks for the `jobs` ",
+    "jobs are invisible. A first successful call by name promotes it, and a ",
+    "promoted tool never leaves the tool list mid-session. The battery asks for the `jobs` ",
     "service only: it reads job rows and retained output text through that ",
     "service and opens no file.\n\n",
     "`op` `list` prints one line per job, live jobs oldest first, then at most ten ",
@@ -25,10 +25,12 @@ pub const PROCS_DOC: &str = concat!(
     "status is `running`, `done` (exit code 0), `failed` (a nonzero exit, a failure, ",
     "or a lost job), or `cancelled`. The age is the time since the job's last ",
     "activity, in the jobs duration format (`48.0s`, `4m12s`, `1h02m05s`). The ",
-    "jobs service keeps one label per job, so the command text is the label, cut ",
-    "at 80 characters. `query` keeps only jobs whose label contains it as a ",
-    "substring, `status` keeps one phase, and `limit` (1 to 50, default 20) caps the ",
-    "rows. A filter that keeps no job answers with the no-match text below.\n\n",
+    "command text is the command the starter ran (an exec job names its command; ",
+    "a job started without one shows its label), collapsed to one line and cut at ",
+    "80 characters. `query` keeps only jobs whose label or full command, line ",
+    "breaks included, contains it as a substring, `status` keeps one phase, and ",
+    "`limit` (1 to 50, default 20) caps the rows. A filter that keeps no job ",
+    "answers with the no-match text below.\n\n",
     "`op` `grep` matches `query` as a regex over the retained output text of each ",
     "job, oldest job first and each job's text read once. Each match prints ",
     "`<job id>:<line>: <text>`, the text cut at `match_bytes` bytes (1 to 2048, ",
@@ -43,6 +45,41 @@ pub const PROCS_DOC: &str = concat!(
     "\"<query>\" in <n> job(s).`, `procs: query is not a valid regex: <message>.`, ",
     "and `procs: the jobs service is not granted to this battery: <Denied text>.`\n",
 );
+
+/// Configuration for the procs battery.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcsConfig {
+    /// Whether the entry product registers this battery.
+    pub enabled: bool,
+}
+
+impl ProcsConfig {
+    /// Decodes the strict `[plugin.procs]` section. The embedded default enables the battery.
+    ///
+    /// # Errors
+    /// Returns the first strict-decode failure.
+    pub fn parse_config(section: Option<&toml::Value>) -> Result<Self, ProcsConfigError> {
+        let Some(section) = section else {
+            return Ok(Self { enabled: true });
+        };
+        section.clone().try_into().map_err(ProcsConfigError::from)
+    }
+}
+
+/// A failure to decode the procs battery's configuration section.
+#[derive(Debug, thiserror::Error)]
+#[error("plugin.procs: {source}")]
+pub struct ProcsConfigError {
+    #[source]
+    source: toml::de::Error,
+}
+
+impl From<toml::de::Error> for ProcsConfigError {
+    fn from(source: toml::de::Error) -> Self {
+        Self { source }
+    }
+}
 
 /// Builds the procs extension: one deferred tool over the `jobs` service.
 /// Registration performs no I/O; effects begin only after the host starts a

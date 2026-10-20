@@ -106,6 +106,9 @@ impl dal_agent::ext::Services for JobsHost {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         unavailable()
     }
@@ -210,11 +213,24 @@ impl dal_agent::ext::Services for JobsHost {
 
 /// Parses `raw` into one `JobStatus` with the given id, label, and age.
 fn job(id: &str, label: &str, state: JobStateView, age_secs: i64) -> JobStatus {
+    job_with(id, label, None, state, age_secs)
+}
+
+/// Parses `raw` into one `JobStatus` with the given id, label, command, and
+/// age; `command` is the starter's command text when the job carries one.
+fn job_with(
+    id: &str,
+    label: &str,
+    command: Option<&str>,
+    state: JobStateView,
+    age_secs: i64,
+) -> JobStatus {
     JobStatus {
         id: dal_core::JobId::parse(id).expect("test id must parse"),
         label: label.into(),
         state,
         log: None,
+        command: command.map(Arc::<str>::from),
         last_activity_at: now() - jiff::SignedDuration::from_secs(age_secs),
     }
 }
@@ -715,6 +731,121 @@ async fn a_bad_pattern_names_the_reason_not_just_the_pattern() {
     );
     assert!(open.contains("unclosed group"), "{open}");
     assert!(open.ends_with('.') && !open.contains('\n'), "{open}");
+}
+
+#[tokio::test]
+async fn list_rows_show_the_full_command_collapsed_and_cut() {
+    // A long, multi-line command collapses to one line and cuts at 80
+    // characters, while the label stays in the label position.
+    let command = format!("echo {}\nsecond line", "y".repeat(120));
+    let jobs = vec![job_with(
+        UUID_A,
+        "exec",
+        Some(&command),
+        JobStateView::Running,
+        1,
+    )];
+    let host = JobsHost::new(jobs, &[]);
+    let text = run(&host, r#"{"op":"list"}"#).await;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    let line = lines[0];
+    assert!(line.contains(" exec: "), "{text}");
+    // The 80-character cut covers the collapsed command text, not the id or
+    // label: "echo " plus 75 y's fill it exactly.
+    assert!(
+        line.ends_with(&format!("echo {}", "y".repeat(75))),
+        "{text}"
+    );
+    assert!(!line.contains(&"y".repeat(76)), "{text}");
+    // The collapsed command never spans lines: one row, one line.
+    assert!(!line.contains("second line"), "{text}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    // Text on a later line of the command, past the display cut, still finds
+    // the row; the row itself stays one cut line.
+    let found = run(&host, r#"{"op":"list","query":"second line"}"#).await;
+    assert_eq!(found.lines().count(), 1, "{found}");
+    assert!(found.starts_with(UUID_A), "{found}");
+    assert!(!found.contains("second line"), "{found}");
+}
+
+#[tokio::test]
+async fn query_matches_the_full_command_beyond_the_display_cut() {
+    // The distinguishing token sits past the 80-character display cut, so
+    // only a query over the full command keeps the row.
+    let command = format!("{}SECRETQUERY", "x".repeat(200));
+    let jobs = vec![job_with(
+        UUID_A,
+        "exec",
+        Some(&command),
+        JobStateView::Running,
+        1,
+    )];
+    let host = JobsHost::new(jobs, &[]);
+    let text = run(&host, r#"{"op":"list","query":"SECRETQUERY"}"#).await;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].starts_with(UUID_A), "{text}");
+    // The row still renders only the 80-character cut of the command.
+    assert!(
+        lines[0].ends_with(&format!("exec: {}", "x".repeat(80))),
+        "{text}"
+    );
+    assert!(!lines[0].contains(&"x".repeat(81)), "{text}");
+    assert!(!lines[0].contains("SECRETQUERY"), "{text}");
+}
+
+#[tokio::test]
+async fn query_still_matches_the_label_when_the_command_differs() {
+    let jobs = vec![job_with(
+        UUID_A,
+        "nightly build",
+        Some("/usr/bin/make -j4"),
+        JobStateView::Running,
+        1,
+    )];
+    let host = JobsHost::new(jobs, &[]);
+    let text = run(&host, r#"{"op":"list","query":"nightly"}"#).await;
+    assert!(
+        text.lines().count() == 1 && text.contains("nightly build"),
+        "{text}"
+    );
+    let text = run(&host, r#"{"op":"list","query":"make -j4"}"#).await;
+    assert!(
+        text.lines().count() == 1 && text.contains("make -j4"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_job_without_command_falls_back_to_the_label() {
+    // Old or commandless rows: the label fills the command position and the
+    // row shape is unchanged.
+    let jobs = vec![job(UUID_A, "watch", JobStateView::Running, 1)];
+    let host = JobsHost::new(jobs, &[]);
+    let text = run(&host, r#"{"op":"list"}"#).await;
+    let line = text.lines().next().expect("one row");
+    assert!(line.ends_with(" watch: watch"), "{text}");
+    // The label still matches the query on its own.
+    let text = run(&host, r#"{"op":"list","query":"watch"}"#).await;
+    assert_eq!(text.lines().count(), 1, "{text}");
+}
+
+#[tokio::test]
+async fn finished_rows_keep_the_command() {
+    let command = "cargo test --all";
+    let jobs = vec![job_with(
+        UUID_A,
+        "exec",
+        Some(command),
+        JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
+        5,
+    )];
+    let host = JobsHost::new(jobs, &[]);
+    let text = run(&host, r#"{"op":"list"}"#).await;
+    let line = text.lines().next().expect("one row");
+    assert!(line.contains(" done "), "{text}");
+    assert!(line.ends_with(&format!(" exec: {command}")), "{text}");
 }
 
 #[test]

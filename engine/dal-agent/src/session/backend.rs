@@ -12,8 +12,9 @@ use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
     AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
     Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson, RedirectPolicy,
-    Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Owner, Part, PrivateEffect,
+    RawJson, RedirectPolicy, Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp,
+    TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -57,20 +58,46 @@ fn record_session_closed() -> ServiceError {
     ServiceError::failed(None, "the session closed before the record was journaled.")
 }
 
+/// Derives the owning extension identity from the host-minted caller.
+///
+/// The only input is the host-minted [`crate::ext::Caller`]; no layer
+/// accepts a caller-supplied owner, so same-name extensions under different
+/// origins stay disjoint by construction. Origin text renders through the
+/// single shared renderer.
+pub(crate) fn private_owner_of(caller: &crate::ext::Caller) -> Owner {
+    Owner::Extension {
+        name: caller.ext().as_str().into(),
+        origin: crate::ext::services::origin_text_shared(caller.origin()).into(),
+    }
+}
+
 /// Encodes the durable start policy of one child session: its tool
-/// allowlist and the approval mode it inherits from its parent.
+/// allowlist, the approval mode it inherits from its parent, and the
+/// prompt customization its start carried. Missing optional fields keep
+/// older records readable.
 fn child_policy_body(
     tools: Option<&[Name]>,
     approval: ApprovalMode,
+    role: Option<&str>,
+    system: Option<&str>,
 ) -> Result<RawJson, ServiceError> {
     #[derive(serde::Serialize)]
     struct Policy<'a> {
         tools: Option<Vec<&'a str>>,
         approval: ApprovalMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        system: Option<&'a str>,
     }
     let tools = tools.map(|names| names.iter().map(Name::as_str).collect());
-    let body = sonic_rs::to_string(&Policy { tools, approval })
-        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    let body = sonic_rs::to_string(&Policy {
+        tools,
+        approval,
+        role,
+        system,
+    })
+    .map_err(|error| ServiceError::failed(None, error.to_string()))?;
     RawJson::parse(&body).map_err(|error| ServiceError::failed(None, error.to_string()))
 }
 
@@ -90,6 +117,23 @@ async fn copy_child_approval(
         })
         .await
         .map(|_| ())
+}
+
+/// Keeps the live child snapshot in step with the durable start policy
+/// before the first prompt enters the child.
+fn apply_child_snapshot(child: &crate::agent::Agent, start: &dal_core::AgentStart) {
+    if let Some(names) = &start.tools {
+        child.inner.shared.restrict_tools(names);
+    }
+    if let Some(system) = &start.system {
+        child.inner.shared.set_child_prompt_policy(
+            crate::session::shared::ChildPromptPolicy::System(system.clone()),
+        );
+    } else if let Some(role) = &start.role {
+        child.inner.shared.set_child_prompt_policy(
+            crate::session::shared::ChildPromptPolicy::Role(role.clone()),
+        );
+    }
 }
 
 /// Runs the prompted turn's interrupt inside the child's task group: after
@@ -310,6 +354,72 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
             }
             Err(_) => return None,
         }
+    }
+}
+
+/// Resolves an absolute `raw` to a file under the session's own `jobs/`
+/// directory, the only absolute location `fs.read` serves: the exec tool
+/// prints its job log as `Full output: <jobs dir>/<job id>.log`, outside the
+/// workspace, and a reader of that line must reach the file.
+///
+/// `Ok(None)` means nothing exists there. Links are resolved, so one that
+/// leaves the directory is refused like any other outside path.
+///
+/// # Errors
+///
+/// Returns [`ConfineError::Outside`] when `raw` is not below `jobs_dir`, is
+/// `jobs_dir` itself, or resolves outside it; [`ConfineError::ParentDir`]
+/// when the part below `jobs_dir` climbs with `..`; and
+/// [`ConfineError::Unresolvable`] when a component exists but cannot be
+/// resolved.
+pub(crate) fn resolve_job_log(
+    jobs_dir: &Path,
+    raw: &Path,
+) -> Result<Option<PathBuf>, ConfineError> {
+    let relative = raw
+        .strip_prefix(jobs_dir)
+        .map_err(|_| ConfineError::Outside)?;
+    let mut names = 0_usize;
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => names += 1,
+            Component::CurDir => {}
+            _ => return Err(ConfineError::ParentDir),
+        }
+    }
+    if names == 0 {
+        return Err(ConfineError::Outside);
+    }
+    let canonical_jobs = match std::fs::canonicalize(jobs_dir) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ConfineError::Unresolvable),
+    };
+    let resolved = match std::fs::canonicalize(raw) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ConfineError::Unresolvable),
+    };
+    if resolved != canonical_jobs && resolved.starts_with(&canonical_jobs) {
+        Ok(Some(resolved))
+    } else {
+        Err(ConfineError::Outside)
+    }
+}
+
+/// Reads one job log by absolute path on a blocking thread, then the bytes.
+async fn read_job_log(jobs_dir: PathBuf, path: &str) -> Result<Option<Vec<u8>>, ServiceError> {
+    let raw = PathBuf::from(path);
+    let outcome = tokio::task::spawn_blocking(move || resolve_job_log(&jobs_dir, &raw))
+        .await
+        .map_err(|error| ServiceError::failed(Some(Service::FsRead), error.to_string()))?;
+    let Some(resolved) = outcome.map_err(|error| refusal(Service::FsRead, path, error))? else {
+        return Ok(None);
+    };
+    match tokio::fs::read(resolved).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(fs_failure(Service::FsRead, path, &error)),
     }
 }
 
@@ -612,8 +722,12 @@ fn is_git_redirect_var(key: &std::ffi::OsString) -> bool {
 impl SessionBackend for Backend {
     fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
         let root = self.canonical_root.clone();
+        let jobs_dir = self.jobs_dir.clone();
         let path = path.to_owned();
         Box::pin(async move {
+            if Path::new(&path).is_absolute() {
+                return read_job_log(jobs_dir, &path).await;
+            }
             let confined = confine_path(root.clone(), &path, Service::FsRead).await?;
             let confined = recheck_path(root, confined, &path, Service::FsRead).await?;
             match tokio::fs::read(confined.resolved()).await {
@@ -815,13 +929,27 @@ impl SessionBackend for Backend {
         })
     }
 
-    fn request_resolved(&self, resolved: crate::broker::Resolved) {
-        self.handle
-            .work_detached(crate::session::actor::TurnWork::Answered { resolved });
-    }
-
     fn ext_records(&self) -> Arc<[ExtRecord]> {
         self.shared.ext_records()
+    }
+    /// Returns the terminal private-effect facts the calling extension owns,
+    /// oldest first, from the published terminal index; never waits on the
+    /// actor.
+    ///
+    /// The owner is derived here from the host-minted caller at the filter
+    /// site. The predicate runs inside the shared lock over the shared
+    /// payloads; only owner-matched payloads are mapped to rows outside it.
+    fn private_outcomes(&self, who: &crate::ext::Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        let owner = private_owner_of(who);
+        let rows = self
+            .shared
+            .private_terminal_select(|terminal| terminal.who == owner);
+        Box::pin(async move {
+            Ok(rows
+                .iter()
+                .map(|terminal| PrivateEffect::from(terminal.as_ref()))
+                .collect())
+        })
     }
     fn blob_put(&self, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         Box::pin(async move {
@@ -1157,6 +1285,9 @@ impl Backend {
     }
 
     async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
+        if let Err(error) = start.validate() {
+            return Err(child_start_error(error));
+        }
         if let Some(max_depth) = self.depth_refusal() {
             return Ok(refused(AgentRefusal::MaxDepth { max_depth }));
         }
@@ -1198,7 +1329,12 @@ impl Backend {
         // The restriction and the inherited approval mode are journaled
         // through the child's actor first: a start whose policy cannot be
         // recorded leaves no half-restricted child behind.
-        let Ok(body) = child_policy_body(start.tools.as_deref(), self.shared.approval()) else {
+        let Ok(body) = child_policy_body(
+            start.tools.as_deref(),
+            self.shared.approval(),
+            start.role.as_deref(),
+            start.system.as_deref(),
+        ) else {
             let _ = self.host().close(child_id).await;
             return Err(child_start_error("could not encode the child start policy"));
         };
@@ -1225,11 +1361,7 @@ impl Backend {
                 "could not journal the child start policy",
             ));
         }
-        // Keep the live snapshot in step with the durable policy before the
-        // first prompt enters the child.
-        if let Some(names) = &start.tools {
-            child.inner.shared.restrict_tools(names);
-        }
+        apply_child_snapshot(&child, &start);
         // The child starts under the approval mode its parent runs under now,
         // not the configured default. When the mode cannot be set the child
         // does not start.
@@ -1237,10 +1369,6 @@ impl Backend {
         if let Err(error) = copy_child_approval(&child, approval).await {
             let _ = self.host().close(child_id).await;
             return Err(child_start_error(error));
-        }
-        let mut prompt = start.prompt.to_string();
-        if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
-            prompt = format!("System: {system}\n\n{prompt}");
         }
         if let Some(model) = model
             && let Err(error) = child
@@ -1256,9 +1384,7 @@ impl Backend {
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
-                content: vec![Part::Text {
-                    text: prompt.into(),
-                }],
+                content: vec![Part::Text { text: start.prompt }],
             })
             .await
         {
@@ -1520,7 +1646,9 @@ impl Backend {
             };
             if latest_assistant {
                 for block in content.iter().rev() {
-                    if let dal_core::Block::Text { text: chunk } = block {
+                    // The report reads visible text only; the opaque
+                    // provider replay payload rides along untouched.
+                    if let dal_core::Block::Text { text: chunk, .. } = block {
                         text.insert_str(0, chunk);
                     }
                 }
@@ -1714,7 +1842,11 @@ mod tests {
     async fn prompt_interrupt_targets_ended_turn_without_cancelling_successor() {
         let prompted = dal_core::TurnId::new(NonZeroU64::MIN);
         let successor = dal_core::TurnId::new(NonZeroU64::new(2).expect("nonzero turn"));
-        let control = Arc::new(std::sync::Mutex::new(ControlCell::new()));
+        // The constructor under test shares one broker between the inbox
+        // and the cell, as `spawn` wires them: claims route through the
+        // inbox under its lock.
+        let inbox = Arc::new(ResolutionInbox::new(Arc::new(Broker::new())));
+        let control = Arc::new(std::sync::Mutex::new(ControlCell::new(Arc::clone(&inbox))));
         let successor_token = {
             let mut control = control
                 .lock()
@@ -1730,7 +1862,7 @@ mod tests {
             tx,
             opening_tx,
             Arc::clone(&control),
-            Arc::new(ResolutionInbox::new()),
+            inbox,
         );
         let tasks = SessionTasks::new();
         spawn_prompt_interrupt(&tasks, handle, prompted, std::time::Duration::ZERO);
@@ -2092,6 +2224,632 @@ mod tests {
             );
         }
     }
+
+    /// Private-effect actor boundary proofs: real actor plus temp-Store
+    /// journals. Every write below travels `private_loop_born` /
+    /// `private_start` / `private_end` through the live session actor and
+    /// asserts against the file-backed journal; no fake journal or backend
+    /// stands in. Owners are minted through `private_owner_of`, the same
+    /// renderer the read filter uses, and every `Owner` value stays
+    /// test-internal.
+    fn private_test_caller(name: &str, origin: dal_core::Origin) -> crate::ext::Caller {
+        crate::ext::Caller::new(
+            name.parse::<dal_core::Name>()
+                .expect("valid extension name"),
+            origin,
+            dal_core::ServiceSet::from_names(["ask"]).expect("inject parses"),
+            std::num::NonZeroU32::MIN,
+            crate::ext::CallerKind::Handler,
+            None,
+        )
+        .with_test_digest()
+    }
+
+    fn private_journal_bytes(
+        temp: &tempfile::TempDir,
+        workspace: &Workspace,
+        id: SessionId,
+    ) -> Vec<u8> {
+        let data_root = temp.path().join("data");
+        let path = dal_store::Store::new(data_root, workspace.clone(), dal_core::Product::Dal)
+            .session_file(id);
+        std::fs::read(&path).expect("private journal is file-backed")
+    }
+
+    fn private_decode_records(bytes: &[u8]) -> Vec<dal_core::Record> {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| dal_core::decode(line).expect("journal line decodes").record)
+            .collect()
+    }
+
+    fn count_private_starts(
+        records: &[dal_core::Record],
+        want_loop: &dal_core::PrivateLoopId,
+        want_token: &dal_core::PrivateEffectId,
+    ) -> usize {
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    dal_core::Record::PrivateStart {
+                        r#loop: found_loop,
+                        token: found_token,
+                        ..
+                    } if found_loop == want_loop && found_token == want_token
+                )
+            })
+            .count()
+    }
+
+    fn count_private_ends(
+        records: &[dal_core::Record],
+        want_loop: &dal_core::PrivateLoopId,
+        want_token: &dal_core::PrivateEffectId,
+    ) -> usize {
+        records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    dal_core::Record::PrivateEnd {
+                        r#loop: found_loop,
+                        token: found_token,
+                        ..
+                    } if found_loop == want_loop && found_token == want_token
+                )
+            })
+            .count()
+    }
+
+    fn private_settled_outcome() -> dal_core::PrivateOutcome {
+        dal_core::PrivateOutcome::Settled {
+            is_error: false,
+            parts: vec![dal_core::JournalPart::Text { text: "ok".into() }],
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps every rejected transition in order"
+    )]
+    async fn private_rejected_transitions_persist_nothing() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let handle = backend_of(&host, root).handle().clone();
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        handle
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        let baseline = private_journal_bytes(&temp, &workspace, root);
+
+        // A duplicate birth is rejected and the journal stays byte-identical.
+        assert!(
+            handle
+                .private_loop_born(r#loop, owner.clone(), None)
+                .await
+                .is_err(),
+            "a twice-born loop must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            baseline,
+            "a rejected birth appends nothing"
+        );
+
+        // A start under a foreign owner is rejected with no new bytes.
+        let stranger = private_test_caller("stranger", dal_core::Origin::User);
+        assert!(
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    private_owner_of(&stranger),
+                    None,
+                    0,
+                    dal_core::CallId::new("rejected-call"),
+                    "proof-tool".into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .is_err(),
+            "an owner-mismatched start must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            baseline,
+            "a mismatched start appends nothing"
+        );
+
+        // The one valid start receipts; its duplicate fails without a record.
+        handle
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                0,
+                dal_core::CallId::new("proof-call"),
+                "proof-tool".into(),
+                dal_core::RawJson::parse("null").expect("args parse"),
+            )
+            .await
+            .expect("valid start receipts");
+        let after_start = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_starts(&private_decode_records(&after_start), &r#loop, &token),
+            1,
+            "exactly one start record lands"
+        );
+        assert!(
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    owner.clone(),
+                    None,
+                    0,
+                    dal_core::CallId::new("proof-call"),
+                    "proof-tool".into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .is_err(),
+            "a twice-started effect must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            after_start,
+            "a duplicate start appends nothing"
+        );
+
+        // One end settles the row; a second end for the token fails and the
+        // journal still holds exactly one end record for it.
+        handle
+            .private_end(r#loop, token, private_settled_outcome())
+            .await
+            .expect("valid end receipts");
+        let after_end = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_ends(&private_decode_records(&after_end), &r#loop, &token),
+            1,
+            "exactly one end record lands"
+        );
+        assert!(
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .is_err(),
+            "a twice-ended effect must fail"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            after_end,
+            "a duplicate end appends nothing"
+        );
+
+        // The rejections above left the fold untouched: an end for a token
+        // that never started still fails instead of settling a phantom row.
+        assert!(
+            handle
+                .private_end(
+                    r#loop,
+                    dal_core::PrivateEffectId::new_v7(),
+                    private_settled_outcome()
+                )
+                .await
+                .is_err(),
+            "an end without a start must fail"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps the receipt and closed-lane phases in order"
+    )]
+    async fn private_receipt_persisted_and_closed_operations_reject() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        handle
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        handle
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                0,
+                dal_core::CallId::new("proof-call"),
+                "proof-tool".into(),
+                dal_core::RawJson::parse("null").expect("args parse"),
+            )
+            .await
+            .expect("start receipts");
+
+        // The receipt above is durable: the start record is on the file, and
+        // only then does the row settle and publish its terminal.
+        let records = private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_starts(&records, &r#loop, &token),
+            1,
+            "the start receipt is on disk"
+        );
+        handle
+            .private_end(r#loop, token, private_settled_outcome())
+            .await
+            .expect("end receipts");
+        let settled_rows = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads its terminal");
+        assert_eq!(settled_rows.len(), 1, "the settled terminal publishes");
+        assert_eq!(settled_rows[0].token, token);
+
+        // A failed append folds and publishes nothing: the armed write fault
+        // rejects the start, the owner still reads only the settled row, and
+        // the journal file is byte-identical (the partial batch rolls back).
+        let faulted = dal_core::PrivateEffectId::new_v7();
+        let before_fault = private_journal_bytes(&temp, &workspace, root);
+        dal_store::Store::new(
+            temp.path().join("data"),
+            workspace.clone(),
+            dal_core::Product::Dal,
+        )
+        .arm_append_write_fault(root, 0);
+        assert!(
+            matches!(
+                handle
+                    .private_start(
+                        r#loop,
+                        faulted,
+                        owner.clone(),
+                        None,
+                        1,
+                        dal_core::CallId::new("faulted-call"),
+                        "proof-tool".into(),
+                        dal_core::RawJson::parse("null").expect("args parse"),
+                    )
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a failed append must reject the start"
+        );
+        let rows_after_fault = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads after the failed append");
+        assert_eq!(
+            rows_after_fault.len(),
+            1,
+            "the failed start publishes nothing"
+        );
+        assert_eq!(
+            private_journal_bytes(&temp, &workspace, root),
+            before_fault,
+            "the rolled-back batch leaves no bytes"
+        );
+
+        // A closed lane rejects with typed errors.
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+        assert!(
+            matches!(
+                handle
+                    .private_start(
+                        r#loop,
+                        dal_core::PrivateEffectId::new_v7(),
+                        owner.clone(),
+                        None,
+                        1,
+                        dal_core::CallId::new("closed-call"),
+                        "proof-tool".into(),
+                        dal_core::RawJson::parse("null").expect("args parse"),
+                    )
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a start on a closed session must fail"
+        );
+        assert!(
+            matches!(
+                handle
+                    .private_end(r#loop, token, private_settled_outcome())
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "an end on a closed session must fail"
+        );
+        assert!(
+            matches!(
+                handle
+                    .private_loop_born(dal_core::PrivateLoopId::new_v7(), owner, None)
+                    .await,
+                Err(AgentError::SessionClosed { .. })
+            ),
+            "a birth on a closed session must fail"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one live-actor journal proof keeps the reopen and repair phases in order"
+    )]
+    async fn private_unfinished_start_repairs_once_across_reopen() {
+        let (host, root, child, temp) = host_with_child().await;
+        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let r#loop = dal_core::PrivateLoopId::new_v7();
+        let token = dal_core::PrivateEffectId::new_v7();
+
+        backend_of(&host, root)
+            .handle()
+            .private_loop_born(r#loop, owner.clone(), None)
+            .await
+            .expect("loop birth receipts");
+        backend_of(&host, root)
+            .handle()
+            .private_start(
+                r#loop,
+                token,
+                owner.clone(),
+                None,
+                3,
+                dal_core::CallId::new("wire-call-9"),
+                "tool-a".into(),
+                dal_core::RawJson::parse(r#"{"n":9}"#).expect("args parse"),
+            )
+            .await
+            .expect("start receipts");
+        // The row stays Started with no end landed; then the armed write
+        // fault rejects the end, which must fold and publish nothing.
+        dal_store::Store::new(
+            temp.path().join("data"),
+            workspace.clone(),
+            dal_core::Product::Dal,
+        )
+        .arm_append_write_fault(root, 0);
+        assert!(
+            matches!(
+                backend_of(&host, root)
+                    .handle()
+                    .private_end(r#loop, token, private_settled_outcome())
+                    .await,
+                Err(ServiceError::Failed { .. })
+            ),
+            "a failed end append must reject"
+        );
+        let rows_before_close = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads before close");
+        assert!(
+            rows_before_close.is_empty(),
+            "the failed end publishes no terminal"
+        );
+        let records_before_close =
+            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_ends(&records_before_close, &r#loop, &token),
+            0,
+            "the failed end appends no record"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+
+        // Reopen repairs the unresolved start to exactly one Indeterminate
+        // end on disk; the owner reads that terminal, never a Settled row.
+        let reopened = host
+            .open(
+                SessionRef::Resume {
+                    key: root.to_string().into(),
+                    workspace: workspace.clone(),
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("reopen session");
+        assert_eq!(reopened.session(), root, "resume reopens the same session");
+        let rows = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads its terminals");
+        assert_eq!(rows.len(), 1, "one repair terminal publishes");
+        assert_eq!(rows[0].r#loop, r#loop);
+        assert_eq!(rows[0].token, token);
+        assert_eq!(rows[0].round, 3);
+        assert!(
+            matches!(rows[0].outcome, dal_core::PrivateOutcome::Indeterminate),
+            "an unfinished effect reads Indeterminate, never Settled"
+        );
+        let repaired = private_journal_bytes(&temp, &workspace, root);
+        assert_eq!(
+            count_private_ends(&private_decode_records(&repaired), &r#loop, &token),
+            1,
+            "the reopen persists exactly one repair end"
+        );
+
+        host.close(root).await.expect("close repaired session");
+        let reopened_again = host
+            .open(
+                SessionRef::Resume {
+                    key: root.to_string().into(),
+                    workspace: workspace.clone(),
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("second reopen");
+        assert_eq!(reopened_again.session(), root);
+        let reopened_records =
+            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        assert_eq!(
+            count_private_ends(&reopened_records, &r#loop, &token),
+            1,
+            "the second reopen persists no extra repair"
+        );
+        let rows_again = backend_of(&host, root)
+            .private_outcomes(&caller)
+            .await
+            .expect("owner reads after second reopen");
+        assert_eq!(rows_again.len(), 1, "still exactly one terminal");
+        assert_eq!(rows_again[0].r#loop, r#loop);
+        assert_eq!(rows_again[0].token, token);
+        assert_eq!(rows_again[0].round, 3);
+        assert!(
+            matches!(
+                rows_again[0].outcome,
+                dal_core::PrivateOutcome::Indeterminate
+            ),
+            "the terminal stays Indeterminate"
+        );
+
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_end_only_advance_is_visible_to_the_owner_read() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let caller = private_test_caller("focus", dal_core::Origin::User);
+        let owner = private_owner_of(&caller);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+
+        // Two loops settle with no leaf or ext movement at all: only private
+        // records land, so a publication parked behind the `sync_ext` memo
+        // early-return would stay stuck at one row.
+        for (round, tool) in [(0_u32, "tool-a"), (1_u32, "tool-b")] {
+            let r#loop = dal_core::PrivateLoopId::new_v7();
+            let token = dal_core::PrivateEffectId::new_v7();
+            handle
+                .private_loop_born(r#loop, owner.clone(), None)
+                .await
+                .expect("loop birth receipts");
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    owner.clone(),
+                    None,
+                    round,
+                    dal_core::CallId::new("proof-call"),
+                    tool.into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .expect("start receipts");
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .expect("end receipts");
+            let rows = backend
+                .private_outcomes(&caller)
+                .await
+                .expect("owner reads its terminals");
+            assert_eq!(
+                rows.len(),
+                usize::try_from(round).expect("round fits") + 1,
+                "each End-only advance publishes"
+            );
+        }
+        let rows = backend
+            .private_outcomes(&caller)
+            .await
+            .expect("final owner read");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(&*rows[0].name, "tool-a");
+        assert_eq!(&*rows[1].name, "tool-b");
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_same_name_under_different_origins_reads_only_own_facts() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let user_caller = private_test_caller("focus", dal_core::Origin::User);
+        let bundled_caller = private_test_caller("focus", dal_core::Origin::Bundled);
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
+
+        for (caller, tool) in [(&user_caller, "tool-a"), (&bundled_caller, "tool-b")] {
+            let r#loop = dal_core::PrivateLoopId::new_v7();
+            let token = dal_core::PrivateEffectId::new_v7();
+            handle
+                .private_loop_born(r#loop, private_owner_of(caller), None)
+                .await
+                .expect("loop birth receipts");
+            handle
+                .private_start(
+                    r#loop,
+                    token,
+                    private_owner_of(caller),
+                    None,
+                    0,
+                    dal_core::CallId::new("proof-call"),
+                    tool.into(),
+                    dal_core::RawJson::parse("null").expect("args parse"),
+                )
+                .await
+                .expect("start receipts");
+            handle
+                .private_end(r#loop, token, private_settled_outcome())
+                .await
+                .expect("end receipts");
+        }
+
+        let user_rows = backend
+            .private_outcomes(&user_caller)
+            .await
+            .expect("user reads its terminals");
+        assert_eq!(user_rows.len(), 1, "user/focus reads only its terminal");
+        assert_eq!(&*user_rows[0].name, "tool-a");
+        let bundled_rows = backend
+            .private_outcomes(&bundled_caller)
+            .await
+            .expect("bundled reads its terminals");
+        assert_eq!(
+            bundled_rows.len(),
+            1,
+            "the same name under bundled reads only its own"
+        );
+        assert_eq!(&*bundled_rows[0].name, "tool-b");
+        let stranger = private_test_caller("stranger", dal_core::Origin::User);
+        assert!(
+            backend
+                .private_outcomes(&stranger)
+                .await
+                .expect("stranger reads")
+                .is_empty(),
+            "a third owner reads nothing"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
 }
 
 #[cfg(test)]
@@ -2189,6 +2947,92 @@ mod path_tests {
             std::fs::canonicalize(&root)?.join("real/file")
         );
         confined.recheck(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_job_log_below_the_jobs_dir_resolves_and_a_missing_one_is_none() -> TestResult {
+        let (_temp, root, _outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(jobs.join("a.log"), b"output")?;
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("a.log"))?,
+            Some(std::fs::canonicalize(jobs.join("a.log"))?)
+        );
+        assert_eq!(resolve_job_log(&jobs, &jobs.join("absent.log"))?, None);
+        let nowhere = root.join("never-created");
+        assert_eq!(resolve_job_log(&nowhere, &nowhere.join("a.log"))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn only_paths_below_the_jobs_dir_are_served() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        std::fs::write(root.join("note.txt"), b"workspace file")?;
+        for raw in [
+            outside.join("secret"),
+            root.join("note.txt"),
+            jobs.clone(),
+            jobs.join(".."),
+            PathBuf::from("/etc/passwd"),
+        ] {
+            assert!(
+                resolve_job_log(&jobs, &raw).is_err(),
+                "{} must be refused",
+                raw.display()
+            );
+        }
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("../outside/secret")),
+            Err(ConfineError::ParentDir)
+        );
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("x/../../note.txt")),
+            Err(ConfineError::ParentDir)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_jobs_dir_is_refused() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        std::os::unix::fs::symlink(outside.join("secret"), jobs.join("leak.log"))?;
+        std::os::unix::fs::symlink(&outside, jobs.join("dir"))?;
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("leak.log")),
+            Err(ConfineError::Outside)
+        );
+        assert_eq!(
+            resolve_job_log(&jobs, &jobs.join("dir/secret")),
+            Err(ConfineError::Outside)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_job_log_serves_bytes_and_still_refuses_other_absolute_paths() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let jobs = root.join("jobs");
+        std::fs::create_dir(&jobs)?;
+        std::fs::write(jobs.join("a.log"), b"head\ntail\n")?;
+        std::fs::write(outside.join("secret"), b"secret")?;
+        let served = read_job_log(jobs.clone(), &jobs.join("a.log").to_string_lossy()).await?;
+        assert_eq!(served.as_deref(), Some(b"head\ntail\n".as_slice()));
+        let absent = read_job_log(jobs.clone(), &jobs.join("b.log").to_string_lossy()).await?;
+        assert_eq!(absent, None);
+        let refused = read_job_log(jobs, &outside.join("secret").to_string_lossy()).await;
+        assert!(
+            matches!(refused, Err(ServiceError::Denied(_))),
+            "an absolute path outside the jobs dir stays denied: {refused:?}"
+        );
         Ok(())
     }
 

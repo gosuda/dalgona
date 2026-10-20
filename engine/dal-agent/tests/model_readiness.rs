@@ -131,6 +131,7 @@ fn api_route() -> ModelRoute {
     ModelRoute::Api {
         family: dal_core::Family::Chat,
         model: "gpt-4o".into(),
+        provider: None,
     }
 }
 
@@ -303,6 +304,7 @@ async fn readiness_reports_missing_credentials_without_opening_transport() {
     let route = ModelRoute::Api {
         family: dal_core::Family::Chat,
         model: "openai/gpt-4o".into(),
+        provider: None,
     };
     let outcome = Arc::new(Mutex::new(None));
     let completed = Arc::new(Notify::new());

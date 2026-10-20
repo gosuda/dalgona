@@ -15,10 +15,12 @@ use std::time::Duration;
 use dal_core::SkillRecord;
 use dal_core::ext::{McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerDecl};
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
-    JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarName, SidecarOp, Site,
-    StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
+    AgentsOp, AgentsReply, Answer, ApprovalMode, Budget, CallId, ClientId, DenyReason, EntryId,
+    Gen, Inference, JobId, JobsOp, JobsReply, JournalPart, Mode, ModelRequest, ModelRoute, Name,
+    OnError, Origin, Owner, PrivateEffect, PrivateEffectId, PrivateLoopId, PrivateOutcome, Purpose,
+    Question, RawJson, Record, RequestParams, ResolutionCause, ScopeSpec, Service, ServiceSet,
+    Session, SessionId, SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord,
+    ThinkingLevel, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -37,6 +39,8 @@ use crate::ext::tool::{Approved, ToolCxRuntime};
 use crate::ext::{Extension, ExtensionBuilder};
 use crate::ext::{Scope, ScopeError};
 use crate::proc::Proc;
+use crate::session::backend::private_owner_of;
+use crate::session::shared::Shared;
 
 /// One canned reply per backend operation, in call order.
 #[derive(Default)]
@@ -44,6 +48,7 @@ struct FakeBackend {
     agents_reply: Mutex<Option<AgentsReply>>,
     jobs_reply: Mutex<Option<JobsReply>>,
     turn_reply: Mutex<Option<TurnOpReply>>,
+    private_outcomes_reply: Mutex<Vec<PrivateEffect>>,
     sidecar_value: Mutex<Option<Vec<u8>>>,
     infer_reply: Mutex<Option<Inference>>,
     seen_env: Mutex<Vec<String>>,
@@ -51,10 +56,9 @@ struct FakeBackend {
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
-    /// Resolutions the ask guard asked the actor to journal.
-    resolved: Mutex<Vec<crate::broker::Resolved>>,
-    resolutions: Arc<crate::session::ResolutionInbox>,
     headless: std::sync::atomic::AtomicBool,
+    /// Every path `fs_read` reached; a gate that refuses first leaves it empty.
+    seen_reads: Mutex<Vec<String>>,
 }
 
 impl SessionBackend for FakeBackend {
@@ -72,6 +76,10 @@ impl SessionBackend for FakeBackend {
     fn ext_records(&self) -> Arc<[crate::ext::ExtRecord]> {
         Arc::from(self.rows.lock().unwrap().clone())
     }
+    fn private_outcomes(&self, _caller: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        let rows = self.private_outcomes_reply.lock().unwrap().clone();
+        Box::pin(async move { Ok(rows) })
+    }
     fn blob_put(&self, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         let digest = *blake3::hash(&bytes).as_bytes();
         self.blobs.lock().unwrap().entry(digest).or_insert(bytes);
@@ -83,8 +91,9 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(bytes) })
     }
 
-    fn fs_read(&self, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        Box::pin(async move { unreachable!("this test never reads files") })
+    fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        self.seen_reads.lock().unwrap().push(path.to_owned());
+        Box::pin(async move { Ok(Some(b"served".to_vec())) })
     }
 
     fn fs_write(&self, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
@@ -194,13 +203,6 @@ impl SessionBackend for FakeBackend {
     fn request_opened(&self, _request: dal_core::Request) -> ServiceFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
-    fn request_resolved(&self, resolved: crate::broker::Resolved) {
-        self.resolutions.mark_settled(resolved.request.id);
-        self.resolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(resolved);
-    }
 
     fn answerer_attached(&self) -> bool {
         !self.headless.load(std::sync::atomic::Ordering::SeqCst)
@@ -267,6 +269,7 @@ struct FakeRt {
     previews: Mutex<Vec<dal_core::Preview>>,
     ladder_asks: Mutex<usize>,
     script: Mutex<VecDeque<AuthorizeScript>>,
+    decisions: Mutex<VecDeque<dal_core::Decision>>,
     spawns: SpawnLog,
     workspace: Workspace,
     cancel: CancellationToken,
@@ -278,6 +281,7 @@ impl Default for FakeRt {
             previews: Mutex::new(Vec::new()),
             ladder_asks: Mutex::new(0),
             script: Mutex::new(VecDeque::new()),
+            decisions: Mutex::new(VecDeque::new()),
             spawns: Mutex::new(Vec::new()),
             workspace: Workspace::new(std::env::temp_dir()).expect("test workspace"),
             cancel: CancellationToken::new(),
@@ -287,7 +291,11 @@ impl Default for FakeRt {
 
 impl ToolCxRuntime for FakeRt {
     fn decide_run(&self) -> dal_core::Decision {
-        dal_core::Decision::Allow
+        self.decisions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(dal_core::Decision::Allow)
     }
 
     fn authorize_approved(
@@ -366,6 +374,10 @@ impl ToolCxRuntime for FakeRt {
         unreachable!("this test never detaches")
     }
 
+    fn detach_command(&self, _proc: Proc, _command: Arc<str>) -> JobId {
+        unreachable!("this test never detaches")
+    }
+
     fn resolve(
         &self,
         _uri: &str,
@@ -378,6 +390,9 @@ impl ToolCxRuntime for FakeRt {
 struct Fixture {
     services: Arc<SessionServices>,
     broker: Arc<Broker>,
+    /// The claim inbox the services share with the session handle; tests
+    /// drain it the way the actor would.
+    inbox: Arc<crate::session::ResolutionInbox>,
     backend: Arc<FakeBackend>,
     rt: Arc<FakeRt>,
     temp: tempfile::TempDir,
@@ -403,13 +418,15 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let broker = Arc::new(Broker::new());
     let grants = Arc::new(
-        GrantStore::with_runtime(
+        GrantStore::with_runtime_scoped(
+            temp.path().to_path_buf(),
             temp.path().to_path_buf(),
             Duration::from_secs(120),
             Arc::clone(&broker),
         )
         .unwrap(),
     );
+    let inbox = Arc::new(crate::session::ResolutionInbox::new(Arc::clone(&broker)));
     let backend = Arc::new(FakeBackend::default());
     let rt = Arc::new(FakeRt::default());
     let cancel = CancellationToken::new();
@@ -441,7 +458,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
             Arc::new(move |_| Some(live.clone()))
         },
         cancel: cancel.clone(),
-        resolutions: Arc::clone(&backend.resolutions),
+        resolutions: Arc::clone(&inbox),
         ask_timeout,
         ephemeral,
         workspace,
@@ -449,6 +466,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     Fixture {
         services,
         broker,
+        inbox,
         backend,
         rt,
         temp,
@@ -505,12 +523,13 @@ fn cancel_next(broker: &Broker, turn: TurnId) {
         .next()
         .expect("an open request")
         .id;
-    let resolved = broker.resolve_turn(turn, Answer::Cancel, ClientId::new("test-front-end"));
+    let resolved = broker.resolve_turn(turn, ResolutionCause::Cancelled);
     assert!(
         resolved.iter().any(|item| item.request.id == id),
         "the turn cancel resolves the open question"
     );
     for item in &resolved {
+        assert_eq!(item.cause, ResolutionCause::Cancelled);
         broker.release(item);
     }
 }
@@ -576,6 +595,65 @@ async fn not_injected_does_not_consult_grants() {
              and approve the new grant when asked",
         ),
         "a missing span renders as unknown",
+    );
+}
+
+/// The session's `jobs/` directory is outside the workspace, so an absolute
+/// `fs.read` path is a Builtin privilege: the guard reads the exec tool's
+/// spill log by the absolute path its footer names. Any other origin holding
+/// the same service is refused before the backend sees the path, with the
+/// refusal a path outside the workspace always had; its relative reads are
+/// untouched.
+#[tokio::test]
+async fn an_absolute_fs_read_path_reaches_the_backend_only_for_a_builtin_caller() {
+    let fx = fixture(Duration::from_secs(30));
+    let absolute = fx.temp.path().join("jobs").join("a.log");
+    let absolute = absolute.to_str().expect("utf-8 path");
+    let reader = |ext: &str, origin: Origin, kind: CallerKind| {
+        Caller::new(
+            ext.parse::<Name>().unwrap(),
+            origin,
+            ServiceSet::from_names(["fs.read"]).unwrap(),
+            std::num::NonZeroU32::MIN,
+            kind,
+            Some(turn()),
+        )
+        .with_test_digest()
+    };
+    let builtin = reader("guard", Origin::Builtin, CallerKind::Hook);
+    // Cells skip the grant store, so the origin check is the only gate under test.
+    let user = reader("focus", Origin::User, CallerKind::Cell { approved: true });
+    let bundled = reader(
+        "focus",
+        Origin::Bundled,
+        CallerKind::Cell { approved: true },
+    );
+
+    assert_eq!(
+        fx.services.fs_read(&builtin, absolute).await.unwrap(),
+        Some(b"served".to_vec()),
+        "a Builtin caller reaches the backend with the absolute path"
+    );
+    for refused in [&user, &bundled] {
+        let error = fx.services.fs_read(refused, absolute).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServiceError::Denied(DenyReason::OutOfScope { ref what })
+                    if what.contains(absolute)
+            ),
+            "an absolute path is out of scope for a non-Builtin caller, got {error:?}"
+        );
+    }
+    assert_eq!(
+        fx.backend.seen_reads.lock().unwrap().as_slice(),
+        [absolute],
+        "only the Builtin read reached the backend"
+    );
+    assert_eq!(
+        fx.services.fs_read(&user, "a.txt").await.unwrap(),
+        Some(b"served".to_vec()),
+        "a workspace-relative read is unchanged for every origin"
     );
 }
 
@@ -940,8 +1018,11 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let services = Arc::clone(&fx.services);
     let who = authorized.clone();
-    let approved =
-        spawn(async move { services.authorize_script_infer(&who, CancellationToken::new()).await });
+    let approved = spawn(async move {
+        services
+            .authorize_script_infer(&who, CancellationToken::new())
+            .await
+    });
     await_open(&fx.broker).await;
     let open = fx.broker.open_requests();
     assert!(
@@ -951,7 +1032,10 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
         open[0].question
     );
     answer_next(&fx.broker, Answer::ApproveForSession);
-    approved.join().await.expect("the live controller approved Infer");
+    approved
+        .join()
+        .await
+        .expect("the live controller approved Infer");
     fx.services
         .authorize_script_infer(&authorized, cancel.clone())
         .await
@@ -984,7 +1068,11 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
             "an origin or service-set change must invalidate grant reuse"
         );
     }
-    assert_eq!(open_count(&fx.broker), 0, "changed identities remain denied");
+    assert_eq!(
+        open_count(&fx.broker),
+        0,
+        "changed identities remain denied"
+    );
 
     // A session grant is scoped to its session's store, not just its plugin.
     let second_session = fixture(Duration::from_secs(30));
@@ -1212,19 +1300,24 @@ async fn ask_queue_preserves_answers_and_records_deadline_unavailable() {
             .expect("a timeout resolves")
             .is_none()
     );
-    {
-        let resolved = fx.backend.resolved.lock().unwrap();
-        assert!(
-            matches!(
-                resolved.as_slice(),
-                [item]
-                    if item.resolution == Resolution::Unavailable
-                        && item.was_default
-                        && item.answer == Answer::Cancel
-            ),
-            "the local deadline must journal one unavailable default: {resolved:?}"
-        );
-    }
+    let claim = fx
+        .inbox
+        .take()
+        .expect("the local deadline routes one claim");
+    assert!(
+        matches!(
+            claim,
+            crate::broker::Resolved {
+                resolution: Resolution::Unavailable,
+                was_default: true,
+                answer: Answer::Cancel,
+                cause: ResolutionCause::TimedOut,
+                ..
+            }
+        ),
+        "the local deadline must journal one attended unavailable default: {claim:?}"
+    );
+    fx.inbox.mark_settled(claim.request.id);
     assert!(
         fx.broker.open_requests().is_empty(),
         "the timed-out request is resolved in the broker"
@@ -1571,13 +1664,12 @@ async fn a_dropped_ask_resolves_its_broker_request() {
         "the question was published: {updates:?}"
     );
     drop(updates);
-    let resolved = fx.backend.resolved.lock().unwrap();
-    assert!(
-        resolved
-            .iter()
-            .any(|r| r.answer == dal_core::Answer::Cancel),
-        "the retired question was routed to the actor as Cancel: {resolved:?}"
-    );
+    let claim = fx
+        .inbox
+        .take()
+        .expect("the dropped guard routes one withdrawal claim");
+    assert_eq!(claim.answer, dal_core::Answer::Cancel);
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn);
 }
 
 #[tokio::test]
@@ -1712,6 +1804,215 @@ async fn the_child_policy_identity_is_denied_to_extensions() {
     );
 }
 
+/// A withdrawn ask slot keeps its admission occupied until the actor
+/// settles the claim: the capacity the dropped slot held is not reusable
+/// before `mark_settled`, which is what bounds the withdrawal queue.
+#[tokio::test]
+async fn a_withdrawn_ask_slot_stays_occupied_until_settlement() {
+    use super::MAX_OPEN_ASKS;
+
+    let fx = fixture(Duration::from_secs(60));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let withdrawn = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    let mut live = Vec::new();
+    for _ in 1..MAX_OPEN_ASKS {
+        live.push(spawn(ask(Arc::clone(&fx.services))));
+    }
+    for _ in 0..100 {
+        if open_count(&fx.broker) >= MAX_OPEN_ASKS {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        open_count(&fx.broker),
+        MAX_OPEN_ASKS,
+        "the ask battery fills to its cap"
+    );
+
+    // Aborting the task drops its armed guard, which claims a withdrawal;
+    // the claim is unsettled, so the slot's capacity stays occupied.
+    drop(withdrawn);
+    let claim = loop {
+        if let Some(claim) = fx.inbox.take() {
+            break claim;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn, "{claim:?}");
+    let busy = fx
+        .services
+        .ask(
+            &caller("focus", &["ask"], Some(turn())),
+            Question::Text {
+                prompt: "one more?".into(),
+                placeholder: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(busy, Err(ServiceError::Failed { .. })),
+        "an unsettled withdrawal blocks admission: {busy:?}"
+    );
+
+    // The actor's durable settlement frees the slot and the next ask opens.
+    fx.inbox.mark_settled(claim.request.id);
+    let reopened = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        reopened
+            .join()
+            .await
+            .expect("the reopened ask resolves")
+            .is_none(),
+        "settling the claim reopens the capacity"
+    );
+    drop(live);
+}
+
+/// A lost withdrawal race never wedges the battery: when another winner
+/// resolved the slot first, the armed drop's claim comes back `None` and
+/// the slot's admission frees at once, without any settlement.
+#[tokio::test]
+async fn a_raced_withdrawal_frees_the_ask_slot_without_settlement() {
+    let fx = fixture(Duration::from_secs(60));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let first = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+
+    // The actor's sweep wins the CAS: the request expires, journals its
+    // default, and releases the waiter before the dropped guard claims.
+    let id = fx
+        .broker
+        .open_requests()
+        .into_iter()
+        .next()
+        .expect("the ask opened")
+        .id;
+    let expired = fx
+        .broker
+        .expire_one(
+            id,
+            tokio::time::Instant::now() + Duration::from_secs(61),
+            false,
+        )
+        .expect("the sweep claims first");
+    fx.broker.release(&expired);
+    fx.inbox.mark_settled(id);
+    assert!(matches!(first.join().await, Ok(None)), "{expired:?}");
+
+    // The dropped guard races the already-resolved slot: no claim queues,
+    // the receipt is None, and the freed entry admits the next ask without
+    // any further settlement.
+    let claim = fx.inbox.take();
+    assert!(claim.is_none(), "no claim raced through: {claim:?}");
+    let second = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        second
+            .join()
+            .await
+            .expect("the next ask opens after a lost race")
+            .is_none()
+    );
+}
+
+/// A run approval whose slot was settled by the actor's sweep frees its
+/// exclusive admission on the guard's lost-race drop: a later run can
+/// approve again instead of failing busy forever.
+#[tokio::test]
+async fn a_raced_run_withdrawal_frees_the_run_slot_without_settlement() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    {
+        // Both runs take the broker approval path: without a queued `Ask`
+        // the ladder allows at once and no run approval ever opens.
+        fx.rt.decisions.lock().unwrap().extend([
+            dal_core::Decision::Ask { grant: None },
+            dal_core::Decision::Ask { grant: None },
+        ]);
+    }
+    let who = caller("focus", &["run"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let first = spawn(async move {
+        services
+            .run(&who, run_request(&["git", "status"], workspace))
+            .await
+    });
+    // The capability grant asks first and persists: approve it so the run
+    // reaches its own approval, the slot under test.
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+
+    let id = fx
+        .broker
+        .open_requests()
+        .into_iter()
+        .next()
+        .expect("the run approval opened")
+        .id;
+    let expired = fx
+        .broker
+        .expire_one(
+            id,
+            tokio::time::Instant::now() + Duration::from_secs(301),
+            false,
+        )
+        .expect("the sweep settles the approval first");
+    fx.broker.release(&expired);
+    fx.inbox.mark_settled(id);
+    let error = first.join().await.unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Denied(DenyReason::Unavailable { .. })),
+        "a cancelled run approval fails closed with a typed refusal: {error:?}"
+    );
+
+    // The guard's armed drop found no claim: the exclusive slot freed at
+    // once, so a second run reaches its approval instead of failing busy.
+    assert!(fx.inbox.take().is_none(), "no run claim raced through");
+    let second_who = caller("focus", &["run"], Some(turn()));
+    let second_workspace = fx.temp.path().to_path_buf();
+    let services = Arc::clone(&fx.services);
+    let second = spawn(async move {
+        services
+            .run(&second_who, run_request(&["echo"], second_workspace))
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    let error = second.join().await.unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Denied(DenyReason::OutOfScope { .. })),
+        "the declined fresh approval is a typed refusal: {error:?}"
+    );
+}
+
 /// A dropped ask reopens only after its withdrawal reaches the durable
 /// owner: the next ask is never answered from a stale slot.
 #[tokio::test]
@@ -1732,17 +2033,23 @@ async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
     let first = spawn(ask(Arc::clone(&fx.services)));
     await_open(&fx.broker).await;
     drop(first);
-    for _ in 0..100 {
-        if !fx.backend.resolved.lock().unwrap().is_empty() {
-            break;
+    let claim = loop {
+        if let Some(claim) = fx.inbox.take() {
+            break claim;
         }
         tokio::task::yield_now().await;
-    }
+    };
     assert_eq!(
-        fx.backend.resolved.lock().unwrap().len(),
-        1,
+        claim.cause,
+        ResolutionCause::Withdrawn,
+        "the dropped ask must withdraw as its first resolution: {claim:?}"
+    );
+    assert!(
+        fx.inbox.take().is_none(),
         "the dropped ask must withdraw exactly once"
     );
+    // The actor's durable settlement is what frees the slot for reuse.
+    fx.inbox.mark_settled(claim.request.id);
     let second = spawn(ask(Arc::clone(&fx.services)));
     await_open(&fx.broker).await;
     answer_next(&fx.broker, Answer::Decline);
@@ -1754,4 +2061,271 @@ async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
             .is_none(),
         "the slot must reopen after the settle"
     );
+}
+
+/// Mints a host-shaped caller for private-outcome reads: the authority under
+/// test is the (name, origin) pair, never the inject set.
+fn private_caller(name: &str, origin: Origin) -> Caller {
+    Caller::new(
+        name.parse::<Name>().unwrap(),
+        origin,
+        ServiceSet::from_names(["ask"]).unwrap(),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Handler,
+        Some(turn()),
+    )
+    .with_test_digest()
+}
+
+fn private_shared() -> Shared {
+    Shared::new(
+        false,
+        Gen::new(std::num::NonZeroU64::MIN),
+        ThinkingLevel::Medium,
+        ApprovalMode::Ask,
+        Mode::Normal,
+    )
+}
+
+/// Reads exactly the way [`crate::session::backend::Backend::private_outcomes`]
+/// does — owner derived from the real caller exactly as the backend does,
+/// predicate inside the shared lock and mapping outside — but over the
+/// test's own real `Shared`, since a full backend needs host state no unit
+/// test can mint.
+fn read_private(shared: &Shared, caller: &Caller) -> Vec<PrivateEffect> {
+    let owner = private_owner_of(caller);
+    shared
+        .private_terminal_select(|terminal| terminal.who == owner)
+        .iter()
+        .map(|terminal| PrivateEffect::from(terminal.as_ref()))
+        .collect()
+}
+
+/// One settled loop journal: birth, one start, one end.
+fn private_settled_loop(
+    owner: Owner,
+    round: u32,
+    name: &str,
+) -> (PrivateLoopId, PrivateEffectId, Vec<Record>) {
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let loop_id = PrivateLoopId::new_v7();
+    let token = PrivateEffectId::new_v7();
+    let records = vec![
+        Record::PrivateLoop {
+            at,
+            r#loop: loop_id,
+            who: owner.clone(),
+            turn: Some(turn()),
+        },
+        Record::PrivateStart {
+            at,
+            r#loop: loop_id,
+            token,
+            who: owner,
+            turn: Some(turn()),
+            round,
+            call: CallId::new("wire-call-1"),
+            name: name.into(),
+            args: RawJson::parse(r#"{"n":1}"#).unwrap(),
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: loop_id,
+            token,
+            outcome: PrivateOutcome::Settled {
+                is_error: false,
+                parts: vec![JournalPart::Text { text: "ok".into() }],
+            },
+        },
+    ];
+    (loop_id, token, records)
+}
+
+#[test]
+fn private_outcomes_return_only_the_calling_owner_terminals() {
+    let user_caller = private_caller("focus", Origin::User);
+    let bundled_caller = private_caller("focus", Origin::Bundled);
+    let stranger_caller = private_caller("stranger", Origin::User);
+    let user_owner = private_owner_of(&user_caller);
+    let bundled_owner = private_owner_of(&bundled_caller);
+    let (user_loop, user_token, mut records) = private_settled_loop(user_owner, 2, "tool-a");
+    let (bundled_loop, bundled_token, mut bundled_records) =
+        private_settled_loop(bundled_owner, 0, "tool-b");
+    records.append(&mut bundled_records);
+    // A hand-journaled core-owned row is fail-closed: no extension reads it.
+    let core_loop = PrivateLoopId::new_v7();
+    let core_token = PrivateEffectId::new_v7();
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    records.extend([
+        Record::PrivateLoop {
+            at,
+            r#loop: core_loop,
+            who: Owner::Core,
+            turn: None,
+        },
+        Record::PrivateStart {
+            at,
+            r#loop: core_loop,
+            token: core_token,
+            who: Owner::Core,
+            turn: None,
+            round: 0,
+            call: CallId::new("core-call"),
+            name: "core-tool".into(),
+            args: RawJson::parse("null").unwrap(),
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: core_loop,
+            token: core_token,
+            outcome: PrivateOutcome::Indeterminate,
+        },
+    ]);
+    let (fold, _) = Session::replay(records, at).expect("private records replay");
+    let shared = private_shared();
+    shared.sync_ext(&fold);
+
+    // The index holds every terminal; each owner reads only its own.
+    assert_eq!(
+        shared.private_terminal_select(|_| true).len(),
+        3,
+        "both owner terminals plus the core row publish"
+    );
+    let user_rows = read_private(&shared, &user_caller);
+    assert_eq!(user_rows.len(), 1, "user/focus reads only its terminal");
+    let row = &user_rows[0];
+    assert_eq!(row.r#loop, user_loop);
+    assert_eq!(row.token, user_token);
+    assert_eq!(row.turn, Some(turn()));
+    assert_eq!(row.round, 2);
+    assert_eq!(&*row.name, "tool-a");
+    assert!(
+        matches!(
+            &row.outcome,
+            PrivateOutcome::Settled { is_error: false, parts }
+            if parts == &vec![JournalPart::Text { text: "ok".into() }]
+        ),
+        "settled payload survives the shared Arc: {:?}",
+        row.outcome
+    );
+    let bundled_rows = read_private(&shared, &bundled_caller);
+    assert_eq!(
+        bundled_rows.len(),
+        1,
+        "same name under bundled origin reads only its own"
+    );
+    assert_eq!(bundled_rows[0].r#loop, bundled_loop);
+    assert_eq!(bundled_rows[0].token, bundled_token);
+    assert!(
+        read_private(&shared, &stranger_caller).is_empty(),
+        "a third owner reads nothing"
+    );
+}
+
+#[test]
+fn private_end_only_advance_publishes_without_a_leaf_move() {
+    let caller = private_caller("focus", Origin::User);
+    let owner = private_owner_of(&caller);
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let (_, _, mut records) = private_settled_loop(owner.clone(), 0, "tool-a");
+    let (fold_a, _) = Session::replay(records.clone(), at).expect("first replay");
+    let shared = private_shared();
+    shared.sync_ext(&fold_a);
+    assert_eq!(read_private(&shared, &caller).len(), 1);
+
+    let (_, _, mut second) = private_settled_loop(owner, 1, "tool-b");
+    records.append(&mut second);
+    let (fold_b, _) = Session::replay(records, at).expect("second replay");
+    // The staleness-trap condition: settling a private row moves neither the
+    // leaf nor the ext length, so a publication placed after the sync_ext
+    // memo early-return would stay stuck at one row.
+    assert_eq!(fold_b.leaf_entry(), fold_a.leaf_entry());
+    assert_eq!(fold_b.ext_len(), fold_a.ext_len());
+    shared.sync_ext(&fold_b);
+    let rows = read_private(&shared, &caller);
+    assert_eq!(rows.len(), 2, "the End-only advance still publishes");
+    assert_eq!(&*rows[0].name, "tool-a");
+    assert_eq!(
+        &*rows[1].name, "tool-b",
+        "terminal order follows End journal order"
+    );
+}
+
+#[test]
+fn private_unfinished_effect_never_publishes_a_settled_row() {
+    let caller = private_caller("focus", Origin::User);
+    let owner = private_owner_of(&caller);
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let loop_id = PrivateLoopId::new_v7();
+    let token = PrivateEffectId::new_v7();
+    // A Start with no End: the effect never settled (failed append, crash
+    // before the End write). Replay honestly repairs it to Indeterminate —
+    // but no Settled row may ever appear for it.
+    let (fold, _) = Session::replay(
+        [
+            Record::PrivateLoop {
+                at,
+                r#loop: loop_id,
+                who: owner.clone(),
+                turn: Some(turn()),
+            },
+            Record::PrivateStart {
+                at,
+                r#loop: loop_id,
+                token,
+                who: owner,
+                turn: Some(turn()),
+                round: 3,
+                call: CallId::new("wire-call-9"),
+                name: "tool-a".into(),
+                args: RawJson::parse(r#"{"n":9}"#).unwrap(),
+            },
+        ],
+        at,
+    )
+    .expect("unfinished private loop replays");
+    assert_eq!(
+        fold.private_terminal_len(),
+        1,
+        "the Start itself publishes nothing; only the repair terminal exists"
+    );
+    let shared = private_shared();
+    shared.sync_ext(&fold);
+    let rows = read_private(&shared, &caller);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].r#loop, loop_id);
+    assert_eq!(rows[0].token, token);
+    assert_eq!(rows[0].round, 3);
+    assert!(
+        matches!(rows[0].outcome, PrivateOutcome::Indeterminate),
+        "an unfinished effect reads Indeterminate, never Settled: {:?}",
+        rows[0].outcome
+    );
+}
+
+#[tokio::test]
+async fn private_outcomes_forward_needs_no_inject_or_grant() {
+    let fx = fixture(Duration::from_secs(30));
+    let loop_id = PrivateLoopId::new_v7();
+    fx.backend
+        .private_outcomes_reply
+        .lock()
+        .unwrap()
+        .push(PrivateEffect {
+            r#loop: loop_id,
+            token: PrivateEffectId::new_v7(),
+            turn: Some(turn()),
+            round: 0,
+            name: "tool-a".into(),
+            outcome: PrivateOutcome::Indeterminate,
+        });
+    // An empty inject set: an own-data read must not consult grants.
+    let who = caller("focus", &[], Some(turn()));
+    let rows = fx
+        .services
+        .private_outcomes(&who)
+        .await
+        .expect("private outcomes forward");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].r#loop, loop_id);
 }

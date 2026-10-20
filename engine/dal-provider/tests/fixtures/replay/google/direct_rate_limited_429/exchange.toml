@@ -1,0 +1,26 @@
+# Synthetic replay fixture for the direct Gemini API bare rate limit
+# (ENG-03: the `google-generative-ai` family).
+#
+# One exchange: HTTP 429 with a `google.rpc.Status` body carrying
+# `RESOURCE_EXHAUSTED` but no account-exhaustion detail (no `ErrorInfo`
+# reason, no retry hint of five minutes or more, no "quota will reset"
+# wording) and a `retry-after` header. The suite configures no retries, so the
+# retryable rate-limit class surfaces after the one exchange with the
+# server's wait carried over. Authored from the public Google API error model
+# and the classifier contract documented in
+# `engine/dal-provider/src/family/google/shared.rs` (`classify_http`: only an
+# account-exhaustion signal makes a 429 terminal quota; everything else runs
+# the shared retry table); never captured from a live API and never generated
+# by the implementation under test.
+[[exchange]]
+kind = "http"
+
+[exchange.request]
+method = "POST"
+path = "/v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse"
+headers = { "content-type" = "application/json", "accept" = "text/event-stream", "x-goog-api-key" = "google-secret" }
+
+[exchange.response]
+status = 429
+headers = { "content-type" = "application/json", "retry-after" = "7" }
+body = "response.json"

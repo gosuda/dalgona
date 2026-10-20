@@ -21,6 +21,8 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
+#[path = "support/vt.rs"]
+mod vt;
 
 use std::{
     error::Error,
@@ -40,6 +42,7 @@ use std::{
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture, shell_quote, wait_for_path};
 use sonic_rs::{JsonValueTrait, Value};
 use support::TestDir;
+use vt::FollowedScreen;
 
 #[test]
 fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -71,6 +74,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         &connect_addr,
     ]);
     let mut terminal = PtyProcess::spawn(&mut client_command, 100, 30)?;
+    let mut screen = FollowedScreen::new(100, 30);
     if let Err(error) = terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
         Duration::from_secs(10),
@@ -80,9 +84,10 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    if let Err(error) = terminal.wait_for(
-        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
+    if let Err(error) = terminal.wait_until(
+        "the armed approval answer keys",
         Duration::from_secs(15),
+        |output| screen.shows(output, dal_tui::copy::ids::DIALOG_ACTIONS_SHORT),
     ) {
         let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
         let out = std::fs::read_to_string(&serve_stdout).unwrap_or_default();
@@ -91,7 +96,8 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         let subscriptions = proxy.subscription_cursors().len();
         let last_server = proxy.server_update_cursor(0);
         return Err(format!(
-            "{error}\nserve stdout:\n{out}\nserve stderr:\n{log}\nsubscriptions: {subscriptions}\nlast server update: {last_server:?}\npty tail:\n{tail}"
+            "{error}\nserve stdout:\n{out}\nserve stderr:\n{log}\nsubscriptions: {subscriptions}\nlast server update: {last_server:?}\nscreen:\n{}\npty tail:\n{tail}",
+            screen.visible()
         )
         .into());
     }
@@ -128,7 +134,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
             .is_running()
             .expect("serve process status is observable")
     );
-    let _first_output_byte = terminal.output().first().unwrap();
+    assert_eq!(terminal.terminal_restore_problem()?, None);
     Ok(())
 }
 

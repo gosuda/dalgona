@@ -28,8 +28,9 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, DeserializeOwned, MapAccess, Visitor},
 };
+use sonic_rs::JsonValueTrait;
 
-use crate::{Hook, PROVIDERS, ProviderDef, ProviderEntry, ProviderError, find};
+use crate::{AuthStyle, Hook, PROVIDERS, ProviderDef, ProviderEntry, ProviderError, find};
 
 /// A secret text value: an API key, access token, refresh token, or ID token.
 ///
@@ -80,25 +81,31 @@ impl<'de> Deserialize<'de> for SecretString {
 /// The process environment, captured once by the binary.
 ///
 /// Variables whose name or value is not UTF-8 are left out. `Debug` lists the
-/// variable names only, never their values.
+/// variable names only, never their values nor the working directory.
 #[derive(Clone, Default)]
 pub struct EnvSnapshot {
     vars: HashMap<String, String>,
+    cwd: Option<PathBuf>,
 }
 
 impl EnvSnapshot {
     /// Reads the process environment. The binary calls this once at startup;
     /// the library never calls it.
+    ///
+    /// Captures variables only; the working directory stays absent until the
+    /// caller supplies it via [`EnvSnapshot::with_cwd`].
     #[must_use]
     pub fn capture() -> Self {
         let vars = std::env::vars_os()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .collect();
-        Self { vars }
+        Self { vars, cwd: None }
     }
 
     /// Builds a snapshot from the process environment values already captured
     /// by the caller. Non-UTF-8 names and values are omitted.
+    ///
+    /// The working directory stays absent until [`EnvSnapshot::with_cwd`].
     #[must_use]
     pub fn from_vars(vars: &BTreeMap<OsString, OsString>) -> Self {
         let vars = vars
@@ -107,7 +114,27 @@ impl EnvSnapshot {
                 Some((name.to_str()?.to_owned(), value.to_str()?.to_owned()))
             })
             .collect();
-        Self { vars }
+        Self { vars, cwd: None }
+    }
+
+    /// Threads the caller-supplied captured working directory.
+    ///
+    /// The library never reads ambient state.
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = Some(cwd);
+        self
+    }
+
+    /// The captured working directory, when supplied via `with_cwd`.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+
+    /// Iterates snapshot variables as `(name, value)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     /// The value of `key`, when the snapshot holds it.
@@ -117,13 +144,15 @@ impl EnvSnapshot {
     }
 
     /// A snapshot holding exactly `entries`; later duplicates win.
+    ///
+    /// The working directory stays absent.
     #[must_use]
     pub fn test(entries: &[(&str, &str)]) -> Self {
         let vars = entries
             .iter()
             .map(|&(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        Self { vars }
+        Self { vars, cwd: None }
     }
 }
 
@@ -133,7 +162,7 @@ impl fmt::Debug for EnvSnapshot {
         names.sort_unstable();
         f.debug_struct("EnvSnapshot")
             .field("names", &names)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -187,9 +216,9 @@ pub struct OAuthCredential {
     /// Unix seconds at which the access token expires; absent means refresh
     /// only on a 401.
     pub expires_at: Option<i64>,
-    /// The Codex ID token; `None` for Anthropic.
+    /// The Codex ID token; `None` for every other sign-in.
     pub id_token: Option<String>,
-    /// The `ChatGPT` account id; `None` for Anthropic.
+    /// The `ChatGPT` account id; `None` for every other sign-in.
     pub account_id: Option<String>,
 }
 
@@ -278,8 +307,21 @@ pub fn oauth_expires_at(now: i64, expires_in: Option<i64>, access_token: &str) -
     }
 }
 
-/// Picks the credential for `provider`: the `auth.json` entry, then the
-/// environment snapshot, then [`ProviderError::NoCredentials`].
+/// The instant an OAuth lifetime counts from: the token response's
+/// `created_at` when it is a JSON integer that fits `i64`, else `now`. Any
+/// other value (a string, a fraction, a number out of range, `null`) is
+/// ignored instead of failing a sign-in or a refresh whose row never needed
+/// it. `GitLab`'s Doorkeeper sends `created_at` beside `expires_in`; sign-in
+/// and refresh read it through this one rule.
+#[must_use]
+pub(crate) fn oauth_issued_at(created_at: Option<&sonic_rs::Value>, now: i64) -> i64 {
+    created_at.and_then(JsonValueTrait::as_i64).unwrap_or(now)
+}
+
+/// Picks the credential for `provider`: an explicit [`AuthStyle::None`]
+/// override yields [`Credential::None`] before looking for credentials.
+/// Otherwise, picks the `auth.json` entry, then the environment snapshot,
+/// then [`ProviderError::NoCredentials`].
 ///
 /// The environment variable is the provider's configured `key_env`; a
 /// built-in provider with an API-key row falls back to the row's variables.
@@ -287,12 +329,15 @@ pub fn oauth_expires_at(now: i64, expires_in: Option<i64>, access_token: &str) -
 ///
 /// # Errors
 /// Returns [`ProviderError::NoCredentials`] when neither source has a
-/// credential.
+/// credential and `provider.auth` is not an explicit [`AuthStyle::None`].
 pub fn resolve(
     provider: &ProviderEntry,
     store: &AuthStore,
     env: &EnvSnapshot,
 ) -> Result<Credential, ProviderError> {
+    if provider.auth == AuthStyle::None {
+        return Ok(Credential::None);
+    }
     if let Some(credential) = store.credential(&provider.id) {
         return Ok(credential);
     }
@@ -605,7 +650,9 @@ enum Stored {
 impl Stored {
     /// Whether `def` can hold this member: an API key needs a key row, and an
     /// OAuth sign-in needs an OAuth row whose hook decides whether the grant
-    /// carries an ID token and account id (both or neither).
+    /// carries an ID token and account id (both or neither). Only the Codex
+    /// sign-in binds an account; the Claude, `WorkOS` device, and GitLab Duo
+    /// sign-ins carry neither.
     fn fits(&self, def: &ProviderDef) -> bool {
         match self {
             Self::ApiKey { .. } => def.key.is_some(),

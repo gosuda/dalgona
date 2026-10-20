@@ -3,6 +3,7 @@
 //! session owner against a scripted host.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use dal_agent::error::ServiceError;
@@ -16,8 +17,8 @@ use dal_core::ext::{
 use dal_core::{
     AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, Answer, ArtifactFile,
     CallId, EntryId, FetchRequest, FetchResponse, Inference, JobId, JobStateView, JobStatus,
-    JobsOp, JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
-    SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
+    JobsOp, JobsReply, ModelRequest, Notice, PrivateEffect, Question, RawJson, RunOutput,
+    RunRequest, SessionId, SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -104,6 +105,10 @@ struct Host {
     apply_gate: Option<Arc<ApplyGate>>,
     stage_gate: Option<Arc<ApplyGate>>,
     passthrough_git: bool,
+    /// When set, each started child with its own workspace gets one distinct
+    /// file written into that workspace, standing in for the child's own
+    /// patch tool in the real-git scale test. The counter names the files.
+    stress_files: Option<Arc<AtomicUsize>>,
 }
 
 fn is_plain_apply(argv: &[std::ffi::OsString]) -> bool {
@@ -196,7 +201,21 @@ impl Host {
         let binding = locked(&self.runtime).clone();
         let services: Option<Arc<dyn Services>> =
             self.this.upgrade().map(|host| host as Arc<dyn Services>);
+        let stress_write = self.stress_files.as_ref().and_then(|counter| {
+            start.workspace.as_ref().map(|workspace| {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    workspace.as_path().join(format!("unit-{n:04}.txt")),
+                    format!("unit {n}\n").into_bytes(),
+                )
+            })
+        });
         Box::pin(async move {
+            if let Some((path, bytes)) = stress_write {
+                tokio::fs::write(&path, &bytes).await.map_err(|error| {
+                    ServiceError::failed(None, format!("stress file {path:?}: {error}"))
+                })?;
+            }
             if let (Some((runtime, parent)), Some(services)) = (binding, services) {
                 let workspace = start.workspace.as_ref().map_or_else(
                     || ToolCx::for_test(Arc::clone(&services)).workspace().clone(),
@@ -562,6 +581,7 @@ impl Services for Host {
                         label: name.to_string().into(),
                         state: JobStateView::Running,
                         log: None,
+                        command: None,
                         last_activity_at: dal_core::Timestamp::now(),
                     },
                     parent,
@@ -736,6 +756,10 @@ impl Services for Host {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         unavailable()
     }
@@ -900,6 +924,7 @@ impl Fixture {
                     content: vec![dal_core::Part::Text {
                         text: "work".into(),
                     }],
+                    model: None,
                 },
                 HookCx::for_test(self.host.clone(), self.session, None),
             )
@@ -983,6 +1008,7 @@ impl Fixture {
                 label: "report".into(),
                 state: JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
                 log: None,
+                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -1454,6 +1480,7 @@ async fn list_with_ids_shows_the_requested_job_past_the_limit() -> TestResult {
                     label: format!("filler-{index}").into(),
                     state: JobStateView::Running,
                     log: None,
+                    command: None,
                     last_activity_at: dal_core::Timestamp::now(),
                 },
                 None,
@@ -1466,6 +1493,7 @@ async fn list_with_ids_shows_the_requested_job_past_the_limit() -> TestResult {
                 label: "target".into(),
                 state: JobStateView::Running,
                 log: None,
+                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -1730,7 +1758,10 @@ async fn implicit_and_explicit_worktree_steps_start_in_distinct_workspaces() -> 
         .map(|request| request.argv.get(6).cloned().map(std::path::PathBuf::from))
         .collect::<Option<HashSet<_>>>()
         .ok_or("malformed git worktree add call")?;
-    assert_eq!(workspaces, added, "child workspaces must match created worktrees");
+    assert_eq!(
+        workspaces, added,
+        "child workspaces must match created worktrees"
+    );
     Ok(())
 }
 
@@ -1951,6 +1982,7 @@ async fn monitor_lines_reach_a_wake_and_old_live_jobs_show_silence() -> TestResu
                 label: "server".into(),
                 state: JobStateView::Running,
                 log: None,
+                command: None,
                 last_activity_at: dal_core::Timestamp::from_second(0)?,
             },
             None,
@@ -2020,6 +2052,7 @@ async fn a_failing_monitor_read_neither_stops_later_jobs_nor_stays_silent() -> T
                     label: label.into(),
                     state: JobStateView::Running,
                     log: None,
+                    command: None,
                     last_activity_at: dal_core::Timestamp::now(),
                 },
                 None,
@@ -2140,6 +2173,183 @@ async fn saved_workflow_input_reaches_the_started_child_prompt() -> TestResult {
     Ok(())
 }
 
+/// The starts one step's children received, in start order. A task's child
+/// is named `<step> <n>` and a pool member `<step> <n>: <item>`.
+fn step_starts(script: &Script, step: &str) -> Vec<AgentStart> {
+    let prefix = format!("{step} ");
+    script
+        .starts
+        .iter()
+        .map(|(_, start)| start)
+        .filter(|start| {
+            start
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Asserts that one step started exactly `count` children and that every
+/// one of them was handed exactly this role and this system prompt.
+fn assert_child_input(
+    script: &Script,
+    step: &str,
+    count: usize,
+    role: Option<&str>,
+    system: Option<&str>,
+) {
+    let starts = step_starts(script, step);
+    assert_eq!(starts.len(), count, "children started for step {step}");
+    for start in &starts {
+        assert_eq!(start.role.as_deref(), role, "role of a {step} child");
+        assert_eq!(start.system.as_deref(), system, "system of a {step} child");
+    }
+}
+
+#[tokio::test]
+async fn a_step_role_reaches_the_started_child() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let reply = fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"review","prompt":"work","role":"reviewer","isolation":"shared"}]}"#,
+        )
+        .await?;
+    assert!(reply.starts_with("started run "), "{reply}");
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 1, "the one step starts one child");
+    assert_child_input(&script, "review", 1, Some("reviewer"), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_step_system_prompt_reaches_the_started_child() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let reply = fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"audit","prompt":"work","system":"Be concise.","isolation":"shared"}]}"#,
+        )
+        .await?;
+    assert!(reply.starts_with("started run "), "{reply}");
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 1, "the one step starts one child");
+    assert_child_input(&script, "audit", 1, None, Some("Be concise."));
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_step_hands_its_own_role_or_system_to_every_child_it_starts() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture
+        .tool(
+            r#"{"action":"run","steps":[
+                {"name":"review","prompt":"work","role":"reviewer","isolation":"shared"},
+                {"name":"audit","prompt":"work","system":"Be concise.","isolation":"shared"},
+                {"name":"plain","prompt":"work","isolation":"shared"},
+                {"name":"check","prompt":"check {{item}}","items":["one","two"],"role":"tester","isolation":"shared"}
+            ]}"#,
+        )
+        .await?;
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(
+        script.starts.len(),
+        5,
+        "one child per task step and one per pool item"
+    );
+    assert_child_input(&script, "review", 1, Some("reviewer"), None);
+    assert_child_input(&script, "audit", 1, None, Some("Be concise."));
+    assert_child_input(&script, "plain", 1, None, None);
+    assert_child_input(&script, "check", 2, Some("tester"), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_step_with_role_and_system_is_refused_before_any_job_or_child_starts() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let error = fixture
+        .tool(
+            r#"{"action":"run","steps":[
+                {"name":"first","prompt":"work","role":"reviewer","isolation":"shared"},
+                {"name":"second","prompt":"work","role":"reviewer","system":"Be concise.","isolation":"shared"}
+            ]}"#,
+        )
+        .await
+        .err()
+        .ok_or("a step with both role and system must be refused")?;
+    assert!(
+        error
+            .to_string()
+            .contains("agents: step second: role and system cannot both be set."),
+        "{error}"
+    );
+    {
+        let script = fixture.script();
+        assert_eq!(script.jobs.len(), 0, "a refused call spawns no run job");
+        assert_eq!(
+            script.starts.len(),
+            0,
+            "the valid first step starts no child either"
+        );
+    }
+    // The same fixture still starts a step that sets only one of the two, so
+    // the refusal above is the conflict and not an unusable host.
+    let reply = fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"first","prompt":"work","role":"reviewer","isolation":"shared"}]}"#,
+        )
+        .await?;
+    assert!(reply.starts_with("started run "), "{reply}");
+    fixture.ended_run().await?;
+    assert_child_input(&fixture.script(), "first", 1, Some("reviewer"), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_workflow_role_and_system_reach_the_started_children() -> TestResult {
+    let mut config = parse_config(None)?;
+    config.workflows = Some(toml::from_str(
+        r#"
+        [vet]
+        steps = [
+            {name = "review", prompt = "work", role = "reviewer", isolation = "shared"},
+            {name = "audit", prompt = "work", system = "Be concise.", isolation = "shared"}
+        ]
+
+        [clash]
+        steps = [{name = "both", prompt = "work", role = "reviewer", system = "Be concise.", isolation = "shared"}]
+    "#,
+    )?);
+    let fixture = Fixture::open_config(config).await?;
+    let error = fixture
+        .tool(r#"{"action":"run","workflow":"clash"}"#)
+        .await
+        .err()
+        .ok_or("a saved step with both role and system must be refused")?;
+    let text = error.to_string();
+    assert!(
+        text.contains(r#"saved workflow "clash" is invalid"#)
+            && text.contains("role and system cannot both be set"),
+        "{text}"
+    );
+    {
+        let script = fixture.script();
+        assert_eq!(script.jobs.len(), 0, "a refused call spawns no run job");
+        assert_eq!(script.starts.len(), 0, "a refused call starts no child");
+    }
+    let reply = fixture.tool(r#"{"action":"run","workflow":"vet"}"#).await?;
+    assert!(reply.starts_with("started run "), "{reply}");
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 2, "one child per saved step");
+    assert_child_input(&script, "review", 1, Some("reviewer"), None);
+    assert_child_input(&script, "audit", 1, None, Some("Be concise."));
+    Ok(())
+}
+
 #[tokio::test]
 async fn dynamic_pools_refuse_before_starting_more_children_than_the_session_budget() -> TestResult
 {
@@ -2182,6 +2392,7 @@ async fn monitor_batches_that_do_not_fit_are_delivered_in_the_next_wake() -> Tes
             label: "server".into(),
             state: JobStateView::Running,
             log: None,
+            command: None,
             last_activity_at: dal_core::Timestamp::now(),
         },
         None,
@@ -2340,6 +2551,7 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
                 label: "queued report".into(),
                 state: JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
                 log: None,
+                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -2908,10 +3120,15 @@ fn temp_toplevel() -> String {
 /// One isolated task's scripted git answers with its own in-scope changed
 /// names and diff, for the sessions that share one checkout merge lock.
 fn isolated_prefix_for(changed: &str, diff: &str) -> Vec<GitAnswer> {
-    let top = temp_toplevel();
+    isolated_prefix_for_top(&temp_toplevel(), changed, diff)
+}
+
+/// One isolated task's scripted git answers against an explicit repository
+/// top, for sessions whose checkouts are distinct merge keys.
+fn isolated_prefix_for_top(top: &str, changed: &str, diff: &str) -> Vec<GitAnswer> {
     vec![
         Ok(output("git version 2.47.0")),
-        Ok(output(&top)),
+        Ok(output(top)),
         Ok(output("head")),
         Ok(output("snapshot")),
         Ok(output("")),
@@ -4194,6 +4411,691 @@ async fn a_capture_failure_settles_the_task_job_with_the_kept_recovery_path() ->
         "the settled task job text must tell the user how to recover: {task_text}"
     );
     let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
+    let _ = tokio::fs::remove_dir_all(&data).await;
+    Ok(())
+}
+
+/// The `StressRuntimeBoundaries` proofs: the per-checkout merge probe at the
+/// real acquisition/drop boundary (T-66, INV-H, D-49) and the owner mailbox
+/// under deterministic hold-and-drain pressure (T-66, INV-C, decision 24).
+/// The scripted-host tests below run on every suite pass; the 500-child
+/// real-git scale test is gated on `DALGONA_ORCH_STRESS` like the gates.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the probe test parks a waiter task behind the holder it measures"
+)]
+#[tokio::test]
+async fn merge_lock_probe_counts_one_hold_per_checkout() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let locks = super::merge_locks::MergeLocks::default();
+    let top = std::path::Path::new("/tmp/repo-top");
+    let key = super::merge_locks::MergeLocks::canonical_key(top).await;
+    let first = locks.hold(top).await;
+    assert_eq!(locks.key_holds(&key), 1, "one merge holds the checkout");
+    assert_eq!(locks.key_peak(&key), 1, "the peak opens at one");
+    // A waiter queues behind the holder; it must not touch the probe until
+    // it acquires.
+    let entered = Arc::new(AtomicBool::new(false));
+    let waiter = tokio::spawn({
+        let locks = locks.clone();
+        let entered = Arc::clone(&entered);
+        async move {
+            let _hold = locks.hold(top).await;
+            entered.store(true, SeqCst);
+        }
+    });
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !entered.load(SeqCst),
+        "the waiter cannot acquire while the holder runs"
+    );
+    assert_eq!(locks.key_holds(&key), 1, "the queued waiter holds nothing");
+    drop(first);
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("the waiter acquires after release")
+        .expect("the waiter joins");
+    assert_eq!(locks.key_holds(&key), 0, "the waiter released its hold");
+    assert_eq!(locks.key_peak(&key), 1, "serialized holds never overlap");
+    assert_eq!(locks.len(), 0, "the registry forgets the slot");
+    assert_eq!(locks.distinct_holds(), 0, "no checkout holds a merge");
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the probe test aborts a parked holder task to prove RAII release"
+)]
+#[tokio::test]
+async fn a_cancelled_merge_hold_returns_its_probe_count() {
+    let locks = super::merge_locks::MergeLocks::default();
+    let top = std::path::Path::new("/tmp/repo-top");
+    let key = super::merge_locks::MergeLocks::canonical_key(top).await;
+    let park = Arc::new(tokio::sync::Notify::new());
+    let holder = tokio::spawn({
+        let locks = locks.clone();
+        let park = Arc::clone(&park);
+        async move {
+            let _hold = locks.hold(top).await;
+            park.notified().await;
+        }
+    });
+    // The holder acquired exactly one probe count before it parked.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while locks.key_holds(&key) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the holder acquires");
+    assert_eq!(locks.key_peak(&key), 1);
+    // Aborting the parked holder unwinds the RAII hold like any release.
+    holder.abort();
+    let _ = holder.await;
+    assert_eq!(
+        locks.key_holds(&key),
+        0,
+        "a cancelled merge carries its probe count back to zero"
+    );
+    // The lock itself is free again: the next merge acquires at once with
+    // the peak intact.
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), locks.hold(top))
+        .await
+        .expect("the lock is free after the abort");
+    assert_eq!(locks.key_holds(&key), 1);
+    drop(next);
+    assert_eq!(locks.key_holds(&key), 0);
+    assert_eq!(locks.key_peak(&key), 1, "no two holds ever overlapped");
+    assert_eq!(locks.len(), 0, "the registry forgets the slot");
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the probe test aborts a queued waiter task to prove it never counts"
+)]
+#[tokio::test]
+async fn a_queued_waiter_aborted_before_acquiring_leaks_no_count() {
+    let locks = super::merge_locks::MergeLocks::default();
+    let top = std::path::Path::new("/tmp/repo-top");
+    let key = super::merge_locks::MergeLocks::canonical_key(top).await;
+    let first = locks.hold(top).await;
+    let waiter = tokio::spawn({
+        let locks = locks.clone();
+        async move {
+            let _hold = locks.hold(top).await;
+        }
+    });
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    // The waiter is still queued: aborting it must not move the probe.
+    waiter.abort();
+    let _ = waiter.await;
+    assert_eq!(
+        locks.key_holds(&key),
+        1,
+        "only the live holder counts while a waiter dies queued"
+    );
+    drop(first);
+    assert_eq!(locks.key_holds(&key), 0);
+    assert_eq!(locks.key_peak(&key), 1);
+    assert_eq!(locks.len(), 0, "the registry forgets the slot");
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_workspace_merges_serialize_with_peak_one() -> TestResult {
+    let mut config = isolation_config()?;
+    config.goal.enabled = false;
+    let runtime = Runtime::new(config)?;
+    let gate = Arc::new(ApplyGate::new());
+    let first = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    for fixture in [&first, &second] {
+        let mut script = fixture.script();
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    first.tool(ISOLATED_WRITE).await?;
+    second.tool(ISOLATED_WRITE).await?;
+    let top =
+        super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&temp_toplevel())).await;
+    let window = std::time::Duration::from_secs(5);
+    tokio::time::timeout(window, gate.entered(1)).await?;
+    let Some(ApplyEvent::Enter(holder)) = gate.events().first().copied() else {
+        return Err("no merge reached apply".into());
+    };
+    let waiter = if holder == first.session {
+        second.session
+    } else {
+        first.session
+    };
+    // The parked apply sits inside its merge hold: exactly one checkout
+    // counts one live hold while the sibling queues behind the gate.
+    assert_eq!(
+        runtime.merge_locks.key_holds(&top),
+        1,
+        "one workspace counts one live merge hold"
+    );
+    assert_eq!(runtime.merge_locks.key_peak(&top), 1);
+    assert_eq!(runtime.merge_locks.distinct_holds(), 1);
+    let overlapped = tokio::time::timeout(std::time::Duration::from_secs(1), gate.entered(2)).await;
+    assert!(
+        overlapped.is_err(),
+        "the second merge reached apply while the first held the checkout"
+    );
+    gate.release.add_permits(1);
+    tokio::time::timeout(window, gate.entered(2)).await?;
+    gate.release.add_permits(1);
+    let (first_report, second_report) = (first.ended_run().await?, second.ended_run().await?);
+    assert!(first_report.contains("isolation: merged"), "{first_report}");
+    assert!(
+        second_report.contains("isolation: merged"),
+        "{second_report}"
+    );
+    assert_eq!(
+        gate.events(),
+        [
+            ApplyEvent::Enter(holder),
+            ApplyEvent::Exit(holder),
+            ApplyEvent::Enter(waiter),
+            ApplyEvent::Exit(waiter),
+        ]
+    );
+    assert_eq!(
+        runtime.merge_locks.key_holds(&top),
+        0,
+        "both merges released their holds"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_peak(&top),
+        1,
+        "the two same-checkout merges never overlapped"
+    );
+    assert_eq!(runtime.merge_locks.distinct_holds(), 0);
+    assert_eq!(runtime.merge_locks.len(), 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn distinct_workspaces_merge_in_parallel() -> TestResult {
+    let mut config = isolation_config()?;
+    config.goal.enabled = false;
+    let runtime = Runtime::new(config)?;
+    let gate = Arc::new(ApplyGate::new());
+    let root = std::env::temp_dir();
+    tokio::fs::create_dir_all(root.join("alpha")).await?;
+    tokio::fs::create_dir_all(root.join("beta")).await?;
+    let alpha = dal_core::Workspace::new(root.join("alpha")).expect("absolute workspace");
+    let beta = dal_core::Workspace::new(root.join("beta")).expect("absolute workspace");
+    let top_alpha_text = root.join("alpha").display().to_string();
+    let top_beta_text = root.join("beta").display().to_string();
+    let first = Fixture::open_at(runtime.clone(), Some(Arc::clone(&gate)), alpha).await?;
+    let second = Fixture::open_at(runtime.clone(), Some(Arc::clone(&gate)), beta).await?;
+    {
+        let mut script = first.script();
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top_alpha_text,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    {
+        let mut script = second.script();
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top_beta_text,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    first.tool(ISOLATED_WRITE).await?;
+    second.tool(ISOLATED_WRITE).await?;
+    let top_alpha =
+        super::merge_locks::MergeLocks::canonical_key(root.join("alpha").as_path()).await;
+    let top_beta = super::merge_locks::MergeLocks::canonical_key(root.join("beta").as_path()).await;
+    assert_ne!(top_alpha, top_beta, "the two checkouts are distinct keys");
+    // Neither merge waits for the other: both applies park with no release,
+    // which a global lock could never let happen.
+    let window = std::time::Duration::from_secs(5);
+    tokio::time::timeout(window, gate.entered(2))
+        .await
+        .map_err(|_| "the second checkout merge waited on the first")?;
+    assert_eq!(
+        runtime.merge_locks.key_holds(&top_alpha),
+        1,
+        "the first checkout holds its own merge"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_holds(&top_beta),
+        1,
+        "the second checkout holds its own merge"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_peak(&top_alpha),
+        1,
+        "one checkout never merges twice at once"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_peak(&top_beta),
+        1,
+        "one checkout never merges twice at once"
+    );
+    assert_eq!(
+        runtime.merge_locks.distinct_holds(),
+        2,
+        "two unrelated checkouts hold two merges"
+    );
+    gate.release.add_permits(2);
+    let (first_report, second_report) = (first.ended_run().await?, second.ended_run().await?);
+    assert!(first_report.contains("isolation: merged"), "{first_report}");
+    assert!(
+        second_report.contains("isolation: merged"),
+        "{second_report}"
+    );
+    assert_eq!(runtime.merge_locks.key_peak(&top_alpha), 1);
+    assert_eq!(runtime.merge_locks.key_peak(&top_beta), 1);
+    assert_eq!(runtime.merge_locks.distinct_holds(), 0);
+    assert_eq!(runtime.merge_locks.len(), 0);
+    let _ = tokio::fs::remove_dir_all(root.join("alpha")).await;
+    let _ = tokio::fs::remove_dir_all(root.join("beta")).await;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_apply_check_releases_the_hold_for_the_next_merge() -> TestResult {
+    let mut config = isolation_config()?;
+    config.goal.enabled = false;
+    let runtime = Runtime::new(config)?;
+    let gate = Arc::new(ApplyGate::new());
+    let first = Fixture::open_on(runtime.clone(), None).await?;
+    let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    {
+        // The checkout refuses the apply check, so the first merge retains
+        // its worktree down the error path without ever reaching apply.
+        let mut script = first.script();
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend([
+            Ok(failed_output("error: patch failed: code:1")),
+            Ok(output("")),
+            Ok(output("")),
+        ]);
+    }
+    {
+        let mut script = second.script();
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    first.tool(ISOLATED_WRITE).await?;
+    second.tool(ISOLATED_WRITE).await?;
+    let top =
+        super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&temp_toplevel())).await;
+    let window = std::time::Duration::from_secs(5);
+    // The second merge must reach apply: if the retained merge leaked its
+    // hold, this waits out the window and the test fails loudly.
+    tokio::time::timeout(window, gate.entered(1))
+        .await
+        .map_err(|_| "the retained merge kept the checkout lock")?;
+    gate.release.add_permits(1);
+    let (first_report, second_report) = (first.ended_run().await?, second.ended_run().await?);
+    assert!(
+        first_report.contains("isolation: retained"),
+        "{first_report}"
+    );
+    assert!(
+        !first_report.contains("isolation: merged"),
+        "{first_report}"
+    );
+    assert!(
+        second_report.contains("isolation: merged"),
+        "{second_report}"
+    );
+    assert_eq!(
+        first.plain_apply_calls(),
+        0,
+        "the refused check never applies"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_holds(&top),
+        0,
+        "the error path released its hold"
+    );
+    assert_eq!(
+        runtime.merge_locks.key_peak(&top),
+        1,
+        "the failed merge never overlapped the next one"
+    );
+    assert_eq!(runtime.merge_locks.len(), 0);
+    Ok(())
+}
+
+/// One `agents list` call through the owner: a read-only delivery the test
+/// can flood without starting work.
+const LIST_AGENTS: &str = r#"{"action":"list"}"#;
+
+/// The parked-owner flood: the mailbox bound plus the backpressure tail the
+/// producers queue behind the parked owner.
+const FLOOD: usize = super::super::constants::BATTERY_MAILBOX + 144;
+
+/// The T-66 miniature width: every child the scale test starts.
+const CHILDREN: usize = 500;
+
+/// The T-66 miniature writers: the worktree children merging one file each.
+const WRITERS: usize = 250;
+
+/// Sends one `agents list` tool call at `session`, for the producers that
+/// flood a parked owner.
+async fn list_agents_call(
+    runtime: Runtime,
+    session: SessionId,
+    caller: Caller,
+    call: CallId,
+) -> Result<String, ServiceError> {
+    let args = RawJson::parse(LIST_AGENTS)
+        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    runtime
+        .tool(
+            session,
+            caller,
+            call,
+            "agents",
+            args,
+            CancellationToken::new(),
+        )
+        .await
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the pressure test floods the mailbox from spawned producer tasks"
+)]
+#[tokio::test]
+async fn a_parked_owner_applies_backpressure_and_loses_no_delivery() -> TestResult {
+    use super::super::constants::BATTERY_MAILBOX;
+
+    let fixture = Fixture::open().await?;
+    let gate = fixture.runtime.parking_gate();
+    // Park the owner inside its next `jobs` list, then prove it parked
+    // before any producer starts: every later send queues behind it.
+    gate.arm();
+    let parked_call = tokio::spawn(list_agents_call(
+        fixture.runtime.clone(),
+        fixture.session,
+        fixture.caller(),
+        CallId::new("park"),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while gate.parked() < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "the owner never parked at the jobs list")?;
+    // Flood past capacity: the first BATTERY_MAILBOX sends queue and the
+    // rest wait for space instead of dropping anything.
+    let mut producers = Vec::with_capacity(FLOOD);
+    for index in 0..FLOOD {
+        producers.push(tokio::spawn(list_agents_call(
+            fixture.runtime.clone(),
+            fixture.session,
+            fixture.caller(),
+            CallId::new(format!("flood-{index}")),
+        )));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while fixture.runtime.mailbox_fill_now(fixture.session) != Some(BATTERY_MAILBOX) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "the mailbox never filled to capacity behind the parked owner")?;
+    assert!(
+        gate.parked() >= 1,
+        "the owner held its park while producers queued"
+    );
+    // Drain: every queued and every backpressured delivery lands exactly
+    // once, and the mailbox empties with the owner still alive.
+    gate.release();
+    let mut replies = Vec::with_capacity(FLOOD + 1);
+    replies.push(
+        tokio::time::timeout(std::time::Duration::from_secs(60), parked_call)
+            .await
+            .map_err(|_| "the parked delivery never returned")?
+            .map_err(|error| format!("the parked delivery failed: {error}"))?,
+    );
+    for producer in producers {
+        replies.push(
+            tokio::time::timeout(std::time::Duration::from_secs(60), producer)
+                .await
+                .map_err(|_| "a backpressured delivery never returned")?
+                .map_err(|error| format!("a backpressured delivery failed: {error}"))?,
+        );
+    }
+    assert_eq!(
+        replies.len(),
+        FLOOD + 1,
+        "every sent delivery answered exactly once"
+    );
+    assert!(
+        replies.iter().all(Result::is_ok),
+        "no delivery failed or was dropped under pressure"
+    );
+    assert_eq!(
+        fixture.runtime.mailbox_fill_now(fixture.session),
+        Some(0),
+        "the drain emptied the mailbox: nothing leaked"
+    );
+    let peak = fixture
+        .runtime
+        .mailbox_fill_peak(fixture.session)
+        .ok_or("the owner is gone")?;
+    assert!(
+        peak <= BATTERY_MAILBOX,
+        "the mailbox never held more than its bound: {peak}"
+    );
+    // The owner is still functional after the flood.
+    fixture.tool(LIST_AGENTS).await?;
+    Ok(())
+}
+
+/// Opens the real-git scale checkout, its data root, and the session owner
+/// the 500-child run drives.
+async fn stress_open_fixture() -> Result<
+    (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Fixture,
+        Arc<AtomicUsize>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (root, data) = tokio::task::spawn_blocking(|| {
+        let root = unique_temp_root("dalgona-stress");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("stress root");
+        seed_new_repo(&root);
+        let data = unique_temp_root("dalgona-stress-data");
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).expect("stress data root");
+        (root, data)
+    })
+    .await
+    .expect("setup joins");
+    let mut config = isolation_config()?;
+    config.goal.enabled = false;
+    config.data_root = Some(data.clone());
+    let runtime = Runtime::new(config)?;
+    let stress_files = Arc::new(AtomicUsize::new(0));
+    let host = Arc::new_cyclic(|this| Host {
+        this: this.clone(),
+        passthrough_git: true,
+        stress_files: Some(Arc::clone(&stress_files)),
+        ..Host::default()
+    });
+    let session = SessionId::new_v7();
+    *locked(&host.runtime) = Some((runtime.clone(), session));
+    let services: Arc<dyn Services> = host.clone();
+    let workspace = dal_core::Workspace::new(root.clone()).expect("absolute workspace");
+    let cx = HookCx::for_test(services, session, None);
+    runtime
+        .open(
+            SessionStart {
+                session,
+                workspace,
+                resumed: false,
+            },
+            cx,
+        )
+        .await?;
+    let fixture = Fixture {
+        runtime: runtime.clone(),
+        host,
+        session,
+    };
+    fixture.user_input().await?;
+    Ok((root, data, fixture, stress_files))
+}
+
+/// The map/shared plus write/worktree fan-out over the 250 writer items.
+fn stress_run_request() -> String {
+    let items: Vec<String> = (0..WRITERS)
+        .map(|index| format!("unit-{index:04}"))
+        .collect();
+    let quoted = items
+        .iter()
+        .map(|item| format!("\"{item}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"action\":\"run\",\"steps\":[{{\"name\":\"map\",\"prompt\":\"inspect {{{{item}}}}\",\"items\":[{quoted}],\"workers\":64,\"tools\":[\"read\"],\"isolation\":\"shared\"}},{{\"name\":\"write\",\"prompt\":\"write {{{{item}}}}\",\"items\":[{quoted}],\"workers\":64,\"tools\":[\"patch\"],\"isolation\":\"worktree\",\"after\":[\"map\"]}}]}}"
+    )
+}
+
+/// Waits out the 600 s delivery bound the gates use for the 500-child run.
+async fn stress_wait_report(fixture: &Fixture) -> Result<String, Box<dyn std::error::Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        loop {
+            let changed = fixture.host.changed.notified();
+            if let Some(text) = fixture
+                .script()
+                .jobs
+                .iter()
+                .find(|(job, parent, _)| {
+                    parent.is_none() && matches!(job.state, JobStateView::Done(_))
+                })
+                .map(|(_, _, text)| text.clone())
+            {
+                return text;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .map_err(|_| "the 500-child run did not settle".into())
+}
+
+/// The merge, start, file, lock, and mailbox assertions of the scale run.
+async fn stress_verify_merges(
+    report: &str,
+    fixture: &Fixture,
+    stress_files: &Arc<AtomicUsize>,
+    root: &std::path::Path,
+) -> TestResult {
+    let merged = report.matches("isolation: merged").count();
+    assert_eq!(merged, WRITERS, "all 250 worktree writers merged: {report}");
+    assert!(
+        !report.contains("isolation: retained") && !report.contains("isolation: kept"),
+        "no merge was retained or kept: {report}"
+    );
+    assert_eq!(
+        fixture.script().starts.len(),
+        CHILDREN,
+        "all 500 subagents started"
+    );
+    assert_eq!(
+        stress_files.load(std::sync::atomic::Ordering::SeqCst),
+        WRITERS,
+        "only the 250 worktree children wrote files"
+    );
+    let top = super::merge_locks::MergeLocks::canonical_key(root).await;
+    assert_eq!(
+        fixture.runtime.merge_locks.key_peak(&top),
+        1,
+        "the 250 same-checkout merges never overlapped"
+    );
+    assert_eq!(fixture.runtime.merge_locks.key_holds(&top), 0);
+    assert_eq!(fixture.runtime.merge_locks.distinct_holds(), 0);
+    assert_eq!(fixture.runtime.merge_locks.len(), 0);
+    let peak = fixture
+        .runtime
+        .mailbox_fill_peak(fixture.session)
+        .ok_or("the owner is gone")?;
+    assert!(
+        peak <= super::super::constants::BATTERY_MAILBOX,
+        "the mailbox never held more than its bound: {peak}"
+    );
+    Ok(())
+}
+
+/// The checkout holds exactly the 250 merged files and only the main tree.
+async fn stress_verify_checkout(root: &std::path::Path) -> TestResult {
+    let mut landed = 0;
+    let mut entries = tokio::fs::read_dir(root)
+        .await
+        .map_err(|error| format!("checkout unreadable: {error}"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("checkout unreadable: {error}"))?
+    {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("unit-"))
+        {
+            landed += 1;
+        }
+    }
+    assert_eq!(
+        landed, WRITERS,
+        "the 250 merged files landed in the checkout"
+    );
+    let list_root = root.to_path_buf();
+    let list = tokio::task::spawn_blocking(move || run_git(&list_root, &["worktree", "list"]))
+        .await
+        .expect("worktree list joins");
+    assert_eq!(
+        String::from_utf8_lossy(&list.stdout).lines().count(),
+        1,
+        "only the main tree remains: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+    Ok(())
+}
+
+/// The T-66 shape in miniature inside the battery crate: 500 children, 250
+/// of them worktree writers merging one distinct real file each through the
+/// real git executable, with the merge probes and the mailbox peak observed
+/// from inside. Gated on `DALGONA_ORCH_STRESS` like the gates: the default
+/// suite keeps the scripted boundary proofs above.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the scale test honors the same stress opt-in flag as the gates"
+)]
+#[tokio::test]
+async fn stress_five_hundred_children_merge_two_hundred_fifty_files() -> TestResult {
+    if std::env::var_os("DALGONA_ORCH_STRESS").is_none() {
+        return Ok(());
+    }
+    let (root, data, fixture, stress_files) = stress_open_fixture().await?;
+    fixture.tool(&stress_run_request()).await?;
+    let report = stress_wait_report(&fixture).await?;
+    stress_verify_merges(&report, &fixture, &stress_files, &root).await?;
+    stress_verify_checkout(&root).await?;
+    let _ = tokio::fs::remove_dir_all(&root).await;
     let _ = tokio::fs::remove_dir_all(&data).await;
     Ok(())
 }

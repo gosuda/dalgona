@@ -8,7 +8,7 @@ use std::time::Duration;
 use dal_core::ext::{NativeOp, OpId};
 use dal_core::{
     Budget, CallId, ContextItem, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec, OnError,
-    Purpose, RawJson, RequestParams, ScopeSpec, ScopeSpecError, StreamEvent, Usage,
+    Purpose, RawJson, RequestParams, ScopeSpec, ScopeSpecError, Stop, StreamEvent, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -112,19 +112,38 @@ fn model_req() -> OpRequest {
     )
 }
 
+/// The usage of a response whose provider measured nothing.
+const UNREPORTED: Usage = Usage {
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: None,
+    cache_write_tokens: 0,
+    premium_requests: None,
+    cost_usd: None,
+};
+
+/// A measured usage of ten input tokens and `output_tokens` output tokens.
+fn measured_usage(output_tokens: u64) -> Usage {
+    Usage {
+        input_tokens: 10,
+        output_tokens,
+        ..UNREPORTED
+    }
+}
+
 /// A successful inference outcome carrying one usage event.
 fn infer_outcome(table: &ScopeTable, t: TaskId, output_tokens: u64) -> OpOutcome {
-    let usage = Usage {
-        input_tokens: 10,
-        cached_input_tokens: 0,
-        output_tokens,
-        reasoning_tokens: None,
-        cache_write_tokens: 0,
-        cost_usd: None,
-    };
-    let inference = dal_core::Inference {
-        events: vec![StreamEvent::Usage(usage)],
-    };
+    inference_outcome(
+        table,
+        t,
+        vec![StreamEvent::Usage(measured_usage(output_tokens))],
+    )
+}
+
+/// A successful inference outcome carrying exactly `events`.
+fn inference_outcome(table: &ScopeTable, t: TaskId, events: Vec<StreamEvent>) -> OpOutcome {
+    let inference = dal_core::Inference { events };
     let encoded = sonic_rs::to_string(&inference).expect("inference encodes");
     OpOutcome::Ok {
         value: OpValue::Json(RawJson::parse(&encoded).expect("inference JSON")),
@@ -292,6 +311,7 @@ fn usd_budget_refuses_an_unpriced_model_and_admits_a_priced_one() {
             cached_input: 1.0,
             output: 1.0,
             reasoning: 1.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     });
@@ -557,6 +577,7 @@ fn usage_exhaustion_refuses_new_submissions() {
             cached_input: 1.0,
             output: 1.0,
             reasoning: 1.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     });
@@ -579,6 +600,285 @@ fn usage_exhaustion_refuses_new_submissions() {
         ),
         "the exhausted budget refuses new handles"
     );
+}
+
+/// A price function that prices every model at one USD per million tokens.
+fn unit_price() -> PriceFn {
+    Arc::new(|_| {
+        Some(ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 1.0,
+            reasoning: 1.0,
+            cache_write: None,
+            tiers: Box::default(),
+        })
+    })
+}
+
+/// One table pricing every model, with one settle-on-error scope bounded by
+/// `budget`.
+fn bounded(budget: Budget) -> (ScopeTable, ScopeId) {
+    let mut table = ScopeTable::new(Arc::new(AtomicUsize::new(0)), unit_price());
+    let mut scoped = spec(4);
+    scoped.on_error = OnError::Settle;
+    scoped.budget = budget;
+    let scope = table
+        .open(scoped, CancellationToken::new())
+        .expect("scope opens");
+    (table, scope)
+}
+
+/// A complete response carrying `usage`, or no usage event at all.
+fn response(usage: Option<Usage>) -> Vec<StreamEvent> {
+    usage
+        .map(StreamEvent::Usage)
+        .into_iter()
+        .chain([StreamEvent::Stop(Stop::EndTurn)])
+        .collect()
+}
+
+/// Submits one model request, issues it, and settles it successfully with
+/// a response carrying `usage`, or none.
+fn settle_model(table: &mut ScopeTable, scope: ScopeId, usage: Option<Usage>) -> TaskId {
+    let Ok(Submit::Queued(t)) = table.submit(scope, model_req(), None) else {
+        panic!("the model request queues");
+    };
+    let _ = table.runnable();
+    table
+        .complete(t, inference_outcome(table, t, response(usage)), 0)
+        .expect("the outcome records");
+    t
+}
+
+/// Whether the scope still accepts one more operation.
+fn admits(table: &mut ScopeTable, scope: ScopeId) -> bool {
+    matches!(table.submit(scope, tool_req(), None), Ok(Submit::Queued(_)))
+}
+
+/// Settles one successful model request carrying `usage`, or none, in a
+/// scope under each token and USD limit, and requires it to exhaust that
+/// scope.
+fn assert_exhausts_every_spend_limit(usage: Option<Usage>) {
+    let limits = [
+        Budget {
+            input_tokens: Some(1_000),
+            ..Budget::default()
+        },
+        Budget {
+            output_tokens: Some(1_000),
+            ..Budget::default()
+        },
+        Budget {
+            usd: Some(1.0),
+            ..Budget::default()
+        },
+    ];
+    for limit in limits {
+        let (mut table, scope) = bounded(limit.clone());
+        let sibling = queued(&mut table, scope);
+        settle_model(&mut table, scope, usage);
+        assert!(
+            matches!(
+                table.submit(scope, tool_req(), None),
+                Ok(Submit::Refused(ScopeSpecError::Exhausted))
+            ),
+            "a response without measured usage must exhaust {limit:?}"
+        );
+        assert!(
+            matches!(
+                table.deliver(sibling),
+                Some(OpOutcome::Failed {
+                    failure: OpFailure {
+                        code: FailureCode::Cancelled,
+                        ..
+                    },
+                    ..
+                })
+            ),
+            "exhaustion stops the scope's other members under {limit:?}"
+        );
+    }
+}
+
+#[test]
+fn unreported_usage_exhausts_spend_limits_instead_of_spending_zero() {
+    assert_exhausts_every_spend_limit(Some(UNREPORTED));
+}
+
+#[test]
+fn a_missing_usage_event_exhausts_spend_limits_instead_of_spending_zero() {
+    assert_exhausts_every_spend_limit(None);
+}
+
+#[test]
+fn an_unreported_response_exhausts_even_below_the_measured_limit() {
+    let (mut table, scope) = bounded(Budget {
+        output_tokens: Some(1_000),
+        ..Budget::default()
+    });
+    settle_model(&mut table, scope, Some(measured_usage(5)));
+    assert!(
+        admits(&mut table, scope),
+        "measured usage stays under the limit"
+    );
+    settle_model(&mut table, scope, Some(UNREPORTED));
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Refused(ScopeSpecError::Exhausted))
+        ),
+        "the unreported response exhausts a scope whose measured total is far below its limit"
+    );
+}
+
+#[test]
+fn reported_zero_measurements_keep_their_current_charge() {
+    let reported_zeros = [
+        Usage {
+            cost_usd: Some(0.0),
+            ..UNREPORTED
+        },
+        Usage {
+            reasoning_tokens: Some(0),
+            ..UNREPORTED
+        },
+    ];
+    for usage in reported_zeros {
+        let (mut table, scope) = bounded(Budget {
+            input_tokens: Some(1_000),
+            output_tokens: Some(1_000),
+            usd: Some(1.0),
+            ..Budget::default()
+        });
+        settle_model(&mut table, scope, Some(usage));
+        assert!(
+            admits(&mut table, scope),
+            "{usage:?} is a reported zero, not a missing measurement"
+        );
+    }
+}
+
+#[test]
+fn measured_usage_charges_once() {
+    let (mut table, scope) = bounded(Budget {
+        input_tokens: Some(25),
+        ..Budget::default()
+    });
+    let measured = Some(measured_usage(5));
+    let first = settle_model(&mut table, scope, measured);
+    table
+        .complete(
+            first,
+            inference_outcome(&table, first, response(measured)),
+            0,
+        )
+        .expect("a settled task absorbs the late arrival");
+    settle_model(&mut table, scope, measured);
+    assert!(
+        admits(&mut table, scope),
+        "two measured responses of 10 input tokens stay under a limit of 25"
+    );
+    settle_model(&mut table, scope, measured);
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Refused(ScopeSpecError::Exhausted))
+        ),
+        "the third measured response reaches the limit"
+    );
+}
+
+#[test]
+fn request_and_wall_limits_do_not_need_a_spend_measurement() {
+    let limits = [
+        Budget {
+            requests: Some(8),
+            ..Budget::default()
+        },
+        Budget {
+            wall: Some(Duration::from_secs(3600)),
+            ..Budget::default()
+        },
+    ];
+    for limit in limits {
+        let (mut table, scope) = bounded(limit.clone());
+        settle_model(&mut table, scope, Some(UNREPORTED));
+        settle_model(&mut table, scope, None);
+        assert!(
+            admits(&mut table, scope),
+            "{limit:?} limits no spend, so an unmeasured response leaves it open"
+        );
+    }
+}
+
+#[test]
+fn failed_cancelled_and_non_model_operations_leave_spend_limits_open() {
+    let (mut table, scope) = bounded(Budget {
+        input_tokens: Some(1_000),
+        usd: Some(1.0),
+        ..Budget::default()
+    });
+    let Ok(Submit::Queued(failed)) = table.submit(scope, model_req(), None) else {
+        panic!("the failing model request queues");
+    };
+    let Ok(Submit::Queued(cancelled)) = table.submit(scope, model_req(), None) else {
+        panic!("the cancelled model request queues");
+    };
+    let tool = queued(&mut table, scope);
+    let _ = table.runnable();
+    table
+        .complete(failed, failed_outcome(&table, failed), 0)
+        .expect("the failure records");
+    assert_eq!(table.cancel(CancelTarget::Task(cancelled)), vec![cancelled]);
+    table
+        .complete(tool, ok_outcome(&table, tool), 0)
+        .expect("the tool result records");
+    assert!(
+        admits(&mut table, scope),
+        "a failed or cancelled request and a tool result carry no usage to measure"
+    );
+}
+
+#[test]
+fn a_result_refused_by_the_byte_budget_still_spends_its_usage() {
+    for usage in [Some(measured_usage(5)), None] {
+        let (mut table, scope) = bounded(Budget {
+            input_tokens: Some(5),
+            ..Budget::default()
+        });
+        let Ok(Submit::Queued(t)) = table.submit(scope, model_req(), None) else {
+            panic!("the model request queues");
+        };
+        let _ = table.runnable();
+        let refused = table
+            .complete(
+                t,
+                inference_outcome(&table, t, response(usage)),
+                MAX_RESULT_BYTES + 1,
+            )
+            .expect_err("the invocation budget refuses");
+        assert!(
+            matches!(
+                refused,
+                HostTerminal::LimitExceeded {
+                    what: "result_bytes"
+                }
+            ),
+            "the refusal names its budget: {refused}"
+        );
+        // The script host then settles the task with a reference-sized failure.
+        table
+            .complete(t, failed_outcome(&table, t), 0)
+            .expect("the failure records");
+        assert!(
+            matches!(
+                table.submit(scope, tool_req(), None),
+                Ok(Submit::Refused(ScopeSpecError::Exhausted))
+            ),
+            "a refused response ({usage:?}) must not escape the scope's token limit"
+        );
+    }
 }
 
 #[test]
@@ -628,6 +928,339 @@ fn mint_raw_refuses_overflow() {
         ),
         "the counter names its budget"
     );
+}
+
+#[test]
+fn mint_raw_hands_out_the_last_handle_below_overflow_then_refuses() {
+    let mut next = u64::MAX - 1;
+    let last = mint_raw(&mut next, "scope_ids").expect("one below the overflow edge still mints");
+    assert_eq!(last.get(), u64::MAX - 1);
+    assert_eq!(next, u64::MAX, "the counter advances to the overflow edge");
+    assert!(
+        matches!(
+            mint_raw(&mut next, "scope_ids"),
+            Err(HostTerminal::LimitExceeded { what: "scope_ids" })
+        ),
+        "the edge itself refuses"
+    );
+    assert_eq!(
+        next,
+        u64::MAX,
+        "a refused mint does not advance the counter"
+    );
+}
+
+/// Settles one response carrying `spend` in a fresh scope under `budget`
+/// and reports whether that scope still admits work.
+fn admits_after(budget: &Budget, spend: Usage) -> bool {
+    let (mut table, scope) = bounded(budget.clone());
+    settle_model(&mut table, scope, Some(spend));
+    admits(&mut table, scope)
+}
+
+#[test]
+fn input_token_limit_exhausts_exactly_at_the_limit() {
+    let budget = Budget {
+        input_tokens: Some(100),
+        ..Budget::default()
+    };
+    let spend = |input_tokens| Usage {
+        input_tokens,
+        output_tokens: 1,
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, spend(99)),
+        "one token under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(100)),
+        "reaching the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, spend(101)),
+        "one token past the limit is exhausted"
+    );
+}
+
+#[test]
+fn output_token_limit_counts_reasoning_tokens_and_exhausts_at_the_limit() {
+    let budget = Budget {
+        output_tokens: Some(100),
+        ..Budget::default()
+    };
+    let spend = |output_tokens, reasoning_tokens| Usage {
+        input_tokens: 1,
+        output_tokens,
+        reasoning_tokens,
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, spend(99, None)),
+        "one output token under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(100, None)),
+        "reaching the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, spend(101, None)),
+        "one output token past the limit is exhausted"
+    );
+    assert!(
+        admits_after(&budget, spend(60, Some(39))),
+        "60 output plus 39 reasoning is 99 and stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(60, Some(40))),
+        "reasoning tokens spend the output limit: 60 plus 40 reaches 100"
+    );
+}
+
+#[test]
+fn usd_limit_exhausts_exactly_at_the_limit_and_sums_across_responses() {
+    let budget = Budget {
+        usd: Some(1.0),
+        ..Budget::default()
+    };
+    let costing = |cost_usd| Usage {
+        input_tokens: 1,
+        cost_usd: Some(cost_usd),
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, costing(0.999_999)),
+        "a cost under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, costing(1.0)),
+        "a cost equal to the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, costing(1.000_001)),
+        "a cost past the limit is exhausted"
+    );
+
+    let (mut table, scope) = bounded(budget);
+    settle_model(&mut table, scope, Some(costing(0.5)));
+    assert!(
+        admits(&mut table, scope),
+        "half of the limit leaves the scope open"
+    );
+    settle_model(&mut table, scope, Some(costing(0.5)));
+    assert!(
+        !admits(&mut table, scope),
+        "two halves sum to the limit and exhaust the scope"
+    );
+}
+
+#[test]
+fn a_provider_cost_that_is_not_a_valid_amount_exhausts_a_usd_budget() {
+    let budget = Budget {
+        usd: Some(1.0),
+        ..Budget::default()
+    };
+    for cost_usd in [-1.0, -0.000_001] {
+        let spend = Usage {
+            input_tokens: 1,
+            cost_usd: Some(cost_usd),
+            ..UNREPORTED
+        };
+        assert!(
+            !admits_after(&budget, spend),
+            "a reported cost of {cost_usd} is unknown spend, never free spend"
+        );
+    }
+    let tokens_only = Budget {
+        input_tokens: Some(1_000),
+        ..Budget::default()
+    };
+    let spend = Usage {
+        input_tokens: 1,
+        cost_usd: Some(-1.0),
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&tokens_only, spend),
+        "an unknown cost only matters to a usd limit"
+    );
+}
+
+#[test]
+fn invocation_byte_budget_admits_exactly_the_cap_and_refuses_one_byte_more() {
+    let host_bytes = Arc::new(AtomicUsize::new(0));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let first = queued(&mut table, scope);
+    let second = queued(&mut table, scope);
+    let third = queued(&mut table, scope);
+    table
+        .complete(first, ok_outcome(&table, first), MAX_RESULT_BYTES - 1)
+        .expect("one byte under the cap lands");
+    table
+        .complete(second, ok_outcome(&table, second), 1)
+        .expect("filling the cap exactly lands");
+    assert_eq!(host_bytes.load(Ordering::SeqCst), MAX_RESULT_BYTES);
+    let error = table
+        .complete(third, ok_outcome(&table, third), 1)
+        .expect_err("one byte past the cap refuses");
+    assert!(
+        matches!(
+            error,
+            HostTerminal::LimitExceeded {
+                what: "result_bytes"
+            }
+        ),
+        "the 4 MiB invocation cap names itself: {error}"
+    );
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        MAX_RESULT_BYTES,
+        "the refused byte is not counted"
+    );
+}
+
+#[test]
+fn host_byte_budget_admits_exactly_the_cap_and_refuses_one_byte_more() {
+    let host_bytes = Arc::new(AtomicUsize::new(super::MAX_HOST_RESULT_BYTES - 8));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let fits = queued(&mut table, scope);
+    let over = queued(&mut table, scope);
+    table
+        .complete(fits, ok_outcome(&table, fits), 8)
+        .expect("filling the host cap exactly lands");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        super::MAX_HOST_RESULT_BYTES
+    );
+    let error = table
+        .complete(over, ok_outcome(&table, over), 1)
+        .expect_err("one byte past the host cap refuses");
+    assert!(
+        matches!(
+            error,
+            HostTerminal::LimitExceeded {
+                what: "result_bytes"
+            }
+        ),
+        "the 16 MiB host cap names itself: {error}"
+    );
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        super::MAX_HOST_RESULT_BYTES,
+        "the refused byte is not counted"
+    );
+}
+
+#[test]
+fn outstanding_slot_frees_on_delivery_not_on_completion() {
+    let mut table = table();
+    let scope = open(&mut table, MAX_SCOPE_CONCURRENCY.into());
+    let ids: Vec<TaskId> = (0..MAX_OUTSTANDING)
+        .map(|_| queued(&mut table, scope))
+        .collect();
+    let first = ids[0];
+    table
+        .complete(first, ok_outcome(&table, first), 0)
+        .expect("complete");
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Terminal(HostTerminal::LimitExceeded {
+                what: "outstanding"
+            }))
+        ),
+        "a completed but undelivered result still holds its slot"
+    );
+    assert!(table.deliver(first).is_some());
+    assert!(admits(&mut table, scope), "delivery frees one slot");
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Terminal(HostTerminal::LimitExceeded {
+                what: "outstanding"
+            }))
+        ),
+        "delivery frees exactly one slot"
+    );
+}
+
+#[test]
+fn next_deadline_publishes_the_earliest_live_wall_and_forgets_closed_scopes() {
+    use tokio::time::Instant;
+
+    let mut table = table();
+    let walled = |seconds| {
+        let mut walled = spec(1);
+        walled.budget.wall = Some(Duration::from_secs(seconds));
+        walled
+    };
+    let near = table
+        .open(walled(60), CancellationToken::new())
+        .expect("near scope opens");
+    let far = table
+        .open(walled(3_600), CancellationToken::new())
+        .expect("far scope opens");
+    open(&mut table, 1);
+
+    let published = table.next_deadline().expect("two walls publish");
+    assert!(
+        published <= Instant::now() + Duration::from_secs(61),
+        "the earliest wall wins: {published:?}"
+    );
+    assert!(table.seal(near).expect("seal").is_empty());
+    let published = table.next_deadline().expect("the far wall remains");
+    assert!(
+        published > Instant::now() + Duration::from_mins(50),
+        "a closed scope no longer publishes its wall: {published:?}"
+    );
+    assert_eq!(table.cancel(CancelTarget::Scope(far)), []);
+    assert!(
+        table.next_deadline().is_none(),
+        "a cancelled scope publishes no wall"
+    );
+}
+
+#[test]
+fn cleanup_reports_only_unfinished_calls_and_releases_retained_bytes() {
+    let host_bytes = Arc::new(AtomicUsize::new(0));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let done = queued(&mut table, scope);
+    let pending = queued(&mut table, scope);
+    let also_done = queued(&mut table, scope);
+    table
+        .complete(done, ok_outcome(&table, done), 500)
+        .expect("complete");
+    table
+        .complete(also_done, ok_outcome(&table, also_done), 300)
+        .expect("complete");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        800,
+        "undelivered results stay retained"
+    );
+    let (complete, unfinished) = table.cleanup();
+    assert!(!complete, "a queued task leaves the cleanup incomplete");
+    let expected = table.call_id(pending).expect("call id");
+    assert_eq!(&*unfinished, [expected], "only the unfinished call reports");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        0,
+        "cleanup releases every retained byte"
+    );
+
+    let mut settled = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut settled, 1);
+    let only = queued(&mut settled, scope);
+    settled
+        .complete(only, ok_outcome(&settled, only), 100)
+        .expect("complete");
+    let (complete, unfinished) = settled.cleanup();
+    assert!(complete, "every task settled");
+    assert!(unfinished.is_empty());
+    assert_eq!(host_bytes.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

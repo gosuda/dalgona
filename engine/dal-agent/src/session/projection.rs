@@ -75,6 +75,7 @@ impl Projection {
                 approval,
                 mode,
                 name: None,
+                scoped_models: None,
             },
             usage: UsageView {
                 usage: Usage {
@@ -83,6 +84,7 @@ impl Projection {
                     output_tokens: 0,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
+                    premium_requests: None,
                     cost_usd: None,
                 },
                 context_tokens: 0,
@@ -143,7 +145,16 @@ impl Projection {
                 }
             }
             UpdateKind::Settings(settings) => {
-                self.settings = settings.clone();
+                // Scope merge: the fold always emits `scoped_models: None`
+                // (keep-existing); only the driver's authoritative
+                // publication carries `Some` (replace, possibly empty on
+                // clear). Catalog gaps never reach here: scope is stored
+                // verbatim and never intersected with the catalog.
+                let mut next_settings = settings.clone();
+                if next_settings.scoped_models.is_none() {
+                    next_settings.scoped_models = self.settings.scoped_models.take();
+                }
+                self.settings = next_settings;
             }
             UpdateKind::Usage(usage) => {
                 self.usage = usage.clone();
@@ -190,6 +201,22 @@ impl Projection {
         self.auto_compaction = auto;
     }
 
+    /// Records the authoritative scope committed by `SetScopedModels` and
+    /// returns the settings view carrying it for publication. The driver
+    /// is the single writer; the fold only ever emits `None`.
+    pub(crate) fn set_scope(&mut self, scope: Vec<Box<str>>) -> SettingsView {
+        self.settings.scoped_models = Some(scope);
+        self.settings.clone()
+    }
+
+    /// The effective settings the projection holds: the last settings
+    /// update with the committed scope merged in. This is exactly what a
+    /// snapshot reports, so a published settings update that carries it
+    /// leaves every subscriber agreeing with a fresh view.
+    pub(crate) fn effective_settings(&self) -> SettingsView {
+        self.settings.clone()
+    }
+
     /// Builds the client-facing snapshot with leaf paging applied.
     pub(crate) fn snapshot(&self, args: SnapshotArgs) -> View {
         let (entries, next_before) = self.page(&args);
@@ -206,6 +233,7 @@ impl Projection {
                 created_at: args.created_at,
                 archived: args.archived,
                 last_seq: self.last_seq,
+                message_count: None,
             },
             turn: self.turn,
             entries: Page {
@@ -251,6 +279,7 @@ impl Projection {
             added,
             leaf: fold.leaf_entry(),
         }));
+        self.apply(&UpdateKind::Settings(fold.settings_view()));
         self.usage.context_tokens = fold.tokens_since_last_compaction();
     }
 
@@ -331,7 +360,9 @@ fn entry_bytes(entry: &EntryView) -> usize {
         }
         EntryKind::Reminder { source, text } => source.len() + text.len(),
         EntryKind::Model { route } => match route {
-            dal_core::ModelRoute::Api { model, .. } => model.len() + 16,
+            dal_core::ModelRoute::Api {
+                model, provider, ..
+            } => model.len() + provider.as_deref().map_or(0, str::len) + 16,
             dal_core::ModelRoute::Synthetic { id } | dal_core::ModelRoute::Harness { id } => {
                 id.len()
             }
@@ -366,10 +397,18 @@ fn part_bytes(part: &JournalPart) -> usize {
 
 /// Heuristic serialized size of one assistant block.
 fn block_bytes(block: &dal_core::Block) -> usize {
+    let replay_bytes = |replay: &Option<dal_core::RawJson>| {
+        replay.as_ref().map_or(0, |replay| replay.as_str().len())
+    };
     match block {
-        dal_core::Block::Text { text } => text.len(),
+        dal_core::Block::Text { text, replay } => text.len() + replay_bytes(replay),
         dal_core::Block::Reasoning { text, replay } => text.len() + replay.as_str().len(),
-        dal_core::Block::ToolCall { name, input, .. } => name.len() + input.as_str().len(),
+        dal_core::Block::ToolCall {
+            id: _id,
+            name,
+            input,
+            replay,
+        } => name.len() + input.as_str().len() + replay_bytes(replay),
     }
 }
 #[cfg(test)]
@@ -377,8 +416,9 @@ mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
 
     use dal_core::{
-        ApprovalMode, EntryId, EntryKind, EntryView, Gen, JournalPart, Mode, PageReq, SessionId,
-        ThinkingLevel, Timestamp, TreeDelta, UpdateKind, Workspace,
+        ApprovalMode, Entry, EntryId, EntryKind, EntryView, Family, Gen, JournalPart, Mode,
+        ModelRoute, PageReq, Record, Session, SessionId, Settings, ThinkingLevel, Timestamp,
+        TreeDelta, UpdateKind, Workspace,
     };
 
     use super::{Projection, SnapshotArgs};
@@ -457,5 +497,95 @@ mod tests {
             [entry_id(1), entry_id(2), entry_id(3)].map(|entry| entry.to_string())
         );
         Ok(())
+    }
+
+    fn journal_entry(id: u64, kind: EntryKind) -> Entry {
+        Entry {
+            id: entry_id(id),
+            parent: (id > 1).then(|| entry_id(id - 1)),
+            at: Timestamp::UNIX_EPOCH,
+            kind,
+        }
+    }
+
+    fn user_record() -> Record {
+        Record::User(journal_entry(
+            1,
+            EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "hello".into(),
+                }],
+            },
+        ))
+    }
+
+    #[test]
+    fn restore_fold_reports_journaled_settings_and_no_inherited_model() {
+        let default = ModelRoute::Api {
+            family: Family::Chat,
+            model: "default-model".into(),
+            provider: Some("acme".into()),
+        };
+        let seed = Settings {
+            model: Some(default.clone()),
+            thinking: ThinkingLevel::Medium,
+            approval: ApprovalMode::Ask,
+            name: None,
+            mode: Mode::Normal,
+        };
+        let restored = |records: Vec<Record>| {
+            let (fold, _) = Session::replay_with(seed.clone(), records, Timestamp::now())
+                .expect("fixture journal replays");
+            let mut projection =
+                Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+            projection.restore_fold(&fold);
+            projection.effective_settings()
+        };
+
+        let inheriting = restored(vec![
+            user_record(),
+            Record::Thinking(journal_entry(
+                2,
+                EntryKind::Thinking {
+                    level: ThinkingLevel::Low,
+                },
+            )),
+        ]);
+        assert_eq!(
+            inheriting.model, None,
+            "an inherited default is not a selection"
+        );
+        assert_eq!(inheriting.thinking, ThinkingLevel::Low);
+
+        let selecting = restored(vec![
+            user_record(),
+            Record::Model(journal_entry(
+                2,
+                EntryKind::Model {
+                    route: default.clone(),
+                },
+            )),
+            Record::Approval(journal_entry(
+                3,
+                EntryKind::Approval {
+                    mode: ApprovalMode::All,
+                },
+            )),
+            Record::Mode(journal_entry(
+                4,
+                EntryKind::Mode {
+                    mode: Mode::EvalOnly,
+                },
+            )),
+            Record::Name {
+                at: Timestamp::UNIX_EPOCH,
+                name: Some("kept".into()),
+            },
+        ]);
+        assert_eq!(selecting.model, Some(default));
+        assert_eq!(selecting.thinking, ThinkingLevel::Medium);
+        assert_eq!(selecting.approval, ApprovalMode::All);
+        assert_eq!(selecting.mode, Mode::EvalOnly);
+        assert_eq!(selecting.name.as_deref(), Some("kept"));
     }
 }

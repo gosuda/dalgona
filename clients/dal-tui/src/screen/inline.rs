@@ -13,6 +13,56 @@ pub struct Region {
     pub height: u16,
 }
 
+/// Where the stale live block sits when a frame starts on the main screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// No resize since the last paint: the block is at the recorded anchor.
+    Anchor,
+    /// The terminal reported the caret: the stale block's first row, 1-based.
+    Located(u16),
+    /// Position unknown or untrusted: write no live bytes this frame. The
+    /// stale block stays on screen and the next frame measures again.
+    Hold,
+}
+
+/// Returns the stale block's first row from a reported caret row and the
+/// caret's offset below the block top at the last paint, plus any extra
+/// wrapped rows the width change added at or above the caret (`piece` and
+/// `reflow_extra` are zero on a height-only resize). A block whose top
+/// scrolled off the screen starts at the second row.
+#[must_use]
+pub(crate) fn located_top(reported_row: u16, offset: u16, piece: u16, extra: u16) -> u16 {
+    reported_row
+        .saturating_sub(offset)
+        .saturating_sub(piece)
+        .saturating_sub(extra)
+        .max(1)
+}
+
+/// Returns the wrap piece the caret occupies after a width change: the caret
+/// cell index (`0`-based column of the caret on its row at the old width)
+/// divided by the new width. `0` when the caret still lands on the first
+/// wrapped piece or when the width did not change (`piece` is only called on
+/// width changes by the driver).
+#[must_use]
+pub(crate) fn piece(cell_index_before_caret: usize, new_width: usize) -> u16 {
+    u16::try_from(cell_index_before_caret / new_width.max(1)).unwrap_or(u16::MAX)
+}
+
+/// Returns the extra rows a width change adds above the caret: the sum of
+/// `cells / new_width` over the given above-caret live rows. A row that ends
+/// exactly on the edge still advances the caret piece, so exact multiples
+/// keep their full piece.
+/// Callers pass only rows whose reflow cannot be verified.
+#[must_use]
+pub(crate) fn reflow_extra(above_caret_cells: &[usize], new_width: usize) -> u16 {
+    let width = new_width.max(1);
+    above_caret_cells.iter().fold(0_u16, |extra, cells| {
+        let pieces = u16::try_from(cells / width).unwrap_or(u16::MAX);
+        extra.saturating_add(pieces)
+    })
+}
+
 /// Builds the byte sequence committing `rows` above the live region.
 ///
 /// Every line ends fully SGR-reset; the commit sits in one sync bracket pair
@@ -57,7 +107,7 @@ pub fn shrink_bytes(first_surplus_row: u16, surplus: u16, sync: bool) -> Vec<u8>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_bytes, shrink_bytes};
+    use super::{commit_bytes, located_top, piece, reflow_extra, shrink_bytes};
 
     #[test]
     fn commit_and_shrink_use_one_bracket_pair_without_erase_display() {
@@ -77,5 +127,28 @@ mod tests {
             2
         );
         assert!(shrink.windows(3).all(|window| window != b"\x1b[J"));
+    }
+
+    #[test]
+    fn located_top_clamps_at_row_one() {
+        assert_eq!(located_top(9, 0, 0, 0), 9);
+        assert_eq!(located_top(16, 2, 0, 0), 14);
+        assert_eq!(located_top(4, 8, 0, 0), 1);
+        assert_eq!(located_top(10, 1, 2, 3), 4);
+    }
+
+    #[test]
+    fn piece_counts_wrapped_pieces_before_the_caret() {
+        assert_eq!(piece(0, 60), 0);
+        assert_eq!(piece(59, 60), 0);
+        assert_eq!(piece(60, 60), 1);
+        assert_eq!(piece(200, 60), 3);
+        assert_eq!(piece(10, 0), 10);
+    }
+
+    #[test]
+    fn reflow_extra_measures_known_rows() {
+        assert_eq!(reflow_extra(&[30, 61, 120], 60), 3);
+        assert_eq!(reflow_extra(&[], 60), 0);
     }
 }

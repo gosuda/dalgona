@@ -149,6 +149,77 @@ async fn run_with(
     (report, seen)
 }
 
+/// A check that always outlives a short deadline: it runs long enough to reach
+/// the evaluator's infrequent stop check, which then ends it.
+const SLOW_CHECK: &str = "def slow(r, w):\n    total = 0\n    for i in range(2000000000):\n        total = total + i\n    return True\nevalpack.pack(name = \"p\", cases = [\n    evalpack.case(id = \"s\", prompt = \"x\", check = slow, repeats = 1),\n])\n";
+
+#[tokio::test]
+async fn a_check_that_outlives_the_run_budget_fails_its_case() {
+    let slow = pack(SLOW_CHECK);
+    let cell = super::Slot {
+        pack: "p",
+        case: &slow.cases[0],
+        arm: ArmName::Defaults,
+        repeat: 1,
+    };
+    let workspace = super::RunWorkspace::create(Vec::new())
+        .await
+        .expect("case workspace");
+    // Already expired by the worker's first stop check: the Tokio clock only
+    // advances between this capture and the worker thread, and run_check
+    // converts it once into the wall clock the synchronous hook reads, so the
+    // evaluator ends the check on its first infrequent check and every select
+    // arm converges on Timeout.
+    let deadline = tokio::time::Instant::now();
+    let (line, interrupted) = super::score(
+        &slow,
+        0,
+        &cell,
+        output(),
+        &workspace,
+        deadline,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(!interrupted);
+    assert_eq!(line.status, Status::Failed);
+    assert!(
+        line.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("exceeded the run time budget")),
+        "{line:?}",
+    );
+}
+
+#[tokio::test]
+async fn an_interrupt_during_the_check_skips_the_run_and_releases_the_workspace() {
+    let slow = pack(SLOW_CHECK);
+    let cell = super::Slot {
+        pack: "p",
+        case: &slow.cases[0],
+        arm: ArmName::Defaults,
+        repeat: 1,
+    };
+    let workspace = super::RunWorkspace::create(Vec::new())
+        .await
+        .expect("case workspace");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    // Only the cancel arm can be ready: the stop signal is already fired, so
+    // the evaluator ends the check on its first stop check.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (line, interrupted) =
+        super::score(&slow, 0, &cell, output(), &workspace, deadline, &cancel).await;
+    assert!(interrupted);
+    assert_eq!(line.status, Status::Skipped);
+    assert_eq!(line.reason.as_deref(), Some(INTERRUPTED));
+    // score consumed the check thread before returning, so this lease is the
+    // last one: dropping it removes the directory.
+    let dir = workspace.path().to_path_buf();
+    drop(workspace);
+    assert!(!dir.exists(), "the check lease released the workspace");
+}
+
 #[tokio::test]
 async fn one_run_line_per_run_and_a_half_pass_rate_when_one_of_two_fails() {
     let smoke = pack(SMOKE);
@@ -430,6 +501,7 @@ async fn slow_owned_cleanup_retains_the_workspace_past_the_timeout_report() {
             judge: None,
         },
         &CancellationToken::new(),
+        tokio::time::Instant::now() + super::CASE_TIMEOUT,
     )
     .await;
     assert!(matches!(result, Err(super::Ended::TimedOut)));
@@ -582,6 +654,33 @@ fn selection_errors_name_the_problem() {
         assert_eq!(bad.check(&loaded), Err(PlanError::Repeats));
     }
     assert_eq!(options().check(&loaded), Ok(()));
+}
+
+#[test]
+fn run_repeats_accept_one_through_ten_and_refuse_either_side() {
+    let loaded = pack(TWO_CASES);
+    for repeats in [1, 2, 9, 10] {
+        let accepted = Options {
+            repeats: Some(repeats),
+            ..options()
+        };
+        assert_eq!(accepted.check(&loaded), Ok(()), "--repeats {repeats}");
+    }
+    for repeats in [0, 11, 12, u32::MAX] {
+        let refused = Options {
+            repeats: Some(repeats),
+            ..options()
+        };
+        assert_eq!(
+            refused.check(&loaded),
+            Err(PlanError::Repeats),
+            "--repeats {repeats}"
+        );
+    }
+    assert_eq!(
+        PlanError::Repeats.to_string(),
+        "--repeats must be an integer from 1 to 10"
+    );
 }
 
 #[tokio::test]

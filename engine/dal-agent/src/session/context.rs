@@ -61,6 +61,7 @@ pub(crate) fn search_surface(provider: &str, route: &ModelRoute) -> SearchSurfac
         ModelRoute::Api {
             family: Family::Anthropic,
             model,
+            ..
         } if dal_provider::supports_tool_search(provider, model) => SearchSurface::Native,
         _ => SearchSurface::Client,
     }
@@ -119,10 +120,13 @@ struct ToolSearchArgs {
     query: Box<str>,
 }
 
-/// Display metadata for one resolved catalog row.
+/// Display metadata for one resolved catalog row. `provider` is the catalog
+/// provider id the resolver matched the row under; it travels on the row so
+/// clients never rebuild it from a display label.
 pub(crate) fn model_info_for(
     entry: &CatalogEntry,
     route: &ModelRoute,
+    provider: &str,
     default_level: ThinkingLevel,
 ) -> ModelInfo {
     let family = api_family(route).unwrap_or(Family::Chat);
@@ -130,6 +134,7 @@ pub(crate) fn model_info_for(
     ModelInfo {
         route: route.clone(),
         name: format!("{} · {}/{}", entry.display, entry.provider, entry.id).into(),
+        provider: provider.into(),
         caps: Caps {
             context_window: entry.context_window,
             thinking: levels_for(&entry.thinking),
@@ -583,6 +588,7 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
             api,
             model,
             content,
+            replay,
             ..
         } => Some(ContextItem::Assistant {
             source: ReplaySource {
@@ -590,6 +596,7 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
                 model: model.clone(),
             },
             parts: content.iter().map(assistant_part).collect(),
+            replay: replay.clone(),
         }),
         EntryKind::ToolResult {
             call,
@@ -629,15 +636,24 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
 /// Maps one assistant block to its provider part.
 fn assistant_part(block: &Block) -> AssistantPart {
     match block {
-        Block::Text { text } => AssistantPart::Text { text: text.clone() },
+        Block::Text { text, replay } => AssistantPart::Text {
+            text: text.clone(),
+            replay: replay.clone(),
+        },
         Block::Reasoning { text, replay } => AssistantPart::Thinking {
             text: text.clone(),
             replay: Some(replay.clone()),
         },
-        Block::ToolCall { id, name, input } => AssistantPart::ToolCall {
+        Block::ToolCall {
+            id,
+            name,
+            input,
+            replay,
+        } => AssistantPart::ToolCall {
             call: id.clone(),
             name: name.clone(),
             args: input.clone(),
+            replay: replay.clone(),
         },
     }
 }
@@ -768,6 +784,7 @@ mod tests {
                         id: CallId::new(*call),
                         name: "read".into(),
                         input: RawJson::parse("{}").expect("valid JSON"),
+                        replay: None,
                     })
                     .collect(),
                 usage: dal_core::Usage {
@@ -776,9 +793,11 @@ mod tests {
                     output_tokens: 0,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
+                    premium_requests: None,
                     cost_usd: None,
                 },
                 stop: dal_core::AssistantStop::ToolUse,
+                replay: None,
             },
         )
     }
@@ -872,6 +891,86 @@ mod tests {
                 Some("question"),
                 Some("first\nsecond"),
                 Some("Stay within the workspace.")
+            ]
+        );
+    }
+
+    #[test]
+    fn journal_replay_forwards_into_the_request_projection() {
+        let text_replay = RawJson::parse(r#"{"t":1}"#).expect("valid JSON");
+        let call_replay = RawJson::parse(r#"{"c":2}"#).expect("valid JSON");
+        let message_replay = RawJson::parse(r#"{"m":3}"#).expect("valid JSON");
+        let response = entry(
+            1,
+            None,
+            EntryKind::Assistant {
+                api: Family::Chat,
+                model: "model".into(),
+                route: Some(dal_core::AssistantRoute::Api(Family::Chat)),
+                content: vec![
+                    Block::Text {
+                        text: "answer".into(),
+                        replay: Some(text_replay.clone()),
+                    },
+                    Block::ToolCall {
+                        id: CallId::new("call-a"),
+                        name: "read".into(),
+                        input: RawJson::parse("{}").expect("valid JSON"),
+                        replay: Some(call_replay.clone()),
+                    },
+                ],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    premium_requests: None,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::Done,
+                replay: Some(message_replay.clone()),
+            },
+        );
+        let plain = assistant_calling(2, Some(response.id), &["call-b"]);
+
+        let context = context_items(&[response, plain]);
+
+        assert_eq!(
+            context,
+            vec![
+                ContextItem::Assistant {
+                    source: ReplaySource {
+                        family: Family::Chat,
+                        model: "model".into(),
+                    },
+                    parts: vec![
+                        AssistantPart::Text {
+                            text: "answer".into(),
+                            replay: Some(text_replay),
+                        },
+                        AssistantPart::ToolCall {
+                            call: CallId::new("call-a"),
+                            name: "read".into(),
+                            args: RawJson::parse("{}").expect("valid JSON"),
+                            replay: Some(call_replay),
+                        },
+                    ],
+                    replay: Some(message_replay),
+                },
+                ContextItem::Assistant {
+                    source: ReplaySource {
+                        family: Family::Chat,
+                        model: "model".into(),
+                    },
+                    parts: vec![AssistantPart::ToolCall {
+                        call: CallId::new("call-b"),
+                        name: "read".into(),
+                        args: RawJson::parse("{}").expect("valid JSON"),
+                        replay: None,
+                    }],
+                    replay: None,
+                },
             ]
         );
     }
@@ -1006,6 +1105,7 @@ mod tests {
         let route = |model: &str| ModelRoute::Api {
             family: Family::Anthropic,
             model: model.into(),
+            provider: None,
         };
         assert_eq!(
             search_surface("anthropic", &route("claude-opus-4-5-20251101")),
@@ -1026,6 +1126,7 @@ mod tests {
         let chat = ModelRoute::Api {
             family: Family::Chat,
             model: "claude-opus-5-5".into(),
+            provider: None,
         };
         assert_eq!(search_surface("anthropic", &chat), SearchSurface::Client);
     }

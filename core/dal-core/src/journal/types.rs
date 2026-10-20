@@ -101,22 +101,28 @@ pub enum JournalPart {
 
 /// One assistant text, reasoning, or tool-call block in a record.
 ///
-/// A `text` block still writes `"replay":null` in format 1; a
-/// `reasoning` block writes its provider replay payload.
+/// A `text` block without a replay payload still writes `"replay":null`, as
+/// in format 1; a `reasoning` block writes its provider replay payload, or
+/// `"replay":null` when the provider streamed none. Only on a `reasoning`
+/// block does the reader keep that `null`; a `text` or `tool_call` block reads
+/// it as absent. A `tool_call` block omits an absent replay member.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
-    /// Assistant-visible text; `replay` is always null in format 1.
+    /// Assistant-visible text; absent `replay` writes `null`, as in format 1.
     Text {
         /// The generated text.
         text: Box<str>,
+        /// The opaque provider replay payload, when the provider returned one.
+        replay: Option<RawJson>,
     },
     /// Reasoning text with its provider replay payload.
     Reasoning {
         /// The reasoning text.
         text: Box<str>,
-        /// The opaque provider replay payload.
+        /// The opaque provider replay payload; `RawJson::null()` when the
+        /// provider streamed reasoning text without one.
         replay: RawJson,
     },
     /// A request to execute a tool.
@@ -127,6 +133,10 @@ pub enum Block {
         name: Box<str>,
         /// The raw tool arguments.
         input: RawJson,
+        /// The opaque provider replay payload, when the provider returned one.
+        /// Omitted when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay: Option<RawJson>,
     },
 }
 
@@ -137,6 +147,8 @@ pub enum Block {
 #[derive(Deserialize)]
 pub(super) struct TextBlockFields {
     pub(super) text: Box<str>,
+    #[serde(default)]
+    pub(super) replay: Option<RawJson>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +162,8 @@ pub(super) struct ToolCallBlockFields {
     pub(super) id: CallId,
     pub(super) name: Box<str>,
     pub(super) input: RawJson,
+    #[serde(default)]
+    pub(super) replay: Option<RawJson>,
 }
 
 impl<'de> Deserialize<'de> for Block {
@@ -159,7 +173,10 @@ impl<'de> Deserialize<'de> for Block {
             "text" => {
                 let wire: TextBlockFields =
                     sonic_rs::from_str(tagged.raw()).map_err(serde::de::Error::custom)?;
-                Ok(Self::Text { text: wire.text })
+                Ok(Self::Text {
+                    text: wire.text,
+                    replay: wire.replay,
+                })
             }
             "reasoning" => {
                 let wire: ReasoningBlockFields =
@@ -176,6 +193,7 @@ impl<'de> Deserialize<'de> for Block {
                     id: wire.id,
                     name: wire.name,
                     input: wire.input,
+                    replay: wire.replay,
                 })
             }
             other => Err(serde::de::Error::custom(format!(
@@ -367,6 +385,13 @@ pub enum EntryKind {
         #[cfg_attr(feature = "schema", schemars(required))]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route: Option<AssistantRoute>,
+        /// The opaque provider replay payload for the whole response, when the
+        /// provider returned one.
+        ///
+        /// Omitted when absent; an explicit `null` is not a valid encoding of
+        /// absence and is rejected by the journal codec, like `route`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay: Option<RawJson>,
     },
     /// A tool call result.
     ToolResult {

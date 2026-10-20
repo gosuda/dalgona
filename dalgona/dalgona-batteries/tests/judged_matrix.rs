@@ -508,7 +508,7 @@ fn assistant_texts(rig: &Rig) -> TestResult<Vec<String>> {
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        dal_core::Block::Text { text } => Some(text.as_ref()),
+                        dal_core::Block::Text { text, .. } => Some(text.as_ref()),
                         _ => None,
                     })
                     .collect::<String>(),

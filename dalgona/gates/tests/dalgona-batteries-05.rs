@@ -2,7 +2,7 @@
 //! Ask fails closed without an answerer and records real RPC and TUI answers.
 use dalgona_gates::support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::time::Duration;
 
@@ -44,7 +44,7 @@ fn ask_fails_closed_on_print_surface_without_answerer() -> support::TestResult<(
     ];
     let journal = support::run_scripted_print(
         &scratch,
-        "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]",
+        "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]",
         &steps,
         "ask me",
     )?;
@@ -103,53 +103,76 @@ async fn rpc_call(
     }
 }
 
-async fn rpc_next_request(
-    peer: &mut dal_wire::transport::MemoryPeer,
-) -> support::TestResult<String> {
-    loop {
-        let frame = rpc_next(peer, "ask request").await?;
-        let update = frame.get("params").and_then(|params| params.get("update"));
-        if frame.get("method").and_then(Value::as_str) == Some("session/update")
-            && update
-                .and_then(|update| update.get("type"))
-                .and_then(Value::as_str)
-                == Some("request_opened")
-        {
-            let id = update
-                .and_then(|update| update.get("id"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    io::Error::other(format!("request opened without an id: {frame}"))
-                })?;
-            return Ok(id.to_owned());
-        }
-    }
+fn str_field<'a>(update: &'a Value, name: &str) -> Option<&'a str> {
+    update.get(name).and_then(Value::as_str)
 }
 
-async fn rpc_until_turn_ended(
-    peer: &mut dal_wire::transport::MemoryPeer,
-) -> support::TestResult<()> {
-    loop {
-        let frame = rpc_next(peer, "turn end").await?;
-        let update = frame.get("params").and_then(|params| params.get("update"));
-        if frame.get("method").and_then(Value::as_str) == Some("session/update")
-            && update
-                .and_then(|update| update.get("type"))
-                .and_then(Value::as_str)
-                == Some("turn_ended")
-        {
+/// What a subscribed wire client has seen of one session: the requests that
+/// opened and are not yet answered, the text of every `ask` notice, and
+/// whether the turn ended. Concurrent updates may arrive in any order
+/// relative to the replies, so every frame the client reads is recorded.
+#[derive(Default)]
+struct Observed {
+    requests: VecDeque<String>,
+    ask_notices: Vec<String>,
+    ended: bool,
+}
+
+impl Observed {
+    fn record(&mut self, frame: &Value) -> support::TestResult<()> {
+        if frame.get("method").and_then(Value::as_str) != Some("session/update") {
             return Ok(());
         }
+        let Some(update) = frame.get("params").and_then(|params| params.get("update")) else {
+            return Ok(());
+        };
+        match str_field(update, "type") {
+            Some("request_opened") => {
+                let id = str_field(update, "id").ok_or_else(|| {
+                    io::Error::other(format!("request opened without an id: {frame}"))
+                })?;
+                self.requests.push_back(id.to_owned());
+            }
+            Some("notice") if str_field(update, "kind") == Some("ask") => {
+                let text = str_field(update, "text")
+                    .ok_or_else(|| io::Error::other(format!("ask notice without text: {frame}")))?;
+                self.ask_notices.push(text.to_owned());
+            }
+            Some("turn_ended") => self.ended = true,
+            _ => {}
+        }
+        Ok(())
     }
 }
 
-fn is_turn_ended(frame: &Value) -> bool {
-    let update = frame.get("params").and_then(|params| params.get("update"));
-    frame.get("method").and_then(Value::as_str) == Some("session/update")
-        && update
-            .and_then(|update| update.get("type"))
-            .and_then(Value::as_str)
-            == Some("turn_ended")
+async fn rpc_observe(
+    peer: &mut dal_wire::transport::MemoryPeer,
+    observed: &mut Observed,
+    what: &str,
+) -> support::TestResult<Value> {
+    let frame = rpc_next(peer, what).await?;
+    observed.record(&frame)?;
+    Ok(frame)
+}
+
+/// Reads and records frames until the reply to call `id`, which must not be
+/// an error.
+async fn rpc_reply(
+    peer: &mut dal_wire::transport::MemoryPeer,
+    observed: &mut Observed,
+    id: i64,
+    method: &str,
+) -> support::TestResult<()> {
+    loop {
+        let frame = rpc_observe(peer, observed, method).await?;
+        if frame.get("id").and_then(Value::as_i64) != Some(id) {
+            continue;
+        }
+        if frame.get("error").is_some() {
+            return Err(io::Error::other(format!("{method} failed: {frame}")).into());
+        }
+        return Ok(());
+    }
 }
 
 fn newest_tool_result(agent: &dal_agent::Agent, tool: &str) -> support::TestResult<String> {
@@ -167,10 +190,14 @@ fn newest_tool_result(agent: &dal_agent::Agent, tool: &str) -> support::TestResu
         .ok_or_else(|| io::Error::other(format!("no {tool} result in view")).into())
 }
 
-async fn answer_rpc_question(
+/// Opens a session, submits one prompt, and answers each question the turn
+/// raises, in order, with the next of `answers` as a `value` answer. Returns
+/// the session and the text of every `ask` notice the client saw by the turn end.
+async fn answer_rpc_questions(
     mut peer: dal_wire::transport::MemoryPeer,
     ws: &str,
-) -> support::TestResult<String> {
+    answers: &[Value],
+) -> support::TestResult<(String, Vec<String>)> {
     rpc_call(
         &mut peer,
         0,
@@ -217,53 +244,57 @@ async fn answer_rpc_question(
         sonic_rs::json!({"sessionId": session.clone(), "command": command_value}),
     )
     .await?;
-    let request = rpc_next_request(&mut peer).await?;
-    rpc_send(
-        &peer,
-        4,
-        "session/answer",
-        sonic_rs::json!({
-            "sessionId": session.clone(),
-            "requestId": request,
-            "answer": {"type": "value", "value": {"text": "gate answer"}},
-        }),
-    )
-    .await?;
-    let mut ended = false;
-    loop {
-        let frame = rpc_next(&mut peer, "answer reply").await?;
-        if frame.get("id").and_then(Value::as_i64) == Some(4) {
-            if frame.get("error").is_some() {
-                return Err(io::Error::other(format!("session/answer failed: {frame}")).into());
+    let mut observed = Observed::default();
+    for (index, answer) in answers.iter().enumerate() {
+        let request = loop {
+            if let Some(request) = observed.requests.pop_front() {
+                break request;
             }
-            break;
-        }
-        if is_turn_ended(&frame) {
-            ended = true;
-        }
+            rpc_observe(&mut peer, &mut observed, "ask request").await?;
+        };
+        let id = 4 + i64::try_from(index)?;
+        rpc_send(
+            &peer,
+            id,
+            "session/answer",
+            sonic_rs::json!({
+                "sessionId": session,
+                "requestId": request,
+                "answer": {"type": "value", "value": answer},
+            }),
+        )
+        .await?;
+        rpc_reply(&mut peer, &mut observed, id, "session/answer").await?;
     }
-    if !ended {
-        rpc_until_turn_ended(&mut peer).await?;
+    while !observed.ended {
+        rpc_observe(&mut peer, &mut observed, "turn end").await?;
     }
-    Ok(session)
+    Ok((session, observed.ask_notices))
 }
 
-/// The same ask tool call answered by a real wire client holding the question
-/// capability. The journal records the supplied answer.
-#[tokio::test]
-async fn ask_answers_on_rpc_surface_with_shared_record() -> support::TestResult<()> {
-    const ASK_ONLY: &str = "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
-    let scratch = support::Scratch::new("ask-rpc-answered")?;
+const GATE_QUESTION: &str =
+    r#"{"questions":[{"id":"gate","header":"Gate","question":"Proceed?","kind":"text"}]}"#;
+const ENVIRONMENT_QUESTION: &str = r#"{"id":"env","header":"Environment","question":"Pick an environment","kind":"single","options":[{"label":"staging"},{"label":"production"}]}"#;
+const FEATURES_QUESTION: &str = r#"{"id":"features","header":"Features","question":"Select features","kind":"multi","options":[{"label":"auth"},{"label":"cache"},{"label":"metrics"}]}"#;
+const TICKET_QUESTION: &str =
+    r#"{"id":"ticket","header":"Ticket","question":"Provide change ticket","kind":"text"}"#;
+
+/// Runs one scripted `ask` call against a real host over the in-memory RPC
+/// transport, answering each raised question in order with `answers`. Returns
+/// the journaled `ask` result and the `ask` notices the wire client received.
+async fn rpc_ask(
+    label: &str,
+    questions: &str,
+    answers: &[Value],
+) -> support::TestResult<(String, Vec<String>)> {
+    const ASK_ONLY: &str = "disabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+    let scratch = support::Scratch::new(label)?;
     let root = scratch.path().to_path_buf();
     std::fs::create_dir_all(root.join("workspace"))?;
     let workspace_path = root.join("workspace");
     let workspace = Workspace::new(workspace_path.clone())?;
     let steps = [
-        support::tool_step(
-            "ask-1",
-            "ask",
-            r#"{"questions":[{"id":"gate","header":"Gate","question":"Proceed?","kind":"text"}]}"#,
-        ),
+        support::tool_step("ask-1", "ask", questions),
         support::text_step("done"),
     ];
     let script = root.join("script.jsonl");
@@ -288,10 +319,10 @@ async fn ask_answers_on_rpc_surface_with_shared_record() -> support::TestResult<
     let (transport, peer) = dal_wire::transport::MemoryTransport::pair(64);
     let server = dal_wire::serve_rpc(host.clone(), transport);
     let ws = workspace_path.display().to_string();
-    let client = answer_rpc_question(peer, &ws);
+    let client = answer_rpc_questions(peer, &ws, answers);
     let (server_outcome, client_outcome) = tokio::join!(server, client);
     server_outcome.map_err(|error| io::Error::other(error.to_string()))?;
-    let session = client_outcome?;
+    let (session, notices) = client_outcome?;
     let agent = host
         .open(
             SessionRef::Resume {
@@ -302,6 +333,18 @@ async fn ask_answers_on_rpc_surface_with_shared_record() -> support::TestResult<
         )
         .await?;
     let report = newest_tool_result(&agent, "ask")?;
+    drop(agent);
+    host.shutdown(Duration::from_secs(2)).await;
+    Ok((report, notices))
+}
+
+/// The same ask tool call answered by a real wire client holding the question
+/// capability, with the strict object the terminal dialog sends. The journal
+/// records the supplied answer.
+#[tokio::test]
+async fn ask_answers_on_rpc_surface_with_shared_record() -> support::TestResult<()> {
+    let answers = [sonic_rs::json!({"text": "gate answer"})];
+    let (report, notices) = rpc_ask("ask-rpc-answered", GATE_QUESTION, &answers).await?;
     assert!(
         report.contains("Gate:"),
         "the shared record names the question header: {report}"
@@ -314,8 +357,71 @@ async fn ask_answers_on_rpc_surface_with_shared_record() -> support::TestResult<
         !report.contains(NO_ANSWER),
         "an answered question never fails closed: {report}"
     );
-    drop(agent);
-    host.shutdown(Duration::from_secs(2)).await;
+    assert!(
+        notices.is_empty(),
+        "an answered question raises no notice: {notices:?}"
+    );
+    Ok(())
+}
+
+/// A wire client answers a single, a multi, and a text question with the
+/// canonical bare values: a string, an array of strings, and a string. Every
+/// answer reaches the shared record and none is discarded as malformed.
+#[tokio::test]
+async fn ask_accepts_bare_wire_answers_on_rpc_surface() -> support::TestResult<()> {
+    let questions = format!(
+        r#"{{"questions":[{ENVIRONMENT_QUESTION},{FEATURES_QUESTION},{TICKET_QUESTION}]}}"#
+    );
+    let answers = [
+        sonic_rs::json!("staging"),
+        sonic_rs::json!(["auth", "metrics"]),
+        sonic_rs::json!("TICKET-1234"),
+    ];
+    let (report, notices) = rpc_ask("ask-rpc-bare", &questions, &answers).await?;
+    for line in [
+        "Environment: staging",
+        "Features: auth, metrics",
+        "Ticket: TICKET-1234",
+    ] {
+        assert!(
+            report.contains(line),
+            "the shared record carries `{line}`: {report}"
+        );
+    }
+    assert!(
+        !report.contains(NO_ANSWER) && !report.contains("Unanswered"),
+        "every bare answer is taken: {report}"
+    );
+    assert!(
+        notices.is_empty(),
+        "no bare answer is reported malformed: {notices:?}"
+    );
+    Ok(())
+}
+
+/// An object keeps its strict member set over the wire: an unknown member
+/// never decodes. The question fails closed with the no-answer text and the
+/// client receives exactly one notice that names the question.
+#[tokio::test]
+async fn ask_refuses_unknown_object_members_on_rpc_surface() -> support::TestResult<()> {
+    let questions = format!(r#"{{"questions":[{ENVIRONMENT_QUESTION}]}}"#);
+    let answers = [sonic_rs::json!({"selected": ["staging"], "admin_override": true})];
+    let (report, notices) = rpc_ask("ask-rpc-unknown-member", &questions, &answers).await?;
+    assert!(
+        report.contains(NO_ANSWER),
+        "an object with an unknown member fails closed: {report}"
+    );
+    assert!(
+        !report.contains("Environment:"),
+        "no answer line is composed: {report}"
+    );
+    let [notice] = notices.as_slice() else {
+        return Err(format!("expected exactly one ask notice: {notices:?}").into());
+    };
+    assert!(
+        notice.contains("malformed answer for question \"Environment\""),
+        "the notice names the question: {notice}"
+    );
     Ok(())
 }
 
@@ -334,7 +440,7 @@ fn ask_answers_on_tui_surface_with_shared_record() -> support::TestResult<()> {
         support::text_step("done"),
     ];
     let scratch = support::Scratch::new("ask-tui-answered")?;
-    let config = "model = \"openai/gpt-6-luna\"\napproval = \"all\"\ndisabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n";
+    let config = "model = \"openai/gpt-6-luna\"\napproval = \"all\"\ndisabled_batteries = [\"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n";
     let run = support::Pane::start_scripted(scratch, config, &steps)?;
     {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);

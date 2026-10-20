@@ -564,49 +564,75 @@ async fn replace_happy_path_writes() {
 }
 
 #[test]
-fn contract_enumeration() {
-    // Every dialect renders every EngineError variant without panicking and
-    // parse-class renderings carry the current-dialect suffix. Each class
-    // keeps a distinct wire name and preserves the probe message, so
-    // collapsing every class to one rendering must turn this test red.
-    let mut names = std::collections::BTreeSet::new();
-    for style in [
-        DialectId::Anchor,
-        DialectId::Replace,
-        DialectId::Hashline,
-        DialectId::HashlineLight,
-        DialectId::HashlineEnhanced,
-        DialectId::ApplyPatch,
-    ] {
-        for class in [
-            super::ir::ErrorClass::Parse,
-            super::ir::ErrorClass::Resolve,
-            super::ir::ErrorClass::Proof,
-            super::ir::ErrorClass::Stale,
-            super::ir::ErrorClass::File,
-            super::ir::ErrorClass::Limit,
-            super::ir::ErrorClass::Blocked,
-            super::ir::ErrorClass::Io,
-        ] {
-            let error = super::ir::EngineError::new(class, "probe");
-            assert_eq!(error.class, class);
-            assert!(error.message.contains("probe"), "{}", error.message);
-            assert_eq!(error.to_string(), "probe");
-            names.insert(format!("{class:?}"));
-            let rendered = match class {
-                super::ir::ErrorClass::Parse => {
-                    styles::with_suffix(style, super::ir::ParseError::new(error.message.clone()))
-                }
-                _ => error.message.clone(),
-            };
-            assert_ne!(rendered, "");
-            if class == super::ir::ErrorClass::Parse {
-                assert!(rendered.contains("Current edit_style is"), "{rendered}");
-                assert!(rendered.contains("probe"), "{rendered}");
-            }
-        }
+fn error_class_wire_names_are_the_published_lowercase_words() {
+    use super::ir::ErrorClass;
+    let table = [
+        (ErrorClass::Parse, "\"parse\""),
+        (ErrorClass::Resolve, "\"resolve\""),
+        (ErrorClass::Proof, "\"proof\""),
+        (ErrorClass::Stale, "\"stale\""),
+        (ErrorClass::File, "\"file\""),
+        (ErrorClass::Limit, "\"limit\""),
+        (ErrorClass::Blocked, "\"blocked\""),
+        (ErrorClass::Io, "\"io\""),
+    ];
+    for (class, wire) in table {
+        assert_eq!(
+            sonic_rs::to_string(&class).expect("class serializes"),
+            wire,
+            "{class:?}"
+        );
     }
-    assert_eq!(names.len(), 8, "{names:?}");
+}
+
+/// Every dialect with the exact name its parse errors must carry.
+const DIALECT_NAMES: [(DialectId, &str); 6] = [
+    (DialectId::Anchor, "anchor"),
+    (DialectId::Replace, "replace"),
+    (DialectId::Hashline, "hashline"),
+    (DialectId::HashlineLight, "hashline-light"),
+    (DialectId::HashlineEnhanced, "hashline-enhanced"),
+    (DialectId::ApplyPatch, "apply_patch"),
+];
+
+#[test]
+fn parse_suffix_names_exactly_the_current_dialect() {
+    for (style, name) in DIALECT_NAMES {
+        let text = styles::with_suffix(style, super::ir::ParseError::new("probe"));
+        assert_eq!(
+            text,
+            format!(
+                "probe\nCurrent edit_style is \"{name}\" for this model; past calls in history may use another dialect. Do not imitate them."
+            ),
+            "{style:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_dialect_rejects_a_junk_payload_naming_itself() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    for (style, name) in DIALECT_NAMES {
+        let Err(error) = plan(&session, style, "junk").await else {
+            panic!("{style:?} must reject a junk payload");
+        };
+        assert_eq!(error.class, super::ir::ErrorClass::Parse, "{style:?}");
+        let suffix = format!(
+            "\nCurrent edit_style is \"{name}\" for this model; past calls in history may use another dialect. Do not imitate them."
+        );
+        assert!(
+            error.message.ends_with(&suffix),
+            "{style:?}: {}",
+            error.message
+        );
+        assert_eq!(
+            error.message.matches("Current edit_style is").count(),
+            1,
+            "{style:?}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -684,6 +710,10 @@ impl Services for NeverServices {
     }
 
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
+        unreachable!("replacement test does not use services")
+    }
+
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
         unreachable!("replacement test does not use services")
     }
 
@@ -1823,7 +1853,13 @@ async fn stage_boundary_lines_gap_span() {
     let bytes = b"a\nb\nc\n";
     let digest = *blake3::hash(bytes).as_bytes();
     session.seen.show(session.session, "a.txt", digest, 1, 3);
-    for (first, last) in [(1_usize, 1_usize), (3, 3)] {
+    for (first, last, expected) in [
+        (1_usize, 1_usize, &b"X\nb\nc\n"[..]),
+        (1, 2, b"X\nc\n"),
+        (2, 3, b"a\nX\n"),
+        (3, 3, b"a\nb\nX\n"),
+        (1, 3, b"X\n"),
+    ] {
         let staged = stage_one(
             &session,
             path,
@@ -1841,7 +1877,11 @@ async fn stage_boundary_lines_gap_span() {
         )
         .await
         .expect("boundary span plans");
-        assert!(staged.after.is_some());
+        assert_eq!(
+            &*staged.after.expect("after"),
+            expected,
+            "span {first}-{last}"
+        );
     }
     // Invalid span combinations reject before any coverage check.
     for (first, last) in [(0_usize, 2_usize), (2, 1)] {
@@ -2659,5 +2699,220 @@ async fn patch_dispatch_malformed_json_gets_documented_error() {
             error.to_string().starts_with("patch: invalid input:"),
             "documented error text, got: {error}"
         );
+    }
+}
+
+#[cfg(unix)]
+mod modes {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    use crate::patch::ir::ErrorClass;
+
+    use super::*;
+
+    fn file_mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("published file metadata")
+            .mode()
+            & 0o777
+    }
+
+    fn restrict(path: &std::path::Path, bits: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))
+            .expect("seed permissions");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_target_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("secret.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o600);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"secret.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        assert_eq!(file_mode(&path), 0o600, "update keeps the target mode");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_executable_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("script.sh");
+        tokio::fs::write(&path, b"old\n").await.expect("seed");
+        restrict(&path, 0o755);
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"script.sh\",\"old\":\"old\",\"new\":\"new\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"new\n");
+        assert_eq!(file_mode(&path), 0o755, "exec bit survives an update");
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_readonly_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("locked.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o400);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"locked.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        assert_eq!(file_mode(&path), 0o400, "read-only target stays read-only");
+    }
+
+    #[tokio::test]
+    async fn commit_update_stamps_bits_the_umask_narrowed_at_creation() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("shared.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o664);
+        let session = test_session(dir.path(), false);
+        let input =
+            "{\"changes\":[{\"path\":\"shared.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        // The staged temp is born with the saved mode narrowed by the umask,
+        // which drops group write under the usual 022. Only the exact stamp
+        // on the open handle restores it before publication.
+        assert_eq!(file_mode(&path), 0o664, "update keeps narrowed bits");
+    }
+
+    #[tokio::test]
+    async fn failed_later_publication_restores_a_published_read_only_update() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let locked = dir.path().join("locked.txt");
+        tokio::fs::write(&locked, b"before\n").await.expect("seed");
+        // The owner class denies writing, so the published file cannot be
+        // reopened for write. The group bit is one a 022 umask strips at
+        // creation, so only the exact stamp can bring it back.
+        restrict(&locked, 0o464);
+        // Planning and staging only touch short temp names, so a name past
+        // NAME_MAX is refused only when publication renames onto it: a real
+        // failure after the earlier update has already published.
+        let overlong = "x".repeat(300);
+        assert!(
+            std::fs::File::create(dir.path().join(&overlong)).is_err(),
+            "fixture needs a filesystem that refuses 300-byte names"
+        );
+        let session = test_session(dir.path(), false);
+        let created = format!(r#"{{"path":"{overlong}","create":"body\n"}}"#);
+        let input = format!(
+            r#"{{"changes":[{{"path":"locked.txt","old":"before","new":"after"}},{created}]}}"#
+        );
+        let staged = plan(&session, DialectId::Replace, &input)
+            .await
+            .expect("plan");
+        // Commit publishes in plan order, and plans sort by path.
+        assert_eq!(staged.files[0].path, std::path::Path::new("locked.txt"));
+
+        let output = commit(&session, staged, &[]).await;
+
+        assert_eq!(output.error_class, Some(ErrorClass::Io));
+        assert!(
+            output.text.contains("Nothing was written"),
+            "{}",
+            output.text
+        );
+        assert_eq!(tokio::fs::read(&locked).await.expect("read"), b"before\n");
+        assert_eq!(file_mode(&locked), 0o464, "rollback keeps the mode");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read workspace")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect();
+        assert_eq!(names, ["locked.txt"], "nothing else survives");
+    }
+
+    #[tokio::test]
+    async fn commit_create_uses_0644_under_umask() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("new.txt");
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"new.txt\",\"create\":\"body\\n\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"body\n");
+        // 0644 can only be narrowed by the umask, never widened: group and
+        // other write bits must be absent under any umask.
+        let mode = file_mode(&path);
+        assert_eq!(
+            mode & 0o022,
+            0,
+            "new file must not be group- or other-writable: {mode:o}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_rename_carries_source_mode_to_destination() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        std::fs::write(dir.path().join("a.txt"), b"alpha\n").expect("seed source");
+        restrict(&dir.path().join("a.txt"), 0o750);
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"a.txt\",\"rename\":\"sub/b.txt\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let destination = dir.path().join("sub/b.txt");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"alpha\n"
+        );
+        assert_eq!(
+            file_mode(&destination),
+            0o750,
+            "destination keeps the source mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_update_with_rename_preserves_source_mode() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        std::fs::write(dir.path().join("a.txt"), b"one\ntwo\n").expect("seed source");
+        restrict(&dir.path().join("a.txt"), 0o750);
+        let session = test_session(dir.path(), false);
+        let input = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: a.txt\n",
+            "*** Move to: b.txt\n",
+            "@@\n",
+            "-two\n",
+            "+dos\n",
+            "*** End Patch\n",
+        );
+        let staged = plan(&session, DialectId::ApplyPatch, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let destination = dir.path().join("b.txt");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"one\ndos\n"
+        );
+        assert_eq!(file_mode(&destination), 0o750);
+        assert!(std::fs::metadata(dir.path().join("a.txt")).is_err());
     }
 }

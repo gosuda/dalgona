@@ -4,6 +4,7 @@ use super::{
     Rejection, ResolveError, ResolvedCall, Stop, StreamChannel, StreamEvent, TurnEndStop, TurnId,
     TurnStage, TurnState, UpdateKind, Usage,
 };
+use crate::model::ReplayCapture;
 
 pub(super) fn invalid(text: &str) -> Rejection {
     Rejection::Invalid {
@@ -20,6 +21,7 @@ pub(super) fn zero_usage() -> Usage {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -93,6 +95,13 @@ pub(super) fn compaction_started_notice(
         text: text.into(),
     })
 }
+/// Converts a token bill to the character basis of `estimate_tokens`, with saturation.
+pub(super) fn characters_billed_as(tokens: u64) -> u64 {
+    tokens.saturating_mul(7) / 2
+}
+
+/// Returns the character weight for the unmeasured context estimate.
+/// Compaction parts use their stored token bill, not their encoded image size.
 pub(super) fn entry_weight(entry: &Entry) -> u64 {
     match &entry.kind {
         EntryKind::User { parts } | EntryKind::ToolResult { parts, .. } => {
@@ -105,11 +114,16 @@ pub(super) fn entry_weight(entry: &Entry) -> u64 {
         {
             text.len() as u64
         }
-        EntryKind::Compaction { summary, parts, .. } => {
+        EntryKind::Compaction {
+            summary,
+            parts,
+            parts_tokens,
+            ..
+        } => {
             if parts.is_empty() {
                 summary.as_ref().map_or(0, |text| text.len() as u64)
             } else {
-                parts.iter().map(journal_part_bytes).sum()
+                characters_billed_as(*parts_tokens)
             }
         }
         _ => 0,
@@ -117,7 +131,7 @@ pub(super) fn entry_weight(entry: &Entry) -> u64 {
 }
 pub(super) fn entry_token_weight(entry: &Entry) -> u64 {
     match &entry.kind {
-        EntryKind::Assistant { usage, .. } => usage.input_tokens,
+        EntryKind::Assistant { usage, .. } if usage.input_tokens > 0 => usage.input_tokens,
         EntryKind::Compaction {
             parts,
             parts_tokens,
@@ -137,7 +151,7 @@ pub(super) fn journal_part_bytes(part: &JournalPart) -> u64 {
 }
 pub(super) fn block_bytes(block: &Block) -> u64 {
     match block {
-        Block::Text { text } | Block::Reasoning { text, .. } => text.len() as u64,
+        Block::Text { text, .. } | Block::Reasoning { text, .. } => text.len() as u64,
         Block::ToolCall { input, .. } => input.as_str().len() as u64,
     }
 }
@@ -210,32 +224,65 @@ pub(super) fn resolution_failure(call: &ResolvedCall) -> Option<Box<str>> {
         }
     }
 }
+/// The calls a turn stage tracks as pending.
+fn staged_pending(stage: &TurnStage) -> &[PendingCall] {
+    match stage {
+        TurnStage::Dispatching { pending } | TurnStage::Resolving { pending } => pending,
+        TurnStage::Streaming { .. } | TurnStage::Boundary | TurnStage::Compacting { .. } => &[],
+    }
+}
+
+/// The tool calls of a journaled partial response that `staged` does not
+/// track, each call identity once, in content order.
+fn untracked_partial_calls<'a>(
+    staged: &'a [PendingCall],
+    partial: Option<&'a PartialResponse>,
+) -> impl Iterator<Item = (&'a CallId, &'a str)> {
+    let content: &[Block] = match partial {
+        Some(partial) => partial.content.as_slice(),
+        None => &[],
+    };
+    content
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, block)| {
+            let Block::ToolCall { id, name, .. } = block else {
+                return None;
+            };
+            let tracked = staged.iter().any(|item| item.call == *id)
+                || content[..index]
+                    .iter()
+                    .any(|prior| matches!(prior, Block::ToolCall { id: other, .. } if other == id));
+            (!tracked).then_some((id, &**name))
+        })
+}
+
 /// Calls that still need a result when a turn ends: the stage's pending calls, then
 /// tool calls from a journaled partial response that no stage tracked.
+///
+/// The list is owned because the turn ending rewrites the phase that holds the stage.
+/// [`unsettled_call_count`] counts the same list without building it.
 pub(super) fn unsettled_calls(
-    stage: TurnStage,
+    stage: &TurnStage,
     partial: Option<&PartialResponse>,
 ) -> Vec<PendingCall> {
-    let mut pending = match stage {
-        TurnStage::Dispatching { pending } | TurnStage::Resolving { pending } => pending,
-        TurnStage::Streaming { .. } | TurnStage::Boundary | TurnStage::Compacting { .. } => {
-            Vec::new()
-        }
-    };
-    let partial_calls = partial.into_iter().flat_map(|partial| &partial.content);
-    for block in partial_calls {
-        if let Block::ToolCall { id, name, .. } = block
-            && !pending.iter().any(|item| item.call == *id)
-        {
-            pending.push(PendingCall {
-                call: id.clone(),
-                name: name.clone(),
-                started: false,
-                promotes: None,
-            });
-        }
-    }
+    let staged = staged_pending(stage);
+    let mut pending = staged.to_vec();
+    pending.extend(
+        untracked_partial_calls(staged, partial).map(|(call, name)| PendingCall {
+            call: call.clone(),
+            name: name.into(),
+            started: false,
+            promotes: None,
+        }),
+    );
     pending
+}
+
+/// The length of [`unsettled_calls`], without copying a call.
+pub(super) fn unsettled_call_count(stage: &TurnStage, partial: Option<&PartialResponse>) -> usize {
+    let staged = staged_pending(stage);
+    staged.len() + untracked_partial_calls(staged, partial).count()
 }
 /// The call and extension a guarding hook result names.
 pub(super) struct HookTarget {
@@ -264,6 +311,11 @@ pub(super) struct InferredResponse {
     pub(super) calls: Vec<(CallId, Box<str>)>,
     pub(super) usage: Option<Usage>,
     pub(super) stop: Option<Stop>,
+    /// The response's exact provider replay capture, when its stream carried
+    /// one. A tool-call response is not a message replay: the policy drops a
+    /// `MessageReplay` event there under the existing late-event rule, so
+    /// `stop` still decides the call flow.
+    pub(super) replay: Option<ReplayCapture>,
 }
 
 pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResponse, Rejection> {
@@ -271,6 +323,11 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
     let mut calls = Vec::new();
     let mut usage = None;
     let mut stop = None;
+    let mut replay = None;
+    // The event grammar puts the capture after the tool calls and before the
+    // usage; a capture arriving outside that window is a late event, dropped
+    // in release and flagged in debug, like every other late stream event.
+    let mut replay_closed = false;
     let mut current_reasoning = None;
     // Adjacent text deltas are one run of prose: a block per token would split
     // a reply into one transcript row per delta.
@@ -307,10 +364,39 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
                     id: call,
                     name,
                     input: args,
+                    replay: None,
                 });
             }
-            StreamEvent::Usage(measurement) => usage = Some(measurement),
+            StreamEvent::Usage(measurement) => {
+                // A capture must not follow the usage: anything arriving now
+                // is outside the grammar's window and is dropped as a late
+                // event rather than attached to the response.
+                replay_closed = true;
+                usage = Some(measurement);
+            }
             StreamEvent::Stop(reason) => stop = Some(reason),
+            StreamEvent::MessageReplay { capture } => {
+                // One capture per response, inside the grammar's window: not
+                // after the usage. A duplicate, or a capture outside the
+                // window, is a late event under the existing policy - flagged
+                // in debug, dropped in release, and never allowed to
+                // overwrite a capture already accepted. Whether the response
+                // may carry a capture at all is decided once the whole
+                // response is known, after the loop.
+                if replay_closed {
+                    debug_assert!(
+                        false,
+                        "message replay event arrived after its response's usage; add an explicit policy"
+                    );
+                } else if replay.is_none() {
+                    replay = Some(capture);
+                } else {
+                    debug_assert!(
+                        false,
+                        "duplicate message replay event; add an explicit policy"
+                    );
+                }
+            }
             StreamEvent::Compaction { .. } => {
                 return Err(invalid(
                     "native compaction outcome appeared in a turn stream",
@@ -319,11 +405,19 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
         }
     }
     flush_text_run(&mut blocks, &mut text_run);
+    // A response that called tools is not a message replay: there is no
+    // closing entry for the capture to ride on. Scripted providers emit the
+    // capture alongside tool calls legitimately, so this is a silent drop
+    // under the same policy that already discarded its streamed state.
+    if !calls.is_empty() {
+        replay = None;
+    }
     Ok(InferredResponse {
         blocks,
         calls,
         usage,
         stop,
+        replay,
     })
 }
 
@@ -362,6 +456,7 @@ fn flush_text_run(blocks: &mut Vec<Block>, text_run: &mut String) {
     if !text_run.is_empty() {
         blocks.push(Block::Text {
             text: std::mem::take(text_run).into_boxed_str(),
+            replay: None,
         });
     }
 }

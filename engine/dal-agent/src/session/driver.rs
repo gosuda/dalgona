@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use dal_core::ext::{BeforeRequest, Channel, TurnEnd};
 use dal_core::{
-    CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryKind, EntryView, Family, Gen,
-    InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq, Part,
-    Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
+    BlobId, CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryKind, EntryView, Family,
+    Gen, InferFailure, Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq,
+    Part, Purpose, RawJson, RequestParams, ResolvedCall, SessionId, Settled, SettledOutcome, Stop,
     StreamChannel, StreamEvent, ToolResultEvent, TurnId, Usage, Visibility, Workspace,
 };
 use tokio::sync::{Mutex, oneshot};
@@ -30,10 +30,10 @@ use crate::ext::hooks::{
     hook_fanout,
 };
 use crate::ext::overlay::{Overlay, TurnTools};
-use crate::ext::prompt::{PromptSection, SectionCx};
+use crate::ext::prompt::{PromptOrder, PromptSection, SectionCx};
 use crate::ext::services::SessionBackend;
 use crate::ext::{Caller, CallerKind, Services, ToolDescription};
-use crate::host::HostState;
+use crate::host::{DefaultModel, HostShared, HostState};
 use crate::jobs::JobTable;
 use crate::session::actor::{DriverPorts, TurnBatch, TurnWork, WatchOutcome};
 use crate::session::backend::Backend;
@@ -43,9 +43,11 @@ use crate::session::context::{
     system_prompt, tool_list,
 };
 use crate::session::control::ControlCell;
-use crate::session::dispatch::{DispatchCtx, GrantLedger, ReadyCall, plan_units, run_unit};
+use crate::session::dispatch::{
+    DispatchCtx, GrantLedger, ReadyCall, echo_resolved, plan_units, run_unit,
+};
 use crate::session::projection::SnapshotArgs;
-use crate::session::shared::Shared;
+use crate::session::shared::{ChildPromptPolicy, Shared};
 use crate::session::tasks::SessionTasks;
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 use crate::session::{SessionHandle, commands};
@@ -170,6 +172,11 @@ pub(crate) struct DriverDeps {
     pub tasks: SessionTasks,
     /// Whether the journal is in-memory.
     pub ephemeral: bool,
+    /// The default execution mode this session opened under; a default
+    /// saved later reaches only sessions opened after it.
+    pub mode: dal_core::Mode,
+    /// The default reasoning level this session opened under.
+    pub thinking: dal_core::ThinkingLevel,
 }
 
 /// Per-turn driver state.
@@ -308,18 +315,13 @@ impl Driver {
                     answer,
                     by,
                     resolution,
+                    cause,
                 } = waiter.await;
-                let _ = handle
-                    .work(TurnWork::Answered {
-                        resolved: crate::broker::Resolved {
-                            request,
-                            answer,
-                            by,
-                            resolution,
-                            was_default: resolution == crate::broker::Resolution::Unavailable,
-                        },
-                    })
-                    .await;
+                let Some(resolved) = echo_resolved(&request, &answer, &by, resolution, cause)
+                else {
+                    return;
+                };
+                let _ = handle.work(TurnWork::Answered { resolved }).await;
             });
         }
     }
@@ -454,11 +456,7 @@ impl Driver {
                 .or_else(|| api_family(&route))
                 .unwrap_or(Family::Chat);
             let state = self.turn(turn);
-            if state
-                .model
-                .as_ref()
-                .is_some_and(|(current, _)| current != &route)
-            {
+            if !provider_pin_holds(state.model.as_ref().map(|(current, _)| current), &route) {
                 state.provider = None;
             }
             state.model = Some((route, family));
@@ -701,91 +699,171 @@ struct ResolvedRequest {
     entry: dal_provider::CatalogEntry,
 }
 
+/// Whether the provider an earlier round of this turn resolved still
+/// qualifies the route the next batch requests.
+///
+/// The turn keeps the route its last round resolved, and that route names
+/// its provider, while the batch re-sends the requested route, which may
+/// not. They name the same model when family and native id agree and no
+/// two providers disagree, so a provider-less request keeps the pin; a
+/// different model, family, or provider drops it. Exact equality would drop
+/// the pin on every round for a provider-less request.
+fn provider_pin_holds(current: Option<&ModelRoute>, requested: &ModelRoute) -> bool {
+    current.is_none_or(|current| current.same_model(requested))
+}
+
+/// Resolves a requested route through the catalog, caching it for commands.
+///
+/// A route that names its provider resolves exactly that provider's row and
+/// never consults the synthetic registry: a provider-native id that spells a
+/// registered synthetic id is still the provider's model. `provider` is the
+/// provider an earlier round of the same turn resolved; it only qualifies a
+/// route that does not name one.
+async fn resolve_requested(
+    shared: &HostShared,
+    route: &ModelRoute,
+    provider: Option<&str>,
+) -> Result<ResolvedRequest, Box<str>> {
+    match (route, provider) {
+        (
+            ModelRoute::Api {
+                provider: Some(_), ..
+            },
+            _,
+        ) => {
+            resolve_catalog(
+                shared,
+                &crate::host::ops::request_reference(route),
+                Some(route),
+            )
+            .await
+        }
+        (ModelRoute::Api { model, .. }, Some(provider)) => {
+            resolve_reference(shared, &format!("{provider}/{model}"), None).await
+        }
+        _ => {
+            resolve_reference(
+                shared,
+                &crate::host::ops::request_reference(route),
+                Some(route),
+            )
+            .await
+        }
+    }
+}
+
+/// Resolves the live default model: a committed structured route resolves
+/// as a requested route, so every family survives a restart exactly; a
+/// legacy-only file resolves its reference string as before.
+async fn resolve_default(shared: &HostShared) -> Result<ResolvedRequest, Box<str>> {
+    match shared.default_model() {
+        Some(DefaultModel::Route(route)) => resolve_requested(shared, &route, None).await,
+        Some(DefaultModel::Reference(reference)) => {
+            resolve_reference(shared, &reference, None).await
+        }
+        None => resolve_reference(shared, "", None).await,
+    }
+}
+
+/// Resolves `reference`, or the model `route` names when one is given.
+async fn resolve_reference(
+    shared: &HostShared,
+    reference: &str,
+    route: Option<&ModelRoute>,
+) -> Result<ResolvedRequest, Box<str>> {
+    if reference.is_empty() {
+        return Err("no model configured: set dal.toml [models] default.".into());
+    }
+    if let Some(found) = synthetic(shared, reference) {
+        return Ok(ResolvedRequest {
+            family: Family::Chat,
+            provider: found.provider(),
+            entry: found.entry(),
+            route: found.route(),
+        });
+    }
+    resolve_catalog(shared, reference, route).await
+}
+
+/// Resolves `reference`, or the model `route` names, through the provider
+/// catalog alone; the synthetic registry is not consulted.
+async fn resolve_catalog(
+    shared: &HostShared,
+    reference: &str,
+    route: Option<&ModelRoute>,
+) -> Result<ResolvedRequest, Box<str>> {
+    let catalog = shared
+        .providers
+        .catalog()
+        .await
+        .map_err(|error| format!("provider catalog unavailable: {error}").into_boxed_str())?;
+    shared.cache_catalog(catalog.clone());
+    let aliases: Vec<(Box<str>, Box<str>)> = shared
+        .config
+        .aliases()
+        .iter()
+        .map(|(name, target)| (name.clone(), target.clone()))
+        .collect();
+    let resolved = match route {
+        Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
+        None => dal_provider::resolve(&catalog, &aliases, reference),
+    }
+    .map_err(|error| {
+        let shown = route.and_then(ModelRoute::provider).map_or_else(
+            || reference.to_owned(),
+            |provider| format!("{provider}/{reference}"),
+        );
+        format!("model {shown} did not resolve: {error}").into_boxed_str()
+    })?;
+    Ok(ResolvedRequest {
+        family: api_family(&resolved.route).unwrap_or(Family::Chat),
+        provider: resolved.provider.clone(),
+        entry: resolved.entry.clone(),
+        route: resolved.route,
+    })
+}
+
+/// Resolves a registered synthetic model; harness ids never match.
+fn synthetic(shared: &HostShared, reference: &str) -> Option<crate::ext::synthetic::Found> {
+    if reference.starts_with("dalgon/") {
+        return None;
+    }
+    crate::ext::synthetic::find(shared, reference)
+}
+
+/// The model a turn opening will request, described as `before_request`
+/// hooks see it: the route the session selected, else the configured default,
+/// resolved by the same functions the request itself uses. `None` when the
+/// route does not resolve.
+pub(crate) async fn opening_model(
+    shared: &HostShared,
+    requested: Option<&ModelRoute>,
+    thinking: dal_core::ThinkingLevel,
+) -> Option<ModelInfo> {
+    let resolved = match requested {
+        Some(route) => resolve_requested(shared, route, None).await,
+        None => resolve_default(shared).await,
+    }
+    .ok()?;
+    Some(model_info_for(
+        &resolved.entry,
+        &resolved.route,
+        &resolved.provider,
+        thinking,
+    ))
+}
+
 impl Driver {
     /// Resolves the request route through the catalog, caching it for commands.
     async fn resolve_model(&self, turn: TurnId) -> Result<ResolvedRequest, Box<str>> {
         let Some(route) = self.turn_model(turn) else {
-            return self.resolve_default_model().await;
+            return resolve_default(&self.deps.host.shared).await;
         };
         let provider = self
             .turns
             .get(&turn)
             .and_then(|state| state.provider.as_deref());
-        match (&route, provider) {
-            (ModelRoute::Api { model, .. }, Some(provider)) => {
-                self.resolve_reference(&format!("{provider}/{model}"), None)
-                    .await
-            }
-            _ => {
-                self.resolve_reference(&crate::host::ops::request_reference(&route), Some(&route))
-                    .await
-            }
-        }
-    }
-
-    async fn resolve_default_model(&self) -> Result<ResolvedRequest, Box<str>> {
-        let reference = self
-            .deps
-            .host
-            .shared
-            .config
-            .model()
-            .unwrap_or("")
-            .to_owned();
-        self.resolve_reference(&reference, None).await
-    }
-
-    /// Resolves `reference`, or the model `route` names when one is given.
-    async fn resolve_reference(
-        &self,
-        reference: &str,
-        route: Option<&ModelRoute>,
-    ) -> Result<ResolvedRequest, Box<str>> {
-        if reference.is_empty() {
-            return Err("no model configured: set dal.toml [models] default.".into());
-        }
-        if let Some(found) = self.synthetic(reference) {
-            return Ok(ResolvedRequest {
-                family: Family::Chat,
-                provider: found.provider(),
-                entry: found.entry(),
-                route: found.route(),
-            });
-        }
-        let providers = &self.deps.host.shared.providers;
-        let catalog = providers
-            .catalog()
-            .await
-            .map_err(|error| format!("provider catalog unavailable: {error}").into_boxed_str())?;
-        self.deps.host.shared.cache_catalog(catalog.clone());
-        let aliases: Vec<(Box<str>, Box<str>)> = self
-            .deps
-            .host
-            .shared
-            .config
-            .aliases()
-            .iter()
-            .map(|(name, target)| (name.clone(), target.clone()))
-            .collect();
-        let resolved = match route {
-            Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
-            None => dal_provider::resolve(&catalog, &aliases, reference),
-        }
-        .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
-        Ok(ResolvedRequest {
-            family: api_family(&resolved.route).unwrap_or(Family::Chat),
-            provider: resolved.provider.clone(),
-            entry: resolved.entry.clone(),
-            route: resolved.route,
-        })
-    }
-
-    /// Resolves a registered synthetic model; harness ids never match.
-    fn synthetic(&self, reference: &str) -> Option<crate::ext::synthetic::Found> {
-        if reference.starts_with("dalgon/") {
-            return None;
-        }
-        crate::ext::synthetic::find(&self.deps.host.shared, reference)
+        resolve_requested(&self.deps.host.shared, &route, provider).await
     }
 
     /// Returns the turn's active route, when the actor snapshotted one.
@@ -804,27 +882,42 @@ impl Driver {
         resolved: &ResolvedRequest,
         params: RequestParams,
     ) -> ModelRequest {
-        let mode = self.deps.host.shared.config.mode();
-        let thinking = self.deps.host.shared.config.thinking();
+        let mode = self.deps.mode;
+        let thinking = self.deps.thinking;
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
-        let info = model_info_for(&resolved.entry, &resolved.route, thinking);
+        let info = model_info_for(
+            &resolved.entry,
+            &resolved.route,
+            &resolved.provider,
+            thinking,
+        );
         let model_id = cache_model_id(&resolved.provider, &resolved.route);
         let mur = self.turn(turn).round;
         self.turn(turn).round = mur + 1;
         let params = self
             .hook_params(turn, &generation, &info, params, mur)
             .await;
-        let system = self.system(turn, &generation, &turn_tools, mode, &info);
+        let entries = self.deps.shared.leaf_entries();
+        let context = context_items(recent_leaf(&entries));
+        // Replayed history can carry letter images admitted for an earlier
+        // image-capable turn; a model that cannot read images must never
+        // receive those bytes, so the context degrades to words first.
+        let context = if resolved.entry.image_input {
+            context
+        } else {
+            strip_images_for_text_model(context)
+        };
+        let context: Arc<[ContextItem]> = context.into();
+        let delivered = context_image_digests(&context);
+        let system = self.system(turn, &generation, &turn_tools, mode, &info, &delivered);
         let surface = search_surface(&resolved.provider, &resolved.route);
         let (model_tools, deferred_search) =
             tool_list(&generation, &turn_tools, &info, &model_id, mode, surface);
         self.turn(turn).deferred_search = deferred_search;
         let tools: Arc<[dal_core::ModelToolSpec]> = model_tools.into();
         let visibility = self.tool_boundaries.observe(&tools);
-        let entries = self.deps.shared.leaf_entries();
         let cache_key = cache_key(self.deps.session, compaction_count(&entries), visibility);
-        let context: Arc<[ContextItem]> = context_items(recent_leaf(&entries)).into();
         ModelRequest {
             purpose: Purpose::Turn,
             model: resolved.route.clone(),
@@ -883,6 +976,13 @@ impl Driver {
     }
 
     /// Renders the system prompt for one provider request.
+    ///
+    /// A child prompt policy reshapes the product-owned base sections: an
+    /// explicit system takes the place of the identity and D2 sections, and
+    /// a role appends one section after the assembled base so siblings on
+    /// one model share the cached prefix. Extension-contributed sections
+    /// keep rendering either way, so a child start cannot silently drop
+    /// required extension guidance.
     fn system(
         &mut self,
         turn: TurnId,
@@ -890,18 +990,41 @@ impl Driver {
         turn_tools: &TurnTools,
         mode: dal_core::Mode,
         info: &ModelInfo,
+        delivered: &[BlobId],
     ) -> String {
+        let policy = self.deps.shared.child_prompt_policy();
         let tools = descriptions(generation, turn_tools, info);
         let deps = &self.deps;
-        system_prompt(generation, mode, &|owner, section| {
+        let rendered = |owner: usize, section: &PromptSection| {
             render_section(
                 deps,
                 generation.extensions.get(owner)?,
                 section,
                 turn,
                 &tools,
+                info,
+                delivered,
             )
-        })
+        };
+        match policy {
+            Some(ChildPromptPolicy::System(system)) => {
+                let base = base_without_product_sections(generation, mode, rendered);
+                if base.is_empty() {
+                    system.to_string()
+                } else {
+                    format!("{system}\n\n{base}")
+                }
+            }
+            Some(ChildPromptPolicy::Role(role)) => {
+                let base = system_prompt(generation, mode, &rendered);
+                if base.is_empty() {
+                    role.to_string()
+                } else {
+                    format!("{base}\n\n{role}")
+                }
+            }
+            None => system_prompt(generation, mode, &rendered),
+        }
     }
 
     /// Publishes one hook notice without journaling.
@@ -1052,7 +1175,7 @@ impl Driver {
     /// from a boundary event, and an empty resolved is dropped outside
     /// the resolving stage.
     async fn resolve(&mut self, turn: TurnId) {
-        let mode = self.deps.host.shared.config.mode();
+        let mode = self.deps.mode;
         let workspace = self.deps.workspace.clone();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
@@ -1112,7 +1235,7 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
-            mode: self.deps.host.shared.config.mode(),
+            mode: self.deps.mode,
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
@@ -1121,7 +1244,7 @@ impl Driver {
             backend: Arc::clone(&self.deps.backend),
             broker: Arc::clone(&self.deps.broker),
             policy: batch.policy.clone(),
-            cancel: state.cancel.clone(),
+            cancel: state.cancel.child_token(),
             turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
             parallel_reads: PARALLEL_READS,
             cutoff: None,
@@ -1334,18 +1457,52 @@ impl Driver {
         }
     }
 
+    /// Cuts a settled tool text to the 4096 bytes a hook sees. A tool that
+    /// ends its text with a `Full output: <path>` line names the file that
+    /// holds what the cut drops, so a cut that would lose that line shrinks
+    /// the content to keep it inside the same bound instead.
     fn bounded_preview(text: &str) -> Box<str> {
         const MAX_BYTES: usize = 4096;
         if text.len() <= MAX_BYTES {
             return text.into();
         }
-        let end = text
-            .char_indices()
+        let end = Self::char_floor(text, MAX_BYTES);
+        let Some((start, footer)) = Self::full_output_footer(text) else {
+            return text[..end].into();
+        };
+        let room = MAX_BYTES.saturating_sub(footer.len() + 1);
+        if start + footer.len() <= end || room == 0 {
+            return text[..end].into();
+        }
+        let content = &text[..Self::char_floor(&text[..start], room)];
+        let mut preview = String::with_capacity(MAX_BYTES);
+        preview.push_str(content);
+        if !content.is_empty() && !content.ends_with('\n') {
+            preview.push('\n');
+        }
+        preview.push_str(footer);
+        preview.into()
+    }
+
+    /// The largest char boundary of `text` at or below `max`.
+    fn char_floor(text: &str, max: usize) -> usize {
+        let mut end = max.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    }
+
+    /// The last line of `text` that starts with the full-output prefix, with
+    /// its byte offset. The tool appends that line after everything a command
+    /// printed, so an earlier line of the same shape is command output.
+    fn full_output_footer(text: &str) -> Option<(usize, &str)> {
+        let start = text
+            .rmatch_indices(crate::FULL_OUTPUT_PREFIX)
             .map(|(index, _)| index)
-            .take_while(|index| *index <= MAX_BYTES)
-            .last()
-            .unwrap_or(0);
-        text[..end].into()
+            .find(|index| *index == 0 || text[..*index].ends_with('\n'))?;
+        let line = text[start..].lines().next()?;
+        Some((start, line))
     }
 
     /// Runs the registered compactor chain over the current leaf entries.
@@ -1361,9 +1518,13 @@ impl Driver {
             page: full_page(),
         });
         let total = view.usage.context_tokens;
+        // An all-zero input count is an unmeasured report, not a zero-token
+        // context: it falls back to the leaf estimate like the fold does, or
+        // a shrinking replacement can never read as shrinking.
         let measured = turn
             .and_then(|turn| self.turns.get(&turn))
             .and_then(|state| state.usage)
+            .filter(|usage| usage.input_tokens > 0)
             .map(|usage| {
                 usage.input_tokens + usage.output_tokens + usage.reasoning_tokens.unwrap_or(0)
             });
@@ -1418,6 +1579,30 @@ impl Driver {
             .await;
     }
 
+    /// Clones the live cancellation token for a turn-scoped compaction.
+    ///
+    /// A turn-scoped pass without driver state is not manual: when the
+    /// control cell still holds that turn's live token (a threshold
+    /// compaction arriving before any infer materialized the state) the
+    /// chain stays bound to it, so a user cancel still stops the chain. A
+    /// turn-scoped pass with no live token at all is stale or replaying; it
+    /// fails closed instead of running an uncancellable chain no stop can
+    /// reach.
+    fn compaction_cancel(&self, turn: TurnId) -> Result<CancellationToken, Box<str>> {
+        if let Some(state) = self.turns.get(&turn) {
+            return Ok(state.cancel.clone());
+        }
+        if let Some(token) = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token_for(turn)
+        {
+            return Ok(token);
+        }
+        Err("compaction cancelled.".into())
+    }
+
     /// Runs compactors in canonical order until one commits a replacement.
     async fn compact_span(
         &self,
@@ -1448,7 +1633,7 @@ impl Driver {
                 entry.context_window.map(u64::from),
             ));
         }
-        let resolved = self.resolve_default_model().await?;
+        let resolved = resolve_default(&self.deps.host.shared).await?;
         Ok((
             resolved.route,
             resolved.entry.image_profile,
@@ -1456,69 +1641,79 @@ impl Driver {
         ))
     }
 
-    /// Runs compactors in canonical order until one commits a replacement.
+    /// Runs compactors in canonical order until one commits a shrinking
+    /// replacement.
+    ///
+    /// A committed replacement counts only when it strictly shrinks the
+    /// context under the same token accounting the journal entry reports
+    /// (`tokens_after < tokens_before`). Non-shrinking output earns a
+    /// neutral `compaction_not_shrunk` notice and the chain moves on to the
+    /// next registered compactor. When no compactor shrinks, the last
+    /// non-shrinking summary is still returned: the core fold owns the
+    /// final verdict (`compaction_not_shrunk` on the journal side), so the
+    /// existing outcome for an all-failed run is preserved rather than
+    /// turned into a turn failure.
     async fn run_compactors(
         &self,
         compacted: CompactedSpan<'_>,
     ) -> Result<dal_core::CompactionSummary, Box<str>> {
-        let CompactedSpan {
-            turn,
-            covered,
-            span,
-            first_kept,
-            total,
-            measured,
-            retained,
-            carried,
-            route,
-            image_profile,
-            window,
-        } = compacted;
         let generation = self.deps.host.shared.generation.borrow().clone();
+        // Bind this turn's live token once for the whole chain, through
+        // `compaction_cancel`: a token re-read after the fold ends the turn
+        // cannot see the fired token, and a stale turn with no live token
+        // fails closed instead of running an uncancellable chain.
+        let cancel: CancellationToken = match compacted.turn {
+            None => CancellationToken::new(),
+            Some(turn) => self.compaction_cancel(turn)?,
+        };
         let params = RequestParams {
-            thinking: self.deps.host.shared.config.thinking(),
+            thinking: self.deps.thinking,
             ..RequestParams::default()
         };
         let mut refused: Option<Box<str>> = None;
+        let mut nonshrunk: Option<dal_core::CompactionSummary> = None;
         for entry in generation.compactors.entries() {
+            // A cancelled turn never starts the next link: the check covers
+            // the link already parked, and a result landing after the
+            // cancellation is dropped, not classified.
+            if cancel.is_cancelled() {
+                return Err("compaction cancelled.".into());
+            }
             let Some(compactor) = generation.compactor(entry.name.as_ref()) else {
                 continue;
             };
-            let Some(owner) = generation.extensions.get(entry.ext) else {
+            let Some(caller) = compactor_caller(&generation, entry, compacted.turn) else {
                 continue;
             };
-            let Ok(ext) = owner.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                ext,
-                owner.origin(),
-                owner.inject(),
-                owner.state_version(),
-                CallerKind::Handler,
-                turn,
-            )
-            .with_extension(owner);
             let input = crate::ext::compact::CompactInput {
                 caller: &caller,
-                model: route.clone(),
+                model: compacted.route.clone(),
                 session: self.deps.session,
                 instructions: "",
-                covered,
-                span,
-                first_kept,
-                context_window: window,
-                image_profile,
-                images_elsewhere: retained.count,
-                image_bytes_elsewhere: retained.bytes,
-                carried: carried.clone(),
-                total_tokens: total,
+                covered: compacted.covered,
+                span: compacted.span,
+                first_kept: compacted.first_kept,
+                context_window: compacted.window,
+                image_profile: compacted.image_profile,
+                images_elsewhere: compacted.retained.count,
+                image_bytes_elsewhere: compacted.retained.bytes,
+                carried: compacted.carried.clone(),
+                total_tokens: compacted.total,
                 params: params.clone(),
             };
-            match compactor
-                .compact(input, Arc::clone(&self.deps.services))
-                .await
-            {
+            // Race the compaction against cancellation: the losing future
+            // is dropped at the await point (the mechanism of the other
+            // session service calls); `biased` makes cancellation win a
+            // poll tie.
+            let outcome = tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(crate::ext::CompactError::Service(
+                    crate::error::ServiceError::Cancelled,
+                )),
+                outcome = compactor
+                    .compact(input, Arc::clone(&self.deps.services)) => outcome,
+            };
+            match outcome {
                 Ok(Some(compaction)) => {
                     if compaction_has_reserved_policy_record(&compaction) {
                         refused = Some(
@@ -1527,13 +1722,26 @@ impl Driver {
                         );
                         continue;
                     }
-                    return Ok(summarize(
+                    let summary = summarize(
                         &entry.name,
-                        measured.unwrap_or(total),
-                        covered,
-                        first_kept,
+                        compacted.measured.unwrap_or(compacted.total),
+                        compacted.covered,
+                        compacted.first_kept,
                         &compaction,
-                    ));
+                    );
+                    if summary.tokens_after >= summary.tokens_before {
+                        let text = not_shrunk_text(
+                            &entry.name,
+                            summary.tokens_before,
+                            summary.tokens_after,
+                        );
+                        if let Some(turn) = compacted.turn {
+                            self.notice(turn, "compaction_not_shrunk", &text);
+                        }
+                        nonshrunk = Some(summary);
+                        continue;
+                    }
+                    return Ok(summary);
                 }
                 Ok(None) => {}
                 Err(error) if error.is_cancelled() => {
@@ -1544,8 +1752,44 @@ impl Driver {
                 }
             }
         }
+        if let Some(summary) = nonshrunk {
+            return Ok(summary);
+        }
         Err(refused.unwrap_or_else(|| "no compactor registered.".into()))
     }
+}
+
+/// Mints the host caller for one compactor link from the live generation.
+///
+/// The admitted extension's immutable code identity is captured here, so an
+/// in-flight call cannot borrow a later generation's grant. A missing owner
+/// or an unparsable extension name skips the link, matching the chain's
+/// prior per-link `continue` behavior.
+fn compactor_caller(
+    generation: &Generation,
+    entry: &crate::ext::generation::NamedEntry,
+    turn: Option<TurnId>,
+) -> Option<Caller> {
+    let owner = generation.extensions.get(entry.ext)?;
+    let ext = owner.name().parse::<Name>().ok()?;
+    Some(
+        Caller::new(
+            ext,
+            owner.origin(),
+            owner.inject(),
+            owner.state_version(),
+            CallerKind::Handler,
+            turn,
+        )
+        .with_extension(owner),
+    )
+}
+
+/// The notice text for one compactor's non-shrinking output.
+fn not_shrunk_text(name: &str, tokens_before: u64, tokens_after: u64) -> String {
+    format!(
+        "Compactor {name} did not shrink the context ({tokens_before} to {tokens_after} tokens)."
+    )
 }
 
 fn compaction_has_reserved_policy_record(compaction: &crate::ext::compact::Compaction) -> bool {
@@ -1565,13 +1809,13 @@ fn settled_reply_text(entries: &[EntryView]) -> Box<str> {
         let capacity = content
             .iter()
             .map(|block| match block {
-                dal_core::Block::Text { text } => text.len(),
+                dal_core::Block::Text { text, .. } => text.len(),
                 _ => 0,
             })
             .sum();
         let mut text = String::with_capacity(capacity);
         for block in content {
-            if let dal_core::Block::Text { text: chunk } = block {
+            if let dal_core::Block::Text { text: chunk, .. } = block {
                 text.push_str(chunk);
             }
         }
@@ -1718,6 +1962,120 @@ fn descriptions(
         .collect()
 }
 
+/// Joins the visible prompt sections minus the product-owned base orders,
+/// byte-stable with the default assembly: same visibility gate, same
+/// order, same separator. An explicit child system prompt takes the place
+/// of exactly these sections; every extension section still renders.
+fn base_without_product_sections(
+    generation: &Generation,
+    mode: dal_core::Mode,
+    render: impl Fn(usize, &PromptSection) -> Option<String>,
+) -> String {
+    let mut sections: Vec<(u8, String)> = Vec::new();
+    for (owner, section) in generation.prompt_sections.iter() {
+        if !section_reaches_model(section.visibility(), mode) {
+            continue;
+        }
+        if matches!(section.order(), PromptOrder::Identity | PromptOrder::D2) {
+            continue;
+        }
+        let text = match section {
+            PromptSection::Static { text, .. } => Some(text.to_string()),
+            PromptSection::Session { .. } => render(*owner, section),
+        };
+        if let Some(text) = text {
+            sections.push((section.order().position(), text));
+        }
+    }
+    sections.sort_by_key(|(order, _)| *order);
+    sections
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Whether a section visibility reaches the model in this mode; mirrors
+/// the default request assembler's gate.
+fn section_reaches_model(visibility: Visibility, mode: dal_core::Mode) -> bool {
+    matches!(
+        (visibility, mode),
+        (Visibility::Model, _)
+            | (
+                Visibility::EvalOnly,
+                dal_core::Mode::EvalFirst | dal_core::Mode::EvalOnly
+            )
+    )
+}
+
+/// Drops every image part from one request context for a model that cannot
+/// read images.
+///
+/// Letters degrade to the text descriptions the prompt already shows such a
+/// model (their source stays readable at `letter://`), so the turn proceeds
+/// on words instead of failing at the provider. Only `image/` mimes go, in
+/// both user messages and tool results; text and text blobs stay, and
+/// messages left with no parts stay in place for the adapters' existing
+/// empty-message handling.
+fn strip_images_for_text_model(context: Vec<ContextItem>) -> Vec<ContextItem> {
+    context
+        .into_iter()
+        .map(|item| match item {
+            ContextItem::User { parts } => ContextItem::User {
+                parts: without_images(parts),
+            },
+            ContextItem::ToolResult {
+                call,
+                name,
+                is_error,
+                parts,
+            } => ContextItem::ToolResult {
+                call,
+                name,
+                is_error,
+                parts: without_images(parts),
+            },
+            item @ ContextItem::Assistant { .. } => item,
+        })
+        .collect()
+}
+
+/// Drops the image parts of one message, keeping text and text blobs.
+fn without_images(parts: Vec<Part>) -> Vec<Part> {
+    parts
+        .into_iter()
+        .filter(|part| match part {
+            Part::Image { mime, .. } | Part::Blob { mime, .. } => !mime.starts_with("image/"),
+            Part::Text { .. } => true,
+        })
+        .collect()
+}
+
+/// Digests of the image parts in the request context, history and current
+/// input alike. Sections hide a description behind a name-only line only for
+/// digests among these. Text spills stay out: only `image/` mimes count.
+fn context_image_digests(context: &[ContextItem]) -> Vec<BlobId> {
+    let mut digests = Vec::new();
+    for item in context {
+        let ContextItem::User { parts } = item else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                Part::Image { bytes, mime } if mime.starts_with("image/") => {
+                    let bytes: &[u8] = bytes;
+                    digests.push(BlobId::from_bytes(bytes));
+                }
+                Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => {
+                    digests.push(*blob_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    digests
+}
+
 /// Renders one prompt section through its registered body.
 fn render_section(
     deps: &DriverDeps,
@@ -1725,6 +2083,8 @@ fn render_section(
     section: &PromptSection,
     turn: TurnId,
     tools: &[ToolDescription],
+    model: &ModelInfo,
+    delivered: &[BlobId],
 ) -> Option<String> {
     let PromptSection::Session { section, .. } = section else {
         return None;
@@ -1748,6 +2108,8 @@ fn render_section(
         turn: Some(turn),
         snapshot: deps.generation,
         tools,
+        model: Some(model),
+        delivered_images: delivered,
         instructions: None,
         system_md: None,
     };
@@ -1968,5 +2330,105 @@ mod tests {
         assert!(!compaction_has_reserved_policy_record(&parts(letter(
             "ordinary",
         ))));
+    }
+
+    fn chat(model: &str, provider: Option<&str>) -> ModelRoute {
+        ModelRoute::Api {
+            family: Family::Chat,
+            model: model.into(),
+            provider: provider.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_provider_less_request_keeps_the_pin_its_resolved_route_carries() {
+        // Round one resolves a provider-less request to a route that names
+        // its provider; the next batch re-sends the provider-less request.
+        let resolved = chat("gpt-4o", Some("acme"));
+        assert_ne!(resolved, chat("gpt-4o", None), "exact equality differs");
+        assert!(provider_pin_holds(Some(&resolved), &chat("gpt-4o", None)));
+        assert!(provider_pin_holds(None, &chat("gpt-4o", None)));
+        assert!(provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o", Some("acme"))
+        ));
+    }
+
+    #[test]
+    fn a_different_model_family_or_provider_drops_the_pin() {
+        let resolved = chat("gpt-4o", Some("acme"));
+        assert!(!provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o", Some("beta"))
+        ));
+        assert!(!provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o-mini", None)
+        ));
+        let responses = ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: None,
+        };
+        assert!(!provider_pin_holds(Some(&resolved), &responses));
+        let synthetic = ModelRoute::synthetic("acme/gpt-4o").expect("synthetic route");
+        assert!(!provider_pin_holds(Some(&resolved), &synthetic));
+    }
+
+    const FOOTER: &str =
+        "Full output: /data/sessions/w/s/jobs/0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000.log";
+
+    #[test]
+    fn a_preview_keeps_a_short_text_whole() {
+        let text = format!("short\n{FOOTER}");
+        assert_eq!(&*Driver::bounded_preview(&text), text);
+    }
+
+    #[test]
+    fn a_preview_without_a_footer_is_the_head_cut_at_a_char_boundary() {
+        let preview = Driver::bounded_preview(&"x".repeat(5000));
+        assert_eq!(preview.len(), 4096);
+        let preview = Driver::bounded_preview(&"é".repeat(3000));
+        assert_eq!(preview.len(), 4096);
+        let preview = Driver::bounded_preview(&format!("a{}", "é".repeat(3000)));
+        assert_eq!(preview.len(), 4095, "never splits a char to reach the cap");
+    }
+
+    #[test]
+    fn a_footer_the_cut_would_drop_is_carried_inside_the_bound() {
+        // A full tail of command output, then the tool's footer and status.
+        let text = format!("{}\n{FOOTER}\nCommand exited with code 1", "x".repeat(4096));
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert!(preview.starts_with("xxxx"));
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+        assert!(!preview.contains("Command exited"), "{preview}");
+    }
+
+    #[test]
+    fn a_carried_footer_never_splits_a_char_of_the_content() {
+        let text = format!("{}\n{FOOTER}", "é".repeat(2500));
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+        assert!(preview.starts_with("éé"));
+    }
+
+    #[test]
+    fn command_output_that_looks_like_a_footer_never_replaces_the_real_one() {
+        let text = format!(
+            "Full output: /forged.log\n{}\n{FOOTER}\nCommand exited with code 2",
+            "x".repeat(5000)
+        );
+        let preview = Driver::bounded_preview(&text);
+        assert!(preview.len() <= 4096, "{}", preview.len());
+        assert_eq!(preview.lines().last(), Some(FOOTER));
+    }
+
+    #[test]
+    fn a_footer_already_inside_the_cut_is_left_where_it_is() {
+        let text = format!("{FOOTER}\n{}", "y".repeat(5000));
+        let preview = Driver::bounded_preview(&text);
+        assert_eq!(&*preview, &text[..4096]);
     }
 }

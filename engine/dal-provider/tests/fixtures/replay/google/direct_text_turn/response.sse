@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hel"}]},"index":0}],"usageMetadata":{"promptTokenCount":12,"totalTokenCount":12},"modelVersion":"gemini-3-pro","responseId":"resp-text-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"lo."}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15,"cachedContentTokenCount":4},"modelVersion":"gemini-3-pro","responseId":"resp-text-1"}
+

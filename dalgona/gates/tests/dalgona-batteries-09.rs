@@ -16,7 +16,7 @@ use dal_core::{
 
 const WAIT: Duration = Duration::from_secs(30);
 
-const ONLY_REVIEW: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const ONLY_REVIEW: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 const REVIEWER_FINDING: &str = r#"{"verdict":"findings","findings":[{"path":"notes.txt","line":null,"severity":"major","title":"Broken behavior","detail":"A failure."}],"summary":"reviewed"}"#;
 
 fn git(workspace: &Path, args: &[&str]) -> support::TestResult<()> {

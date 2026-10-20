@@ -45,8 +45,9 @@ use dal_core::{
 };
 use dal_provider::{
     AuthStore, AuthStyle, Capture, CompactOutcome, CredentialKind, EnvSnapshot, NoticeSink,
-    Provider, ProviderConfig, ProviderEntry, ProviderIdentity, ProviderSet, ReplayPayload,
-    ResolvedModel, StopReason, StreamEvent, ToolArgs, ToolCall, Transport, find, items_for, record,
+    Provider, ProviderConfig, ProviderEntry, ProviderIdentity, ProviderSet, ProviderSettings,
+    ReplayPayload, ResolvedModel, StopReason, StreamEvent, ToolArgs, ToolCall, Transport, find,
+    items_for, record,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -140,6 +141,7 @@ fn codex_entry(transport: Transport) -> ProviderEntry {
         key_env: None,
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 4,
+        settings: ProviderSettings::default(),
     }
 }
 
@@ -155,6 +157,7 @@ fn anthropic_entry() -> ProviderEntry {
         key_env: None,
         auth: AuthStyle::XApiKey,
         max_concurrent_requests: 4,
+        settings: ProviderSettings::default(),
     }
 }
 
@@ -174,6 +177,7 @@ fn zenmux_entry(family: Family) -> ProviderEntry {
         key_env: Some("ZENMUX_API_KEY".into()),
         auth,
         max_concurrent_requests: 4,
+        settings: ProviderSettings::default(),
     }
 }
 
@@ -307,6 +311,7 @@ fn replay_request(
     if !first.text.is_empty() {
         parts.push(AssistantPart::Text {
             text: first.text.clone().into(),
+            replay: None,
         });
     }
     for item in &first.items {
@@ -326,7 +331,11 @@ fn replay_request(
                     text: first_prompt.into(),
                 }],
             },
-            ContextItem::Assistant { source, parts },
+            ContextItem::Assistant {
+                source,
+                parts,
+                replay: None,
+            },
             ContextItem::User {
                 parts: vec![Part::Text {
                     text: prompt.into(),
@@ -608,7 +617,9 @@ async fn live_codex_compaction() {
                 source,
                 parts: vec![AssistantPart::Text {
                     text: "Here is a short draft.".into(),
+                    replay: None,
                 }],
+                replay: None,
             },
             ContextItem::User {
                 parts: vec![Part::Text {

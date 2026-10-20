@@ -1,7 +1,36 @@
-use futures::{StreamExt, stream};
+use std::time::Duration;
+
+use futures::{FutureExt, StreamExt, stream};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::transport::{MAX_FRAME_BYTES, ReadFrameError, StdioTransport, Transport};
+
+/// The serve loops poll `read_frame` beside other events and drop it when one
+/// fires. A read dropped midway must leave the received part of its line for
+/// the next read, whichever byte the drop falls on.
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_read_keeps_the_part_of_the_line_it_took() {
+    let (mut input, reader) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, tokio::io::sink()));
+    let mut frames = Vec::new();
+
+    for byte in "ab\r\n{\"id\":1}\n\nlast".bytes() {
+        input.write_all(&[byte]).await.expect("send one byte");
+        if let Ok(frame) =
+            tokio::time::timeout(Duration::from_millis(1), transport.read_frame()).await
+        {
+            frames.push(frame.expect("a complete frame"));
+        }
+    }
+    drop(input);
+
+    assert_eq!(frames, ["ab", r#"{"id":1}"#]);
+    assert_eq!(transport.read_frame().await, Ok("last".to_owned()));
+    assert_eq!(
+        transport.read_frame().await,
+        Err(ReadFrameError::EndOfInput)
+    );
+}
 
 #[tokio::test]
 async fn cr_blank_final_frame_reads_each_nonempty_line() {
@@ -98,6 +127,81 @@ async fn oversized_frame_closes_the_transport() {
         transport.read_frame().await,
         Err(ReadFrameError::Closed)
     ));
+}
+
+#[tokio::test]
+async fn frame_cap_counts_bytes_kept_across_abandoned_reads() {
+    let (mut input, reader) = tokio::io::duplex(9 * 1024 * 1024);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, tokio::io::sink()));
+    let chunk = vec![b'x'; MAX_FRAME_BYTES / 8];
+    for _ in 0..4 {
+        input.write_all(&chunk).await.expect("send one chunk");
+        assert!(
+            transport.read_frame().now_or_never().is_none(),
+            "no complete frame arrives yet"
+        );
+    }
+    let rest = vec![b'x'; MAX_FRAME_BYTES / 2 + 1];
+    let writer = async {
+        input.write_all(&rest).await.expect("send second half");
+    };
+    let reader = async {
+        let first = transport.read_frame().await;
+        let second = transport.read_frame().await;
+        (first, second)
+    };
+    let ((), (first, second)) = tokio::join!(writer, reader);
+    assert_eq!(first, Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES)));
+    assert_eq!(second, Err(ReadFrameError::Closed));
+}
+
+#[tokio::test]
+async fn close_after_oversize_read_still_ends_the_peer_stream() {
+    let bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
+    let reader = std::io::Cursor::new(bytes);
+    let (writer_side, mut peer) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, writer_side));
+
+    assert_eq!(
+        transport.read_frame().await,
+        Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES))
+    );
+    transport.close().await;
+    assert!(
+        transport.write_frame("late").await.is_err(),
+        "a closed transport takes no more frames"
+    );
+
+    let mut seen = Vec::new();
+    let end = peer.read_to_end(&mut seen).now_or_never();
+    assert!(
+        matches!(end, Some(Ok(0))),
+        "the peer sees the end of the stream after close"
+    );
+    assert_eq!(seen, [] as [u8; 0]);
+}
+
+#[tokio::test]
+async fn close_during_a_write_ends_the_peer_stream_once_the_write_finishes() {
+    let (writer_side, mut peer) = tokio::io::duplex(16);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    let frame = "x".repeat(1024);
+    let mut write = std::pin::pin!(writer.write_frame(&frame));
+    assert!(
+        write.as_mut().now_or_never().is_none(),
+        "the write parks while nothing reads"
+    );
+    assert!(
+        transport.close().now_or_never().is_some(),
+        "close returns without waiting for the write"
+    );
+
+    let mut seen = Vec::new();
+    let (result, end) = tokio::join!(write, peer.read_to_end(&mut seen));
+    result.expect("the parked write finishes once the peer reads");
+    end.expect("the peer reads to the end of the stream");
+    assert_eq!(seen, format!("{frame}\n").into_bytes());
 }
 
 #[tokio::test]
@@ -232,5 +336,205 @@ async fn websocket_oversized_message_ends_without_a_close_frame() {
     match client.next().await {
         None | Some(Err(_)) => {}
         Some(Ok(frame)) => panic!("an oversized message must end without a reply, got {frame:?}"),
+    }
+}
+
+/// Fragments that are each within the frame limit still add up to one
+/// message. A client holds the same message cap as a server and drops a
+/// connection whose message outgrows it.
+#[tokio::test]
+async fn websocket_client_ends_the_connection_when_a_message_outgrows_the_cap() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+    use tokio_tungstenite::tungstenite::{Bytes, Message};
+
+    use crate::transport::WebSocketTransport;
+
+    let fragment = Bytes::from(vec![b'x'; MAX_FRAME_BYTES / 2 + 1]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let address = listener.local_addr().expect("listener address");
+    let url = format!("ws://{address}/");
+    let url = url::Url::parse(&url).expect("socket url");
+
+    // This peer applies the library defaults, so it sends what the cap forbids.
+    let serve = async {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete the handshake");
+        socket
+            .send(Message::Text("within the cap".into()))
+            .await
+            .expect("send a small message");
+        let first = Frame::message(fragment.clone(), OpCode::Data(Data::Text), false);
+        let last = Frame::message(fragment, OpCode::Data(Data::Continue), true);
+        // The client ends the connection partway, so these sends may fail.
+        let _ = socket.send(Message::Frame(first)).await;
+        let _ = socket.send(Message::Frame(last)).await;
+        socket
+    };
+    let receive = async {
+        let mut client = WebSocketTransport::connect(url).await.expect("connect");
+        assert_eq!(client.read_frame().await, Ok("within the cap".to_owned()));
+        assert!(
+            matches!(client.read_frame().await, Err(ReadFrameError::Closed)),
+            "a message past the cap must end the connection, not be delivered"
+        );
+    };
+    let (_socket, ()) = tokio::time::timeout(
+        Duration::from_secs(30),
+        Box::pin(async { tokio::join!(serve, receive) }),
+    )
+    .await
+    .expect("the oversized message ends the connection");
+}
+
+/// Closing a line transport shuts the write half down even while another
+/// handle to the writer is alive, so the peer sees the end of the stream.
+#[tokio::test(start_paused = true)]
+async fn close_ends_the_peer_stream_while_a_writer_handle_lives() {
+    let (writer_side, mut peer) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    writer.write_frame("last").await.expect("a frame writes");
+    transport.close().await;
+
+    let mut seen = Vec::new();
+    let end = tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut seen)).await;
+    assert!(end.is_ok(), "the peer sees the end of the stream");
+    assert_eq!(seen, b"last\n");
+    let late = writer.write_frame("late").await;
+    assert!(late.is_err(), "a closed transport takes no more frames");
+}
+
+/// A write that is stalled on its peer holds the writer. Close must not wait
+/// for it: the serve loops close while handlers that still own the writer are
+/// alive, and a stalled peer would otherwise hold the close forever.
+#[tokio::test(start_paused = true)]
+async fn close_does_not_wait_for_a_write_in_flight() {
+    // Nothing reads the peer, so the write fills the pipe and stalls.
+    let (writer_side, _stalled_peer) = tokio::io::duplex(16);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    let frame = "x".repeat(1024);
+
+    let mut write = std::pin::pin!(writer.write_frame(&frame));
+    let close = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), transport.close()).await
+    };
+    let closed = tokio::select! {
+        _ = &mut write => panic!("the write cannot finish while nothing reads"),
+        closed = close => closed,
+    };
+    assert!(closed.is_ok(), "close returns while a write is stalled");
+}
+
+/// A `401`/`403` upgrade denial over real loopback maps to `Auth` and is
+/// permanent, while other handshake failures stay `Transport` and retryable.
+///
+/// Each case serves one real TCP handshake: the client sends a WebSocket
+/// upgrade, the server answers with a bare HTTP status and closes. No
+/// credentials are sent beyond the loopback handshake and no token enters
+/// logs.
+#[tokio::test]
+async fn websocket_upgrade_denials_map_to_auth_while_other_failures_stay_transient() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::error::WireError;
+    use crate::transport::WebSocketTransport;
+
+    /// Serves one denied upgrade; the returned set owns the server task.
+    async fn denied_once(status: &'static str) -> (url::Url, tokio::task::JoinSet<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let url = url::Url::parse(&format!("ws://{address}/")).expect("socket url");
+        // `tokio::spawn` is workspace-banned; JoinSet is the tracked spawn.
+        let mut server = tokio::task::JoinSet::new();
+        server.spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                if request.len() > 16_384 {
+                    break;
+                }
+            }
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (url, server)
+    }
+
+    for status in ["401 Unauthorized", "403 Forbidden"] {
+        let (url, _server) = denied_once(status).await;
+        let Err(error) = WebSocketTransport::connect(url).await else {
+            panic!("a denied upgrade must fail");
+        };
+        assert!(
+            matches!(error, WireError::Auth),
+            "{status} must map to Auth, got {error:?}"
+        );
+        assert_eq!(error.to_string(), "authentication failed");
+    }
+
+    let (url, _server) = denied_once("500 Internal Server Error").await;
+    let Err(error) = WebSocketTransport::connect(url).await else {
+        panic!("a failed handshake must fail");
+    };
+    assert!(
+        matches!(error, WireError::Transport(_)),
+        "500 must stay Transport for retry, got {error:?}"
+    );
+
+    let (url, _server) = denied_once("401 Unauthorized").await;
+    let Err(error) = WebSocketTransport::connect_with_auth(url.as_str(), "loopback-token").await
+    else {
+        panic!("an authenticated denial must fail");
+    };
+    assert!(
+        matches!(error, WireError::Auth),
+        "authenticated 401 must map to Auth, got {error:?}"
+    );
+}
+
+/// A saturated [`MemoryTransport`](crate::transport::MemoryTransport) pair
+/// preserves FIFO framing under backpressure with its single-slot credits.
+#[tokio::test]
+async fn memory_transport_pair_preserves_fifo_under_saturation() {
+    use crate::transport::MemoryTransport;
+
+    const FRAMES: usize = 2048;
+    let (mut transport, peer) = MemoryTransport::pair(1);
+    let send = async {
+        for index in 0..FRAMES {
+            let frame = format!("frame-{index:04}");
+            peer.send_frame(frame).await.expect("peer sends");
+        }
+    };
+    let receive = async {
+        let mut seen = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            seen.push(transport.read_frame().await.expect("transport frames"));
+        }
+        seen
+    };
+    let ((), seen) = tokio::join!(send, receive);
+    for (index, frame) in seen.iter().enumerate() {
+        assert_eq!(frame, &format!("frame-{index:04}"), "FIFO order holds");
     }
 }

@@ -48,228 +48,287 @@ pub struct BuiltinSpec {
     pub single_instance: bool,
 }
 
+/// Private typed identity for one built-in command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Builtin {
+    Settings,
+    Model,
+    Tree,
+    Thinking,
+    ScopedModels,
+    Export,
+    Import,
+    Share,
+    Bug,
+    Copy,
+    Name,
+    Session,
+    Changelog,
+    Hotkeys,
+    Fork,
+    Clone,
+    Trust,
+    Login,
+    Logout,
+    New,
+    Compact,
+    Resume,
+    Reload,
+    Quit,
+    Mode,
+}
+
 /// Built-in commands in their stable display and registration order.
-pub const BUILTINS: [BuiltinSpec; 24] = [
-    BuiltinSpec {
-        name: "settings",
-        hint: "",
-        summary: "view and change settings",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "model",
-        hint: "[provider/model]",
-        summary: "pick the model",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Optional,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "tree",
-        hint: "",
-        summary: "navigate the session tree",
-        scope: Scope::Session,
-        idle: true,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "thinking",
-        hint: "[level]",
-        summary: "set the thinking level",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Optional,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "scoped-models",
-        hint: "",
-        summary: "choose the models that /model lists",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "export",
-        hint: "[path]",
-        summary: "write the session to a .md or .jsonl file",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Optional,
-        single_instance: true,
-    },
-    BuiltinSpec {
-        name: "import",
-        hint: "<path>",
-        summary: "open a session from a .jsonl file",
-        scope: Scope::Front,
-        idle: true,
-        arity: Arity::Raw,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "share",
-        hint: "",
-        summary: "not in dalgon: use /export",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Ignored,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "bug",
-        hint: "",
-        summary: "not in dalgon: use /export and /session",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Ignored,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "copy",
-        hint: "",
-        summary: "copy the last reply to the clipboard",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "name",
-        hint: "[name]",
-        summary: "set or show the session name",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Raw,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "session",
-        hint: "",
-        summary: "show session details and usage",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "changelog",
-        hint: "",
-        summary: "show what changed in each version",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "hotkeys",
-        hint: "",
-        summary: "show keyboard shortcuts",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "fork",
-        hint: "",
-        summary: "new branch from a previous message",
-        scope: Scope::Session,
-        idle: true,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "clone",
-        hint: "",
-        summary: "copy this session into a new one",
-        scope: Scope::Session,
-        idle: true,
-        arity: Arity::None,
-        single_instance: true,
-    },
-    BuiltinSpec {
-        name: "trust",
-        hint: "",
-        summary: "not in dalgon: plugins load only from the data directory",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::Ignored,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "login",
-        hint: "[provider]",
-        summary: "sign in to a provider",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::Optional,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "logout",
-        hint: "[provider]",
-        summary: "remove stored credentials",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::Optional,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "new",
-        hint: "",
-        summary: "start a new session",
-        scope: Scope::Front,
-        idle: true,
-        arity: Arity::None,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "compact",
-        hint: "[instructions]",
-        summary: "summarize older context now",
-        scope: Scope::Session,
-        idle: true,
-        arity: Arity::Raw,
-        single_instance: true,
-    },
-    BuiltinSpec {
-        name: "resume",
-        hint: "[id or name]",
-        summary: "open another session",
-        scope: Scope::Front,
-        idle: true,
-        arity: Arity::Raw,
-        single_instance: false,
-    },
-    BuiltinSpec {
-        name: "reload",
-        hint: "",
-        summary: "reload plugins",
-        scope: Scope::Session,
-        idle: false,
-        arity: Arity::None,
-        single_instance: true,
-    },
-    BuiltinSpec {
-        name: "quit",
-        hint: "",
-        summary: "quit dalgon",
-        scope: Scope::Front,
-        idle: false,
-        arity: Arity::None,
-        single_instance: false,
-    },
+const ORDER: &[Builtin] = &[
+    Builtin::Settings,
+    Builtin::Model,
+    Builtin::Tree,
+    Builtin::Thinking,
+    Builtin::ScopedModels,
+    Builtin::Export,
+    Builtin::Import,
+    Builtin::Share,
+    Builtin::Bug,
+    Builtin::Copy,
+    Builtin::Name,
+    Builtin::Session,
+    Builtin::Changelog,
+    Builtin::Hotkeys,
+    Builtin::Fork,
+    Builtin::Clone,
+    Builtin::Trust,
+    Builtin::Login,
+    Builtin::Logout,
+    Builtin::New,
+    Builtin::Compact,
+    Builtin::Resume,
+    Builtin::Reload,
+    Builtin::Quit,
+    Builtin::Mode,
 ];
 
-/// The harness mode command follows the 24 row-30 commands.
-pub const MODE: BuiltinSpec = BuiltinSpec {
+/// Immutable metadata record for one built-in command.
+///
+/// Hoisted out of `record` so the dispatch match stays a one-line-per-arm
+/// table; the field values below are the single source of registration,
+/// completion, listing, and admission data.
+const SPEC_SETTINGS: &BuiltinSpec = &BuiltinSpec {
+    name: "settings",
+    hint: "",
+    summary: "view and change settings",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_MODEL: &BuiltinSpec = &BuiltinSpec {
+    name: "model",
+    hint: "[provider/model]",
+    summary: "pick the model",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Optional,
+    single_instance: false,
+};
+const SPEC_TREE: &BuiltinSpec = &BuiltinSpec {
+    name: "tree",
+    hint: "",
+    summary: "navigate the session tree",
+    scope: Scope::Session,
+    idle: true,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_THINKING: &BuiltinSpec = &BuiltinSpec {
+    name: "thinking",
+    hint: "[level]",
+    summary: "set the thinking level",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Optional,
+    single_instance: false,
+};
+const SPEC_SCOPED_MODELS: &BuiltinSpec = &BuiltinSpec {
+    name: "scoped-models",
+    hint: "",
+    summary: "choose the models that /model lists",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_EXPORT: &BuiltinSpec = &BuiltinSpec {
+    name: "export",
+    hint: "[path]",
+    summary: "write the session to a .md or .jsonl file",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Optional,
+    single_instance: true,
+};
+const SPEC_IMPORT: &BuiltinSpec = &BuiltinSpec {
+    name: "import",
+    hint: "<path>",
+    summary: "open a session from a .jsonl file",
+    scope: Scope::Front,
+    idle: true,
+    arity: Arity::Raw,
+    single_instance: false,
+};
+const SPEC_SHARE: &BuiltinSpec = &BuiltinSpec {
+    name: "share",
+    hint: "",
+    summary: "not in dalgon: use /export",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Ignored,
+    single_instance: false,
+};
+const SPEC_BUG: &BuiltinSpec = &BuiltinSpec {
+    name: "bug",
+    hint: "",
+    summary: "not in dalgon: use /export and /session",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Ignored,
+    single_instance: false,
+};
+const SPEC_COPY: &BuiltinSpec = &BuiltinSpec {
+    name: "copy",
+    hint: "",
+    summary: "copy the last reply to the clipboard",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_NAME: &BuiltinSpec = &BuiltinSpec {
+    name: "name",
+    hint: "[name]",
+    summary: "set or show the session name",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Raw,
+    single_instance: false,
+};
+const SPEC_SESSION: &BuiltinSpec = &BuiltinSpec {
+    name: "session",
+    hint: "",
+    summary: "show session details and usage",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_CHANGELOG: &BuiltinSpec = &BuiltinSpec {
+    name: "changelog",
+    hint: "",
+    summary: "show what changed in each version",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_HOTKEYS: &BuiltinSpec = &BuiltinSpec {
+    name: "hotkeys",
+    hint: "",
+    summary: "show keyboard shortcuts",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_FORK: &BuiltinSpec = &BuiltinSpec {
+    name: "fork",
+    hint: "",
+    summary: "new branch from a previous message",
+    scope: Scope::Session,
+    idle: true,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_CLONE: &BuiltinSpec = &BuiltinSpec {
+    name: "clone",
+    hint: "",
+    summary: "copy this session into a new one",
+    scope: Scope::Session,
+    idle: true,
+    arity: Arity::None,
+    single_instance: true,
+};
+const SPEC_TRUST: &BuiltinSpec = &BuiltinSpec {
+    name: "trust",
+    hint: "",
+    summary: "not in dalgon: plugins load only from the data directory",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::Ignored,
+    single_instance: false,
+};
+const SPEC_LOGIN: &BuiltinSpec = &BuiltinSpec {
+    name: "login",
+    hint: "[provider]",
+    summary: "sign in to a provider",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::Optional,
+    single_instance: false,
+};
+const SPEC_LOGOUT: &BuiltinSpec = &BuiltinSpec {
+    name: "logout",
+    hint: "[provider]",
+    summary: "remove stored credentials",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::Optional,
+    single_instance: false,
+};
+const SPEC_NEW: &BuiltinSpec = &BuiltinSpec {
+    name: "new",
+    hint: "",
+    summary: "start a new session",
+    scope: Scope::Front,
+    idle: true,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_COMPACT: &BuiltinSpec = &BuiltinSpec {
+    name: "compact",
+    hint: "[instructions]",
+    summary: "summarize older context now",
+    scope: Scope::Session,
+    idle: true,
+    arity: Arity::Raw,
+    single_instance: true,
+};
+const SPEC_RESUME: &BuiltinSpec = &BuiltinSpec {
+    name: "resume",
+    hint: "[id or name]",
+    summary: "open another session",
+    scope: Scope::Front,
+    idle: true,
+    arity: Arity::Raw,
+    single_instance: false,
+};
+const SPEC_RELOAD: &BuiltinSpec = &BuiltinSpec {
+    name: "reload",
+    hint: "",
+    summary: "reload plugins",
+    scope: Scope::Session,
+    idle: false,
+    arity: Arity::None,
+    single_instance: true,
+};
+const SPEC_QUIT: &BuiltinSpec = &BuiltinSpec {
+    name: "quit",
+    hint: "",
+    summary: "quit dalgon",
+    scope: Scope::Front,
+    idle: false,
+    arity: Arity::None,
+    single_instance: false,
+};
+const SPEC_MODE: &BuiltinSpec = &BuiltinSpec {
     name: "mode",
     hint: "<normal|eval-first|eval-only>",
     summary: "set the harness mode",
@@ -279,13 +338,54 @@ pub const MODE: BuiltinSpec = BuiltinSpec {
     single_instance: false,
 };
 
-/// Finds one built-in command or the trailing `mode` record by canonical name.
+/// Returns the immutable metadata record for one built-in command.
+const fn record(builtin: Builtin) -> &'static BuiltinSpec {
+    match builtin {
+        Builtin::Settings => SPEC_SETTINGS,
+        Builtin::Model => SPEC_MODEL,
+        Builtin::Tree => SPEC_TREE,
+        Builtin::Thinking => SPEC_THINKING,
+        Builtin::ScopedModels => SPEC_SCOPED_MODELS,
+        Builtin::Export => SPEC_EXPORT,
+        Builtin::Import => SPEC_IMPORT,
+        Builtin::Share => SPEC_SHARE,
+        Builtin::Bug => SPEC_BUG,
+        Builtin::Copy => SPEC_COPY,
+        Builtin::Name => SPEC_NAME,
+        Builtin::Session => SPEC_SESSION,
+        Builtin::Changelog => SPEC_CHANGELOG,
+        Builtin::Hotkeys => SPEC_HOTKEYS,
+        Builtin::Fork => SPEC_FORK,
+        Builtin::Clone => SPEC_CLONE,
+        Builtin::Trust => SPEC_TRUST,
+        Builtin::Login => SPEC_LOGIN,
+        Builtin::Logout => SPEC_LOGOUT,
+        Builtin::New => SPEC_NEW,
+        Builtin::Compact => SPEC_COMPACT,
+        Builtin::Resume => SPEC_RESUME,
+        Builtin::Reload => SPEC_RELOAD,
+        Builtin::Quit => SPEC_QUIT,
+        Builtin::Mode => SPEC_MODE,
+    }
+}
+
+/// Ordered metadata for every built-in command, with `mode` last.
+pub fn specs() -> impl ExactSizeIterator<Item = &'static BuiltinSpec> {
+    ORDER.iter().copied().map(record)
+}
+
+/// Finds one built-in command by canonical name.
 #[must_use]
 pub fn spec(name: &str) -> Option<&'static BuiltinSpec> {
-    BUILTINS
+    lookup(name).map(record)
+}
+
+/// Resolves one built-in command name to its typed identity.
+fn lookup(name: &str) -> Option<Builtin> {
+    ORDER
         .iter()
-        .chain(std::iter::once(&MODE))
-        .find(|command| command.name == name)
+        .copied()
+        .find(|builtin| record(*builtin).name == name)
 }
 
 /// Maximum number of bytes in a plugin command summary.
@@ -417,7 +517,15 @@ pub(crate) fn comma_group(mut n: u64) -> String {
     result
 }
 
-/// Finds the closest name within edit distance one; equal distances keep input order.
+/// The farthest suggestion distance: edit distance at most two, ties to the
+/// earlier entry.
+const SUGGEST_MAX_DISTANCE: usize = 2;
+
+/// Finds the closest name within edit distance two; equal distances keep input order.
+///
+/// Only a strictly smaller distance replaces the current best, so the
+/// earlier candidate wins a tie. Names farther than two edits, measured with
+/// one adjacent transposition, suggest nothing.
 #[must_use]
 pub fn suggest_in<'a>(names: &[&'a str], word: &str) -> Option<&'a str> {
     let max_name_length = names
@@ -425,14 +533,14 @@ pub fn suggest_in<'a>(names: &[&'a str], word: &str) -> Option<&'a str> {
         .map(|name| name.chars().count())
         .max()
         .unwrap_or_default();
-    if word.chars().count() > max_name_length.saturating_add(1) {
+    if word.chars().count() > max_name_length.saturating_add(SUGGEST_MAX_DISTANCE) {
         return None;
     }
 
     let mut best_name = None;
-    let mut best_distance = 2;
+    let mut best_distance = SUGGEST_MAX_DISTANCE + 1;
     for name in names {
-        if let Some(distance) = distance_at_most_one(name, word)
+        if let Some(distance) = distance_at_most(name, word, SUGGEST_MAX_DISTANCE)
             && distance < best_distance
         {
             best_distance = distance;
@@ -442,10 +550,10 @@ pub fn suggest_in<'a>(names: &[&'a str], word: &str) -> Option<&'a str> {
     best_name
 }
 
-fn distance_at_most_one(left: &str, right: &str) -> Option<usize> {
+fn distance_at_most(left: &str, right: &str, cap: usize) -> Option<usize> {
     let left: Vec<char> = left.chars().collect();
     let right: Vec<char> = right.chars().collect();
-    if left.len().abs_diff(right.len()) > 1 {
+    if left.len().abs_diff(right.len()) > cap {
         return None;
     }
     // Optimal string alignment: insertion, deletion, substitution, and one
@@ -474,7 +582,7 @@ fn distance_at_most_one(left: &str, right: &str) -> Option<usize> {
         }
     }
     let distance = table[left.len()][right.len()];
-    (distance <= 1).then_some(distance)
+    (distance <= cap).then_some(distance)
 }
 /// Renders an import failure with the shared path-check remedy.
 #[must_use]
@@ -689,7 +797,8 @@ pub fn extension(
         env!("CARGO_PKG_VERSION"),
         dal_core::ServiceSet::EMPTY,
     )?;
-    for record in BUILTINS.iter().chain(std::iter::once(&MODE)) {
+    for builtin in ORDER.iter().copied() {
+        let record = record(builtin);
         let name: dal_core::CommandName = record.name.parse()?;
         builder = builder.command(
             dal_core::CommandSpec {
@@ -702,7 +811,7 @@ pub fn extension(
                 },
             },
             std::sync::Arc::new(BuiltinHandler {
-                spec: *record,
+                builtin,
                 reload: reload.clone(),
             }),
         );
@@ -712,7 +821,7 @@ pub fn extension(
 
 /// One first-party command implementation behind the extension registry.
 struct BuiltinHandler {
-    spec: BuiltinSpec,
+    builtin: Builtin,
     reload: std::sync::Arc<dyn PluginReload>,
 }
 
@@ -724,7 +833,7 @@ impl dal_agent::ext::CommandHandler for BuiltinHandler {
     ) -> dal_agent::ext::BoxFuture<'a, Result<dal_core::command::Reply, dal_agent::ServiceError>>
     {
         Box::pin(async move {
-            dispatch(self.spec.name, cx, args, &self.reload)
+            invoke(self.builtin, cx, args, &self.reload)
                 .await
                 .map_err(dal_agent::ServiceError::Command)
         })
@@ -733,7 +842,7 @@ impl dal_agent::ext::CommandHandler for BuiltinHandler {
 
 /// Runs one built-in command tail to a reply.
 ///
-/// Parses arguments once by the record's arity, routes by canonical name,
+/// Resolves the name once, then invokes the shared typed operation,
 /// and lifts handler triples into the service error path the dispatcher
 /// renders as the `error { what, why, fix }` reply. Unknown names render
 /// through the shared unknown pair; the idle gate runs before this call.
@@ -750,53 +859,59 @@ pub async fn dispatch<'a>(
 ) -> Result<dal_core::command::Reply, dal_core::command::ErrorTriple> {
     use dal_core::command::CommandError;
 
-    let Some(record) = spec(name) else {
-        let names: Vec<&str> = BUILTINS
-            .iter()
-            .map(|item| item.name)
-            .chain(std::iter::once(MODE.name))
-            .collect();
+    let Some(builtin) = lookup(name) else {
+        let names: Vec<&str> = specs().map(|record| record.name).collect();
         return Err(render(&CommandError::Unknown {
             name: name.into(),
             suggestion: suggest_in(&names, name).map(Into::into),
         }));
     };
-    let arg = match check_arity(name, record.arity, tail) {
+    invoke(builtin, cx, tail, reload).await
+}
+
+/// Runs one built-in command tail through its typed identity.
+///
+/// Parses arguments once by the record's arity, then routes through the
+/// exhaustive identity match calling the unchanged child handlers.
+async fn invoke<'a>(
+    builtin: Builtin,
+    cx: dal_agent::ext::command::CommandCx<'a>,
+    tail: &'a str,
+    reload: &'a std::sync::Arc<dyn PluginReload>,
+) -> Result<dal_core::command::Reply, dal_core::command::ErrorTriple> {
+    let record = record(builtin);
+    let arg = match check_arity(record.name, record.arity, tail) {
         Ok(arg) => arg,
         Err(error) => return Err(render(&error)),
     };
     let word = arg.as_deref();
     let text = word.unwrap_or("");
-    match record.name {
-        "settings" => Ok(model::settings()),
-        "model" => model::model(&cx, word).await,
-        "tree" => tree::tree(&cx),
-        "thinking" => model::thinking(&cx, word).await,
-        "scoped-models" => model::scoped_models(&cx),
-        "export" => session::export(&cx, word),
-        "import" => session::import(&cx, text),
-        "share" => Ok(misc::share()),
-        "bug" => Ok(misc::bug()),
-        "copy" => session::copy(&cx),
-        "name" => session::name(&cx, text).await,
-        "session" => Ok(session::details(&cx)),
-        "changelog" => Ok(session::changelog(&cx)),
-        "hotkeys" => Ok(session::hotkeys()),
-        "fork" => tree::fork(&cx),
-        "clone" => tree::clone(&cx),
-        "trust" => Ok(misc::trust(&cx)),
-        "login" => model::login(word),
-        "logout" => model::logout(word),
-        "new" => Ok(session::new_session()),
-        "compact" => misc::compact(&cx, text),
-        "resume" => session::resume(&cx, text),
-        "reload" => misc::reload(&cx, &**reload).await,
-        "quit" => Ok(session::quit(&cx)),
-        "mode" => model::mode(&cx, text).await,
-        _ => Err(render(&CommandError::Unknown {
-            name: name.into(),
-            suggestion: None,
-        })),
+    match builtin {
+        Builtin::Settings => Ok(model::settings()),
+        Builtin::Model => model::model(&cx, word).await,
+        Builtin::Tree => tree::tree(&cx),
+        Builtin::Thinking => model::thinking(&cx, word).await,
+        Builtin::ScopedModels => model::scoped_models(&cx),
+        Builtin::Export => session::export(&cx, word),
+        Builtin::Import => session::import(&cx, text),
+        Builtin::Share => Ok(misc::share()),
+        Builtin::Bug => Ok(misc::bug()),
+        Builtin::Copy => session::copy(&cx),
+        Builtin::Name => session::name(&cx, text).await,
+        Builtin::Session => Ok(session::details(&cx)),
+        Builtin::Changelog => Ok(session::changelog(&cx)),
+        Builtin::Hotkeys => Ok(session::hotkeys()),
+        Builtin::Fork => tree::fork(&cx),
+        Builtin::Clone => tree::clone(&cx),
+        Builtin::Trust => Ok(misc::trust(&cx)),
+        Builtin::Login => model::login(word),
+        Builtin::Logout => model::logout(word),
+        Builtin::New => Ok(session::new_session()),
+        Builtin::Compact => misc::compact(&cx, text),
+        Builtin::Resume => session::resume(&cx, text),
+        Builtin::Reload => misc::reload(&cx, &**reload).await,
+        Builtin::Quit => Ok(session::quit(&cx)),
+        Builtin::Mode => model::mode(&cx, text).await,
     }
 }
 
@@ -810,8 +925,11 @@ pub fn complete_args(
     prefix: &str,
     cx: &dal_agent::ext::command::CommandCx<'_>,
 ) -> Vec<dal_core::command::Completion> {
-    let feed: Vec<dal_core::command::Completion> = match name {
-        "model" => cx
+    let Some(builtin) = lookup(name) else {
+        return Vec::new();
+    };
+    let feed: Vec<dal_core::command::Completion> = match builtin {
+        Builtin::Model => cx
             .catalog()
             .map(|view| {
                 view.entries
@@ -824,7 +942,7 @@ pub fn complete_args(
                     .collect()
             })
             .unwrap_or_default(),
-        "thinking" => cx
+        Builtin::Thinking => cx
             .levels_for()
             .iter()
             .map(|level| dal_core::command::Completion {
@@ -833,7 +951,7 @@ pub fn complete_args(
                 detail: "thinking level".into(),
             })
             .collect(),
-        "login" | "logout" => dal_agent::login::login_providers()
+        Builtin::Login | Builtin::Logout => dal_agent::login::login_providers()
             .iter()
             .map(|def| dal_core::command::Completion {
                 value: def.id.into(),
@@ -841,7 +959,7 @@ pub fn complete_args(
                 detail: "provider".into(),
             })
             .collect(),
-        "resume" => {
+        Builtin::Resume => {
             let mut names = Vec::new();
             let mut cursor: Option<Box<str>> = None;
             loop {
@@ -864,7 +982,26 @@ pub fn complete_args(
             }
             names
         }
-        _ => Vec::new(),
+        Builtin::Settings
+        | Builtin::Tree
+        | Builtin::ScopedModels
+        | Builtin::Export
+        | Builtin::Import
+        | Builtin::Share
+        | Builtin::Bug
+        | Builtin::Copy
+        | Builtin::Name
+        | Builtin::Session
+        | Builtin::Changelog
+        | Builtin::Hotkeys
+        | Builtin::Fork
+        | Builtin::Clone
+        | Builtin::Trust
+        | Builtin::New
+        | Builtin::Compact
+        | Builtin::Reload
+        | Builtin::Quit
+        | Builtin::Mode => Vec::new(),
     };
     feed.into_iter()
         .filter(|item| item.value.starts_with(prefix))

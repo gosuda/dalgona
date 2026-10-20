@@ -265,5 +265,51 @@ mod tests {
                 .expect("chmod 640");
             assert!(!file_is_private(&file).expect("read mode"));
         }
+
+        #[test]
+        fn each_group_or_other_permission_bit_alone_makes_a_file_shared() {
+            let dir = tempfile::tempdir().expect("scratch dir");
+            let path = dir.path().join("auth.json");
+            let file = create_new(&path, FileMode::Mode0600).expect("create owner-only");
+            for shared in [0o040, 0o020, 0o010, 0o004, 0o002, 0o001] {
+                let mode = 0o600 | shared;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                    .expect("chmod");
+                assert!(
+                    !file_is_private(&file).expect("read mode"),
+                    "mode {mode:o} exposes the file beyond its owner"
+                );
+            }
+            for owner_only in [0o700, 0o600, 0o400, 0o200] {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(owner_only))
+                    .expect("chmod");
+                assert!(
+                    file_is_private(&file).expect("read mode"),
+                    "mode {owner_only:o} stays within the owner"
+                );
+            }
+        }
+
+        #[test]
+        fn creating_over_an_existing_file_fails_and_leaves_it_alone() {
+            let dir = tempfile::tempdir().expect("scratch dir");
+            let path = dir.path().join("auth.json");
+            std::fs::write(&path, b"existing secret").expect("seed an existing file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod 644");
+            let error = create_private_file_new(&path)
+                .expect_err("an existing file is never reused as a private one");
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                std::fs::read(&path).expect("reread"),
+                b"existing secret",
+                "the existing bytes are untouched"
+            );
+            assert_eq!(
+                std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777,
+                0o644,
+                "the existing mode is neither reused nor rewritten"
+            );
+        }
     }
 }

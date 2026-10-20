@@ -1,7 +1,11 @@
 use super::{
     Answer, CallId, ClientId, Entry, EntryId, FileChange, Gen, Header, InferredPurpose, JobEvent,
-    JobId, Mail, Owner, RawJson, RequestId, RouteError, TurnEndStop, TurnId, Usage, fmt,
+    JobId, JournalPart, Mail, Owner, RawJson, RequestId, RouteError, TurnEndStop, TurnId, Usage,
+    fmt,
 };
+use crate::id::{PrivateEffectId, PrivateLoopId};
+use crate::update::ResolutionCause;
+use serde::{Deserialize, Serialize};
 
 /// One journal record from a supported line format.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +132,10 @@ pub enum Record {
         /// Whether the answer was the request's default. The member is
         /// written only when it is true.
         was_default: bool,
+        /// Why the request resolved. Absent in records written before
+        /// causes existed; the member is written only when present, so a
+        /// record without one re-encodes byte-for-byte.
+        cause: Option<ResolutionCause>,
     },
     /// A client granted a tool always-allowance.
     AllowAlways {
@@ -244,6 +252,65 @@ pub enum Record {
         /// Its normalized usage.
         usage: Usage,
     },
+    /// The birth certificate of one synthetic private loop invocation.
+    PrivateLoop {
+        /// When the loop was constructed.
+        at: jiff::Timestamp,
+        /// The loop identity.
+        r#loop: PrivateLoopId,
+        /// The extension that owns the loop.
+        who: Owner,
+        /// The owning turn, when the loop runs inside one.
+        turn: Option<TurnId>,
+    },
+    /// One private tool effect started; written before the effect runs.
+    PrivateStart {
+        /// When the start was recorded.
+        at: jiff::Timestamp,
+        /// The loop identity.
+        r#loop: PrivateLoopId,
+        /// The effect identity.
+        token: PrivateEffectId,
+        /// The extension that owns the effect.
+        who: Owner,
+        /// The owning turn, when the loop runs inside one.
+        turn: Option<TurnId>,
+        /// The private round number.
+        round: u32,
+        /// The live-execution call identity; correlation only.
+        call: CallId,
+        /// The tool name.
+        name: Box<str>,
+        /// The raw tool arguments.
+        args: RawJson,
+    },
+    /// One private tool effect settled; exactly one per (`loop`, `token`).
+    PrivateEnd {
+        /// When the end was recorded.
+        at: jiff::Timestamp,
+        /// The loop identity.
+        r#loop: PrivateLoopId,
+        /// The effect identity.
+        token: PrivateEffectId,
+        /// The terminal outcome.
+        outcome: PrivateOutcome,
+    },
+}
+
+/// The terminal outcome of one private tool effect.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PrivateOutcome {
+    /// The effect ran to a terminal result.
+    Settled {
+        /// Whether the result is an error.
+        is_error: bool,
+        /// The terminal result parts.
+        parts: Vec<JournalPart>,
+    },
+    /// The effect never reported a result; repaired at open.
+    Indeterminate,
 }
 
 /// The parsed record of one journal line.
@@ -301,6 +368,15 @@ pub enum EncodeError {
     /// lie that no cost was reported.
     #[error("cannot encode a non-finite, negative, or out-of-range cost")]
     InvalidCost,
+    /// A reported premium is non-finite or negative.
+    ///
+    /// [`Usage::premium_requests`] holds the provider-reported premium
+    /// requests consumed; the journal stores the measurement as an
+    /// optional floating-point count. A non-finite or negative premium
+    /// has no valid representation, and writing `null` would lie that
+    /// no premium was reported.
+    #[error("cannot encode a non-finite or negative premium")]
+    InvalidPremium,
     /// A tree record's variant does not match its entry kind.
     ///
     /// `Record::User` must carry `EntryKind::User`, and so on; a mismatch
@@ -319,6 +395,20 @@ pub enum EncodeError {
     /// replay one, so the record is refused instead of written.
     #[error("cannot encode an empty model id")]
     EmptyModel,
+    /// An API model record names an empty provider id.
+    ///
+    /// The decoder rejects an empty `provider`; absence, not an empty
+    /// string, means the route names no provider, so the record is refused
+    /// instead of written.
+    #[error("cannot encode an empty provider id")]
+    EmptyProvider,
+    /// An assistant entry replay holds an explicit JSON `null`.
+    ///
+    /// Only an absent member means absent replay: the decoder rejects a
+    /// present `null`, so the record is refused instead of written as a
+    /// line no reader accepts.
+    #[error("cannot encode a null assistant replay")]
+    NullReplay,
 }
 
 /// The fixed prefix of a tree record, read without allocation.

@@ -10,8 +10,9 @@
 //! threshold re-arms it.
 //!
 //! The lane reads only the settled reply, never in-flight deltas. Its state
-//! is at most [`LANE_WINDOW`] bounded digests plus two counters per session,
-//! held behind one mutex that is taken for synchronous map work only.
+//! is at most [`LANE_WINDOW`] bounded digests, two counters, and one parked
+//! fire excerpt per session, held behind one mutex that is taken for
+//! synchronous map work only.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -19,6 +20,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 use dal_core::{SessionId, TurnId};
 
+use super::matcher::EXCERPT_BYTES;
 use super::value::{Name, Origin, RepeatMode, Rule, RuleAction, ScopeSpec, ToolScope, cut_utf8};
 
 /// Least Jaccard similarity that counts a turn as a repeat.
@@ -136,9 +138,24 @@ pub fn similarity<S: BuildHasher>(left: &HashSet<String, S>, right: &HashSet<Str
     shared as f64 / union as f64
 }
 
-/// One lane fire: a `Remind` of [`lane_rule`] on the settled turn. The parent
-/// renders it with `FireText::new(lane_rule(), LANE_RULE, reply subject,
-/// RuleAction::Remind)`.
+/// Cuts a settled reply to its last [`EXCERPT_BYTES`] bytes, starting at a
+/// UTF-8 lead byte: the same tail cut a stream fire's excerpt uses. A reply
+/// at or under the bound is kept whole.
+fn tail_excerpt(reply: &str) -> String {
+    if reply.len() <= EXCERPT_BYTES {
+        return reply.to_owned();
+    }
+    let mut start = reply.len() - EXCERPT_BYTES;
+    while !reply.is_char_boundary(start) {
+        start += 1;
+    }
+    reply[start..].to_owned()
+}
+
+/// One lane fire: a `Remind` of [`lane_rule`] on the settled turn. The
+/// session's next request watch renders it with
+/// `render_reminder_text(lane_rule(), RuleSubject::Reply)` and delivers it
+/// through the stream-fire path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LaneFire {
     /// The settled turn that completed the streak.
@@ -158,13 +175,16 @@ impl LaneFire {
 /// One session's lane state.
 ///
 /// Invariants: `digests.len() <= LANE_WINDOW`; `1 <= streak <= LANE_STREAK`
-/// once a turn is seen; `latched` implies a fire since the last re-arm.
+/// once a turn is seen; `latched` implies a fire since the last re-arm;
+/// `pending` parks at most one fire excerpt, replaced by a newer fire and
+/// cleared once its reminder is durable.
 #[derive(Debug, Default)]
 pub struct LaneWindow {
     digests: VecDeque<HashSet<String>>,
     streak: usize,
     latched: bool,
     last: Option<TurnId>,
+    pending: Option<Box<str>>,
 }
 
 impl LaneWindow {
@@ -227,20 +247,47 @@ impl Lanes {
     }
 
     /// Observes the settled reply of `turn` in `session`; call it once per
-    /// settled event, with the reply text of the settled payload.
+    /// settled event, with the reply text of the settled payload. A fire
+    /// parks its excerpt for the session, replacing any older one.
     #[must_use]
     pub fn observe(&self, session: SessionId, turn: TurnId, reply: &str) -> Option<LaneFire> {
         let digest = digest(reply);
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        let window = windows.entry(session).or_default();
+        let fire = window.observe(turn, digest);
+        if fire.is_some() {
+            window.pending = Some(tail_excerpt(reply).into_boxed_str());
+        }
+        fire
+    }
+
+    /// Returns the session's parked fire excerpt, if any. Reading it does
+    /// not consume it: the excerpt stays parked until [`Lanes::delivered`]
+    /// clears it or [`Lanes::end_session`] evicts it.
+    #[must_use]
+    pub fn pending(&self, session: SessionId) -> Option<String> {
         self.windows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(session)
-            .or_default()
-            .observe(turn, digest)
+            .get(&session)
+            .and_then(|window| window.pending.as_deref().map(str::to_owned))
     }
 
-    /// Evicts the session's window at `session_end`; an unknown session is a
-    /// no-op.
+    /// Clears the session's parked fire excerpt after its reminder record is
+    /// durable; an unknown session is a no-op.
+    pub fn delivered(&self, session: SessionId) {
+        if let Some(window) = self
+            .windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&session)
+        {
+            window.pending = None;
+        }
+    }
+
+    /// Evicts the session's window and its parked fire excerpt at
+    /// `session_end`; an unknown session is a no-op.
     pub fn end_session(&self, session: SessionId) {
         self.windows
             .lock()
@@ -266,8 +313,8 @@ mod tests {
     use dal_core::{SessionId, TurnId};
 
     use super::{
-        LANE_BODY, LANE_INPUT_MAX_BYTES, LANE_RULE, LANE_SIMILARITY, LANE_WINDOW, LaneWindow,
-        Lanes, digest, is_similar, lane_rule, similarity,
+        EXCERPT_BYTES, LANE_BODY, LANE_INPUT_MAX_BYTES, LANE_RULE, LANE_SIMILARITY, LANE_WINDOW,
+        LaneWindow, Lanes, digest, is_similar, lane_rule, similarity,
     };
     use crate::ttsr::value::{RuleAction, cut_utf8};
 
@@ -429,6 +476,59 @@ mod tests {
                 .digests
                 .contains(&digest("distinct32 alpha32 beta32"))
         );
+    }
+
+    #[test]
+    fn fire_parks_one_pending_excerpt() {
+        let lanes = Lanes::new();
+        let session = SessionId::new_v7();
+        assert!(lanes.pending(session).is_none());
+
+        assert_eq!(feed(&lanes, session, &BUILD[..3]), [3]);
+        // The parked excerpt is a suffix of the reply that fired.
+        let pending = lanes.pending(session).expect("the fire parks an excerpt");
+        assert!(BUILD[2].ends_with(&pending));
+
+        // Latched turns replace nothing and park nothing new.
+        assert!(lanes.observe(session, turn(4), BUILD[3]).is_none());
+        assert_eq!(lanes.pending(session).as_deref(), Some(pending.as_str()));
+
+        // A delivered fire clears the excerpt; the window keeps its state.
+        lanes.delivered(session);
+        assert!(lanes.pending(session).is_none());
+        lanes.delivered(session);
+        assert!(lanes.pending(session).is_none());
+        assert!(lanes.observe(session, turn(5), BUILD[4]).is_none());
+
+        // An evicted session loses its excerpt.
+        lanes.end_session(session);
+        assert!(lanes.pending(session).is_none());
+        assert_eq!(lanes.session_count(), 0);
+    }
+
+    #[test]
+    fn second_fire_replaces_the_excerpt_within_the_bound() {
+        let lanes = Lanes::new();
+        let session = SessionId::new_v7();
+        assert_eq!(feed(&lanes, session, &BUILD[..3]), [3]);
+        lanes.delivered(session);
+
+        // A dissimilar reply re-arms; two further similar replies fire once.
+        assert!(lanes.observe(session, turn(4), DOCS).is_none());
+        let long = format!("{} {}", BUILD[0], "zqx1 zqx2 zqx3 ".repeat(24));
+        assert!(long.len() > EXCERPT_BYTES);
+        assert!(lanes.observe(session, turn(5), &long).is_none());
+        assert!(lanes.observe(session, turn(6), &long).is_some());
+        let replaced = lanes.pending(session).expect("the second fire parks");
+        assert!(!BUILD[2].ends_with(&replaced), "the older excerpt is gone");
+        assert!(long.ends_with(&replaced));
+        assert!(replaced.len() <= EXCERPT_BYTES);
+        assert!(replaced.len() < long.len());
+
+        // The read never consumed it; the session end evicts the rest.
+        assert!(lanes.pending(session).is_some());
+        lanes.end_session(session);
+        assert!(lanes.pending(session).is_none());
     }
 
     #[test]

@@ -77,6 +77,7 @@ fn usage() -> Usage {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -89,6 +90,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
             id: CallId::new(*call),
             name: "read_file".into(),
             input: input.clone(),
+            replay: None,
         })
         .collect();
     Record::Assistant(Entry {
@@ -102,6 +104,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
             content,
             usage: usage(),
             stop: AssistantStop::ToolUse,
+            replay: None,
         },
     })
 }

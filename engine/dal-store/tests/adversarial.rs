@@ -120,10 +120,8 @@ async fn complete_garbage_line_is_refused_and_never_silently_accepted() {
                 "the refusal names the garbage line's start"
             );
             assert!(
-                reason.contains("no format version")
-                    || reason.contains("invalid JSON")
-                    || reason.contains("unknown record type"),
-                "the reason is a decode boundary, got {reason}"
+                reason.starts_with("invalid JSON"),
+                "text that is not JSON is reported as invalid JSON, got {reason}"
             );
         }
         _ => panic!("expected Damaged, got {error:?}"),

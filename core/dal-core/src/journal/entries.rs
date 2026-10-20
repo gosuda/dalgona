@@ -18,6 +18,8 @@ pub(super) struct AssistantEntryFields {
     pub(super) stop: AssistantStop,
     #[serde(default, deserialize_with = "assistant_route_field")]
     pub(super) route: Option<AssistantRoute>,
+    #[serde(default, deserialize_with = "assistant_replay_field")]
+    pub(super) replay: Option<RawJson>,
 }
 
 /// Reads the optional assistant route. `null` is malformed provenance,
@@ -27,6 +29,20 @@ where
     D: serde::Deserializer<'de>,
 {
     AssistantRoute::deserialize(deserializer).map(Some)
+}
+
+/// Reads the optional assistant replay. `null` is malformed provenance,
+/// not unknown: only an absent member means the replay is absent, matching
+/// the journal decoder's `assistant_replay_member`.
+fn assistant_replay_field<'de, D>(deserializer: D) -> Result<Option<RawJson>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let replay = RawJson::deserialize(deserializer)?;
+    if replay.as_str() == "null" {
+        return Err(serde::de::Error::custom("member `replay` must not be null"));
+    }
+    Ok(Some(replay))
 }
 
 #[derive(Deserialize)]
@@ -129,6 +145,7 @@ impl<'de> Deserialize<'de> for EntryKind {
                     usage: wire.usage,
                     stop: wire.stop,
                     route: wire.route,
+                    replay: wire.replay,
                 })
             }
             "tool_result" => {

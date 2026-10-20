@@ -11,10 +11,10 @@ use std::time::Duration;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentReport, AgentStart, AgentsOp, AgentsReply, Answer, Budget, CallId, ContextItem, EntryId,
-    FetchRequest, FetchResponse, HandleStatus, Inference, JobsOp, JobsReply, ModelRequest,
-    ModelRoute, Name, Notice, OnError, Origin, Part, Purpose, Question, RequestParams, RunOutput,
-    RunRequest, ScopeSpec, ServiceSet, SessionId, SidecarOp, StateError, StateOp, StateRecord,
-    Stop, TurnOp, TurnOpReply, Usage,
+    FetchRequest, FetchResponse, HandleStatus, Inference, JobsOp, JobsReply, ModelPrice,
+    ModelRequest, ModelRoute, Name, Notice, OnError, Origin, Part, PrivateEffect, Purpose,
+    Question, RequestParams, RunOutput, RunRequest, ScopeSpec, ServiceSet, SessionId, SidecarOp,
+    StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply, Usage,
 };
 use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent};
 use futures::channel::{mpsc, oneshot};
@@ -181,6 +181,9 @@ impl Services for Held {
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
         never!()
     }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        never!()
+    }
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         never!()
     }
@@ -192,6 +195,16 @@ impl Services for Held {
 fn member() -> SessionId {
     SessionId::new_v7()
 }
+fn caller() -> Caller {
+    Caller::new(
+        "scope-test".parse::<Name>().expect("name"),
+        Origin::Builtin,
+        ServiceSet::EMPTY,
+        NonZeroU32::MIN,
+        CallerKind::Handler,
+        None,
+    )
+}
 
 struct Rig {
     scope: Scope,
@@ -201,7 +214,7 @@ struct Rig {
     upstream_cancelled: Arc<AtomicBool>,
 }
 
-fn rig() -> Rig {
+fn rig_with(budget: Budget, price: Option<super::PriceFn>) -> Rig {
     let (upstream, source) = mpsc::unbounded();
     let upstream_cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&upstream_cancelled);
@@ -218,25 +231,17 @@ fn rig() -> Rig {
         awaiting: AtomicUsize::new(0),
         inferred: AtomicUsize::new(0),
     });
-    let caller = Caller::new(
-        "scope-test".parse::<Name>().expect("name"),
-        Origin::Builtin,
-        ServiceSet::EMPTY,
-        NonZeroU32::MIN,
-        CallerKind::Handler,
-        None,
-    );
     let services: Arc<dyn Services> = held.clone();
     let scope = Scope::open(
         services,
-        caller,
+        caller(),
         CancellationToken::new(),
         &ScopeSpec {
             limit: 4,
             on_error: OnError::Settle,
-            budget: Budget::default(),
+            budget,
         },
-        None,
+        price,
     )
     .expect("scope opens");
     let shared = Arc::clone(&scope.inner.shared);
@@ -249,12 +254,17 @@ fn rig() -> Rig {
     }
 }
 
+fn rig() -> Rig {
+    rig_with(Budget::default(), None)
+}
+
 fn request() -> ModelRequest {
     ModelRequest {
         purpose: Purpose::Turn,
         model: ModelRoute::Api {
             family: dal_core::Family::Chat,
             model: "scripted".into(),
+            provider: None,
         },
         system: "".into(),
         tools: Arc::from(Vec::new()),
@@ -292,26 +302,50 @@ fn first_event() -> StreamEvent {
     StreamEvent::TextDelta { text: "he".into() }
 }
 
-fn finish_events(upstream: &Upstream) {
-    let usage = Usage {
+fn measured_usage() -> Usage {
+    Usage {
         input_tokens: 3,
         cached_input_tokens: 0,
         output_tokens: 2,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
-    };
-    for event in [
+    }
+}
+
+/// An all-zero usage with no cost: the provider measured nothing.
+fn unreported_usage() -> Usage {
+    Usage {
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        premium_requests: None,
+        cost_usd: None,
+    }
+}
+
+fn finish_events_with(upstream: &Upstream, usage: Option<Usage>) {
+    let mut events: Vec<Result<StreamEvent, ProviderError>> = vec![
         Ok(StreamEvent::TextDelta { text: "llo".into() }),
         Ok(StreamEvent::ToolCallsDone { calls: Vec::new() }),
-        Ok(StreamEvent::Usage { usage }),
-        Ok(StreamEvent::Stop {
-            reason: StopReason::EndTurn,
-        }),
-    ] {
+    ];
+    if let Some(usage) = usage {
+        events.push(Ok(StreamEvent::Usage { usage }));
+    }
+    events.push(Ok(StreamEvent::Stop {
+        reason: StopReason::EndTurn,
+    }));
+    for event in events {
         let _ = upstream.unbounded_send(event);
     }
     upstream.close_channel();
+}
+
+fn finish_events(upstream: &Upstream) {
+    finish_events_with(upstream, Some(measured_usage()));
 }
 
 async fn until(mut ready: impl FnMut() -> bool) {
@@ -649,4 +683,308 @@ async fn dropping_the_scope_while_the_start_is_blocked_still_rolls_its_child_bac
     let started = locked(&held.started).clone();
     assert_eq!(started.len(), 1);
     assert_eq!(*locked(&held.closed), vec![started[0]]);
+}
+
+async fn admitted_inference(scope: &Scope, rig: &Rig) -> super::ScopeHandle {
+    let handle = scope.infer(request()).expect("admitted");
+    until(|| locked(&rig.held.stream).is_none()).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(handle.status(), HandleStatus::Running);
+    handle
+}
+
+fn unit_price() -> super::PriceFn {
+    Arc::new(|_| {
+        Some(ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 1.0,
+            reasoning: 1.0,
+            cache_write: None,
+            tiers: Box::default(),
+        })
+    })
+}
+
+#[tokio::test]
+async fn a_request_budget_admits_exactly_its_count_and_refuses_the_next() {
+    let rig = rig_with(
+        Budget {
+            requests: Some(2),
+            ..Budget::default()
+        },
+        None,
+    );
+    let first = rig.scope.agent(start()).expect("the first request admits");
+    let second = rig
+        .scope
+        .agent(start())
+        .expect("the second request fills the budget");
+    assert!(
+        matches!(rig.scope.agent(start()), Err(ScopeError::Exhausted)),
+        "admission counts requests before they finish, so the third is refused"
+    );
+    drop((first, second));
+}
+
+/// Runs one measured inference (3 input and 2 output tokens) in a scope
+/// under `budget` and reports whether the scope then refuses new work.
+async fn exhausted_after_measured_inference(budget: Budget, price: Option<super::PriceFn>) -> bool {
+    let rig = rig_with(budget, price);
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events(&rig.upstream);
+    timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted))
+}
+
+#[tokio::test]
+async fn an_input_limit_equal_to_the_measured_usage_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        input_tokens: Some(limit),
+        ..Budget::default()
+    };
+    assert!(
+        exhausted_after_measured_inference(limited(3), None).await,
+        "3 measured input tokens reach a limit of 3"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(4), None).await,
+        "3 measured input tokens stay under a limit of 4"
+    );
+}
+
+#[tokio::test]
+async fn an_output_limit_equal_to_the_measured_usage_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        output_tokens: Some(limit),
+        ..Budget::default()
+    };
+    assert!(
+        exhausted_after_measured_inference(limited(2), None).await,
+        "2 measured output tokens reach a limit of 2"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(3), None).await,
+        "2 measured output tokens stay under a limit of 3"
+    );
+}
+
+#[tokio::test]
+async fn a_usd_limit_equal_to_the_priced_cost_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        usd: Some(limit),
+        ..Budget::default()
+    };
+    // 3 input plus 2 output tokens at one USD per million tokens each.
+    assert!(
+        exhausted_after_measured_inference(limited(5e-6), Some(unit_price())).await,
+        "a cost of 5e-6 reaches a limit of 5e-6"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(6e-6), Some(unit_price())).await,
+        "a cost of 5e-6 stays under a limit of 6e-6"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_wall_refuses_new_work_and_a_distant_one_does_not() {
+    let walled = |wall| Budget {
+        wall: Some(wall),
+        ..Budget::default()
+    };
+    let expired = rig_with(walled(Duration::from_millis(1)), None);
+    std::thread::sleep(Duration::from_millis(25));
+    assert!(
+        matches!(expired.scope.agent(start()), Err(ScopeError::Exhausted)),
+        "a scope past its wall refuses new work"
+    );
+    let distant = rig_with(walled(Duration::from_secs(3_600)), None);
+    let handle = distant
+        .scope
+        .agent(start())
+        .expect("a scope inside its wall admits");
+    drop(handle);
+}
+
+#[tokio::test]
+async fn missing_usage_after_a_successful_inference_exhausts_a_token_limited_scope() {
+    let rig = rig_with(
+        Budget {
+            input_tokens: Some(10),
+            ..Budget::default()
+        },
+        None,
+    );
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events_with(&rig.upstream, None);
+    let value = timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert!(matches!(value, ScopeValue::Inference(_)));
+    assert_eq!(handle.status(), HandleStatus::Done);
+    assert!(
+        matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted)),
+        "a response with no usage exhausts the token budget instead of charging zero"
+    );
+}
+
+#[tokio::test]
+async fn all_zero_usage_exhausts_token_limits_without_failing_the_response() {
+    let rig = rig_with(
+        Budget {
+            input_tokens: Some(100),
+            output_tokens: Some(100),
+            ..Budget::default()
+        },
+        None,
+    );
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events_with(&rig.upstream, Some(unreported_usage()));
+    let value = timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert!(matches!(value, ScopeValue::Inference(_)));
+    assert_eq!(handle.status(), HandleStatus::Done);
+    assert_eq!(
+        handle.usage(),
+        unreported_usage(),
+        "the raw zero stays visible and unpriced"
+    );
+    assert!(
+        matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted)),
+        "an all-zero usage exhausts the token budgets instead of charging zero"
+    );
+}
+
+#[tokio::test]
+async fn priced_all_zero_usage_still_exhausts_a_usd_limited_scope() {
+    let rig = rig_with(
+        Budget {
+            usd: Some(1.0),
+            ..Budget::default()
+        },
+        Some(unit_price()),
+    );
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events_with(&rig.upstream, Some(unreported_usage()));
+    let value = timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert!(matches!(value, ScopeValue::Inference(_)));
+    // Local pricing would value the raw zero at $0.00; the ledger judges the
+    // raw event before pricing, so the next request is refused.
+    assert!(
+        matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted)),
+        "a priced all-zero usage exhausts the USD budget instead of charging $0.00"
+    );
+}
+
+#[tokio::test]
+async fn measured_usage_below_the_limit_stays_admitted() {
+    let rig = rig_with(
+        Budget {
+            input_tokens: Some(10),
+            ..Budget::default()
+        },
+        None,
+    );
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events(&rig.upstream);
+    timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert_eq!(locked(&rig.shared.ledger.state).used.input_tokens, 3);
+    assert!(
+        rig.scope.infer(request()).is_ok(),
+        "measured usage below the limit does not exhaust"
+    );
+}
+
+#[tokio::test]
+async fn request_only_budgets_do_not_need_a_spend_measurement() {
+    let rig = rig_with(
+        Budget {
+            requests: Some(4),
+            ..Budget::default()
+        },
+        None,
+    );
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events_with(&rig.upstream, None);
+    timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert!(
+        rig.scope.infer(request()).is_ok(),
+        "a request-only scope stays open after an unmeasured response"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_handle_without_usage_leaves_spend_limits_open() {
+    let rig = rig_with(
+        Budget {
+            input_tokens: Some(10),
+            ..Budget::default()
+        },
+        None,
+    );
+    let (report_tx, report_rx) = oneshot::channel();
+    locked(&rig.held.report).push_back(report_rx);
+    let handle = rig.scope.agent(start()).expect("admitted");
+    until(|| rig.held.awaiting.load(Ordering::SeqCst) == 1).await;
+    report_tx.send(report()).expect("the report delivers");
+    let value = timed(handle.result()).await.expect("the member completes");
+    assert!(matches!(value, ScopeValue::Agent(_)));
+    assert!(
+        rig.scope.infer(request()).is_ok(),
+        "a member session's legitimate None usage is not unmetered spend"
+    );
+}
+
+#[tokio::test]
+async fn unreported_usage_in_a_child_scope_exhausts_the_parent_budget() {
+    let rig = rig_with(
+        Budget {
+            input_tokens: Some(10),
+            ..Budget::default()
+        },
+        None,
+    );
+    let parent_ledger = Arc::clone(&rig.shared.ledger);
+    let lineage = crate::ext::synthetic::Lineage::default().with_ledger(parent_ledger);
+    let child = crate::ext::synthetic::enter(lineage, async {
+        let services: Arc<dyn Services> = rig.held.clone();
+        Scope::open(
+            services,
+            caller(),
+            CancellationToken::new(),
+            &ScopeSpec {
+                limit: 2,
+                on_error: OnError::Settle,
+                budget: Budget::default(),
+            },
+            None,
+        )
+        .expect("child scope opens")
+    })
+    .await;
+    assert!(
+        child.inner.shared.ledger.parent.is_some(),
+        "the child rolls up to the parent ledger"
+    );
+    let handle = admitted_inference(&child, &rig).await;
+    finish_events_with(&rig.upstream, None);
+    let value = timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    assert!(matches!(value, ScopeValue::Inference(_)));
+    assert!(
+        matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted)),
+        "the unmetered child spend propagates to the parent ledger"
+    );
 }

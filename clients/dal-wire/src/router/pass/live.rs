@@ -68,6 +68,8 @@ impl RelayMapper {
                 ..UsageSum::default()
             })),
             StreamEvent::Stop { reason } => out.push(HarnessEvent::Stop(stop_of(reason))),
+            // Nonjournaling pass-through relay: message replay (captured payload
+            // or typed refusal) is never journaled here and never re-emitted.
             _ => {}
         }
     }

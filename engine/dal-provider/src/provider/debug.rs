@@ -20,6 +20,8 @@ impl std::fmt::Debug for Provider {
             Self::Responses(http) => formatter.debug_tuple("Responses").field(http).finish(),
             Self::Codex(http) => formatter.debug_tuple("Codex").field(http).finish(),
             Self::Anthropic(http) => formatter.debug_tuple("Anthropic").field(http).finish(),
+            Self::Http(http) => formatter.debug_tuple("Http").field(http).finish(),
+            Self::GeminiCli(http) => formatter.debug_tuple("GeminiCli").field(http).finish(),
             Self::Scripted(_) => formatter.write_str("Scripted"),
         }
     }

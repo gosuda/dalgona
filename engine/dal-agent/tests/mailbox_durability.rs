@@ -1,5 +1,6 @@
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "integration fixture failures must fail at their specific setup boundary"
 )]
 //! Mailbox receipts must rest on journal durability.
@@ -40,10 +41,11 @@ use dal_agent::ext::{
     ArgError, BoxFuture, Extension, ExtensionBuilder, RawValue, Tool, ToolCall, ToolCx,
     ToolOutcome, ToolOutput,
 };
-use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription};
+use dal_agent::{Agent, Delivery, Env, Host, Product, ServiceError, SessionRef, Subscription};
 use dal_core::{
-    AgentsOp, CallId, ClientId, Command, Config, ConfigProduct, Expect, MailMode, ModelInfo, Name,
-    Part, RawJson, Record, ServiceSet, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
+    AgentsOp, AgentsReply, CallId, ClientId, Command, Config, ConfigProduct, Expect, MailMode,
+    ModelInfo, Name, Part, RawJson, Receipt, Record, Service, ServiceSet, ToolClass, ToolSpec,
+    UpdateKind, Visibility, Workspace,
 };
 use tokio::sync::Notify;
 
@@ -66,6 +68,15 @@ fn end_turn() -> String {
 }
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// What one `AgentsOp::Send` answered, kept typed so assertions match the
+/// variant and its fields instead of a `Debug` rendering.
+type Reply = Result<AgentsReply, ServiceError>;
+
+/// The reply value of a send that answered with `receipt`.
+fn delivered(receipt: Receipt) -> AgentsReply {
+    AgentsReply::Delivered(receipt)
+}
 
 /// A host and its workspace, backed by a temporary data root.
 struct Live {
@@ -169,7 +180,7 @@ async fn turn_ended(subscription: &mut Subscription) {
 /// Waits until the probe has recorded exactly one reply. The faulted tests
 /// use this instead of `turn_ended`: the armed fault stays on the journal
 /// handle, the reply-step batch fails, and `TurnEnded` never publishes.
-async fn one_reply(seen: &Mutex<Vec<String>>) {
+async fn one_reply(seen: &Mutex<Vec<Reply>>) {
     tokio::time::timeout(WAIT, async {
         loop {
             if seen
@@ -216,7 +227,7 @@ struct SelfSend {
     spec: Arc<ToolSpec>,
     target: Target,
     mode: Arc<Mutex<MailMode>>,
-    seen: Arc<Mutex<Vec<String>>>,
+    seen: Arc<Mutex<Vec<Reply>>>,
     hold: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
@@ -264,7 +275,7 @@ impl Tool for SelfSend {
                 .await;
             seen.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(format!("{reply:?}"));
+                .push(reply);
             if hold.is_some() {
                 cx.cancel().cancelled().await;
                 return ToolOutcome::Interrupted;
@@ -279,7 +290,7 @@ fn self_send_extension(
     target: Target,
     mode: MailMode,
     hold: Option<(Arc<Notify>, Arc<Notify>)>,
-) -> (Arc<Mutex<Vec<String>>>, Extension) {
+) -> (Arc<Mutex<Vec<Reply>>>, Extension) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let name = Name::parse(tool_name).expect("tool name");
     let extension = ExtensionBuilder::new(
@@ -359,16 +370,23 @@ async fn stored_mails(
 /// The typed error a refused append must surface: the agents service failed
 /// with the journal's injected sync failure, not a receipt. Production keeps
 /// `format!("journal write failed: {error}")` with the full `StoreError`
-/// cause, so this asserts only the typed envelope plus the cause substring,
-/// never an exact layout or session id.
-fn assert_typed_journal_error(reply: &str) {
+/// cause, so the message is matched by prefix and cause substring, never by
+/// an exact layout or session id; the variant and the service are exact.
+fn assert_typed_journal_error(reply: &Reply) {
+    let Err(ServiceError::Failed { service, message }) = reply else {
+        panic!(
+            "a failed mail append must surface the typed journal error, never a \
+             receipt or another error: {reply:?}"
+        );
+    };
+    assert_eq!(
+        *service,
+        Some(Service::Agents),
+        "the failure is attributed to the agents service: {reply:?}"
+    );
     assert!(
-        reply.contains("Err(Failed")
-            && reply.contains("Some(Agents)")
-            && reply.contains("journal write failed:")
-            && reply.contains("injected sync failure"),
-        "a failed mail append must surface the typed journal error, never a \
-         Delivered or Buffered receipt: {reply:?}"
+        message.starts_with("journal write failed: ") && message.contains("injected sync failure"),
+        "the failure carries the journal's cause: {message}"
     );
 }
 
@@ -397,7 +415,7 @@ async fn a_durable_self_send_still_reports_its_receipt() -> TestResult {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             replies.as_slice(),
-            ["Ok(Delivered(Buffered))"],
+            [Ok(delivered(Receipt::Buffered))],
             "a durable NextTurn self-send reports its computed receipt: {replies:?}"
         );
     }
@@ -564,6 +582,67 @@ async fn a_failed_steer_append_is_not_acknowledged_as_delivered() -> TestResult 
     Ok(())
 }
 
+/// The `Aside` receipt is precomputed as `Delivered` without any journal
+/// state, so it is the mode most likely to answer before the append result:
+/// a failed append must still surface the typed journal error and keep the
+/// message out of the journal.
+#[tokio::test]
+async fn a_failed_aside_append_is_not_acknowledged_as_delivered() -> TestResult {
+    let target: Target = Arc::new(Mutex::new(None));
+    let (entered, gate) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let tool = probe_tool_name("aside-fault");
+    let (seen, extension) = self_send_extension(
+        &tool,
+        Arc::clone(&target),
+        MailMode::Aside,
+        Some((Arc::clone(&entered), Arc::clone(&gate))),
+    );
+    let live = host_with_steps(extension, format!("{}{}", tool_step(&tool), end_turn())).await;
+    let root = open_root(&live).await;
+    let session = root.session();
+    target_cell(&target, session);
+
+    let subscription = run_prompt(&root, "aside yourself mail").await;
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the tool call to pause before its send");
+    let store = dal_store::Store::new(
+        live.tmp.path().join("data"),
+        live.workspace.clone(),
+        dal_core::Product::Dal,
+    );
+    store.arm_append_sync_fault(session);
+    gate.notify_one();
+    one_reply(&seen).await;
+
+    {
+        let replies = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reply = replies
+            .first()
+            .expect("one_reply guarantees a recorded reply");
+        assert_typed_journal_error(reply);
+    }
+
+    let Live {
+        host,
+        workspace,
+        tmp,
+    } = live;
+    drop(subscription);
+    drop(root);
+    close_all(&host, &[session]).await;
+    drop(host);
+
+    let mails = stored_mails(tmp.path().join("data"), workspace, session).await?;
+    assert!(
+        mails.iter().all(|mail| mail.text.as_ref() != "probe"),
+        "the failed aside append's message must stay out of the journal: {mails:?}"
+    );
+    Ok(())
+}
+
 /// The aside control on a durable journal: `Aside` computes `Delivered` and
 /// must keep that receipt when the append succeeds.
 #[tokio::test]
@@ -585,7 +664,7 @@ async fn a_durable_aside_send_reports_delivered() -> TestResult {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             replies.as_slice(),
-            ["Ok(Delivered(Delivered))"],
+            [Ok(delivered(Receipt::Delivered))],
             "a durable aside self-send reports its computed receipt: {replies:?}"
         );
     }
@@ -633,7 +712,7 @@ async fn a_missing_recipient_keeps_the_gone_contract() -> TestResult {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             replies.as_slice(),
-            ["Ok(Delivered(Gone))"],
+            [Ok(delivered(Receipt::Gone))],
             "a missing recipient keeps the Gone contract: {replies:?}"
         );
     }
@@ -668,7 +747,7 @@ struct FullSend {
     name: Name,
     spec: Arc<ToolSpec>,
     target: Target,
-    seen: Arc<Mutex<Vec<String>>>,
+    seen: Arc<Mutex<Vec<Reply>>>,
 }
 
 impl Tool for FullSend {
@@ -710,7 +789,7 @@ impl Tool for FullSend {
                     .await;
                 seen.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(format!("{reply:?}"));
+                    .push(reply);
             }
             ToolOutcome::Ok(Box::new(ToolOutput::from_text("done")))
         })
@@ -721,7 +800,7 @@ struct SteerSaturate {
     name: Name,
     spec: Arc<ToolSpec>,
     target: Target,
-    seen: Arc<Mutex<Vec<String>>>,
+    seen: Arc<Mutex<Vec<Reply>>>,
     entered: Arc<Notify>,
     gate: Arc<Notify>,
     saturated: Arc<Notify>,
@@ -766,8 +845,7 @@ impl Tool for SteerSaturate {
                         },
                     )
                     .await;
-                let reply = format!("{reply:?}");
-                let full = reply.as_str() == "Ok(Delivered(Full))";
+                let full = reply == Ok(delivered(Receipt::Full));
                 seen.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(reply);
@@ -849,11 +927,12 @@ async fn a_full_mailbox_refuses_without_storing_the_refused_message() -> TestRes
         assert!(
             replies[..MAILBOX_WAITING_LIMIT]
                 .iter()
-                .all(|reply| reply.as_str() == "Ok(Delivered(Buffered))"),
+                .all(|reply| *reply == Ok(delivered(Receipt::Buffered))),
             "accepted messages report Buffered: {replies:?}"
         );
         assert_eq!(
-            replies[MAILBOX_WAITING_LIMIT], "Ok(Delivered(Full))",
+            replies[MAILBOX_WAITING_LIMIT],
+            Ok(delivered(Receipt::Full)),
             "the message past the limit reports Full: {:?}",
             replies[MAILBOX_WAITING_LIMIT]
         );
@@ -954,7 +1033,7 @@ async fn a_full_steer_queue_refuses_without_queuing_or_storing_the_refused_messa
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let full_at = replies
             .iter()
-            .position(|reply| reply.as_str() == "Ok(Delivered(Full))")
+            .position(|reply| *reply == Ok(delivered(Receipt::Full)))
             .expect("the live steer queue to refuse with Full");
         assert!(
             full_at > 0,
@@ -963,7 +1042,7 @@ async fn a_full_steer_queue_refuses_without_queuing_or_storing_the_refused_messa
         assert!(
             replies[..full_at]
                 .iter()
-                .all(|reply| reply.as_str() == "Ok(Delivered(Delivered))"),
+                .all(|reply| *reply == Ok(delivered(Receipt::Delivered))),
             "accepted steers report Delivered: {replies:?}"
         );
         full_at

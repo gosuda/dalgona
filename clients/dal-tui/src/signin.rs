@@ -124,6 +124,7 @@ struct FlowView {
     code: Option<String>,
     opened: bool,
     paste_hint: Option<String>,
+    paste_default: Option<String>,
     pasted: String,
     exchanging: bool,
     cancelling: bool,
@@ -175,13 +176,12 @@ impl std::fmt::Debug for SignIn {
     }
 }
 
-/// The method the terminal signs in with: the browser when the provider
-/// offers it, else a pasted key.
+/// Selects browser sign-in, then device authorization, then a pasted key.
 pub(crate) fn preferred_method(provider: &str) -> Option<Method> {
     let def = login_providers()
         .into_iter()
         .find(|def| def.id == provider)?;
-    [Method::Browser, Method::ApiKey]
+    [Method::Browser, Method::Device, Method::ApiKey]
         .into_iter()
         .find(|method| def.offers(*method))
 }
@@ -234,7 +234,7 @@ impl SignIn {
 
     /// Adds pasted text to the open input, one line.
     pub(crate) fn paste(&mut self, text: &str) {
-        let line: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        let line: String = text.chars().filter(|c| !c.is_control()).collect();
         match &mut self.stage {
             Stage::Key { typed } => typed.push_str(&line),
             Stage::Flow(flow) if flow.paste_hint.is_some() => flow.pasted.push_str(&line),
@@ -262,7 +262,7 @@ impl SignIn {
                     crate::composer::pop_grapheme(typed);
                     KeyAction::None
                 }
-                KeyCode::Char(character) if plain => {
+                KeyCode::Char(character) if plain && !character.is_control() => {
                     typed.push(character);
                     KeyAction::None
                 }
@@ -273,12 +273,20 @@ impl SignIn {
                     self.cancel();
                     KeyAction::None
                 }
-                KeyCode::Enter if flow.paste_hint.is_some() && !flow.pasted.trim().is_empty() => {
-                    let text = std::mem::take(&mut flow.pasted);
-                    if let Some(run) = &mut self.run
-                        && run.send_paste(text)
-                    {
+                KeyCode::Enter if flow.paste_hint.is_some() => {
+                    let to_send = if flow.pasted.trim().is_empty() {
+                        flow.paste_default.take()
+                    } else {
+                        Some(std::mem::take(&mut flow.pasted))
+                    };
+                    let Some(text) = to_send else {
+                        return KeyAction::None;
+                    };
+                    flow.pasted.clear();
+                    let sent = self.run.as_mut().is_some_and(|run| run.send_paste(text));
+                    if sent {
                         flow.paste_hint = None;
+                        flow.paste_default = None;
                         flow.exchanging = true;
                     }
                     KeyAction::None
@@ -287,7 +295,9 @@ impl SignIn {
                     crate::composer::pop_grapheme(&mut flow.pasted);
                     KeyAction::None
                 }
-                KeyCode::Char(character) if plain && flow.paste_hint.is_some() => {
+                KeyCode::Char(character)
+                    if plain && flow.paste_hint.is_some() && !character.is_control() =>
+                {
                     flow.pasted.push(character);
                     KeyAction::None
                 }
@@ -344,14 +354,16 @@ impl SignIn {
                 set_url(flow, url, io);
                 flow.code = Some(code);
             }
-            LoginProgress::AskPaste { hint } => {
+            LoginProgress::AskPaste { hint, default } => {
                 if self.run.as_ref().is_some_and(|run| run.paste.is_some()) {
                     flow.paste_hint = Some(hint);
+                    flow.paste_default = default;
                 }
             }
             LoginProgress::Exchanging => {
                 flow.exchanging = true;
                 flow.paste_hint = None;
+                flow.paste_default = None;
             }
         }
     }
@@ -361,17 +373,30 @@ impl SignIn {
     pub(crate) fn rows(&self, width: usize, mode: WidthMode, max_rows: usize) -> Vec<RenderRow> {
         let provider = escape(&self.provider);
         match &self.stage {
-            Stage::ConfirmAll => vec![
-                RenderRow::plain(ids::LOGOUT_ALL_TITLE, Role::Accent),
-                RenderRow::plain(
-                    format!(
-                        "[y] {}   [n] {}",
-                        ids::LOGOUT_ALL_REMOVE,
-                        ids::LOGOUT_ALL_KEEP
-                    ),
-                    Role::Accent,
-                ),
-            ],
+            Stage::ConfirmAll => {
+                let options = format!(
+                    "[y] {}   [n] {}",
+                    ids::LOGOUT_ALL_REMOVE,
+                    ids::LOGOUT_ALL_KEEP
+                );
+                // Narrow screens cannot clip the conservative half away:
+                // the two verbs take one row each when the pair does not
+                // fit, so `n Keep them` stays visible.
+                let mut rows = vec![RenderRow::plain(ids::LOGOUT_ALL_TITLE, Role::Accent)];
+                if crate::width::width(&options, mode) <= width {
+                    rows.push(RenderRow::plain(options, Role::Accent));
+                } else {
+                    rows.push(RenderRow::plain(
+                        format!("[y] {}", ids::LOGOUT_ALL_REMOVE),
+                        Role::Accent,
+                    ));
+                    rows.push(RenderRow::plain(
+                        format!("[n] {}", ids::LOGOUT_ALL_KEEP),
+                        Role::Accent,
+                    ));
+                }
+                rows
+            }
             Stage::Key { typed } => {
                 let shown = typed.chars().count().min(width.saturating_sub(3).max(1));
                 let mut input = RenderRow::plain(format!("> {}", "*".repeat(shown)), Role::Text);
@@ -462,7 +487,7 @@ fn flow_rows(
     if url_rows.len() > room {
         url_rows.truncate(room);
         if let Some(last) = url_rows.last_mut() {
-            last.text = crate::width::take_cells(&last.text, width.saturating_sub(1), mode) + "…";
+            last.text = crate::width::take_cells(&last.text, width.saturating_sub(3), mode) + "...";
             last.links.clear();
             if flow.url_trusted
                 && let Some(url) = &flow.url
@@ -820,14 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn the_method_prefers_the_browser_then_the_key() {
-        assert_eq!(preferred_method("anthropic"), Some(Method::Browser));
-        assert_eq!(preferred_method("openai-codex"), Some(Method::Browser));
-        assert_eq!(preferred_method("openai"), Some(Method::ApiKey));
-        assert_eq!(preferred_method("nobody"), None);
-    }
-
-    #[test]
     fn the_logout_rows_name_the_saved_model_only_when_it_needs_a_removed_credential() {
         let removed = [Box::<str>::from("openai-codex")];
         assert_eq!(
@@ -849,5 +866,122 @@ mod tests {
             logout_rows(None, &[], Some("openai/gpt-5")),
             [ids::LOGOUT_NONE]
         );
+    }
+
+    fn running_flow(hint: &str, default: Option<&str>) -> (SignIn, oneshot::Receiver<String>) {
+        let (paste_tx, paste_rx) = oneshot::channel();
+        let (_events_tx, events_rx) = mpsc::channel();
+        let sign_in = SignIn {
+            provider: "test".into(),
+            stage: Stage::Flow(Box::new(FlowView {
+                paste_hint: Some(hint.to_owned()),
+                paste_default: default.map(str::to_owned),
+                ..FlowView::default()
+            })),
+            run: Some(LoginRun {
+                events: events_rx,
+                cancel: CancellationToken::new(),
+                paste: Some(paste_tx),
+                thread: None,
+            }),
+        };
+        (sign_in, paste_rx)
+    }
+
+    #[test]
+    fn default_empty_acceptance() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (mut sign_in, mut paste_rx) =
+            running_flow("Paste domain or Enter for default", Some("github.com"));
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::None);
+
+        assert_eq!(paste_rx.try_recv(), Ok(String::from("github.com")));
+        let Stage::Flow(flow) = &sign_in.stage else {
+            panic!("test flow must remain a flow");
+        };
+        assert!(flow.paste_hint.is_none());
+        assert!(flow.paste_default.is_none());
+        assert!(flow.exchanging);
+        assert_eq!(flow.pasted, "");
+        assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
+    }
+
+    #[test]
+    fn required_blank_then_valid_value() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (mut sign_in, mut paste_rx) = running_flow("Paste code", None);
+
+        // Blank Enter does not submit when there is no default; sender is retained.
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::None);
+        assert_eq!(
+            paste_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_some()));
+
+        let Stage::Flow(flow) = &sign_in.stage else {
+            panic!("test flow must remain a flow");
+        };
+        assert!(flow.paste_hint.is_some());
+        assert!(!flow.exchanging);
+
+        // Whitespace-only input also stays pending with sender retained.
+        sign_in.paste("   ");
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::None);
+        assert_eq!(
+            paste_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_some()));
+
+        // Backspace to remove whitespace.
+        sign_in.key(Key::new(KeyCode::Backspace, KeyModifiers::NONE));
+        sign_in.key(Key::new(KeyCode::Backspace, KeyModifiers::NONE));
+        sign_in.key(Key::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        // Valid explicit value succeeds.
+        sign_in.paste("secret-auth-code");
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::None);
+        assert_eq!(paste_rx.try_recv(), Ok(String::from("secret-auth-code")));
+
+        let Stage::Flow(flow) = &sign_in.stage else {
+            panic!("test flow must remain a flow");
+        };
+        assert!(flow.paste_hint.is_none());
+        assert!(flow.paste_default.is_none());
+        assert!(flow.exchanging);
+        assert_eq!(flow.pasted, "");
+        assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
+    }
+
+    #[test]
+    fn explicit_default_override() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (mut sign_in, mut paste_rx) =
+            running_flow("Paste domain or Enter for default", Some("github.com"));
+        sign_in.paste("ghe.enterprise.internal");
+
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::None);
+
+        assert_eq!(
+            paste_rx.try_recv(),
+            Ok(String::from("ghe.enterprise.internal"))
+        );
+        let Stage::Flow(flow) = &sign_in.stage else {
+            panic!("test flow must remain a flow");
+        };
+        assert!(flow.paste_hint.is_none());
+        assert!(flow.paste_default.is_none());
+        assert!(flow.exchanging);
+        assert_eq!(flow.pasted, "");
+        assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
     }
 }

@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use dal_core::Answer;
+
 /// Every fixed terminal string, keyed by its stable deck id.
 pub mod ids {
     /// Product tagline.
@@ -79,18 +81,12 @@ pub mod ids {
     pub const THINKING_COLLAPSED: &str = "Thinking {dur} · ctrl+o to show reasoning";
     /// Expanded reasoning header.
     pub const THINKING_OPEN: &str = "Thinking · {n} step|s · {dur} · ctrl+o to hide";
-    /// Remaining reasoning count.
-    pub const THINKING_MORE: &str = "... {n} more step|s";
     /// Successful settled tool card.
     pub const TOOL_OK: &str = "ok  {name} {summary} · {dur}";
     /// Failed settled tool card.
     pub const TOOL_FAILED: &str = "failed  {name} · {reason} · {dur}";
-    /// Tool expansion hint.
-    pub const TOOL_EXPAND: &str = "ctrl+o expands";
     /// Tool collapse hint.
     pub const TOOL_COLLAPSE: &str = "ctrl+o collapses";
-    /// Truncated tool output footer.
-    pub const TOOL_MORE: &str = "... {n} more line|s in the full output";
     /// Patch summary header.
     pub const DIFF_HEADER: &str = "patch {path} · +{add} -{del}";
     /// Truncated diff footer.
@@ -214,6 +210,14 @@ pub mod ids {
         "note: \"{title}\" timed out. dal used the default: {answer}.";
     /// Turn-cancelled request notice.
     pub const REQUEST_CANCELLED: &str = "note: \"{title}\" was cancelled with the turn.";
+    /// Withdrawn request notice: the owner gave up without a turn cancellation.
+    pub const REQUEST_WITHDRAWN: &str = "note: \"{title}\" was withdrawn.";
+    /// Unanswered request notice: no answerer was attached when the deadline passed.
+    pub const REQUEST_NO_CONTROLLER: &str =
+        "note: no one was attached to answer \"{title}\"; dal used the default: {answer}.";
+    /// Neutral request notice for resolutions that predate causes or carry one
+    /// this build does not know; the cause is never inferred from the answer.
+    pub const REQUEST_RESOLVED: &str = "note: \"{title}\" was resolved: {answer}.";
     /// Lost answer notice.
     pub const REQUEST_LOST: &str = "note: {error}";
     /// One-call answer word.
@@ -264,8 +268,12 @@ pub mod ids {
     pub const RESUME_TITLE: &str = "Resume a session · type to filter";
     /// Resume picker row.
     pub const RESUME_ROW: &str = "{name} · {when} · {n} message|s · {dir}";
+    /// Resume picker row whose journal could not be read, so it has no count.
+    pub const RESUME_ROW_UNREADABLE: &str = "{name} · {when} · messages unreadable · {dir}";
     /// Resume picker hint.
     pub const RESUME_HINT: &str = "enter resume · esc cancel · d delete";
+    /// Line shown while a resume row's delete is armed, until its second `d`.
+    pub const RESUME_ARMED: &str = "note: press d again to delete session {id}; esc cancels";
     /// Session tree title.
     pub const TREE_TITLE: &str =
         "Session tree · enter moves the leaf · the model rewinds to that point";
@@ -277,6 +285,13 @@ pub mod ids {
     pub const FORK_PICKER_TITLE: &str = "Pick a user message to fork from";
     /// Picker key guide.
     pub const PICKER_HINT: &str = "↑/↓ move · type to filter · enter confirm · esc cancel";
+    /// Scoped-model picker title.
+    pub const SCOPED_MODELS_TITLE: &str =
+        "Pick the models /model lists · space checks · enter applies";
+    /// Scoped-model row for a committed id the current model list does not name.
+    pub const SCOPED_UNAVAILABLE_ROW: &str = "{id} · not in the current model list";
+    /// Prompt-history picker title.
+    pub const HISTORY_PICKER_TITLE: &str = "Pick a past prompt · enter loads it as the draft";
     /// Empty picker notice.
     pub const PICKER_EMPTY: &str = "No choices are available.";
     /// Unsupported picker notice.
@@ -363,7 +378,7 @@ pub mod ids {
     pub const SETTINGS_HINT: &str = "arrows select · enter toggles or saves · esc close";
     /// Persisted-session exit line.
     pub const EXIT_SAVED: &str =
-        "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {name} to resume";
+        "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {token} to resume";
     /// Ephemeral-session exit line.
     pub const EXIT_EPHEMERAL: &str = "{bin}: ephemeral session · nothing saved";
     /// Draft discard dialog title.
@@ -374,6 +389,12 @@ pub mod ids {
     pub const NARROW_ROWS: &str = "dalgon needs at least 8 rows";
     /// Minimum terminal width notice.
     pub const NARROW_COLS: &str = "dalgon needs at least 12 columns";
+    /// Minimum usable height in rows; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_ROWS: u16 = 8;
+    /// Minimum usable width in columns; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_COLS: u16 = 12;
     /// Plugin notice prefix.
     pub const NOTICE_PLUGIN: &str = "note: {text}";
     /// Large paste notice.
@@ -428,13 +449,9 @@ pub const DECK: &[(&str, &str)] = &[
     ("state.retrying", ids::STATE_RETRYING),
     ("state.waiting", ids::STATE_WAITING),
     ("thinking.collapsed", ids::THINKING_COLLAPSED),
-    ("thinking.open", ids::THINKING_OPEN),
-    ("thinking.more", ids::THINKING_MORE),
     ("tool.ok", ids::TOOL_OK),
     ("tool.failed", ids::TOOL_FAILED),
-    ("tool.expand", ids::TOOL_EXPAND),
     ("tool.collapse", ids::TOOL_COLLAPSE),
-    ("tool.more", ids::TOOL_MORE),
     ("diff.header", ids::DIFF_HEADER),
     ("diff.more", ids::DIFF_MORE),
     ("agents.header", ids::AGENTS_HEADER),
@@ -493,6 +510,9 @@ pub const DECK: &[(&str, &str)] = &[
     ("request.resolvedBy", ids::REQUEST_RESOLVED_BY),
     ("request.timedOut", ids::REQUEST_TIMED_OUT),
     ("request.cancelled", ids::REQUEST_CANCELLED),
+    ("request.withdrawn", ids::REQUEST_WITHDRAWN),
+    ("request.noController", ids::REQUEST_NO_CONTROLLER),
+    ("request.resolved", ids::REQUEST_RESOLVED),
     ("request.lost", ids::REQUEST_LOST),
     ("answer.word.approve", ids::ANSWER_WORD_APPROVE),
     ("answer.word.session", ids::ANSWER_WORD_SESSION),
@@ -517,11 +537,19 @@ pub const DECK: &[(&str, &str)] = &[
     ("retry.cancel", ids::RETRY_CANCEL),
     ("resume.title", ids::RESUME_TITLE),
     ("resume.row", ids::RESUME_ROW),
+    ("resume.rowUnreadable", ids::RESUME_ROW_UNREADABLE),
     ("resume.hint", ids::RESUME_HINT),
+    ("resume.armed", ids::RESUME_ARMED),
     ("tree.title", ids::TREE_TITLE),
     ("tree.leaf", ids::TREE_LEAF),
     ("picker.fork.title", ids::FORK_PICKER_TITLE),
     ("picker.hint", ids::PICKER_HINT),
+    ("picker.scopedModels.title", ids::SCOPED_MODELS_TITLE),
+    (
+        "picker.scopedModels.unavailableRow",
+        ids::SCOPED_UNAVAILABLE_ROW,
+    ),
+    ("picker.history.title", ids::HISTORY_PICKER_TITLE),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
     ("picker.login.title", ids::LOGIN_PICKER_TITLE),
@@ -612,6 +640,23 @@ pub fn render(template: &str, values: &[(&str, &str)], plural_count: u64) -> Str
     rendered
 }
 
+/// Selects the spoken word for an answer used as a default in a resolution
+/// notice: the deck's answer words, or a value answer's raw JSON text.
+///
+/// An answer this build does not know is named by its debug form, never
+/// guessed into a known word.
+#[must_use]
+pub fn answer_word(answer: &Answer) -> String {
+    match answer {
+        Answer::Approve => ids::ANSWER_WORD_APPROVE.to_owned(),
+        Answer::ApproveForSession => ids::ANSWER_WORD_SESSION.to_owned(),
+        Answer::Decline => ids::ANSWER_WORD_DECLINE.to_owned(),
+        Answer::Cancel => ids::ANSWER_WORD_CANCEL.to_owned(),
+        Answer::Value(value) => value.as_str().to_owned(),
+        _ => format!("{answer:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DECK, dur, ids, render, tokens};
@@ -652,5 +697,58 @@ mod tests {
         let unique: std::collections::BTreeSet<_> = DECK.iter().map(|(id, _)| *id).collect();
         assert_eq!(unique.len(), DECK.len());
         assert!(!DECK.iter().any(|(id, _)| *id == "jobs.wake"));
+    }
+
+    #[test]
+    fn answer_words_follow_the_deck_and_values_stay_raw() {
+        use dal_core::{Answer, RawJson};
+
+        assert_eq!(
+            super::answer_word(&Answer::Approve),
+            ids::ANSWER_WORD_APPROVE
+        );
+        assert_eq!(
+            super::answer_word(&Answer::ApproveForSession),
+            ids::ANSWER_WORD_SESSION
+        );
+        assert_eq!(
+            super::answer_word(&Answer::Decline),
+            ids::ANSWER_WORD_DECLINE
+        );
+        assert_eq!(super::answer_word(&Answer::Cancel), ids::ANSWER_WORD_CANCEL);
+        assert_eq!(
+            super::answer_word(&Answer::Value(
+                RawJson::parse("\"selected rows\"").expect("valid raw JSON")
+            )),
+            "\"selected rows\""
+        );
+    }
+
+    #[test]
+    fn resolution_notices_render_from_the_deck() {
+        assert_eq!(
+            super::render(
+                ids::REQUEST_WITHDRAWN,
+                &[("title", "Allow this command?")],
+                1,
+            ),
+            "note: \"Allow this command?\" was withdrawn."
+        );
+        assert_eq!(
+            super::render(
+                ids::REQUEST_NO_CONTROLLER,
+                &[("title", "Allow this command?"), ("answer", "deny"),],
+                1,
+            ),
+            "note: no one was attached to answer \"Allow this command?\"; dal used the default: deny."
+        );
+        assert_eq!(
+            super::render(
+                ids::REQUEST_RESOLVED,
+                &[("title", "Pick one"), ("answer", "\"a\"")],
+                1,
+            ),
+            "note: \"Pick one\" was resolved: \"a\"."
+        );
     }
 }

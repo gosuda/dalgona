@@ -18,8 +18,8 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, Visibility};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, AssistantPart, BlobId, CallId, ContextItem, EntryId, Family,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, ModelRoute, Notice,
-    Part, Question, RawJson, ReplaySource, RequestParams, RunOutput, RunRequest, SessionId,
-    SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+    Part, PrivateEffect, Question, RawJson, ReplaySource, RequestParams, RunOutput, RunRequest,
+    SessionId, SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
 };
 use dal_ext::Font;
 use tokio::sync::Semaphore;
@@ -697,6 +697,7 @@ fn assistant(parts: Vec<AssistantPart>) -> ContextItem {
             model: "claude".into(),
         },
         parts,
+        replay: None,
     }
 }
 
@@ -705,6 +706,7 @@ fn call(args: &str) -> AssistantPart {
         call: CallId::new("c1"),
         name: "read".into(),
         args: RawJson::parse(args).expect("fixture JSON parses"),
+        replay: None,
     }
 }
 
@@ -747,6 +749,7 @@ fn every_role() -> Vec<CoveredEntry> {
                 },
                 AssistantPart::Text {
                     text: "on it".into(),
+                    replay: None,
                 },
                 call(r#"{"path":"a.rs"}"#),
             ]),
@@ -876,6 +879,7 @@ async fn journal_input_drives_the_pipeline_and_names_roles_in_letter_text() {
             assistant(vec![
                 AssistantPart::Text {
                     text: "on it".into(),
+                    replay: None,
                 },
                 call("{\"path\":\"\u{1F680}.rs\"}"),
             ]),
@@ -1413,6 +1417,9 @@ impl Services for CountingServices {
         let records = self.records.iter().cloned().map(Box::new).collect();
         Box::pin(async move { Ok(records) })
     }
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        unavailable()
+    }
     fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
         let digest = *blake3::hash(&bytes).as_bytes();
         self.locked_blobs().insert(digest, bytes);
@@ -1581,6 +1588,7 @@ async fn compactor_reuses_matching_images_without_fetching_unrelated_pngs() {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "test".into(),
+            provider: None,
         },
         session: SessionId::new_v7(),
         instructions: "",

@@ -32,6 +32,7 @@ pub(super) fn chat_request(
             "assistant" => context.push(ContextItem::Assistant {
                 source: source.clone(),
                 parts: chat_assistant(message)?,
+                replay: None,
             }),
             "tool" => context.push(ContextItem::ToolResult {
                 call: CallId::new(str_member(message, "tool_call_id")),
@@ -117,6 +118,7 @@ pub(super) fn messages_request(
             "assistant" => context.push(ContextItem::Assistant {
                 source: source.clone(),
                 parts: anthropic_assistant(body)?,
+                replay: None,
             }),
             role => return Err(unsupported_role(role)),
         }
@@ -196,7 +198,10 @@ fn chat_assistant(message: &Value) -> Result<Vec<AssistantPart>, RouterFail> {
     let mut parts = Vec::new();
     let text = chat_text(message.get("content"))?;
     if !text.is_empty() {
-        parts.push(AssistantPart::Text { text: text.into() });
+        parts.push(AssistantPart::Text {
+            text: text.into(),
+            replay: None,
+        });
     }
     for call in message
         .get("tool_calls")
@@ -211,6 +216,7 @@ fn chat_assistant(message: &Value) -> Result<Vec<AssistantPart>, RouterFail> {
                 .map_or("", |function| str_member(function, "name"))
                 .into(),
             args: raw_text(function.map_or("{}", |function| str_member(function, "arguments"))),
+            replay: None,
         });
     }
     Ok(parts)
@@ -227,7 +233,9 @@ fn responses_item(item: &Value, source: &ReplaySource) -> Result<ContextItem, Ro
                 source: source.clone(),
                 parts: vec![AssistantPart::Text {
                     text: chat_text(item.get("content"))?.into(),
+                    replay: None,
                 }],
+                replay: None,
             }),
             "user" | "system" | "developer" => Ok(ContextItem::User {
                 parts: chat_parts(item.get("content"))?,
@@ -240,7 +248,9 @@ fn responses_item(item: &Value, source: &ReplaySource) -> Result<ContextItem, Ro
                 call: CallId::new(str_member(item, "call_id")),
                 name: str_member(item, "name").into(),
                 args: raw_text(str_member(item, "arguments")),
+                replay: None,
             }],
+            replay: None,
         }),
         "function_call_output" => Ok(ContextItem::ToolResult {
             call: CallId::new(str_member(item, "call_id")),
@@ -256,6 +266,7 @@ fn responses_item(item: &Value, source: &ReplaySource) -> Result<ContextItem, Ro
                 text: "".into(),
                 replay: Some(raw_of(Some(item))),
             }],
+            replay: None,
         }),
         kind => Err(unsupported_part(kind)),
     }
@@ -320,7 +331,10 @@ fn anthropic_assistant(content: Option<&Value>) -> Result<Vec<AssistantPart>, Ro
         return Ok(Vec::new());
     };
     if let Some(text) = content.as_str() {
-        return Ok(vec![AssistantPart::Text { text: text.into() }]);
+        return Ok(vec![AssistantPart::Text {
+            text: text.into(),
+            replay: None,
+        }]);
     }
     let mut parts = Vec::new();
     for block in content
@@ -331,11 +345,13 @@ fn anthropic_assistant(content: Option<&Value>) -> Result<Vec<AssistantPart>, Ro
         match str_member(block, "type") {
             "text" => parts.push(AssistantPart::Text {
                 text: str_member(block, "text").into(),
+                replay: None,
             }),
             "tool_use" => parts.push(AssistantPart::ToolCall {
                 call: CallId::new(str_member(block, "id")),
                 name: str_member(block, "name").into(),
                 args: raw_of(block.get("input")),
+                replay: None,
             }),
             "thinking" | "redacted_thinking" => parts.push(AssistantPart::Thinking {
                 text: str_member(block, "thinking").into(),

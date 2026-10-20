@@ -344,19 +344,41 @@ fn generator_utf8_error() {
 fn generator_link_errors() {
     let guard = tempfile_guard::Guard::new();
     let dir = guard.dir().join("docs");
+    let source = guard.dir().join("references.rs");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("pages"), "a user docs 100\n").unwrap();
+    std::fs::write(dir.join("a.md"), "# Aye\n").unwrap();
     std::fs::write(
-        dir.join("a.md"),
-        format!("# Aye\n\nSee {SCHEME}://missing-page.\n"),
+        &source,
+        format!(
+            r#"const _: &str = "{SCHEME}://a.\n {SCHEME}://a.\r {SCHEME}://a.\t {SCHEME}://a.\" {SCHEME}://a.\'";
+"#
+        ),
     )
     .unwrap();
     let args = GenArgs {
         scheme: Scheme::Dal,
         dir: dir.clone(),
         examples: None,
-        scan: vec![dir],
+        scan: vec![guard.dir().clone()],
     };
+    generate(&args).expect("valid source delimiters end the URI");
+
+    std::fs::write(&source, format!(r#"const _: &str = "{SCHEME}://a\q.";"#)).unwrap();
+    let malformed = generate(&args).expect_err("malformed escape stays in the URI");
+    assert!(
+        malformed
+            .iter()
+            .any(|e| e.to_string().contains("is not a page")),
+        "malformed link error, got {malformed:?}"
+    );
+
+    std::fs::write(&source, "const _: &str = \"no links\";\n").unwrap();
+    std::fs::write(
+        dir.join("a.md"),
+        format!("# Aye\n\nSee {SCHEME}://missing-page.\n"),
+    )
+    .unwrap();
     let errors = generate(&args).expect_err("link fails");
     assert!(
         errors
@@ -532,38 +554,160 @@ fn resolver_grammar_edges() {
     }
 }
 
-#[test]
-fn prop_index_column() {
-    let snap = snapshot();
-    for manual in &snap.manuals {
-        let text = render_index(manual);
-        let mut columns = std::collections::HashSet::new();
-        for line in text.lines().skip(1) {
-            let title_start = line.find(|c: char| c != ' ').unwrap_or(line.len());
-            let _ = title_start;
-            let trimmed = line.trim_start();
-            let first_space = trimmed.find(' ').unwrap_or(trimmed.len());
-            columns.insert(trimmed[..first_space].len());
-        }
-        assert!(columns.iter().next().is_some());
+fn synthetic_manual(pages: &[(&str, &str)]) -> Manual {
+    Manual {
+        scheme: SCHEME.to_owned(),
+        plugin: SCHEME.to_owned(),
+        pages: pages
+            .iter()
+            .map(|(page, text)| ((*page).to_owned(), (*text).to_owned()))
+            .collect(),
     }
 }
 
 #[test]
-fn prop_lookup_total() {
+fn index_pads_every_title_to_the_longest_uri_plus_two_spaces() {
+    let manual = synthetic_manual(&[
+        ("a", "# Alpha\nbody"),
+        ("mid", "# Middle page\nbody"),
+        ("long-page", "# Longest\nbody"),
+    ]);
+    // The `long-page` entry is the longest URI at 15 bytes, so every title
+    // starts at byte 17 and the longest entry keeps exactly two spaces.
+    let expected = format!(
+        "# dal://\n{}{}Alpha\n{}{}Middle page\n{}  Longest\n",
+        u("a"),
+        " ".repeat(10),
+        u("mid"),
+        " ".repeat(8),
+        u("long-page"),
+    );
+    assert_eq!(render_index(&manual), expected);
+
+    // The widest entry decides the column, not the first or the last.
+    let reordered = synthetic_manual(&[("long-page", "# Longest\nbody"), ("a", "# Alpha\nbody")]);
+    assert_eq!(
+        render_index(&reordered),
+        format!(
+            "# dal://\n{}  Longest\n{}{}Alpha\n",
+            u("long-page"),
+            u("a"),
+            " ".repeat(10)
+        )
+    );
+
+    // A one-page index still separates URI and title by two spaces, and an
+    // empty manual is the header line alone.
+    assert_eq!(
+        render_index(&synthetic_manual(&[("solo", "# Only\n")])),
+        format!("# dal://\n{}  Only\n", u("solo"))
+    );
+    assert_eq!(render_index(&synthetic_manual(&[])), "# dal://\n");
+}
+
+#[test]
+fn live_index_aligns_every_title_to_one_column_and_ends_with_one_newline() {
     let snap = snapshot();
-    let abc = u("a/b/c");
-    for text in [
-        "",
-        "://",
-        "dal://",
-        "DALGON://CONFIG",
-        abc.as_str(),
-        "\u{1f600}",
-        "a".repeat(300).as_str(),
-    ] {
-        let _ = lookup(&snap, text);
+    assert!(!snap.manuals.is_empty(), "the live snapshot has a manual");
+    for manual in &snap.manuals {
+        let text = render_index(manual);
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text:?}");
+        let widest = manual
+            .pages
+            .iter()
+            .map(|(page, _)| format!("{}://{page}", manual.scheme).len())
+            .max()
+            .expect("a live manual has pages");
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(lines.len(), manual.pages.len(), "one line per page");
+        for (line, (page, body)) in lines.iter().zip(&manual.pages) {
+            let uri = format!("{}://{page}", manual.scheme);
+            let title = body
+                .lines()
+                .next()
+                .and_then(|first| first.strip_prefix("# "))
+                .expect("a live page opens with a title line");
+            assert_eq!(&line[..uri.len()], uri, "entry order follows page order");
+            assert!(
+                line[uri.len()..widest + 2].bytes().all(|byte| byte == b' '),
+                "{line:?} pads with spaces up to the shared column"
+            );
+            assert_eq!(
+                &line[widest + 2..],
+                title,
+                "{line:?} starts its title at the shared column"
+            );
+        }
     }
+}
+
+#[test]
+fn lookup_classifies_every_hostile_input_without_guessing() {
+    let snap = DocsSnapshot {
+        manuals: vec![synthetic_manual(&[
+            ("cli", "# CLI\nbody"),
+            ("config", "# Config\nbody"),
+        ])],
+    };
+    let deep = u("a/b/c");
+    let nested_separator = format!("{SCHEME}://config{}x", "://");
+    let overlong = "a".repeat(300);
+    let no_page = |text: &str| match lookup(&snap, text) {
+        Lookup::Miss(Miss::NoPage {
+            scheme,
+            uri,
+            nearest,
+        }) => {
+            assert_eq!(scheme, SCHEME, "{text:?}");
+            assert_eq!(uri, text);
+            nearest
+        }
+        other => panic!("{text:?} must be NoPage, got {other:?}"),
+    };
+    let not_a_uri = |text: &str| match lookup(&snap, text) {
+        Lookup::Miss(Miss::NotAUri {
+            text: echoed,
+            nearest,
+        }) => {
+            assert_eq!(echoed, text);
+            nearest
+        }
+        other => panic!("{text:?} must be NotAUri, got {other:?}"),
+    };
+    let no_scheme = |text: &str| match lookup(&snap, text) {
+        Lookup::Miss(Miss::NoScheme { scheme, known }) => {
+            assert_eq!(known, vec![SCHEME.to_owned()], "{text:?}");
+            scheme
+        }
+        other => panic!("{text:?} must be NoScheme, got {other:?}"),
+    };
+
+    // No separator at all: never a page, never an index, never a panic.
+    assert_eq!(not_a_uri(""), None);
+    assert_eq!(not_a_uri("\u{1f600}"), None);
+    assert_eq!(not_a_uri(&overlong), None);
+    // A bare page name is a near miss only through its own entry.
+    assert_eq!(not_a_uri("confg").as_deref(), Some(u("config").as_str()));
+    // The first separator splits; an empty or foreign scheme is NoScheme,
+    // and scheme matching is exact-case and multi-byte safe.
+    assert_eq!(no_scheme("://"), "");
+    assert_eq!(no_scheme("DALGON://CONFIG"), "DALGON");
+    assert_eq!(no_scheme("\u{e9}://x"), "\u{e9}");
+    assert_eq!(no_scheme(&format!("\u{1f600}{}", "://")), "\u{1f600}");
+    // A known scheme with an empty page is the index, nothing else.
+    match lookup(&snap, &format!("{SCHEME}{}", "://")) {
+        Lookup::Index { uri, text } => {
+            assert_eq!(uri, format!("{SCHEME}://"));
+            assert_eq!(text, render_index(&snap.manuals[0]));
+        }
+        other => panic!("the empty page must be the index, got {other:?}"),
+    }
+    // Pages that break the grammar or are simply absent are NoPage on the
+    // known scheme, and a second separator inside the page is not a scheme.
+    assert_eq!(no_page(&deep), None);
+    assert_eq!(no_page(&nested_separator), None);
+    assert_eq!(no_page(&format!("{SCHEME}:///")), None);
+    assert_eq!(no_page(&u("CONFIG")), None);
 }
 
 #[test]
@@ -589,13 +733,32 @@ fn prop_page_valid_regex() {
 }
 
 #[test]
-fn prop_nearest_minimal() {
-    // Bare page names, sorted per the contract; production pairs full URIs
-    // with pages itself in `lookup`.
-    let candidates = ["cli", "config", "context"];
-    let borrowed: Vec<&str> = candidates.to_vec();
-    assert_eq!(nearest(&borrowed, "config"), Some("config".to_owned()));
-    assert_eq!(nearest(&borrowed, "zzz"), None);
+fn nearest_accepts_edit_distance_two_and_rejects_three() {
+    let only = ["config"];
+    // N-1 / N / N+1 around the distance-2 limit.
+    assert_eq!(nearest(&only, "config").as_deref(), Some("config"));
+    assert_eq!(nearest(&only, "confi").as_deref(), Some("config"));
+    assert_eq!(nearest(&only, "conf").as_deref(), Some("config"));
+    assert_eq!(nearest(&only, "con"), None);
+    // Substitutions and insertions count the same as deletions.
+    assert_eq!(nearest(&only, "cxnfxg").as_deref(), Some("config"));
+    assert_eq!(nearest(&only, "cxnfxgx"), None);
+    // The empty text is two edits from a two-byte page and three from a
+    // three-byte page; the early-exit must not undercount it.
+    assert_eq!(nearest(&["ab"], "").as_deref(), Some("ab"));
+    assert_eq!(nearest(&["abc"], ""), None);
+    assert_eq!(nearest(&[], "config"), None);
+}
+
+#[test]
+fn nearest_prefers_the_strictly_closer_candidate_and_keeps_ties_earlier() {
+    // A tie at distance 1 keeps the earlier of the sorted candidates.
+    assert_eq!(nearest(&["bad", "cad"], "dad").as_deref(), Some("bad"));
+    // A later candidate that is strictly closer replaces the earlier one,
+    // even when the earlier one is still inside the limit.
+    assert_eq!(nearest(&["aaaa", "aaab"], "aaab").as_deref(), Some("aaab"));
+    // An earlier exact match is never displaced by a later distance-1 one.
+    assert_eq!(nearest(&["aaab", "aaac"], "aaab").as_deref(), Some("aaab"));
 }
 
 #[test]
@@ -729,7 +892,7 @@ fn split_cells(line: &str) -> Vec<String> {
 
 #[test]
 fn truth_commands_page() {
-    use dal_ext::commands::{BUILTINS, MODE};
+    use dal_ext::commands::specs;
     let pages = load_manual();
     let commands = pages.get("commands").expect("commands page");
     let rows: Vec<Vec<String>> = commands
@@ -737,7 +900,7 @@ fn truth_commands_page() {
         .filter(|line| line.starts_with("| /"))
         .map(split_cells)
         .collect();
-    let specs: Vec<_> = BUILTINS.iter().chain(std::iter::once(&MODE)).collect();
+    let specs: Vec<_> = specs().collect();
     assert_eq!(rows.len(), specs.len(), "one row per registry entry");
     for (row, spec) in rows.iter().zip(specs.iter()) {
         assert_eq!(row[1], format!("/{}", spec.name), "name column");

@@ -65,6 +65,14 @@ pub struct SessionInfo {
     /// The last journal sequence, when known by the active session.
     #[serde(default)]
     pub last_seq: Option<Seq>,
+    /// The number of entries on the session's visible leaf path: every entry
+    /// from the root to the current leaf, of any kind, which is the length of
+    /// the path [`SessionSummary::message_count`] and a live view report.
+    /// `None` when the producer could not read it (a damaged journal, or an
+    /// older producer); the member is then absent on the wire, so listings
+    /// without it keep their exact old encoding and old payloads parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
 }
 
 /// One row of a session listing: identity plus picker counts.
@@ -112,14 +120,35 @@ pub enum TurnState {
 }
 
 /// A bounded request for one page of session entries.
+///
+/// Decoding enforces the same [`PageReq::MAX_LIMIT`] bound as
+/// [`PageReq::new`]: JSON carrying a larger limit is rejected instead of
+/// bypassing the constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "PageReqWire")]
 pub struct PageReq {
     /// The maximum number of entries requested.
     pub limit: NonZeroU32,
     /// The exclusive entry cursor for the preceding page.
     pub before: Option<EntryId>,
+}
+
+/// The unchecked wire shape behind [`PageReq`]; only [`PageReq::new`] admits it.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+struct PageReqWire {
+    limit: NonZeroU32,
+    before: Option<EntryId>,
+}
+
+impl TryFrom<PageReqWire> for PageReq {
+    type Error = PageReqError;
+
+    fn try_from(wire: PageReqWire) -> Result<Self, Self::Error> {
+        Self::new(wire.limit, wire.before)
+    }
 }
 
 impl PageReq {
@@ -232,6 +261,15 @@ pub struct SettingsView {
     pub mode: Mode,
     /// The optional session display name.
     pub name: Option<Box<str>>,
+    /// The authoritative model scope committed by `SetScopedModels`, when
+    /// any. Stored verbatim: entries the current catalog omits are kept,
+    /// so a temporarily missing model never vanishes from the scope.
+    /// `None` means no scope was ever committed; the fold never authors
+    /// this field (it emits `None`, which the projection treats as
+    /// keep-existing). Absent on the wire when `None`, so views without a
+    /// committed scope keep their exact old encoding and old payloads parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_models: Option<Vec<Box<str>>>,
 }
 
 /// The counts of added and removed lines for one changed file.
@@ -383,10 +421,51 @@ mod tests {
             created_at: Some(jiff::Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         };
         let encoded = sonic_rs::to_string(&session)?;
         let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
         assert_eq!(decoded, session);
+        Ok(())
+    }
+
+    /// `message_count` is additive: a listing that could not read it omits the
+    /// member (the exact old encoding), a payload from a producer that predates
+    /// it decodes as unknown, and a measured count round-trips, zero included.
+    #[test]
+    fn session_info_message_count_is_additive_on_the_wire() -> TestResult {
+        let base = SessionInfo {
+            id: SessionId::new_v7(),
+            name: None,
+            preview: "".into(),
+            workspace: Workspace::new(std::env::temp_dir())?,
+            updated_at: jiff::Timestamp::UNIX_EPOCH,
+            created_at: None,
+            archived: None,
+            last_seq: None,
+            message_count: None,
+        };
+        let unknown = sonic_rs::to_string(&base)?;
+        assert!(
+            !unknown.contains("messageCount"),
+            "an unreadable count is omitted, not zero: {unknown}"
+        );
+        let decoded: SessionInfo = sonic_rs::from_str(&unknown)?;
+        assert_eq!(decoded.message_count, None, "an old payload is unknown");
+
+        for count in [0_u64, 7] {
+            let measured = SessionInfo {
+                message_count: Some(count),
+                ..base.clone()
+            };
+            let encoded = sonic_rs::to_string(&measured)?;
+            assert!(
+                encoded.contains(&format!("\"messageCount\":{count}")),
+                "{encoded}"
+            );
+            let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
+            assert_eq!(decoded, measured);
+        }
         Ok(())
     }
 
@@ -420,6 +499,7 @@ mod tests {
             created_at: Some(jiff::Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::new(4).expect("4 is nonzero"))),
+            message_count: None,
         };
         let view = View {
             r#gen: Gen::new(NonZeroU64::new(2).expect("2 is nonzero")),
@@ -443,6 +523,7 @@ mod tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
+                scoped_models: None,
             },
             open,
             changes,
@@ -454,6 +535,7 @@ mod tests {
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
                     cost_usd: None,
+                    premium_requests: None,
                 },
                 context_tokens: 17,
                 context_window: 128_000,
@@ -498,6 +580,7 @@ mod tests {
             created_at: None,
             archived: None,
             last_seq: None,
+            message_count: None,
         };
         let encoded = sonic_rs::to_string(&session)?;
         assert!(encoded.contains("\"createdAt\":null"));

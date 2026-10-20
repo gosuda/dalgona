@@ -42,6 +42,7 @@ reasoning = 3.0
             cached_input: 0.5,
             output: 2.0,
             reasoning: 3.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     );
@@ -91,6 +92,7 @@ reasoning = 3.0
             cached_input: 0.0,
             output: 0.0,
             reasoning: 0.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     );
@@ -112,6 +114,7 @@ fn config_merges_price_fields_and_rejects_incomplete_rates() {
             cached_input: 2.0,
             output: 3.0,
             reasoning: 4.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     );
@@ -143,6 +146,7 @@ fn config_price_layers_override_single_rates_including_zero() {
             cached_input: 0.0,
             output: 3.0,
             reasoning: 5.0,
+            cache_write: None,
             tiers: Box::default(),
         })
     );
@@ -164,6 +168,7 @@ fn config_parses_request_wide_price_tiers() {
             cached_input: 0.5,
             output: 2.0,
             reasoning: 3.0,
+            cache_write: None,
             tiers: vec![PriceTier {
                 size: 200_000,
                 input: Some(2.0),
@@ -269,4 +274,130 @@ fn compact_ratio_enforces_finite_inclusive_bounds() {
                 if key.as_ref() == "compact_ratio"
         ));
     }
+}
+
+#[test]
+fn config_price_cache_write_is_optional_and_layered() {
+    let omitted = load(
+        ConfigProduct::Dalgon,
+        "[prices.model]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 3.0",
+    )
+    .expect("cache_write is optional");
+    assert_eq!(
+        omitted
+            .price_for_model("model")
+            .map(|price| price.cache_write),
+        Some(None)
+    );
+
+    let supplied = load(
+        ConfigProduct::Dalgon,
+        "[prices.model]\ninput = 1.0\ncached_input = 0.5\ncache_write = 0.75\noutput = 2.0\nreasoning = 3.0",
+    )
+    .expect("supplied cache_write parses");
+    assert_eq!(
+        supplied
+            .price_for_model("model")
+            .map(|price| price.cache_write),
+        Some(Some(0.75))
+    );
+
+    let retained = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new(DATA_ROOT),
+        "[prices.model]\ninput = 1.0\ncached_input = 0.5\ncache_write = 0.75\noutput = 2.0\nreasoning = 3.0",
+        Some("[prices.model]\noutput = 4.0"),
+    )
+    .expect("omitted cache_write keeps the earlier layer");
+    assert_eq!(
+        retained
+            .price_for_model("model")
+            .map(|price| price.cache_write),
+        Some(Some(0.75))
+    );
+
+    let overridden = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new(DATA_ROOT),
+        "[prices.model]\ninput = 1.0\ncached_input = 0.5\ncache_write = 0.75\noutput = 2.0\nreasoning = 3.0",
+        Some("[prices.model]\ncache_write = 0.0"),
+    )
+    .expect("explicit zero cache_write overrides");
+    assert_eq!(
+        overridden
+            .price_for_model("model")
+            .map(|price| price.cache_write),
+        Some(Some(0.0))
+    );
+}
+
+#[test]
+fn config_price_cache_write_rejects_invalid_rates() {
+    for rate in ["-1.0", "nan", "inf"] {
+        let document = format!(
+            "[prices.model]\ninput = 1.0\ncached_input = 0.5\ncache_write = {rate}\noutput = 2.0\nreasoning = 3.0"
+        );
+        assert!(matches!(
+            load(ConfigProduct::Dalgon, &document),
+            Err(ConfigError::InvalidValue { key, expected, .. })
+                if key.as_ref() == "prices.model.cache_write"
+                    && expected.as_ref() == "finite non-negative USD rate"
+        ));
+    }
+}
+
+#[test]
+fn config_rejects_misspelled_cache_write_key() {
+    let error = load(
+        ConfigProduct::Dalgon,
+        "[prices.model]\ninput = 1.0\ncached_input = 0.5\ncache_writes = 0.75\noutput = 2.0\nreasoning = 3.0",
+    )
+    .expect_err("misspelled cache_write is not a key");
+    assert!(matches!(
+        error,
+        ConfigError::UnknownKey { key, suggestion, .. }
+            if key.as_ref() == "prices.model.cache_writes"
+                && suggestion.as_deref() == Some("prices.model.cache_write")
+    ));
+}
+
+#[test]
+fn config_price_cache_write_tier_scoping_matches_helpers() {
+    let config = load(
+        ConfigProduct::Dalgon,
+        "[prices.tiered]\ninput = 1.0\ncached_input = 0.5\ncache_write = 1.5\noutput = 2.0\nreasoning = 3.0\ntiers = [{ size = 200000, output = 4.0 }]",
+    )
+    .expect("tier without cache_write parses beside a base rate");
+    assert_eq!(
+        config.price_for_model("tiered"),
+        Some(&ModelPrice {
+            input: 1.0,
+            cached_input: 0.5,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: Some(1.5),
+            tiers: vec![PriceTier {
+                size: 200_000,
+                input: None,
+                cached_input: None,
+                cache_write: None,
+                output: Some(4.0),
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
+        })
+    );
+
+    let tier_only = load(
+        ConfigProduct::Dalgon,
+        "[prices.tiered]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 3.0\ntiers = [{ size = 200000, cache_write = 5.0 }]",
+    )
+    .expect("tier cache_write parses without a base rate");
+    assert_eq!(
+        tier_only.price_for_model("tiered").map(|price| (
+            price.cache_write,
+            price.tiers.first().and_then(|tier| tier.cache_write)
+        )),
+        Some((None, Some(5.0)))
+    );
 }

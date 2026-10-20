@@ -1,10 +1,12 @@
 //! Strict decoding of the provider layer's effective TOML configuration.
 
+use std::collections::BTreeMap;
+
 use dal_core::{Config, Family, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{PROVIDERS, ProviderDef, Shape};
+use super::{PROVIDERS, ProviderDef, Shape, def::FamilyPolicy};
 
 /// The transport used to reach a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +24,16 @@ pub enum AuthStyle {
     Bearer,
     /// Send the credential in an `x-api-key` header.
     XApiKey,
+    /// Send the credential in an `api-key` header.
+    ///
+    /// On a Chat or Responses entry this style also selects the Azure
+    /// `OpenAI` adapter (deployment routing and the `api-version` query), as
+    /// the configuration reference documents. No other family takes Azure
+    /// routing from this style.
+    ApiKey,
+    /// Send no credential: the entry authenticates nothing, so no
+    /// authorization header is built for it and none is ever invented.
+    None,
 }
 
 /// Provider-specific settings decoded from the effective configuration.
@@ -43,6 +55,42 @@ pub struct ProviderConfig {
     pub scripted: Option<ScriptedSelection>,
 }
 
+/// The per-provider settings that sit beside the connection defaults.
+///
+/// Each field is the value of the same-named key in the entry's own
+/// `providers.<id>` table, trimmed; an absent key leaves it empty. Nothing is
+/// inherited from a built-in row and nothing is read from the environment:
+/// the families that consume a setting overlay the environment themselves.
+/// `base_url_defaulted` is the one field without a same-named key: it records
+/// whether the entry's own table named no `base_url`, so the entry carries
+/// its built-in row default. Preparation consults the captured environment
+/// for such an entry only; an explicit URL wins even when it equals the row
+/// default, because omission is what the table said, not what the value is.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderSettings {
+    /// Whether the entry's own table named no `base_url`: the entry carries
+    /// its built-in row default, which preparation may replace from the
+    /// captured environment. `false` for every named provider, whose table
+    /// always names one.
+    pub(crate) base_url_defaulted: bool,
+    /// The `api-version` query value of an Azure endpoint.
+    pub(crate) api_version: Option<Box<str>>,
+    /// Catalog model id to deployment name, in model-id order.
+    pub(crate) deployments: BTreeMap<Box<str>, Box<str>>,
+    /// The cloud region of a Bedrock endpoint.
+    pub(crate) region: Option<Box<str>>,
+    /// The cloud project of a Vertex endpoint.
+    pub(crate) project: Option<Box<str>>,
+    /// The cloud location of a Vertex endpoint.
+    pub(crate) location: Option<Box<str>>,
+    /// The `GitLab` namespace that scopes a workflow session.
+    pub(crate) namespace: Option<Box<str>>,
+    /// The executable a command-line family launches.
+    pub(crate) binary: Option<Box<str>>,
+    /// The integration identity a Copilot request presents.
+    pub(crate) integration: Option<Box<str>>,
+}
+
 /// One configured provider route and its connection defaults.
 #[derive(Clone, Debug)]
 pub struct ProviderEntry {
@@ -57,20 +105,32 @@ pub struct ProviderEntry {
     pub base_url: Box<str>,
     /// The provider transport.
     pub transport: Transport,
-    /// The environment variable name for a named provider's API key.
+    /// The environment variable name of this entry's API key. A named
+    /// provider sets it, except that a named `auth = none` entry may omit it
+    /// or keep it; a built-in row may override its own default with it.
     pub key_env: Option<Box<str>>,
     /// The API-key authorization header style.
     pub auth: AuthStyle,
     /// The maximum number of simultaneous requests for this provider.
     pub max_concurrent_requests: u32,
+    /// The settings of this entry's own `providers.<id>` table.
+    pub settings: ProviderSettings,
 }
 
 impl ProviderEntry {
-    /// The request-time header set: the table row's, else the family's.
+    /// The request-time header set: the table row's while the entry keeps the
+    /// row's family, else the family's.
+    ///
+    /// A compatible preset pointed at another family sends that family's
+    /// headers, exactly as the named-provider path did before the row
+    /// existed. At rest every row's own shape already matches its family, so
+    /// the vendor rows and untouched presets are unchanged.
     #[must_use]
     pub fn shape(&self) -> Shape {
-        self.def
-            .map_or_else(|| Shape::of_family(self.family), |def| def.shape)
+        match self.def {
+            Some(def) if def.family == self.family => def.shape,
+            _ => Shape::of_family(self.family),
+        }
     }
 }
 
@@ -180,6 +240,14 @@ const PROVIDER_KEYS: &[&str] = &[
     "key_env",
     "auth",
     "max_concurrent_requests",
+    "api_version",
+    "deployments",
+    "region",
+    "project",
+    "location",
+    "namespace",
+    "binary",
+    "integration",
 ];
 
 fn invalid(message: impl Into<Box<str>>) -> ProviderConfigError {
@@ -222,6 +290,47 @@ fn string_field<'a>(
         .as_str()
         .map(Some)
         .ok_or_else(|| invalid(format!("{path}.{key} must be a string")))
+}
+
+/// A string setting, trimmed; `None` when the key is absent.
+///
+/// A value that is not a string, or is blank, is refused: a setting that is
+/// present must name something.
+fn setting_field(
+    table: Option<&toml::Table>,
+    key: &str,
+    path: &str,
+) -> Result<Option<Box<str>>, ProviderConfigError> {
+    let Some(value) = table.and_then(|table| table.get(key)) else {
+        return Ok(None);
+    };
+    match value.as_str().map(str::trim) {
+        Some(text) if !text.is_empty() => Ok(Some(text.into())),
+        _ => Err(invalid(format!("{path}.{key} must be a non-empty string"))),
+    }
+}
+
+/// The `deployments` table: model id to a non-empty, trimmed deployment name.
+fn deployments_field(
+    table: Option<&toml::Table>,
+    path: &str,
+) -> Result<BTreeMap<Box<str>, Box<str>>, ProviderConfigError> {
+    let Some(value) = table.and_then(|table| table.get("deployments")) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(rows) = value.as_table() else {
+        return Err(invalid(format!("{path}.deployments must be a table")));
+    };
+    rows.iter()
+        .map(|(model, value)| match value.as_str().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                Ok((Box::<str>::from(model.as_str()), Box::<str>::from(name)))
+            }
+            _ => Err(invalid(format!(
+                "{path}.deployments.{model} must be a non-empty string"
+            ))),
+        })
+        .collect()
 }
 
 /// The decoded `[models]` table: default model, thinking level, and aliases.
@@ -356,6 +465,23 @@ fn decode_scripted(value: &toml::Value) -> Result<ScriptedSelection, ProviderCon
     })
 }
 
+fn decode_settings(
+    table: Option<&toml::Table>,
+    path: &str,
+) -> Result<ProviderSettings, ProviderConfigError> {
+    Ok(ProviderSettings {
+        base_url_defaulted: false,
+        api_version: setting_field(table, "api_version", path)?,
+        deployments: deployments_field(table, path)?,
+        region: setting_field(table, "region", path)?,
+        project: setting_field(table, "project", path)?,
+        location: setting_field(table, "location", path)?,
+        namespace: setting_field(table, "namespace", path)?,
+        binary: setting_field(table, "binary", path)?,
+        integration: setting_field(table, "integration", path)?,
+    })
+}
+
 fn decode_builtin(
     value: Option<&toml::Value>,
     def: &'static ProviderDef,
@@ -367,9 +493,17 @@ fn decode_builtin(
         reject_unknown_keys(table, &path, PROVIDER_KEYS)?;
     }
 
-    let family = match string_field(table, "api", &path)? {
-        None => def.family,
-        Some(value) if def.family == Family::Responses => {
+    let family = match (def.family_policy, string_field(table, "api", &path)?) {
+        // A generic compatibility preset takes an explicit `api` the way the
+        // named-provider path did before the row existed: any supported key
+        // family wins. `openai_codex` stays rejected by `parse_api`, so a
+        // preset can never claim the OAuth-only Codex family.
+        (FamilyPolicy::Compatible, Some(value)) => parse_api(name, value)?,
+        // The native rows keep their pre-preset contract: `openai` takes its
+        // documented Chat alternate, every other `api` is refused. Either
+        // policy without an explicit `api` keeps the row default.
+        (FamilyPolicy::Compatible | FamilyPolicy::Native, None) => def.family,
+        (FamilyPolicy::Native, Some(value)) if def.family == Family::Responses => {
             let family = parse_api(name, value)?;
             if matches!(family, Family::Responses | Family::Chat) {
                 family
@@ -379,15 +513,16 @@ fn decode_builtin(
                 )));
             }
         }
-        Some(value) if value == api_name(def.family) => def.family,
-        Some(_) => {
+        (FamilyPolicy::Native, Some(value)) if value == api_name(def.family) => def.family,
+        (FamilyPolicy::Native, Some(_)) => {
             return Err(invalid(format!(
                 "{path}.api conflicts with its fixed family"
             )));
         }
     };
 
-    let url = string_field(table, "base_url", &path)?
+    let configured = string_field(table, "base_url", &path)?;
+    let url = configured
         .unwrap_or(def.base_url)
         .to_owned()
         .into_boxed_str();
@@ -396,13 +531,29 @@ fn decode_builtin(
         def.transport,
         name,
     )?;
-    let default_auth = def.key.map_or(AuthStyle::Bearer, |key| key.style);
+    // At rest the row names its own header. When the user points a preset at
+    // another family, the new family's header is the default, exactly as the
+    // named-provider path defaulted it before the row existed; an explicit
+    // `auth` still wins either way. A credential-less family takes `none`
+    // whichever row it sits on.
+    let default_auth = if family == Family::GoogleGeminiCli {
+        AuthStyle::None
+    } else if family == def.family {
+        def.key.map_or(AuthStyle::Bearer, |key| key.style)
+    } else if family == Family::Anthropic {
+        AuthStyle::XApiKey
+    } else {
+        AuthStyle::Bearer
+    };
     let auth = parse_auth(string_field(table, "auth", &path)?, default_auth, name)?;
     let key_env =
         string_field(table, "key_env", &path)?.map(|value| value.to_owned().into_boxed_str());
     let max_concurrent_requests = concurrency_limit(table, name)?;
+    let mut settings = decode_settings(table, &path)?;
+    settings.base_url_defaulted = configured.is_none();
 
     validate_transport(name, family, transport)?;
+    validate_auth(name, family, auth)?;
 
     Ok(ProviderEntry {
         id: name.into(),
@@ -413,6 +564,7 @@ fn decode_builtin(
         key_env,
         auth,
         max_concurrent_requests,
+        settings,
     })
 }
 
@@ -423,6 +575,18 @@ const fn api_name(family: Family) -> &'static str {
         Family::Responses => "openai_responses",
         Family::Codex => "openai_codex",
         Family::Anthropic => "anthropic",
+        Family::Bedrock => "bedrock",
+        Family::Cursor => "cursor",
+        Family::Devin => "devin",
+        Family::Droid => "droid",
+        Family::GitLab => "gitlab",
+        Family::GoogleGenerativeAi => "google-generative-ai",
+        Family::GoogleVertex => "google-vertex",
+        Family::GoogleGeminiCli => "google-gemini-cli",
+        Family::GoogleAntigravity => "google-antigravity",
+        Family::Mistral => "mistral",
+        Family::Ollama => "ollama",
+        Family::PiMessages => "pi-messages",
     }
 }
 
@@ -446,19 +610,16 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
             key: "base_url",
         }
     })?;
-    let key_env = string_field(Some(table), "key_env", &path)?.ok_or_else(|| {
-        ProviderConfigError::MissingKey {
-            name: name.to_owned().into_boxed_str(),
-            key: "key_env",
-        }
-    })?;
+    let key_env = string_field(Some(table), "key_env", &path)?;
 
     let transport = parse_transport(
         string_field(Some(table), "transport", &path)?,
         Transport::Https,
         name,
     )?;
-    let default_auth = if family == Family::Anthropic {
+    let default_auth = if family == Family::GoogleGeminiCli {
+        AuthStyle::None
+    } else if family == Family::Anthropic {
         AuthStyle::XApiKey
     } else {
         AuthStyle::Bearer
@@ -468,8 +629,18 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         default_auth,
         name,
     )?;
+    // Every credential style names the variable its key comes from; only an
+    // entry that authenticates nothing may omit it.
+    if key_env.is_none() && auth != AuthStyle::None {
+        return Err(ProviderConfigError::MissingKey {
+            name: name.to_owned().into_boxed_str(),
+            key: "key_env",
+        });
+    }
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
+    let settings = decode_settings(Some(table), &path)?;
     validate_transport(name, family, transport)?;
+    validate_auth(name, family, auth)?;
 
     Ok(ProviderEntry {
         id: name.to_owned().into_boxed_str(),
@@ -477,9 +648,10 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         family,
         base_url: base_url.to_owned().into_boxed_str(),
         transport,
-        key_env: Some(key_env.to_owned().into_boxed_str()),
+        key_env: key_env.map(|value| value.to_owned().into_boxed_str()),
         auth,
         max_concurrent_requests,
+        settings,
     })
 }
 
@@ -488,6 +660,18 @@ fn parse_api(name: &str, value: &str) -> Result<Family, ProviderConfigError> {
         "openai_chat" => Ok(Family::Chat),
         "openai_responses" => Ok(Family::Responses),
         "anthropic" => Ok(Family::Anthropic),
+        "bedrock" => Ok(Family::Bedrock),
+        "cursor" => Ok(Family::Cursor),
+        "devin" => Ok(Family::Devin),
+        "droid" => Ok(Family::Droid),
+        "gitlab" => Ok(Family::GitLab),
+        "google-generative-ai" => Ok(Family::GoogleGenerativeAi),
+        "google-vertex" => Ok(Family::GoogleVertex),
+        "google-gemini-cli" => Ok(Family::GoogleGeminiCli),
+        "google-antigravity" => Ok(Family::GoogleAntigravity),
+        "mistral" => Ok(Family::Mistral),
+        "ollama" => Ok(Family::Ollama),
+        "pi-messages" => Ok(Family::PiMessages),
         _ => Err(ProviderConfigError::UnknownApi {
             name: name.to_owned().into_boxed_str(),
             value: value.to_owned().into_boxed_str(),
@@ -519,8 +703,10 @@ fn parse_auth(
         None => Ok(default),
         Some("bearer") => Ok(AuthStyle::Bearer),
         Some("x-api-key") => Ok(AuthStyle::XApiKey),
+        Some("api-key") => Ok(AuthStyle::ApiKey),
+        Some("none") => Ok(AuthStyle::None),
         Some(_) => Err(invalid(format!(
-            "providers.{name}.auth must be bearer or x-api-key"
+            "providers.{name}.auth must be bearer, x-api-key, api-key, or none"
         ))),
     }
 }
@@ -547,11 +733,24 @@ fn concurrency_limit(table: Option<&toml::Table>, name: &str) -> Result<u32, Pro
     })
 }
 
+/// A `google-gemini-cli` entry spawns a local process and sends no
+/// credential, so its `auth` is `none`, by default or by explicit choice.
+fn validate_auth(name: &str, family: Family, auth: AuthStyle) -> Result<(), ProviderConfigError> {
+    if family == Family::GoogleGeminiCli && auth != AuthStyle::None {
+        return Err(invalid(format!(
+            "providers.{name}.auth must be none for api google-gemini-cli"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_transport(
     name: &str,
     family: Family,
     transport: Transport,
 ) -> Result<(), ProviderConfigError> {
+    // Only Responses and Codex define a WebSocket transport; every other
+    // family speaks HTTPS only (or, for Gemini CLI, a local subprocess).
     if transport == Transport::Websocket && !matches!(family, Family::Responses | Family::Codex) {
         return Err(ProviderConfigError::TransportMismatch {
             name: name.to_owned().into_boxed_str(),

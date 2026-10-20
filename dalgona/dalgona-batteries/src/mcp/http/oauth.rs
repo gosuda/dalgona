@@ -1238,14 +1238,26 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
-        let result =
-            discover(&oauth, &target, &challenge, Duration::from_millis(200), &cancel).await;
+        let result = discover(
+            &oauth,
+            &target,
+            &challenge,
+            Duration::from_millis(200),
+            &cancel,
+        )
+        .await;
 
         assert!(matches!(result, Err(McpError::Auth { .. })));
-        assert!(
-            unauthorized_listener.try_accept().is_err(),
-            "a cross-origin metadata URL received an HTTP connection"
-        );
+        let unauthorized_listener: std::net::TcpListener = unauthorized_listener
+            .into_std()
+            .expect("unauthorized listener into std");
+        unauthorized_listener
+            .set_nonblocking(true)
+            .expect("unauthorized listener nonblocking");
+        match unauthorized_listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("a cross-origin metadata URL received an HTTP connection: {other:?}"),
+        }
     }
 
     #[tokio::test]

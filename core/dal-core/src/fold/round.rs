@@ -11,6 +11,7 @@ use super::{
     Rejection, RequestParams, Session, SettledOutcome, Step, Stop, ToolOutcomeView, TreeDelta,
     TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
+use crate::update::ResolutionCause;
 
 /// One dispatcher result: the call, how it ended, and how long its tool ran.
 pub(super) struct Settlement {
@@ -244,6 +245,11 @@ impl Session {
     ) {
         let compaction = self.should_compact();
         let compactor_missing = compaction.is_none() && self.threshold_compaction_due();
+        // The decision above compared the measured count against the live
+        // route; the notice must read it before that route is cleared, or a
+        // session whose requested model is a reference reports the trigger
+        // as unmeasured.
+        let measured = self.measured_context_tokens();
         self.active_model = None;
         self.active_family = None;
         if let Some(reason) = compaction {
@@ -260,7 +266,7 @@ impl Session {
             emit.updates.push(compaction_started_notice(
                 Some(turn),
                 reason,
-                self.measured_context_tokens(),
+                measured,
                 window,
             ));
             effects.push(Effect::Compact {
@@ -305,15 +311,14 @@ impl Session {
         if overflowed {
             self.turn_flags.overflow = Overflow::Clear;
         }
-        let stage = match &self.phase {
+        let pending = match &self.phase {
             Phase::Running {
                 turn: active,
                 stage,
                 ..
-            } if *active == turn => stage.clone(),
+            } if *active == turn => unsettled_calls(stage, partial.as_ref()),
             _ => return Ok(()),
         };
-        let pending = unsettled_calls(stage, partial.as_ref());
         let cancelled = matches!(stop, TurnEndStop::Cancelled);
         if cancelled {
             self.turn_flags.pending_reminders.clear();
@@ -349,9 +354,16 @@ impl Session {
                 text: message.clone(),
             }));
         }
-        if matches!(stop, TurnEndStop::Cancelled) {
-            self.cancel_open_questions(turn, now, emit);
-        }
+        // Every request the turn opened gets its terminal record before the
+        // turn closes, whatever the stop: a cancelled turn names the
+        // cancellation, any other end names the owner giving up. Closing the
+        // turn afterwards leaves nothing for `close_turn` to drop silently.
+        let leftover = if cancelled {
+            ResolutionCause::Cancelled
+        } else {
+            ResolutionCause::Withdrawn
+        };
+        self.cancel_open_questions(turn, leftover, now, emit);
         emit.records.push(Record::TurnEnd {
             at: now,
             turn,
@@ -399,6 +411,11 @@ impl Session {
                 content: partial.content,
                 usage: partial.usage,
                 stop: assistant_stop_for_end(stop),
+                // A partial response carries no replay capture: the
+                // interruption ended the run before any closing capture
+                // could be taken, and a payload here would claim an
+                // exactness the partial entry cannot have.
+                replay: None,
             },
         )?;
         let view = self.tree.append(assistant.clone());
@@ -437,5 +454,202 @@ impl Session {
         } else {
             Phase::Idle
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::super::{
+        Answer, ClientId, Command, Effect, Emit, Event, Expect, HookEvent, HookOutcome,
+        HookVerdict, Part, Phase, Question, Record, Request, RequestId, Session, TurnEndStop,
+        TurnId, UpdateKind,
+    };
+    use crate::update::ResolutionCause;
+
+    const STAMP: jiff::Timestamp = jiff::Timestamp::UNIX_EPOCH;
+
+    /// A session whose first turn has passed its before-turn hook.
+    fn running_turn() -> (Session, TurnId) {
+        let mut session = Session::replay([], STAMP).unwrap().0;
+        let mut effects = Vec::new();
+        session
+            .step(
+                Event::Command {
+                    cmd: Command::Prompt {
+                        expect: Expect::Idle,
+                        content: vec![Part::Text {
+                            text: "question".into(),
+                        }],
+                    },
+                    by: ClientId::new("tester"),
+                },
+                STAMP,
+                &mut effects,
+            )
+            .unwrap();
+        let Phase::Opening { turn, .. } = session.phase() else {
+            panic!("the prompt did not open a turn");
+        };
+        let turn = *turn;
+        session
+            .step(
+                Event::Guard {
+                    turn,
+                    call: None,
+                    extension: None,
+                    outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))
+                        .unwrap(),
+                },
+                STAMP,
+                &mut effects,
+            )
+            .unwrap();
+        (session, turn)
+    }
+
+    fn request(turn: Option<TurnId>) -> Request {
+        Request {
+            id: RequestId::new_v7(),
+            turn,
+            owner: crate::Owner::Core,
+            question: Question::Confirm {
+                text: "Proceed?".into(),
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Cancel,
+        }
+    }
+
+    /// The terminal records one reducer step journaled, in order.
+    fn journaled(emit: &Emit) -> Vec<(RequestId, Answer, ClientId, bool, Option<ResolutionCause>)> {
+        emit.records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Resolved {
+                    request: id,
+                    answer,
+                    by,
+                    was_default,
+                    cause,
+                    ..
+                } => Some((*id, answer.clone(), by.clone(), *was_default, *cause)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The resolutions one reducer step published, in order.
+    fn published(emit: &Emit) -> Vec<(RequestId, Answer, Option<ResolutionCause>)> {
+        emit.updates
+            .iter()
+            .filter_map(|update| match update {
+                UpdateKind::RequestResolved {
+                    id, answer, cause, ..
+                } => Some((*id, answer.clone(), *cause)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_turn_end_resolves_its_open_requests_once_before_closing() {
+        let ends = [
+            (TurnEndStop::Done, ResolutionCause::Withdrawn),
+            (TurnEndStop::Length, ResolutionCause::Withdrawn),
+            (TurnEndStop::Filter, ResolutionCause::Withdrawn),
+            (TurnEndStop::MaxSteps, ResolutionCause::Withdrawn),
+            (TurnEndStop::Aborted, ResolutionCause::Withdrawn),
+            (
+                TurnEndStop::Failed {
+                    message: "provider failed".into(),
+                },
+                ResolutionCause::Withdrawn,
+            ),
+            (TurnEndStop::Cancelled, ResolutionCause::Cancelled),
+        ];
+        for (stop, cause) in ends {
+            let label = format!("{stop:?}");
+            let (mut session, turn) = running_turn();
+            let owned = request(Some(turn));
+            let turnless = request(None);
+            let mut effects = Vec::new();
+            for opened in [&owned, &turnless] {
+                session
+                    .step(
+                        Event::RequestOpened {
+                            request: opened.clone(),
+                        },
+                        STAMP,
+                        &mut effects,
+                    )
+                    .unwrap();
+            }
+
+            let mut emit = Emit::default();
+            session
+                .end_turn(turn, stop, None, STAMP, &mut emit, &mut effects)
+                .unwrap();
+
+            assert_eq!(
+                journaled(&emit),
+                vec![(
+                    owned.id,
+                    Answer::Cancel,
+                    ClientId::new("core"),
+                    false,
+                    Some(cause)
+                )],
+                "{label} journals exactly one terminal record for the turn's request",
+            );
+            let resolved_at = emit
+                .records
+                .iter()
+                .position(|record| matches!(record, Record::Resolved { .. }));
+            let ended_at = emit
+                .records
+                .iter()
+                .position(|record| matches!(record, Record::TurnEnd { .. }));
+            assert!(
+                matches!((resolved_at, ended_at), (Some(resolved), Some(ended)) if resolved < ended),
+                "{label} resolves the request before the turn-end record"
+            );
+            assert_eq!(
+                published(&emit),
+                vec![(owned.id, Answer::Cancel, Some(cause))],
+                "{label} publishes the same single resolution"
+            );
+            assert_eq!(
+                session
+                    .open_questions
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                vec![turnless.id],
+                "{label} leaves the turnless question waiting"
+            );
+
+            // A broker withdrawal that folds after the close finds the
+            // terminal record already journaled and publishes nothing more.
+            let mut late = Vec::new();
+            session
+                .step(
+                    Event::GrantResolved {
+                        request: owned.id,
+                        answer: Answer::Cancel,
+                        by: Some(ClientId::new("core")),
+                        was_default: false,
+                        cause: ResolutionCause::Withdrawn,
+                    },
+                    STAMP,
+                    &mut late,
+                )
+                .unwrap();
+            assert!(
+                !late.iter().any(|effect| matches!(effect, Effect::Emit(_))),
+                "{label} publishes no second terminal record"
+            );
+        }
     }
 }

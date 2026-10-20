@@ -41,6 +41,7 @@ fn usage() -> Usage {
         output_tokens: 0,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -63,6 +64,7 @@ fn view(workspace: Workspace) -> View {
             created_at: Some(jiff::Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: dal_core::Page {
@@ -78,6 +80,7 @@ fn view(workspace: Workspace) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: Some("Moon".into()),
+            scoped_models: None,
         },
         open: Vec::new(),
         changes: Vec::new(),
@@ -131,15 +134,18 @@ fn markdown_export_includes_assistant_reply() -> Result<(), Box<dyn std::error::
                     },
                     Block::Text {
                         text: "Answer".into(),
+                        replay: None,
                     },
                     Block::ToolCall {
                         id: CallId::new("call-1"),
                         name: "read".into(),
                         input: RawJson::parse(r#"{"path":"src"}"#)?,
+                        replay: None,
                     },
                 ],
                 usage: usage(),
                 stop: AssistantStop::Done,
+                replay: None,
             },
         },
         EntryView {
@@ -192,6 +198,158 @@ fn markdown_export_includes_assistant_reply() -> Result<(), Box<dyn std::error::
 #[test]
 fn markdown_fences_exceed_embedded_backtick_runs() {
     assert_eq!(fence("a```b", "json"), "````json\na```b\n````");
+}
+
+#[test]
+fn fence_length_is_one_past_the_longest_backtick_run_and_never_below_three() {
+    for (body, ticks) in [
+        ("plain", 3),
+        ("a`b", 3),
+        ("a``b", 3),
+        ("a```b", 4),
+        ("a````b", 5),
+        ("`a``b`````c``", 6),
+    ] {
+        let bar = "`".repeat(ticks);
+        assert_eq!(
+            fence(body, "text"),
+            format!("{bar}text\n{body}\n{bar}"),
+            "fence around {body:?}"
+        );
+    }
+    assert_eq!(
+        fence("done\n", "text"),
+        "```text\ndone\n```",
+        "a trailing newline is not doubled"
+    );
+}
+
+#[test]
+fn base64_length_handles_unpadded_tails_and_hostile_padding() {
+    for (encoded, expected) in [
+        ("YWJjZA", 4),
+        ("YWJjZGU", 5),
+        ("YQ", 1),
+        ("YWI", 2),
+        ("A", 0),
+        ("=", 0),
+        ("==", 0),
+    ] {
+        assert_eq!(base64_bytes_len(encoded), expected, "{encoded}");
+    }
+}
+
+#[test]
+fn parent_traversal_is_a_path_component_not_a_substring() {
+    for (path, denied) in [
+        ("a/../b", true),
+        ("..", true),
+        ("a/..", true),
+        ("..b", false),
+        ("a/..b", false),
+        ("a../b", false),
+        ("./a", false),
+        ("a/./b", false),
+    ] {
+        let command = Command::Export {
+            path: Some(PathBuf::from(path)),
+            format: ExportFormat::Markdown,
+        };
+        assert_eq!(
+            untrusted_export_path_denied(Origin::User, &command),
+            denied,
+            "{path}"
+        );
+    }
+    let default_target = Command::Export {
+        path: None,
+        format: ExportFormat::Markdown,
+    };
+    assert!(!untrusted_export_path_denied(Origin::User, &default_target));
+}
+
+#[test]
+fn default_export_names_follow_the_format() -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let workspace = Workspace::new(root.path().join("workspace"))?;
+    for (format, name) in [
+        (ExportFormat::Markdown, "dal-export.md"),
+        (ExportFormat::Jsonl, "dal-export.jsonl"),
+    ] {
+        assert_eq!(
+            export_target(&workspace, None, format),
+            workspace.as_path().join(name)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn markdown_export_names_unnamed_sessions_marks_failed_tools_and_skips_reasoning_only_turns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let workspace = Workspace::new(root.path().to_path_buf())?;
+    let mut view = view(workspace);
+    view.session.name = None;
+    let entries = [
+        EntryView {
+            id: entry_id(1),
+            parent: None,
+            kind: EntryKind::Assistant {
+                api: Family::Responses,
+                model: "gpt-test".into(),
+                route: Some(AssistantRoute::Api(Family::Responses)),
+                content: vec![Block::Reasoning {
+                    text: "private reasoning".into(),
+                    replay: RawJson::null(),
+                }],
+                usage: usage(),
+                stop: AssistantStop::Done,
+                replay: None,
+            },
+        },
+        EntryView {
+            id: entry_id(2),
+            parent: Some(entry_id(1)),
+            kind: EntryKind::ToolResult {
+                call: CallId::new("call-1"),
+                name: "read".into(),
+                error: true,
+                parts: vec![JournalPart::Text {
+                    text: "boom".into(),
+                }],
+                changes: Vec::new(),
+                elapsed_ms: None,
+            },
+        },
+        EntryView {
+            id: entry_id(3),
+            parent: Some(entry_id(2)),
+            kind: EntryKind::Compaction {
+                summary: None,
+                first_kept: None,
+                tokens_before: 100,
+                replay: None,
+                usage: None,
+                parts: Vec::new(),
+                parts_tokens: 0,
+            },
+        },
+    ];
+    let at = jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC);
+    let expected = format!(
+        concat!(
+            "# Session 018f0f62\n\n",
+            "Session 018f0f62-3b00-7000-8000-000000000001 · ",
+            "exported 1970-01-01 00:00 · {}",
+            "\n\n### Tool result: read · failed\n\n```text\nboom\n```",
+            "\n\n## Summary of earlier turns",
+            "\n",
+        ),
+        view.session.workspace.as_path().display()
+    );
+    assert_eq!(render_markdown(&view, &entries, &at)?, expected);
+    Ok(())
 }
 
 #[test]

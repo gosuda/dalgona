@@ -21,7 +21,7 @@ use super::{
     server::{Reply, Request, Server},
 };
 use crate::{
-    AuthStore, Credential, LoginEndpoints, LoginIo, LoginProgress, LoginSite, Method,
+    AuthStore, Credential, EnvSnapshot, LoginEndpoints, LoginIo, LoginProgress, LoginSite, Method,
     OAuthCredential, ProviderError, SecretString,
     auth::{
         oauth::{pkce_challenge, unix_now},
@@ -94,7 +94,8 @@ impl Fixture {
     }
 
     fn site(&self) -> LoginSite {
-        let endpoints = LoginEndpoints::loopback(self.server.base()).expect("loopback endpoints");
+        let endpoints = LoginEndpoints::loopback(self.server.base(), &EnvSnapshot::default())
+            .expect("loopback endpoints");
         self.dir
             .site()
             .with_endpoints(endpoints)

@@ -895,12 +895,48 @@ mod tests {
             error.to_string(),
             "read: data.bin is a binary file (7 bytes)"
         );
+    }
 
-        let mut late = vec![b'a'; 8192];
-        late.push(0);
-        fs::write(dir.path().join("late.txt"), &late).unwrap();
-        let reading = read(dir.path(), &args("late.txt")).await.unwrap();
-        assert!(text(&reading).starts_with("1\t"));
+    #[tokio::test]
+    async fn binary_probe_covers_exactly_the_first_8192_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        // 128 rows of 64 bytes fill the probe window exactly.
+        let row = "abcdefg".repeat(9);
+        let window = format!("{row}\n").repeat(128);
+        assert_eq!(window.len(), 8192);
+
+        // A NUL on the last probed byte (index 8191) makes the file binary,
+        // whatever follows it.
+        let mut last_probed = window.clone().into_bytes();
+        last_probed[8191] = 0;
+        fs::write(dir.path().join("edge.bin"), &last_probed).unwrap();
+        let error = read(dir.path(), &args("edge.bin")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "read: edge.bin is a binary file (8192 bytes)"
+        );
+        last_probed.extend_from_slice(b"tail\n");
+        fs::write(dir.path().join("edge.bin"), &last_probed).unwrap();
+        let error = read(dir.path(), &args("edge.bin")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "read: edge.bin is a binary file (8197 bytes)"
+        );
+
+        // The first byte past the probe (index 8192) is not inspected: the
+        // file reads as text and shows the NUL row, unterminated last line
+        // included.
+        let mut first_unprobed = window.clone().into_bytes();
+        first_unprobed.extend_from_slice(b"\0tail");
+        fs::write(dir.path().join("edge.txt"), &first_unprobed).unwrap();
+        let reading = read(dir.path(), &args("edge.txt")).await.unwrap();
+        let mut expected = String::new();
+        for number in 1..=128 {
+            let _ = std::fmt::Write::write_fmt(&mut expected, format_args!("{number}\t{row}\n"));
+        }
+        expected.push_str("129\t\0tail\n");
+        expected.push_str(&whole_tag("edge.txt", &first_unprobed));
+        assert_eq!(text(&reading), expected);
     }
 
     #[tokio::test]
@@ -1050,7 +1086,11 @@ mod tests {
 
         for path in [
             workspace.join("inside.txt").to_string_lossy().into_owned(),
-            parent.path().join("secret.txt").to_string_lossy().into_owned(),
+            parent
+                .path()
+                .join("secret.txt")
+                .to_string_lossy()
+                .into_owned(),
             "../secret.txt".to_owned(),
             "nested/../inside.txt".to_owned(),
             "../secret.txt:1".to_owned(),
@@ -1070,7 +1110,11 @@ mod tests {
         {
             use std::os::unix::fs::symlink;
 
-            symlink(parent.path().join("secret.txt"), workspace.join("outside-file")).unwrap();
+            symlink(
+                parent.path().join("secret.txt"),
+                workspace.join("outside-file"),
+            )
+            .unwrap();
             symlink(parent.path(), workspace.join("outside-dir")).unwrap();
             symlink(workspace.join("inside.txt"), workspace.join("inside-link")).unwrap();
             for path in ["outside-file", "outside-dir"] {

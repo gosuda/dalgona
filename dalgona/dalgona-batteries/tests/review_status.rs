@@ -211,7 +211,7 @@ fn parent_completed(view: &dal_core::View) -> bool {
             return false;
         };
         content.iter().any(
-            |block| matches!(block, Block::Text { text } if text.as_ref() == PARENT_FOLLOW_UP_TEXT),
+            |block| matches!(block, Block::Text { text, .. } if text.as_ref() == PARENT_FOLLOW_UP_TEXT),
         )
     })
 }

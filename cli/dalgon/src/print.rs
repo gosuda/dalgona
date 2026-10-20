@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const QUIET_WAIT: Duration = Duration::from_secs(3);
 
 /// Pause between quiet checks while an extension is still busy.
-const QUIET_RECHECK: Duration = Duration::from_millis(50);
+pub(crate) const QUIET_RECHECK: Duration = Duration::from_millis(50);
 
 /// A prompt positional that the edge could not turn into message content.
 #[derive(Debug, Error)]
@@ -152,9 +152,9 @@ pub(crate) struct PrintOptions {
     pub prompt: Vec<dal_core::Part>,
     pub stdout_is_tty: bool,
     pub stderr_is_tty: bool,
-    /// Approval mode `ask` with no terminal: the run emits the once-per-run
-    /// headless notice before the first denial note.
-    pub headless_approval: bool,
+    /// Approval mode: `ask` with no terminal emits the once-per-run headless
+    /// notice before the first denial note.
+    pub approval: dal_core::ApprovalMode,
     pub stop: CancellationToken,
     pub quiet_wait: Option<Duration>,
 }
@@ -302,14 +302,9 @@ async fn run_print_inner(
         return Err(PrintError::UnexpectedReply);
     };
 
-    // The once-per-run headless notice precedes any per-call denial note.
-    if opts.headless_approval && !opts.json {
-        stderr
-            .write_all(dal_texts::HEADLESS_APPROVAL.as_bytes())
-            .await
-            .map_err(PrintError::Io)?;
-        stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
-    }
+    // The once-per-run headless notice (N0) is emitted lazily below, once
+    // before the first per-call denial note, so runs with no denials stay
+    // silent on stderr.
 
     let mut assistant = String::new();
     let mut last_notice = None;
@@ -349,9 +344,19 @@ async fn run_print_inner(
                 write_terminal_text(stderr, &progress, opts.stderr_is_tty).await?;
             }
             UpdateKind::ToolSettled { outcome, .. } if !opts.json => {
+                if !outcome.is_error {
+                    continue;
+                }
                 let Some((tool, rung)) = parse_headless_denial(&outcome.text) else {
                     continue;
                 };
+                if denial_count == 0 && opts.approval == dal_core::ApprovalMode::Ask {
+                    stderr
+                        .write_all(dal_texts::HEADLESS_APPROVAL.as_bytes())
+                        .await
+                        .map_err(PrintError::Io)?;
+                    stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
+                }
                 let note = dal_texts::approval_denied_note(tool, rung.as_str());
                 write_terminal_text(stderr, &note, opts.stderr_is_tty).await?;
                 stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
@@ -412,9 +417,15 @@ async fn emit_print_result(
         return Err(last_notice.map_or(PrintError::FailedWithoutMessage, PrintError::TurnFailed));
     }
 
-    // One exact note per denied call; no summary sentence. A denied run is a
-    // completed run with nothing to show: exit non-zero.
+    // One exact note per denied call plus the turn-end summary count. A
+    // denied run is a completed run with nothing to show: exit non-zero.
     if denial_count > 0 && !json {
+        let summary = denial_summary(denial_count);
+        stderr
+            .write_all(summary.as_bytes())
+            .await
+            .map_err(PrintError::Io)?;
+        stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
         return Ok(PrintOutcome::Denied);
     }
 
@@ -456,6 +467,13 @@ async fn emit_print_result(
         });
     }
     Ok(PrintOutcome::Completed)
+}
+
+/// The turn-end denial summary (`dalgon: <n> call(s) denied by approval
+/// mode.`), with the plural `s` only when more than one call was denied.
+fn denial_summary(denial_count: usize) -> String {
+    let plural = if denial_count == 1 { "" } else { "s" };
+    format!("dalgon: {denial_count} call{plural} denied by approval mode.")
 }
 
 enum QuietEnd {
@@ -547,9 +565,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
+    use dal_agent::error::ToolError;
+    use dal_agent::ext::tool::{
+        ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
+    };
+    use dal_agent::ext::{BoxFuture, ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
     use dal_agent::{Agent, Env, Host, Product, SessionRef};
-    use dal_core::{ClientId, Config, ConfigProduct, Part, ServiceSet, Workspace};
+    use dal_core::{
+        ClientId, Config, ConfigProduct, ModelInfo, Name, Part, Preview, RawJson, ServiceSet,
+        ToolClass, ToolSpec, Visibility, Workspace,
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::{PrintError, PrintOptions, PrintOutcome, run_print, write_failure};
@@ -634,6 +659,179 @@ mod tests {
         (tmp, host, agent)
     }
 
+    /// The two gated tools of the denial fixture: `editgate` is Patch class
+    /// and `execgate` is Exec class, so each needs a different approval rung.
+    const EDIT_TOOL: &str = "editgate";
+    const EXEC_TOOL: &str = "execgate";
+    /// What the model says once both of its gated calls were denied.
+    const DENIAL_REPLY: &str = "Hello";
+
+    fn usage_json(input_tokens: u32, output_tokens: u32) -> sonic_rs::Value {
+        sonic_rs::json!({
+            "input_tokens": input_tokens,
+            "cached_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": null,
+            "cache_write_tokens": 0,
+            "cost_usd": null
+        })
+    }
+
+    /// The replay fixture of the denial run, one typed step per line: the
+    /// first response calls both gated tools and stops for tool use, the
+    /// second answers with [`DENIAL_REPLY`]. The lines go through the JSON
+    /// encoder, so they are valid JSON by construction; the scripted provider
+    /// refuses a line that is not exactly one typed step.
+    fn denial_fixture() -> String {
+        let parsed_call = |id: &str, name: &str| sonic_rs::json!({"id": id, "name": name, "args": {"kind": "parsed", "value": {}}});
+        let steps = [
+            sonic_rs::json!({
+                "kind": "events",
+                "events": [
+                    {"type": "tool_call_started", "id": "c1", "name": EDIT_TOOL},
+                    {"type": "tool_call_started", "id": "c2", "name": EXEC_TOOL},
+                    {
+                        "type": "tool_calls_done",
+                        "calls": [parsed_call("c1", EDIT_TOOL), parsed_call("c2", EXEC_TOOL)]
+                    },
+                    {"type": "usage", "usage": usage_json(10, 4)},
+                    {"type": "stop", "reason": "tool_use"}
+                ]
+            }),
+            sonic_rs::json!({
+                "kind": "events",
+                "events": [
+                    {"type": "text_delta", "text": DENIAL_REPLY},
+                    {"type": "tool_calls_done", "calls": []},
+                    {"type": "usage", "usage": usage_json(12, 5)},
+                    {"type": "stop", "reason": "end_turn"}
+                ]
+            }),
+        ];
+        let mut text = String::new();
+        for step in &steps {
+            text.push_str(&step.to_string());
+            text.push('\n');
+        }
+        text
+    }
+
+    /// An approval-gated test tool: Patch class for `editgate`, Exec class
+    /// for `execgate`. With nobody attached to answer, `ask` denies both as
+    /// headless denials naming the `edits` and `all` rungs.
+    struct GatedTool {
+        name: Name,
+        spec: Arc<ToolSpec>,
+        patch: bool,
+    }
+
+    impl GatedTool {
+        fn gated(name: &str, patch: bool) -> Self {
+            let name = Name::parse(name).expect("tool name");
+            let spec = Arc::new(ToolSpec {
+                name: name.clone(),
+                description: "Approval-gated marker tool.".into(),
+                parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#)
+                    .expect("schema json"),
+                grammar: None,
+            });
+            Self { name, spec, patch }
+        }
+
+        fn patch() -> Self {
+            Self::gated(EDIT_TOOL, true)
+        }
+
+        fn exec() -> Self {
+            Self::gated(EXEC_TOOL, false)
+        }
+
+        fn class(&self) -> ToolClass {
+            if self.patch {
+                ToolClass::Patch
+            } else {
+                ToolClass::Exec {
+                    read_only: false,
+                    grant: None,
+                }
+            }
+        }
+    }
+
+    impl Tool for GatedTool {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+
+        fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+
+        fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+            Ok(self.class())
+        }
+
+        fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                let preview = Preview {
+                    title: "gated".into(),
+                    body: String::new().into(),
+                    digest: None,
+                };
+                match cx.authorize(preview).await {
+                    Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("allowed"))),
+                    Err(reason) => ToolOutcome::Err(ToolError::Denied(reason)),
+                }
+            })
+        }
+    }
+
+    async fn session_with_denial_tools(switch: &Arc<Switch>) -> (tempfile::TempDir, Host, Agent) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let workspace_dir = tmp.path().join("w");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+        let fixture = data.join("script.jsonl");
+        std::fs::write(&fixture, denial_fixture()).expect("fixture");
+        let user = format!(
+            "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+            fixture.to_string_lossy().replace('\\', "\\\\")
+        );
+        let config =
+            Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
+        let extension = ExtensionBuilder::new("focus", "0.1.0", ServiceSet::default())
+            .expect("builder")
+            .status_kind("focus", Arc::clone(switch) as Arc<dyn StatusPoll>)
+            .tool(Arc::new(GatedTool::patch()), Visibility::Model)
+            .tool(Arc::new(GatedTool::exec()), Visibility::Model)
+            .build()
+            .expect("extension");
+        let product = Product {
+            name: "dal",
+            data_root: data,
+            defaults: "",
+            extensions: vec![extension],
+            bundled: Vec::new(),
+        };
+        let env = Env {
+            vars: BTreeMap::from([(OsString::from("OPENAI_API_KEY"), OsString::from("sk-test"))]),
+            cwd: workspace_dir.clone(),
+            sandbox_helper: None,
+        };
+        let host = Host::start(product, config, env).await.expect("host");
+        let agent = host
+            .open(
+                SessionRef::Ephemeral {
+                    workspace: Workspace::new(workspace_dir).expect("workspace"),
+                },
+                ClientId::new("cli"),
+            )
+            .await
+            .expect("open");
+        (tmp, host, agent)
+    }
+
     fn options(json: bool, quiet_wait: Option<Duration>, stop: &CancellationToken) -> PrintOptions {
         PrintOptions {
             json,
@@ -643,7 +841,7 @@ mod tests {
             stderr_is_tty: false,
             stop: stop.clone(),
             quiet_wait,
-            headless_approval: false,
+            approval: dal_core::ApprovalMode::All,
         }
     }
 
@@ -665,8 +863,11 @@ mod tests {
             String::from_utf8(stdout).expect("utf8"),
             "Hello\n\\u{1b}]52;c;SGVsbG8=\\a\\u{9b}2J\\u{7f}\\u{202e}\\rafter\n\n"
         );
-        assert_eq!(std::fs::read(output_path).expect("saved message"), CONTROL_TEXT.as_bytes());
-        assert!(stderr.is_empty());
+        assert_eq!(
+            std::fs::read(output_path).expect("saved message"),
+            CONTROL_TEXT.as_bytes()
+        );
+        assert_eq!(stderr, [] as [u8; 0]);
         host.shutdown(Duration::from_secs(1)).await;
     }
 
@@ -681,7 +882,7 @@ mod tests {
             .expect("run");
         assert_eq!(outcome, PrintOutcome::Completed);
         assert_eq!(stdout, [CONTROL_TEXT.as_bytes(), b"\n"].concat());
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, [] as [u8; 0]);
         host.shutdown(Duration::from_secs(1)).await;
     }
 
@@ -692,7 +893,7 @@ mod tests {
         write_failure(&error, false, true, &mut stdout, &mut stderr)
             .await
             .expect("write");
-        assert!(stdout.is_empty());
+        assert_eq!(stdout, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(stderr).expect("utf8"),
             "\\u{1b}]2;spoof\\a\nCheck the provider response and try the prompt again.\n"
@@ -785,8 +986,26 @@ mod tests {
         let switch = Arc::new(Switch(Mutex::new(true)));
         let (_tmp, host, agent) = session(&switch).await;
         let stop = CancellationToken::new();
+        // Deterministic deadline proof on the real quiet-wait path: freeze
+        // the virtual clock around `await_quiet` with the original 1s wait.
+        // An already-quiet agent returns without arming any timer, so virtual
+        // time does not advance; an unconditional sleep auto-advances it.
+        tokio::time::pause();
+        let start = tokio::time::Instant::now();
+        let end = super::await_quiet(&agent, &stop, Some(Duration::from_secs(1)))
+            .await
+            .expect("quiet");
+        let quiet_elapsed = start.elapsed();
+        assert!(matches!(end, super::QuietEnd::Quiet));
+        assert_eq!(
+            quiet_elapsed,
+            Duration::ZERO,
+            "already-quiet session must not advance its 1s wait: {quiet_elapsed:?}"
+        );
+        tokio::time::resume();
+        // Functional half preserves the Completed/stdout/stderr contract with
+        // the original 1s option; the whole-turn real I/O is not timed.
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        let started = Instant::now();
         let outcome = run_print(
             agent,
             options(false, Some(Duration::from_secs(1)), &stop),
@@ -795,13 +1014,130 @@ mod tests {
         )
         .await
         .expect("run");
-        let elapsed = started.elapsed();
         assert_eq!(outcome, PrintOutcome::Completed);
         assert_eq!(String::from_utf8(stdout).expect("utf8"), "Hello\n");
         assert_eq!(stderr, [] as [u8; 0]);
-        assert!(
-            elapsed < Duration::from_millis(800),
-            "already-quiet session must not sleep its 1s wait: {elapsed:?}"
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn ask_run_without_denials_prints_no_headless_notice() {
+        let switch = Arc::new(Switch(Mutex::new(true)));
+        let (_tmp, host, agent) = session(&switch).await;
+        let stop = CancellationToken::new();
+        let mut opts = options(false, None, &stop);
+        opts.approval = dal_core::ApprovalMode::Ask;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = run_print(agent, opts, &mut stdout, &mut stderr)
+            .await
+            .expect("run");
+        assert_eq!(outcome, PrintOutcome::Completed);
+        assert_eq!(String::from_utf8(stdout).expect("utf8"), "Hello\n");
+        assert_eq!(stderr, [] as [u8; 0]);
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn denied_text_run_ends_with_a_counted_summary() {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = super::emit_print_result(
+            dal_core::Stop::EndTurn,
+            2,
+            "Hello",
+            None,
+            None,
+            false,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(outcome, PrintOutcome::Denied);
+        assert_eq!(stdout, [] as [u8; 0]);
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf8"),
+            "dalgon: 2 calls denied by approval mode.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_denial_summary_uses_the_singular_call() {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = super::emit_print_result(
+            dal_core::Stop::EndTurn,
+            1,
+            "Hello",
+            None,
+            None,
+            false,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(outcome, PrintOutcome::Denied);
+        assert_eq!(stdout, [] as [u8; 0]);
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf8"),
+            "dalgon: 1 call denied by approval mode.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_json_run_emits_no_denial_text() {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = super::emit_print_result(
+            dal_core::Stop::EndTurn,
+            2,
+            "Hello",
+            None,
+            None,
+            true,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(outcome, PrintOutcome::Completed);
+        assert_eq!(
+            String::from_utf8(stdout).expect("utf8"),
+            "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{\"stopReason\":\"end_turn\"}}\n"
+        );
+        assert_eq!(stderr, [] as [u8; 0]);
+    }
+
+    #[tokio::test]
+    async fn denied_text_run_reports_each_denial_once_with_summary() {
+        let switch = Arc::new(Switch(Mutex::new(true)));
+        let (_tmp, host, agent) = session_with_denial_tools(&switch).await;
+        let stop = CancellationToken::new();
+        let mut opts = options(false, None, &stop);
+        opts.approval = dal_core::ApprovalMode::Ask;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = run_print(agent, opts, &mut stdout, &mut stderr)
+            .await
+            .expect("run");
+        assert_eq!(outcome, PrintOutcome::Denied);
+        assert_eq!(
+            String::from_utf8(stdout).expect("utf8"),
+            DENIAL_REPLY,
+            "stdout carries the model's text and no denial note"
+        );
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf8"),
+            concat!(
+                "dalgon: approval is ask and no terminal is attached: patch and exec calls are denied. Re-run with --approval all to approve them.\n",
+                "dalgon: editgate needs approval; print mode cannot ask. Rerun with --approval edits.\n",
+                "dalgon: execgate needs approval; print mode cannot ask. Rerun with --approval all.\n",
+                "dalgon: 2 calls denied by approval mode.\n",
+            ),
+            "one notice, then one note per denied call in call order naming the lowest approval rung that allows it, then the summary"
         );
         host.shutdown(Duration::from_secs(1)).await;
     }

@@ -232,6 +232,12 @@ pub(super) fn parse_prices(
                 value,
             )?);
         }
+        if let Some(value) = text.cache_write {
+            partial.cache_write = Some(parse_rate(
+                &format!("prices.{model_id}.cache_write"),
+                value,
+            )?);
+        }
         if let Some(value) = text.output {
             partial.output = Some(parse_rate(&format!("prices.{model_id}.output"), value)?);
         }

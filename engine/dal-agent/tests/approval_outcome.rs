@@ -322,6 +322,41 @@ async fn resumed_shows(
     Ok(())
 }
 
+/// A client that cancels the approval request neither approves nor
+/// declines: the tool fails closed with the cancelled-approval denial, never
+/// runs, and the journal keeps the cancel as a client answer ahead of the
+/// denial result.
+#[tokio::test]
+async fn a_client_cancel_fails_closed_without_running_the_tool() -> TestResult {
+    let mut session = start_turn().await?;
+    let request = next_request(&session.agent, &mut session.subscription, WAIT).await?;
+    session.agent.answer(request, Answer::Cancel).await?;
+    let dump = finish_turn(&mut session, WAIT).await?;
+    assert!(
+        dump.contains("denied: approval cancelled is unavailable"),
+        "{dump}"
+    );
+    assert!(!dump.contains("the probe ran"), "{dump}");
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
+    else {
+        return Err("the cancel answer is not journaled".into());
+    };
+    assert!(matches!(answer, Answer::Cancel), "{answer:?}");
+    assert_eq!(by.as_str(), "probe");
+    assert!(!was_default);
+    let Some(effect_at) = probe_result(&records) else {
+        return Err("the denial result is not journaled".into());
+    };
+    assert!(
+        resolved_at < effect_at,
+        "the cancel must land in the journal before the denial it produced"
+    );
+    Ok(())
+}
+
 /// The answer the broadcast carries must sit in the journal before the
 /// settled result that consumed it, and a resumed session still shows it.
 #[tokio::test]

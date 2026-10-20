@@ -33,6 +33,7 @@ fn usage() -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -57,6 +58,7 @@ fn assistant(content: Vec<Block>, stop: AssistantStop) -> EntryKind {
         content,
         usage: usage(),
         stop,
+        replay: None,
     }
 }
 
@@ -143,74 +145,77 @@ fn json(text: &str) -> Value {
     sonic_rs::from_str(text).expect("test JSON")
 }
 
+fn pinned_schema_updates(turn: TurnId) -> Vec<UpdateKind> {
+    vec![
+        entries(vec![entry(
+            1,
+            EntryKind::User {
+                parts: vec![JournalPart::Text { text: "hi".into() }],
+            },
+        )]),
+        UpdateKind::Delta {
+            turn,
+            channel: StreamChannel::Text,
+            text: "Hel".into(),
+        },
+        UpdateKind::Delta {
+            turn,
+            channel: StreamChannel::Thinking,
+            text: "hmm".into(),
+        },
+        UpdateKind::Delta {
+            turn,
+            channel: StreamChannel::Text,
+            text: "lo".into(),
+        },
+        entries(vec![entry(
+            2,
+            assistant(
+                vec![
+                    Block::Reasoning {
+                        text: "hmm".into(),
+                        replay: RawJson::null(),
+                    },
+                    Block::Text {
+                        text: "Hello".into(),
+                        replay: None,
+                    },
+                ],
+                AssistantStop::ToolUse,
+            ),
+        )]),
+        UpdateKind::ToolStarted {
+            call: CallId::new("call-1"),
+            tool: "exec".into(),
+            args: RawJson::parse(r#"{"argv":["ls"]}"#).expect("raw args"),
+        },
+        UpdateKind::ToolSettled {
+            call: CallId::new("call-1"),
+            outcome: ToolOutcomeView {
+                is_error: true,
+                text: "exit 2".into(),
+                images: Vec::new(),
+                elapsed_ms: None,
+            },
+        },
+        UpdateKind::TurnEnded {
+            turn,
+            stop: Stop::Failed,
+        },
+        UpdateKind::TurnEnded {
+            turn,
+            stop: Stop::EndTurn,
+        },
+    ]
+}
+
 #[test]
 fn item_and_turn_notifications_match_pinned_schema() {
     let thread = SessionId::new_v7().to_string();
     let turn = TurnId::new(nonzero(3));
     let mut stream = TurnStream::new(thread.clone(), turn);
-    let events = notifications(
-        &mut stream,
-        &[
-            entries(vec![entry(
-                1,
-                EntryKind::User {
-                    parts: vec![JournalPart::Text { text: "hi".into() }],
-                },
-            )]),
-            UpdateKind::Delta {
-                turn,
-                channel: StreamChannel::Text,
-                text: "Hel".into(),
-            },
-            UpdateKind::Delta {
-                turn,
-                channel: StreamChannel::Thinking,
-                text: "hmm".into(),
-            },
-            UpdateKind::Delta {
-                turn,
-                channel: StreamChannel::Text,
-                text: "lo".into(),
-            },
-            entries(vec![entry(
-                2,
-                assistant(
-                    vec![
-                        Block::Reasoning {
-                            text: "hmm".into(),
-                            replay: RawJson::null(),
-                        },
-                        Block::Text {
-                            text: "Hello".into(),
-                        },
-                    ],
-                    AssistantStop::ToolUse,
-                ),
-            )]),
-            UpdateKind::ToolStarted {
-                call: CallId::new("call-1"),
-                tool: "exec".into(),
-                args: RawJson::parse(r#"{"argv":["ls"]}"#).expect("raw args"),
-            },
-            UpdateKind::ToolSettled {
-                call: CallId::new("call-1"),
-                outcome: ToolOutcomeView {
-                    is_error: true,
-                    text: "exit 2".into(),
-                    images: Vec::new(),
-                    elapsed_ms: None,
-                },
-            },
-            UpdateKind::TurnEnded {
-                turn,
-                stop: Stop::Failed,
-            },
-            UpdateKind::TurnEnded {
-                turn,
-                stop: Stop::EndTurn,
-            },
-        ],
-    );
+    let updates = pinned_schema_updates(turn);
+    let events = notifications(&mut stream, &updates);
     for (method, params) in &events {
         assert_valid("serverNotifications", method, "params", params);
     }
@@ -286,6 +291,7 @@ fn thread_started_matches_pinned_schema() {
         created_at: None,
         archived: None,
         last_seq: None,
+        message_count: None,
     };
     let idle = sonic_rs::json!({"type": "idle"});
     let thread = thread_value(&info, true, &idle, &[]);

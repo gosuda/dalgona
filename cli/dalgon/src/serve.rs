@@ -575,6 +575,11 @@ mod tests {
             resolve_bind(&ServeArgs::default(), &configured),
             "localhost"
         );
+        let configured_public = ServeArgs {
+            public: true,
+            ..ServeArgs::default()
+        };
+        assert_eq!(resolve_bind(&configured_public, &configured), "localhost");
         assert!(all_resolved_addresses_are_loopback("localhost", 7437).unwrap());
         assert!(!all_resolved_addresses_are_loopback("192.0.2.10", 7437).unwrap());
 

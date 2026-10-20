@@ -215,15 +215,16 @@ directory rule may narrow a shared rule. It must not weaken it.
 - Preserve dal's headless, TUI, plugin, wires, full-product, and release gates. Preserve
   Dalgona's boot, orchestration, batteries, and release gates. Do not merge gates whose
   failure owners or prerequisites differ.
-- Run these commands from the repository root before a commit:
+- Run these commands from the repository root before you merge a pull request or
+  publish a release:
 
-  ```text
+  ```bash
   cargo fmt --check
   cargo clippy --all-targets --all-features --locked -- -D warnings
   cargo test --locked
   cargo deny --locked check
   ```
-
+  
 - Run every specialized suite named by the applicable directory instructions. Do not relax
   a lint, remove a target, accept a snapshot blindly, or skip a native target to make a
   gate pass.
@@ -237,11 +238,6 @@ directory rule may narrow a shared rule. It must not weaken it.
   work to force the expected base.
 - Stage explicit paths only. Do not use `git add -A` from the public root. The nested
   private checkout and unrelated work must never enter a public commit.
-- Keep one concern per commit. Leave the workspace buildable at each commit.
-  Split generated data, lint-only sweeps, and independent mechanisms when they have
-  separate review and rollback paths.
-- Run the relevant local gate before you push a checkpoint. Never force-push or rewrite
-  published history to repair a failed gate.
 - Keep generated files reproducible from checked-in inputs and a named command. Verify a
   clean regeneration in its owning gate. Do not edit generated output by hand.
 - Regenerate the package-local dal manual from the repository root with

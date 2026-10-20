@@ -5,14 +5,21 @@
 //! Catalog fetches happen per request here; the driver caches the
 //! resolved model across a turn's requests.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dal_core::{ModelRequest, ModelRoute, SessionId, Stop, StreamChannel, StreamEvent};
-use dal_provider::{EventStream, StopReason, StreamEvent as ProviderEvent, ToolArgs};
+use dal_core::{
+    BlobId, ContextItem, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
+    StreamChannel, StreamEvent,
+};
+use dal_provider::{
+    EventStream, ProviderError, StopReason, StreamEvent as ProviderEvent, ToolArgs,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::ServiceError;
+use super::SessionHandle;
+use crate::error::{AgentError, ServiceError};
 use crate::host::HostState;
 
 /// Session inputs for one provider request.
@@ -71,7 +78,9 @@ pub(crate) async fn model_ready(
             Ok(resolved) => resolved,
             Err(
                 dal_provider::ResolveError::UnknownModel { .. }
-                | dal_provider::ResolveError::AmbiguousModel { .. },
+                | dal_provider::ResolveError::AmbiguousModel { .. }
+                | dal_provider::ResolveError::UnknownProvider { .. }
+                | dal_provider::ResolveError::ProviderFamilyMismatch { .. },
             ) => return Ok(None),
             Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         };
@@ -97,24 +106,217 @@ pub(crate) async fn model_ready(
 
 /// Opens one provider stream for a model request.
 ///
-/// Scripted providers bypass the catalog; live providers resolve through
-/// one catalog fetch. Open failures return a stream yielding the single
-/// error, so callers handle transport and content uniformly.
+/// Stored images and stored text are read back into the request first, so a
+/// registered model, the scripted provider, and a live provider all receive
+/// inline content. Scripted providers then bypass the catalog; live providers
+/// resolve through one catalog fetch. Hydration and open failures return a
+/// stream yielding the single error, so callers handle transport and
+/// content uniformly.
 pub(crate) async fn infer_stream(
     deps: &RequestDeps,
-    req: ModelRequest,
+    mut req: ModelRequest,
     cancel: &CancellationToken,
 ) -> EventStream {
+    if let Err(error) = hydrate_blobs(deps, &mut req, cancel).await {
+        return failed(error);
+    }
     if let Some(found) = crate::ext::synthetic::find_route(&deps.host.shared, &req.model) {
         return crate::ext::synthetic::open(deps, found, req, cancel).await;
     }
     match open_stream(deps, &req, cancel).await {
         Ok(stream) => crate::ext::synthetic::observe(stream),
-        Err(error) => {
-            let items = vec![Err(error)];
-            EventStream::new(futures::stream::iter(items), || {})
+        Err(error) => failed(error),
+    }
+}
+
+/// A stream that yields `error` and ends.
+fn failed(error: ProviderError) -> EventStream {
+    let items = vec![Err(error)];
+    EventStream::new(futures::stream::iter(items), || {})
+}
+
+/// Replaces every stored image and stored text of the request context with
+/// its content.
+///
+/// The session store moves an image or a text part of 16 KiB or more out of
+/// the journal, and the projection then names it by digest. Neither a
+/// provider nor a registered model can read the store, so this is where those
+/// references become inline images and inline text again, before any route is
+/// chosen. Order, media types, and every other part are unchanged. A request
+/// that names no stored image or text is left as it is: nothing is cloned, and
+/// inline parts are never copied.
+///
+/// A blob that is absent, unreadable, from a session that is not open, not
+/// the recorded length, or (for text) not UTF-8 refuses the request: the part
+/// is never skipped, and nothing is sent without it.
+async fn hydrate_blobs(
+    deps: &RequestDeps,
+    req: &mut ModelRequest,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let Some(first) = req
+        .context
+        .iter()
+        .flat_map(|item| parts(item).iter())
+        .find_map(stored_blob)
+    else {
+        return Ok(());
+    };
+    let Some(handle) = session_handle(deps) else {
+        return Err(ProviderError::UnresolvedBlob { blob_id: first });
+    };
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    // The blob path alone copies the message list; the no-blob path above
+    // returns `req` untouched.
+    let mut items = req.context.to_vec();
+    for item in &mut items {
+        for part in parts_mut(item) {
+            hydrate_part(&handle, part, cancel).await?;
         }
     }
+    req.context = items.into();
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Stored {
+    Image,
+    Text,
+}
+
+impl Stored {
+    fn of(mime: &str) -> Option<Self> {
+        mime.starts_with("image/")
+            .then_some(Self::Image)
+            .or_else(|| mime.starts_with("text/").then_some(Self::Text))
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Text => "text",
+        }
+    }
+}
+
+/// Replaces `part` with the stored content when it names a stored image or
+/// stored text.
+async fn hydrate_part(
+    handle: &SessionHandle,
+    part: &mut Part,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let Part::Blob {
+        blob_id,
+        mime,
+        bytes: recorded,
+    } = part
+    else {
+        return Ok(());
+    };
+    let Some(stored) = Stored::of(mime) else {
+        return Ok(());
+    };
+    let id = *blob_id;
+    let bytes = read_blob(handle, id, *recorded, stored, cancel).await?;
+    *part = match stored {
+        Stored::Image => Part::Image {
+            mime: std::mem::take(mime),
+            bytes,
+        },
+        Stored::Text => {
+            let text = String::from_utf8(bytes.into_vec()).map_err(|_| {
+                fatal(format!(
+                    "text blob {id} is not valid UTF-8; the text was not sent."
+                ))
+            })?;
+            Part::Text { text: text.into() }
+        }
+    };
+    Ok(())
+}
+
+/// The digest behind a part that names a stored image or stored text.
+fn stored_blob(part: &Part) -> Option<BlobId> {
+    match part {
+        Part::Blob { blob_id, mime, .. } if Stored::of(mime).is_some() => Some(*blob_id),
+        Part::Blob { .. } | Part::Text { .. } | Part::Image { .. } => None,
+    }
+}
+
+/// The content parts of one context message; an assistant message has none.
+fn parts(item: &ContextItem) -> &[Part] {
+    match item {
+        ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts.as_slice(),
+        ContextItem::Assistant { .. } => &[],
+    }
+}
+
+/// The content parts of one context message, for in-place replacement.
+fn parts_mut(item: &mut ContextItem) -> &mut [Part] {
+    match item {
+        ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts.as_mut_slice(),
+        ContextItem::Assistant { .. } => &mut [],
+    }
+}
+
+/// The actor port of the request's session, while that session is open.
+fn session_handle(deps: &RequestDeps) -> Option<SessionHandle> {
+    deps.host
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&deps.session)
+        .map(|entry| entry.handle.clone())
+}
+
+/// Reads one stored blob through the session actor.
+///
+/// A cancelled request stops waiting at once. An absent digest is the typed
+/// unresolved-blob refusal; every other failure, and a stored length that
+/// differs from the journal's record, is a fatal inference failure naming
+/// the blob.
+async fn read_blob(
+    handle: &SessionHandle,
+    id: BlobId,
+    recorded: u64,
+    stored: Stored,
+    cancel: &CancellationToken,
+) -> Result<Box<[u8]>, ProviderError> {
+    let noun = stored.noun();
+    let read = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(cancelled()),
+        read = handle.blob(id) => read,
+    };
+    match read {
+        Ok(bytes) if u64::try_from(bytes.len()).is_ok_and(|length| length == recorded) => {
+            Ok(bytes.into_boxed_slice())
+        }
+        Ok(bytes) => Err(fatal(format!(
+            "{noun} blob {id} holds {} bytes but its journal part records {recorded}; the {noun} was not sent.",
+            bytes.len()
+        ))),
+        Err(AgentError::BlobNotFound { .. }) => Err(ProviderError::UnresolvedBlob { blob_id: id }),
+        Err(error) => Err(fatal(format!(
+            "{noun} blob {id} could not be read from the session store: {error}"
+        ))),
+    }
+}
+
+/// The typed failure of a request cancelled before it was sent.
+fn cancelled() -> ProviderError {
+    ProviderError::Synthetic(InferFailure::Cancelled)
+}
+
+/// A terminal request failure with no next-action text.
+fn fatal(message: String) -> ProviderError {
+    ProviderError::Synthetic(InferFailure::Fatal {
+        message: message.into(),
+        fix: None,
+    })
 }
 
 /// Opens the provider stream for one request.
@@ -144,10 +346,20 @@ async fn open_stream(
                 message: error.to_string(),
             }
         })?;
+    let bound = bound_to(req, &resolved.route);
     let provider = providers.provider(resolved)?;
     provider
-        .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)
+        .open(deps.session, &bound, &[], Arc::new(|_: String| {}), cancel)
         .await
+}
+
+fn bound_to<'a>(req: &'a ModelRequest, resolved: &ModelRoute) -> Cow<'a, ModelRequest> {
+    if matches!(req.model, ModelRoute::Api { .. }) {
+        return Cow::Borrowed(req);
+    }
+    let mut bound = req.clone();
+    bound.model = resolved.clone();
+    Cow::Owned(bound)
 }
 
 /// Normalizes decoding-level provider events to recorded core events.
@@ -202,6 +414,9 @@ impl StreamConverter {
                     });
                 }
                 out
+            }
+            In::MessageReplay { capture } => {
+                vec![StreamEvent::MessageReplay { capture }]
             }
             In::Usage { usage } => vec![StreamEvent::Usage(usage)],
             In::Stop { reason } => vec![StreamEvent::Stop(map_stop(&reason))],
@@ -273,4 +488,74 @@ fn valid_prefix_len(bytes: &[u8]) -> usize {
         end -= 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use dal_core::{Family, ModelRequest, ModelRoute, Purpose, RequestParams};
+
+    use super::bound_to;
+
+    fn request(model: ModelRoute) -> ModelRequest {
+        ModelRequest {
+            purpose: Purpose::Judge,
+            model,
+            system: Arc::from("system"),
+            tools: Arc::from(Vec::new()),
+            context: Arc::from(Vec::new()),
+            params: RequestParams::default(),
+            cache_key: None,
+        }
+    }
+
+    fn resolved() -> ModelRoute {
+        ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: Some("openai".into()),
+        }
+    }
+
+    #[test]
+    fn an_identity_route_binds_to_the_resolved_api_route() {
+        let req = request(ModelRoute::from_id("openai/gpt-6-luna"));
+        assert!(
+            matches!(req.model, ModelRoute::Synthetic { .. }),
+            "a configured provider/model string types as synthetic"
+        );
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, resolved());
+        assert_eq!(bound.system, req.system);
+        assert_eq!(bound.purpose, req.purpose);
+        assert!(matches!(bound, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn an_api_route_keeps_its_own_pin_and_is_not_cloned() {
+        let own = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: None,
+        };
+        let req = request(own.clone());
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, own);
+        assert!(matches!(bound, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn an_api_route_with_a_provider_pin_keeps_it_and_is_not_cloned() {
+        let own = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: Some("openai".into()),
+        };
+        let req = request(own.clone());
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, own);
+        assert!(matches!(bound, Cow::Borrowed(_)));
+    }
 }

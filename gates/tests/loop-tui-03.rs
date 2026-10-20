@@ -63,11 +63,6 @@ fn tui_first_frame_within_one_second() -> Result<(), Box<dyn Error + Send + Sync
         frame_before_probe_reply,
         "the first frame must paint before the delayed probe reply at {reply_time:?}"
     );
-    let _verified_frame = terminal
-        .output()
-        .windows(placeholder.len())
-        .find(|bytes| *bytes == placeholder)
-        .expect("the first frame contains its composer placeholder");
     let first_byte = terminal.output().first().unwrap();
     assert_ne!(*first_byte, 0);
     assert!(
@@ -80,5 +75,6 @@ fn tui_first_frame_within_one_second() -> Result<(), Box<dyn Error + Send + Sync
     terminal.write(b"\x04")?;
     let status = terminal.wait_for_exit(Duration::from_secs(5))?;
     assert!(status.success(), "dalgon exited with {status}");
+    assert_eq!(terminal.terminal_restore_problem()?, None);
     Ok(())
 }

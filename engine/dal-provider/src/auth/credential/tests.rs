@@ -6,11 +6,12 @@ use std::{
 use dal_core::Family;
 
 use super::*;
-use crate::{AuthStyle, Transport};
+use crate::{AuthStyle, ProviderSettings, Transport};
 
 const OPENAI: &str = "openai";
 const ANTHROPIC: &str = "anthropic";
 const OPENAI_CODEX: &str = "openai-codex";
+const FACTORY_DROID: &str = "factory-droid";
 
 struct TestDir(PathBuf);
 
@@ -60,6 +61,7 @@ fn entry(id: &str, key_env: Option<&str>) -> ProviderEntry {
         key_env: key_env.map(Box::from),
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 4,
+        settings: ProviderSettings::default(),
     }
 }
 
@@ -310,6 +312,96 @@ fn credential_order_is_entry_then_environment_then_error() {
 }
 
 #[test]
+fn none_auth_style_overrides_stored_oauth_and_env_keys() {
+    let dir = TestDir::new("none-override");
+    let mut store = AuthStore::load(dir.auth()).expect("missing file is empty");
+    let stored_oauth = codex_oauth(Some(1_789_000_000));
+    store
+        .set(OPENAI_CODEX, stored_oauth.clone())
+        .expect("codex takes oauth");
+    let stored_key = Credential::ApiKey {
+        key: SecretString::from("stored-openai-key"),
+    };
+    store
+        .set(OPENAI, stored_key.clone())
+        .expect("openai takes a key");
+    store.store().expect("store writes to disk");
+    let store = AuthStore::load(dir.auth()).expect("reload from disk");
+
+    let env = EnvSnapshot::test(&[
+        ("OPENAI_API_KEY", "env-openai-key"),
+        ("CODEX_KEY", "env-codex-key"),
+        ("CUSTOM_KEY", "env-custom-key"),
+    ]);
+
+    let mut codex = entry(OPENAI_CODEX, Some("CODEX_KEY"));
+    let mut openai = entry(OPENAI, None);
+    let mut custom = entry("custom", Some("CUSTOM_KEY"));
+    let mut unconfigured = entry("unconfigured", None);
+
+    // Explicit AuthStyle::None yields Credential::None before stored lookup and env fallback:
+    codex.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&codex, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    openai.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&openai, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    custom.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&custom, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    unconfigured.auth = AuthStyle::None;
+    assert_eq!(
+        resolve(&unconfigured, &store, &env).expect("none auth resolves"),
+        Credential::None
+    );
+
+    // Normal styles preserve store-first precedence and standard fallback / error:
+    for normal in [AuthStyle::Bearer, AuthStyle::XApiKey, AuthStyle::ApiKey] {
+        codex.auth = normal;
+        assert_eq!(
+            resolve(&codex, &store, &env).expect("normal style resolves"),
+            stored_oauth,
+            "stored oauth takes precedence under {normal:?}"
+        );
+
+        openai.auth = normal;
+        assert_eq!(
+            resolve(&openai, &store, &env).expect("normal style resolves"),
+            stored_key,
+            "stored key takes precedence under {normal:?}"
+        );
+
+        custom.auth = normal;
+        assert_eq!(
+            resolve(&custom, &store, &env).expect("normal style falls back to env"),
+            Credential::ApiKey {
+                key: SecretString::from("env-custom-key"),
+            },
+            "env fallback under {normal:?}"
+        );
+
+        unconfigured.auth = normal;
+        let error = resolve(&unconfigured, &store, &env).expect_err("no credentials");
+        assert!(
+            matches!(
+                error,
+                ProviderError::NoCredentials { ref provider } if provider == "unconfigured"
+            ),
+            "expected NoCredentials under {normal:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
 fn set_rejects_kinds_the_member_cannot_hold() {
     let mut store = AuthStore::empty("unused/auth.json");
     let oauth = codex_oauth(None);
@@ -336,6 +428,38 @@ fn set_rejects_kinds_the_member_cannot_hold() {
         store.set("zenmux", bare.clone()),
         Err(ProviderError::AuthWrite { .. })
     ));
+    // The `WorkOS` device row takes no API key and binds no account: a Codex
+    // sign-in, an account id alone, an ID token alone, and a key are refused
+    // and leave the store untouched, while the plain sign-in the device flow
+    // stores fits.
+    let account_only = Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from("a"),
+        refresh_token: SecretString::from("r"),
+        expires_at: None,
+        id_token: None,
+        account_id: Some(String::from("acct")),
+    });
+    let id_token_only = Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from("a"),
+        refresh_token: SecretString::from("r"),
+        expires_at: None,
+        id_token: Some(String::from("id")),
+        account_id: None,
+    });
+    let key = Credential::ApiKey {
+        key: SecretString::from("sk-droid"),
+    };
+    for refused in [codex_oauth(None), account_only, id_token_only, key] {
+        assert!(matches!(
+            store.set(FACTORY_DROID, refused),
+            Err(ProviderError::AuthWrite { .. })
+        ));
+        assert_eq!(store.credential(FACTORY_DROID), None);
+    }
+    store
+        .set(FACTORY_DROID, bare.clone())
+        .expect("factory-droid takes plain oauth");
+    assert_eq!(store.credential(FACTORY_DROID), Some(bare.clone()));
     store
         .set(ANTHROPIC, bare.clone())
         .expect("anthropic takes plain oauth");
@@ -343,11 +467,141 @@ fn set_rejects_kinds_the_member_cannot_hold() {
 }
 
 #[test]
+fn a_rejected_set_keeps_the_old_entry_and_the_stored_file_loadable() {
+    let dir = TestDir::new("rejected-set");
+    let mut store = AuthStore::empty(dir.auth());
+    let kept = Credential::ApiKey {
+        key: SecretString::from("sk-kept"),
+    };
+    store.set(OPENAI, kept.clone()).expect("openai takes a key");
+    assert!(matches!(
+        store.set(OPENAI, codex_oauth(None)),
+        Err(ProviderError::AuthWrite { .. })
+    ));
+    assert!(matches!(
+        store.set(
+            OPENAI_CODEX,
+            Credential::ApiKey {
+                key: SecretString::from("sk-wrong-member"),
+            },
+        ),
+        Err(ProviderError::AuthWrite { .. })
+    ));
+    assert!(matches!(
+        store.set(OPENAI, Credential::None),
+        Err(ProviderError::AuthWrite { .. })
+    ));
+    assert_eq!(store.credential(OPENAI), Some(kept.clone()));
+    assert_eq!(store.credential(OPENAI_CODEX), None);
+
+    // A refused set must not leave a shape that load() would refuse, or the
+    // next store() would write an auth.json the next start cannot read.
+    store.store().expect("store writes");
+    let reloaded = AuthStore::load(dir.auth()).expect("the stored file still loads");
+    assert_eq!(reloaded.credential(OPENAI), Some(kept));
+    assert_eq!(reloaded.credential(OPENAI_CODEX), None);
+}
+
+#[test]
+fn expiring_flips_exactly_at_the_proactive_window_edge() {
+    let at = |expires_at: Option<i64>| OAuthCredential {
+        access_token: SecretString::from("a"),
+        refresh_token: SecretString::from("r"),
+        expires_at,
+        id_token: None,
+        account_id: None,
+    };
+    let now = 1_000_000;
+    let window = crate::PROACTIVE_WINDOW_SECS;
+    assert!(at(Some(now - 1)).expiring(now), "already expired");
+    assert!(at(Some(now)).expiring(now), "expires this second");
+    assert!(at(Some(now + window - 1)).expiring(now), "one inside");
+    assert!(at(Some(now + window)).expiring(now), "the edge is inside");
+    assert!(
+        !at(Some(now + window + 1)).expiring(now),
+        "one second past the edge is outside"
+    );
+    assert!(!at(None).expiring(now), "no expiry refreshes only on a 401");
+    // The distance saturates instead of wrapping: a far-future token read at
+    // a far-past clock stays outside, a far-past token at a far-future clock
+    // stays inside.
+    assert!(!at(Some(i64::MAX)).expiring(i64::MIN));
+    assert!(at(Some(i64::MIN)).expiring(i64::MAX));
+    assert!(!at(None).expiring(i64::MAX));
+}
+
+#[cfg(unix)]
+#[test]
+fn every_group_or_other_permission_bit_refuses_and_owner_only_modes_load() {
+    let body = r#"{"openai":{"kind":"api_key","key":"sk"}}"#;
+    for mode in [0o600, 0o400] {
+        let dir = TestDir::new("owner-only");
+        write_file(&dir.auth(), body, mode);
+        AuthStore::load(dir.auth())
+            .unwrap_or_else(|error| panic!("mode {mode:o} must load: {error}"));
+    }
+    for bit in [0o040, 0o020, 0o010, 0o004, 0o002, 0o001] {
+        let mode = 0o600 | bit;
+        let dir = TestDir::new("shared-bit");
+        write_file(&dir.auth(), body, mode);
+        let error = AuthStore::load(dir.auth()).expect_err("a shared bit is refused");
+        assert!(
+            matches!(error, ProviderError::AuthFilePerms { .. }),
+            "mode {mode:o}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn debug_output_redacts_secrets() {
-    let env = EnvSnapshot::test(&[("OPENAI_API_KEY", "SECRET-ENV")]);
+    let env = EnvSnapshot::test(&[("OPENAI_API_KEY", "SECRET-ENV")])
+        .with_cwd(PathBuf::from("/secret/cwd-value"));
     let shown = format!("{env:?} {:?}", codex_oauth(Some(1)));
     assert!(!shown.contains("SECRET"), "{shown}");
+    assert!(!shown.contains("/secret/cwd-value"), "{shown}");
     assert!(shown.contains("OPENAI_API_KEY"), "{shown}");
+}
+
+#[test]
+fn a_blank_stored_account_id_defers_to_the_id_token_claim() {
+    let credential = |account_id: Option<&str>, id_token: Option<String>| OAuthCredential {
+        access_token: SecretString::from("a"),
+        refresh_token: SecretString::from("r"),
+        expires_at: None,
+        id_token,
+        account_id: account_id.map(String::from),
+    };
+    let claim = jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-claim"}}"#);
+    let blank_claim = jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"  "}}"#);
+    assert_eq!(
+        credential(Some("acct-stored"), Some(claim.clone()))
+            .chatgpt_account_id()
+            .as_deref(),
+        Some("acct-stored"),
+        "a stored id wins over the claim"
+    );
+    for blank in ["", " ", "\t\n"] {
+        assert_eq!(
+            credential(Some(blank), Some(claim.clone()))
+                .chatgpt_account_id()
+                .as_deref(),
+            Some("acct-claim"),
+            "a blank stored id {blank:?} defers to the claim"
+        );
+    }
+    assert_eq!(
+        credential(None, Some(claim))
+            .chatgpt_account_id()
+            .as_deref(),
+        Some("acct-claim")
+    );
+    // A request must never go out with an empty account header, so a blank
+    // id and a blank or missing claim leave no id at all.
+    assert_eq!(credential(Some(" "), None).chatgpt_account_id(), None);
+    assert_eq!(
+        credential(Some(" "), Some(blank_claim)).chatgpt_account_id(),
+        None
+    );
 }
 
 #[test]
@@ -395,6 +649,17 @@ fn expiry_prefers_expires_in_then_jwt_exp_then_absent() {
     );
     assert_eq!(oauth_expires_at(1_000, None, &jwt(r#"{"sub":"x"}"#)), None);
     assert_eq!(oauth_expires_at(1_000, None, "opaque-token"), None);
+}
+
+#[test]
+fn issuance_counts_from_created_at_only_when_it_is_an_integer() {
+    let value = |text: &str| sonic_rs::from_str::<sonic_rs::Value>(text).expect("valid JSON");
+    assert_eq!(oauth_issued_at(None, 9), 9);
+    assert_eq!(oauth_issued_at(Some(&value("100")), 9), 100);
+    assert_eq!(oauth_issued_at(Some(&value("-5")), 9), -5);
+    for text in ["null", r#""100""#, "1.5", "true", "18446744073709551615"] {
+        assert_eq!(oauth_issued_at(Some(&value(text)), 9), 9, "{text}");
+    }
 }
 
 /// Files written by the serializer before the member map replaced the three

@@ -220,31 +220,130 @@ pub(crate) fn isolate_wire_streams() -> io::Result<WireStreams> {
     })
 }
 
-/// Waits for one shutdown signal and returns its `128 + signo` exit code.
+/// The process shutdown signals, registered once and awaited repeatedly.
 ///
-/// POSIX watches SIGINT, SIGTERM, and SIGHUP; other platforms watch the
-/// console break event. A signal whose registration fails is skipped.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "process edge: the process edge owns its shutdown signal"
-)]
-pub(crate) async fn shutdown_signal() -> u8 {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut terminate = signal(SignalKind::terminate()).ok();
-        let mut hangup = signal(SignalKind::hangup()).ok();
-        tokio::select! {
-            biased;
-            _ = tokio::signal::ctrl_c() => 130,
-            () = wait_for_signal(&mut terminate) => 143,
-            () = wait_for_signal(&mut hangup) => 129,
+/// POSIX watches SIGINT (130), SIGTERM (143), and SIGHUP (129). Windows
+/// watches the console Ctrl+C event (130) and the console close event (129,
+/// the terminal-hangup status). A signal whose registration fails logs one
+/// warning and is skipped: it never fires. A holder keeps one registration
+/// for its whole wait, so a second signal cannot fall into the gap between
+/// two registrations. Create it inside the runtime.
+#[cfg(unix)]
+pub(crate) struct ShutdownSignals {
+    interrupt: Option<tokio::signal::unix::Signal>,
+    terminate: Option<tokio::signal::unix::Signal>,
+    hangup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    pub(crate) fn register() -> Self {
+        use tokio::signal::unix::SignalKind;
+        Self {
+            interrupt: register_signal(SignalKind::interrupt(), "SIGINT"),
+            terminate: register_signal(SignalKind::terminate(), "SIGTERM"),
+            hangup: register_signal(SignalKind::hangup(), "SIGHUP"),
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        130
+
+    /// Waits for the next shutdown signal and returns its `128 + signo`
+    /// exit status.
+    pub(crate) async fn next(&mut self) -> u8 {
+        tokio::select! {
+            biased;
+            () = wait_for_signal(&mut self.interrupt) => 130,
+            () = wait_for_signal(&mut self.terminate) => 143,
+            () = wait_for_signal(&mut self.hangup) => 129,
+        }
+    }
+}
+
+/// The process shutdown signals, registered once and awaited repeatedly.
+///
+/// See the POSIX variant: Windows watches Ctrl+C (130) and the console close
+/// event (129).
+#[cfg(windows)]
+pub(crate) struct ShutdownSignals {
+    interrupt: Option<tokio::signal::windows::CtrlC>,
+    close: Option<tokio::signal::windows::CtrlClose>,
+}
+
+#[cfg(windows)]
+impl ShutdownSignals {
+    pub(crate) fn register() -> Self {
+        Self {
+            interrupt: registered(tokio::signal::windows::ctrl_c(), "CTRL_C_EVENT"),
+            close: registered(tokio::signal::windows::ctrl_close(), "CTRL_CLOSE_EVENT"),
+        }
+    }
+
+    /// Waits for the next shutdown event and returns its `128 + signo`
+    /// exit status.
+    pub(crate) async fn next(&mut self) -> u8 {
+        tokio::select! {
+            biased;
+            () = wait_for_ctrl_c(&mut self.interrupt) => 130,
+            () = wait_for_ctrl_close(&mut self.close) => 129,
+        }
+    }
+}
+
+/// Keeps a registered Windows console event; a failure logs one warning and
+/// skips that event.
+#[cfg(windows)]
+fn registered<T>(result: io::Result<T>, name: &str) -> Option<T> {
+    result
+        .map_err(|error| log_signal_failure(name, &error))
+        .ok()
+}
+
+#[cfg(windows)]
+async fn wait_for_ctrl_c(event: &mut Option<tokio::signal::windows::CtrlC>) {
+    match event {
+        Some(event) => {
+            event.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_ctrl_close(event: &mut Option<tokio::signal::windows::CtrlClose>) {
+    match event {
+        Some(event) => {
+            event.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Logs one warning for a shutdown signal that could not register.
+///
+/// The process log is the only sink: a registration failure never reaches
+/// the terminal, and without an installed sink the warning is dropped.
+fn log_signal_failure(name: &str, error: &io::Error) {
+    if let Some(sink) = crate::log::LogSink::global() {
+        sink.log(
+            LogLevel::Warning,
+            "dalgon.edge",
+            format_args!("cannot register {name}: {error}"),
+        );
+    }
+}
+
+/// Registers one POSIX shutdown signal; a failure logs one warning and skips
+/// that signal.
+#[cfg(unix)]
+fn register_signal(
+    kind: tokio::signal::unix::SignalKind,
+    name: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(signal) => Some(signal),
+        Err(error) => {
+            log_signal_failure(name, &error);
+            None
+        }
     }
 }
 
@@ -798,6 +897,77 @@ mod tests {
             Ok(Some(LogLevel::Debug))
         );
         assert!(parse_log_level(&env(&[("DAL_LOG", "verbose")])).is_err());
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the terminal-silence proof owns its subprocess environment and streams"
+    )]
+    fn log_rotation_and_shedding_are_silent_on_terminal() {
+        use super::{LogLevel, parse_log_level};
+        use crate::log::{FLUSH_DEADLINE, LogSink, QUEUE_CAPACITY};
+        use std::process::{Command, Stdio};
+        use std::sync::{Arc, Barrier};
+
+        const CHILD: &str = "DAL_TEST_LOG_CHILD";
+        const LOG_DIR: &str = "DAL_TEST_LOG_DIR";
+        if std::env::var_os(CHILD).is_some() {
+            let dir = std::path::PathBuf::from(std::env::var_os(LOG_DIR).expect("log dir"));
+            let path = dir.join("cache").join("dal.log");
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("cache dir");
+            let oversized = vec![0_u8; 11 * 1024 * 1024];
+            std::fs::write(&path, &oversized).expect("seed the oversized log");
+            let level = parse_log_level(&env(&[("DAL_LOG", "debug")]))
+                .unwrap()
+                .unwrap();
+            let gate = Arc::new(Barrier::new(2));
+            let sink =
+                LogSink::open_gated(Some(level), &path, Some(Arc::clone(&gate))).expect("sink");
+            for index in 0..QUEUE_CAPACITY + 5 {
+                sink.log(LogLevel::Warning, "dalgon.test", format!("line {index}"));
+            }
+            gate.wait();
+            sink.flush(FLUSH_DEADLINE).expect("flush the sink");
+            assert_eq!(sink.dropped(), 5);
+            let rotated = path.with_file_name("dal.log.1");
+            assert_eq!(std::fs::read(&rotated).expect("rotated"), oversized);
+            let text = std::fs::read_to_string(&path).expect("fresh log");
+            assert!(text.contains("dropped 5 log lines"), "{text}");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = Command::new(std::env::current_exe().expect("current exe"))
+            .args([
+                "--exact",
+                "edge::tests::log_rotation_and_shedding_are_silent_on_terminal",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env(LOG_DIR, dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the log child");
+        let output = child.wait_with_output().expect("wait for the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        // A passing libtest child writes nothing to stderr, so the sink must
+        // leave it exactly empty. Stdout carries the harness report, so only
+        // the sink's own text is excluded there.
+        assert!(
+            stderr.is_empty(),
+            "the sink must not write to stderr: {stderr}"
+        );
+        for text in ["line 0", "dalgon.test", "dropped 5"] {
+            assert!(
+                !stdout.contains(text),
+                "the sink must not write {text:?} to stdout: {stdout}"
+            );
+        }
     }
 
     fn env(values: &[(&str, &str)]) -> BTreeMap<OsString, OsString> {

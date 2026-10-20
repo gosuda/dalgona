@@ -90,8 +90,8 @@ fn read(path: &Path) -> Result<Option<String>, ResolveError> {
 /// `<user_root>/<name>.eval.star`.
 ///
 /// # Errors
-/// Returns [`ResolveError`] for a malformed name, an unknown pack, or an
-/// unreadable file.
+/// Returns [`ResolveError`] for a malformed name, an unknown pack, an
+/// unreadable file, or a file whose stem cannot serve as a pack name.
 pub fn resolve(requested: &str, user_root: &Path) -> Result<Resolved, ResolveError> {
     let is_file = requested.contains(['/', '\\'])
         || Path::new(requested)
@@ -126,6 +126,11 @@ fn resolve_file(requested: &str) -> Result<Resolved, ResolveError> {
         .ok_or_else(|| ResolveError::NotAPack {
             path: requested.to_owned(),
         })?;
+    // The stem becomes the report directory name under `evals/runs/`: `..`
+    // would resolve outside it, and neither dot name is a usable pack name.
+    if matches!(name, "." | "..") {
+        return Err(ResolveError::BadName);
+    }
     let source = read(&path)?.ok_or_else(|| ResolveError::Read {
         path: requested.to_owned(),
         source: io::Error::from(io::ErrorKind::NotFound),

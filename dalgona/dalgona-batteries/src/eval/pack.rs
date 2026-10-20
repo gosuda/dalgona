@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use crate::text::normalize_ws;
 use dal_ext::judge::JudgeQuestion;
@@ -23,6 +24,7 @@ use starlark::values::none::NoneType;
 use starlark::values::structs::AllocStruct;
 use starlark::values::tuple::TupleRef;
 use starlark::values::{FrozenValue, OwnedFrozenValue, Value};
+use tokio_util::sync::CancellationToken;
 
 /// The longest prompt a case may carry, in characters.
 pub const MAX_PROMPT_CHARS: usize = 8000;
@@ -145,6 +147,20 @@ pub struct ScriptError {
     pub line: usize,
     /// The failure text, on one line.
     pub message: String,
+}
+
+/// Why a check produced no verdict.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CheckError {
+    /// The check raised; carries the Starlark failure.
+    #[error(transparent)]
+    Script(#[from] ScriptError),
+    /// An interrupt fired while the check ran.
+    #[error("interrupted")]
+    Interrupted,
+    /// The run deadline passed while the check ran.
+    #[error("the check exceeded the run time budget")]
+    Timeout,
 }
 
 /// A pack that cannot be loaded. The `Display` text carries no pack prefix.
@@ -607,15 +623,40 @@ struct UsageJson {
     cost_usd: Option<f64>,
 }
 
+/// Maps a failed check evaluation: an interrupt wins over the deadline, and
+/// either wins over the Starlark failure. Both conditions are monotonic, so a
+/// stop the evaluator observed still holds here.
+fn classify_stop(
+    error: &starlark::Error,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> CheckError {
+    if cancel.is_cancelled() {
+        CheckError::Interrupted
+    } else if Instant::now() >= deadline {
+        CheckError::Timeout
+    } else {
+        CheckError::Script(script_error(error))
+    }
+}
+
 impl Check {
-    /// Runs the check against a finished run and its workspace.
+    /// Runs the check against a finished run and its workspace, observing
+    /// `cancel` and `deadline` through the evaluator.
     ///
     /// A `true` result passes the run; any other truthiness fails it.
     ///
     /// # Errors
-    /// Returns the Starlark failure when the check raises, reads a file the
-    /// run never wrote, or exceeds its budget.
-    pub fn run(&self, input: &CheckInput<'_>, workspace: &Path) -> Result<bool, ScriptError> {
+    /// Returns [`CheckError::Script`] when the check raises, reads a file the
+    /// run never wrote, or exceeds its budget; [`CheckError::Interrupted`] on
+    /// interrupt; [`CheckError::Timeout`] past `deadline`.
+    pub fn run(
+        &self,
+        input: &CheckInput<'_>,
+        workspace: &Path,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<bool, CheckError> {
         let payload = sonic_rs::to_string(&ResultJson {
             exit: input.exit.as_str(),
             text: input.text,
@@ -639,10 +680,18 @@ impl Check {
         })?;
         WORKSPACE.with_borrow_mut(|slot| *slot = Some(workspace.to_path_buf()));
         let _detach = Reset(|| WORKSPACE.with_borrow_mut(|slot| *slot = None));
-        self.call(&payload).map_err(|error| script_error(&error))
+        match self.call(&payload, cancel.clone(), deadline) {
+            Ok(verdict) => Ok(verdict),
+            Err(error) => Err(classify_stop(&error, cancel, deadline)),
+        }
     }
 
-    fn call(&self, payload: &str) -> starlark::Result<bool> {
+    fn call(
+        &self,
+        payload: &str,
+        stop: CancellationToken,
+        deadline: Instant,
+    ) -> starlark::Result<bool> {
         let globals = pack_globals();
         let internal = GlobalsBuilder::new().with(workspace_builtins).build();
         let read = internal
@@ -660,6 +709,9 @@ impl Check {
             let decode =
                 AstModule::parse("result.star", "json.decode(payload)".to_owned(), &dialect())?;
             let mut evaluator = Evaluator::new(&module);
+            evaluator.set_check_cancelled(Box::new(move || {
+                stop.is_cancelled() || Instant::now() >= deadline
+            }));
             apply_limits(&mut evaluator, CELL_LIMITS).map_err(starlark::Error::new_other)?;
             let result = evaluator.eval_module(decode, &globals)?;
             let workspace = heap.alloc(AllocStruct([("read", read.to_value())]));

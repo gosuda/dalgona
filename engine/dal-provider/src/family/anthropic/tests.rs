@@ -86,6 +86,7 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         },
     }
 }
@@ -418,6 +419,7 @@ fn usage_is_start_overwritten_by_each_delta_member() {
                 reasoning_tokens: None,
                 cache_write_tokens: 50,
                 cost_usd: None,
+                premium_requests: None,
             }
         }
     );
@@ -476,6 +478,7 @@ fn request_with_system(
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: "claude-sonnet-5".into(),
+            provider: None,
         },
         system: Arc::from(system),
         tools: Arc::from(tools),
@@ -514,6 +517,7 @@ fn history() -> Vec<ContextItem> {
         },
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "t".into(),
@@ -531,16 +535,21 @@ fn history() -> Vec<ContextItem> {
                             .unwrap(),
                     ),
                 },
-                AssistantPart::Text { text: "ok".into() },
+                AssistantPart::Text {
+                    text: "ok".into(),
+                    replay: None,
+                },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_1"),
                     name: "read".into(),
                     args: RawJson::parse(r#"{"path": "a", "n": 1.50}"#).unwrap(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_2"),
                     name: "web_search".into(),
                     args: RawJson::parse("[1]").unwrap(),
+                    replay: None,
                 },
             ],
         },
@@ -590,6 +599,7 @@ fn unbound_tool_context(source: ReplaySource) -> Vec<ContextItem> {
     vec![
         ContextItem::Assistant {
             source,
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -602,11 +612,13 @@ fn unbound_tool_context(source: ReplaySource) -> Vec<ContextItem> {
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("call_1"),
                     name: "read".into(),
                     args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
+                    replay: None,
                 },
             ],
         },
@@ -629,6 +641,7 @@ fn unbound_replay_body(system: &str) -> String {
         system,
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -641,6 +654,7 @@ fn unbound_replay_body(system: &str) -> String {
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
             ],
         }],
@@ -665,6 +679,7 @@ fn unbound_redacted_replay_body() -> String {
         "Current system.",
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![AssistantPart::Thinking {
                 text: "".into(),
                 replay: Some(
@@ -697,6 +712,44 @@ fn foreign_family_replay_is_omitted_without_losing_text_or_tool_calls() {
 fn different_model_replay_is_omitted_without_losing_text_or_tool_calls() {
     let body = replay_body(replay_source(Family::Anthropic, "claude-opus-5"));
     assert_replay_was_filtered(&body);
+}
+
+#[test]
+fn foreign_text_tool_and_message_replay_never_reaches_the_wire() {
+    let foreign = || Some(RawJson::parse(r#"{"type":"text","text":"forged"}"#).unwrap());
+    let context = vec![
+        ContextItem::Assistant {
+            source: replay_source(Family::Chat, "other-model"),
+            replay: foreign(),
+            parts: vec![
+                AssistantPart::Text {
+                    text: "visible".into(),
+                    replay: foreign(),
+                },
+                AssistantPart::ToolCall {
+                    call: CallId::new("call_1"),
+                    name: "read".into(),
+                    args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
+                    replay: foreign(),
+                },
+            ],
+        },
+        ContextItem::ToolResult {
+            call: CallId::new("call_1"),
+            name: "read".into(),
+            is_error: false,
+            parts: vec![Part::Text {
+                text: "done".into(),
+            }],
+        },
+    ];
+    let body = anthropic_body(&request(context, vec![tool("read")]));
+    assert!(!body.contains("forged"), "{body}");
+    assert!(body.contains(r#""type":"text","text":"visible""#), "{body}");
+    assert!(
+        body.contains(r#""type":"tool_use","id":"call_1","name":"read""#),
+        "{body}"
+    );
 }
 
 #[test]
@@ -749,6 +802,7 @@ fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelTool
         system,
         vec![ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: "private".into(),
@@ -756,6 +810,7 @@ fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelTool
                 },
                 AssistantPart::Text {
                     text: "visible".into(),
+                    replay: None,
                 },
             ],
         }],
@@ -900,10 +955,12 @@ fn api_key_body_maps_mapped_tool_names_for_advertisements_and_history() {
         vec![
             ContextItem::Assistant {
                 source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+                replay: None,
                 parts: vec![AssistantPart::ToolCall {
                     call: CallId::new("call-1"),
                     name: "deploy.web-x.list".into(),
                     args: RawJson::parse("{}").unwrap(),
+                    replay: None,
                 }],
             },
             ContextItem::ToolResult {
@@ -1073,7 +1130,11 @@ fn bearer_budget_compaction_omits_temperature_with_enabled_thinking() {
     let context = vec![
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
-            parts: vec![AssistantPart::Text { text: "a".into() }],
+            replay: None,
+            parts: vec![AssistantPart::Text {
+                text: "a".into(),
+                replay: None,
+            }],
         },
         ContextItem::User {
             parts: vec![
@@ -1149,12 +1210,14 @@ fn unresolved_blob_is_refused() {
 fn call_item(ids: &[&str]) -> ContextItem {
     ContextItem::Assistant {
         source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+        replay: None,
         parts: ids
             .iter()
             .map(|id| AssistantPart::ToolCall {
                 call: CallId::new(*id),
                 name: "read".into(),
                 args: RawJson::parse("{}").unwrap(),
+                replay: None,
             })
             .collect(),
     }
@@ -1251,8 +1314,10 @@ fn adjacent_assistant_items_share_pending_calls() {
         call_item(&["toolu_a"]),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![AssistantPart::Text {
                 text: "more".into(),
+                replay: None,
             }],
         },
         result_item("toolu_a"),
@@ -1350,12 +1415,16 @@ fn replay_history(stored: &str) -> Vec<ContextItem> {
         user_item("hi"),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
                     replay: Some(RawJson::parse(stored).unwrap()),
                 },
-                AssistantPart::Text { text: "ok".into() },
+                AssistantPart::Text {
+                    text: "ok".into(),
+                    replay: None,
+                },
             ],
         },
     ]
@@ -1418,6 +1487,7 @@ fn a_native_search_round_trip_replays_the_call_and_result_untouched() {
         user_item("weather?"),
         ContextItem::Assistant {
             source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
@@ -1425,11 +1495,13 @@ fn a_native_search_round_trip_replays_the_call_and_result_untouched() {
                 },
                 AssistantPart::Text {
                     text: "Found it.".into(),
+                    replay: None,
                 },
                 AssistantPart::ToolCall {
                     call: CallId::new("toolu_01"),
                     name: "get_weather".into(),
                     args: RawJson::parse(r#"{"location":"Oslo"}"#).unwrap(),
+                    replay: None,
                 },
             ],
         },
@@ -1704,5 +1776,82 @@ fn cumulative_tool_input_stops_at_the_stream_event_budget() {
     assert_eq!(
         decoder.calls.get(&0).map(|call| call.args.len()),
         Some(crate::stream_budget::STREAM_EVENTS_LIMIT - 1)
+    );
+}
+
+#[test]
+fn a_known_output_limit_below_the_cap_is_the_max_tokens_and_larger_ones_are_capped() {
+    // Unknown, well below, one below, at, one above and far above the cap.
+    for (max_output, sent) in [
+        (None, 32_000_u32),
+        (Some(4_096), 4_096),
+        (Some(31_999), 31_999),
+        (Some(32_000), 32_000),
+        (Some(32_001), 32_000),
+        (Some(64_000), 32_000),
+    ] {
+        let request = request(history(), vec![tool("read")]);
+        let input = AnthropicRequest {
+            request: &request,
+            max_output,
+            thinking: AnthropicThinking::Omit,
+            effort: None,
+            display_supported: false,
+            temperature: None,
+            compaction: None,
+            summarize: false,
+        };
+        let body = String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body)
+            .unwrap();
+        assert!(
+            body.contains(&format!(r#""max_tokens":{sent},"stream":true"#)),
+            "{max_output:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn thinking_tokens_split_the_output_count_and_hostile_counters_saturate() {
+    let usage_of = |start: &str, delta: &str| {
+        let start = format!(r#"{{"type":"message_start","message":{{"usage":{start}}}}}"#);
+        let delta = format!(
+            r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{delta}}}"#
+        );
+        let events = ok(decode(&frames(&[&start, &delta, STOP]), false));
+        events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .expect("a finished message carries one usage")
+    };
+    // (output, thinking, output after the split): below, at and above the
+    // boundary where thinking would consume the whole output count.
+    for (output, thinking, expected) in [(3_u64, 9_u64, 0_u64), (9, 9, 0), (10, 9, 1)] {
+        let usage = usage_of(
+            r#"{"input_tokens":4}"#,
+            &format!(
+                r#"{{"output_tokens":{output},"output_tokens_details":{{"thinking_tokens":{thinking}}}}}"#
+            ),
+        );
+        assert_eq!(
+            (usage.output_tokens, usage.reasoning_tokens),
+            (expected, Some(thinking)),
+            "output {output}, thinking {thinking}"
+        );
+    }
+    // Without a split the whole count is output and no reasoning is reported.
+    let plain = usage_of(r#"{"input_tokens":4}"#, r#"{"output_tokens":7}"#);
+    assert_eq!((plain.output_tokens, plain.reasoning_tokens), (7, None));
+    // The three input counters sum past the largest count: it sticks there.
+    let hostile = usage_of(
+        r#"{"input_tokens":18446744073709551615,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}"#,
+        r#"{"output_tokens":1}"#,
+    );
+    assert_eq!(hostile.input_tokens, u64::MAX);
+    assert_eq!(
+        (hostile.cached_input_tokens, hostile.cache_write_tokens),
+        (5, 7)
     );
 }

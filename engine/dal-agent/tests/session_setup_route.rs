@@ -32,13 +32,19 @@ fn entry_id(id: u64) -> EntryId {
 }
 
 fn assistant(id: u64, route: Option<AssistantRoute>) -> Record {
+    recorded(id, RECORDED_MODEL, route)
+}
+
+/// One assistant record that answered with API family `Chat` and the native
+/// model `model`; a record names no provider.
+fn recorded(id: u64, model: &str, route: Option<AssistantRoute>) -> Record {
     Record::Assistant(Entry {
         id: entry_id(id),
         parent: Some(entry_id(id - 1)),
         at: jiff::Timestamp::UNIX_EPOCH,
         kind: EntryKind::Assistant {
             api: Family::Chat,
-            model: RECORDED_MODEL.into(),
+            model: model.into(),
             route,
             content: Vec::new(),
             usage: Usage {
@@ -48,13 +54,19 @@ fn assistant(id: u64, route: Option<AssistantRoute>) -> Record {
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                premium_requests: None,
             },
             stop: AssistantStop::Done,
+            replay: None,
         },
     })
 }
 
 async fn resumed_setup(records: Vec<Record>) -> SetupRoute {
+    resumed_setup_with(records, &format!("model = {CONFIGURED_MODEL:?}\n")).await
+}
+
+async fn resumed_setup_with(records: Vec<Record>, user_config: &str) -> SetupRoute {
     let temp = tokio::task::spawn_blocking(tempfile::tempdir)
         .await
         .expect("temporary store task")
@@ -86,13 +98,8 @@ async fn resumed_setup(records: Vec<Record>) -> SetupRoute {
         .expect("seed user");
     journal.append(records).await.expect("seed route history");
     journal.close().await.expect("close seeded journal");
-    let config = Config::load(
-        ConfigProduct::Dalgon,
-        &data,
-        "",
-        Some(&format!("model = {CONFIGURED_MODEL:?}\n")),
-    )
-    .expect("configuration");
+    let config =
+        Config::load(ConfigProduct::Dalgon, &data, "", Some(user_config)).expect("configuration");
     let seen = Arc::new(Mutex::new(None));
     let captured = Arc::clone(&seen);
     let extension = ExtensionBuilder::new("capture", "0.1.0", ServiceSet::EMPTY)
@@ -155,6 +162,7 @@ async fn setup_uses_typed_assistant_route_before_configuration() {
             ModelRoute::Api {
                 family: Family::Chat,
                 model: RECORDED_MODEL.into(),
+                provider: None,
             },
         ),
         (
@@ -246,6 +254,75 @@ async fn setup_keeps_recorded_route_after_compaction() {
                 id: RECORDED_MODEL.into()
             }),
             model_id: RECORDED_MODEL.into(),
+        },
+    );
+}
+
+/// A configuration whose structured default names `provider` for `family`
+/// and `model` (the legacy mirror carries the family prefix only).
+fn provider_default(family_wire: &str, prefix: &str, model: &str, provider: &str) -> String {
+    format!(
+        "model = \"{prefix}/{model}\"\n\n[model_route]\nkind = \"api\"\nfamily = \"{family_wire}\"\nmodel = \"{model}\"\nprovider = \"{provider}\"\n"
+    )
+}
+
+fn chat_route(model: &str, provider: Option<&str>) -> ModelRoute {
+    ModelRoute::Api {
+        family: Family::Chat,
+        model: model.into(),
+        provider: provider.map(Into::into),
+    }
+}
+
+#[tokio::test]
+async fn setup_keeps_the_configured_provider_for_the_model_a_response_recorded() {
+    // The response records its family and model but no provider; the
+    // configured default names the same model with its provider, and that is
+    // the route the session's own turns send.
+    let config = provider_default("openai_chat", "openai-chat", "gpt-4o", "acme");
+    let records = vec![recorded(
+        2,
+        "gpt-4o",
+        Some(AssistantRoute::Api(Family::Chat)),
+    )];
+    assert_eq!(
+        resumed_setup_with(records, &config).await,
+        SetupRoute {
+            model: Some(chat_route("gpt-4o", Some("acme"))),
+            model_id: "gpt-4o".into(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn setup_does_not_lend_the_configured_provider_to_another_model_or_family() {
+    let config = provider_default("openai_chat", "openai-chat", "gpt-4o", "acme");
+    // Another native model: the response's own provider-less route stands.
+    let records = vec![recorded(
+        2,
+        "gpt-4o-mini",
+        Some(AssistantRoute::Api(Family::Chat)),
+    )];
+    assert_eq!(
+        resumed_setup_with(records, &config).await,
+        SetupRoute {
+            model: Some(chat_route("gpt-4o-mini", None)),
+            model_id: "gpt-4o-mini".into(),
+        },
+    );
+    // Another API family under the same model name: the response was
+    // produced by a different route than the configured one.
+    let config = provider_default("openai_responses", "openai-responses", "gpt-4o", "acme");
+    let records = vec![recorded(
+        2,
+        "gpt-4o",
+        Some(AssistantRoute::Api(Family::Chat)),
+    )];
+    assert_eq!(
+        resumed_setup_with(records, &config).await,
+        SetupRoute {
+            model: Some(chat_route("gpt-4o", None)),
+            model_id: "gpt-4o".into(),
         },
     );
 }

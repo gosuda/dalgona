@@ -568,16 +568,44 @@ mod tests {
             normalize_name("na\u{7}me"),
             Err(StoreError::InvalidName)
         ));
-        assert!(normalize_name(&"g".repeat(64)).is_ok());
+        for kept in [1, 63, 64] {
+            let name = "g".repeat(kept);
+            assert_eq!(
+                normalize_name(&name)
+                    .expect("name within the limit")
+                    .as_ref(),
+                name,
+                "a {kept}-cluster name comes back unchanged"
+            );
+        }
         assert!(matches!(
             normalize_name(&"g".repeat(65)),
             Err(StoreError::InvalidName)
         ));
         let exactly_64_clusters = format!("{}e\u{301}", "g".repeat(63));
         let too_many_clusters = format!("{}e\u{301}", "g".repeat(64));
-        assert!(normalize_name(&exactly_64_clusters).is_ok());
+        assert_eq!(
+            normalize_name(&exactly_64_clusters)
+                .expect("64 clusters")
+                .as_ref(),
+            exactly_64_clusters,
+            "a combining mark stays attached and uncounted"
+        );
         assert!(matches!(
             normalize_name(&too_many_clusters),
+            Err(StoreError::InvalidName)
+        ));
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let sixty_four_families = family.repeat(64);
+        assert_eq!(
+            normalize_name(&sixty_four_families)
+                .expect("64 joined-emoji clusters")
+                .as_ref(),
+            sixty_four_families,
+            "a joined emoji sequence counts as one cluster"
+        );
+        assert!(matches!(
+            normalize_name(&family.repeat(65)),
             Err(StoreError::InvalidName)
         ));
     }

@@ -6,8 +6,11 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+
 use super::super::ir::{
-    Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
+    Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Operation, Output, Plan,
     StagedFileOwned,
 };
 
@@ -16,7 +19,13 @@ use super::{PatchSession, ensure_regular_target, non_regular_target, rename_temp
 
 /// An opened directory is the authority for rename publication.
 enum PendingTemp {
-    Ordinary { target: PathBuf, temp: PathBuf },
+    /// Mode bits the temp is born with and then stamped to exactly; `None`
+    /// keeps the 0644 create mode of a new file.
+    Ordinary {
+        target: PathBuf,
+        temp: PathBuf,
+        mode: Option<u32>,
+    },
     Rename(RenameTemp),
 }
 
@@ -30,7 +39,7 @@ impl PendingTemp {
 
     async fn publish(&self) -> io::Result<()> {
         match self {
-            Self::Ordinary { target, temp } => tokio::fs::rename(temp, target).await,
+            Self::Ordinary { target, temp, .. } => tokio::fs::rename(temp, target).await,
             Self::Rename(rename) => rename.publish(),
         }
     }
@@ -176,9 +185,11 @@ pub(crate) async fn apply_files(
         undo.push(match (pending, file.before.as_deref()) {
             (PendingTemp::Rename(rename), _) => Undo::RemoveRenamed(rename),
             (PendingTemp::Ordinary { target, .. }, None) => Undo::RemoveInstalled(target),
-            (PendingTemp::Ordinary { target, .. }, Some(before)) => {
-                Undo::RestoreBytes(target, before)
-            }
+            (PendingTemp::Ordinary { target, mode, .. }, Some(before)) => Undo::RestoreBytes {
+                path: target,
+                bytes: before,
+                mode: *mode,
+            },
         });
     }
     for file in &plan.files {
@@ -229,6 +240,7 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
 fn stage_rename_temp(
     session: &PatchSession,
     file: &StagedFileOwned,
+    mode: Option<u32>,
 ) -> Result<(PendingTemp, tokio::fs::File), EngineError> {
     let dest = file.renamed_to.as_ref().ok_or_else(|| {
         EngineError::new(
@@ -236,7 +248,8 @@ fn stage_rename_temp(
             "patch: rename is missing its validated destination.",
         )
     })?;
-    let (rename, handle) = RenameTemp::create(&session.workspace, &dest.path).map_err(|error| {
+    let created = RenameTemp::create(&session.workspace, &dest.path, mode);
+    let (rename, handle) = created.map_err(|error| {
         EngineError::new(
             ErrorClass::Io,
             format!(
@@ -260,7 +273,7 @@ async fn stage_temp(
 ) -> Result<Option<PendingTemp>, EngineError> {
     use tokio::io::AsyncWriteExt as _;
 
-    if file.op == super::super::ir::Operation::Delete {
+    if file.op == Operation::Delete {
         let parent = file
             .absolute_path
             .parent()
@@ -290,48 +303,41 @@ async fn stage_temp(
         ));
     }
 
+    // The published mode is decided before staging: a new file keeps the
+    // create-time 0644, an update keeps the target's mode, and a rename
+    // keeps the source's mode. The temp is born with that mode, so no other
+    // user can open it wider than its final mode and keep the descriptor.
+    // A mode that cannot be read refuses the stage while nothing exists to
+    // clean up.
+    let mode_bits = staged_mode_bits(file, target_abs)
+        .await
+        .map_err(|error| cannot_write(file.path.as_path(), &error))?;
     let (pending, mut handle) = if file.op == super::super::ir::Operation::Rename {
-        stage_rename_temp(session, file)?
+        stage_rename_temp(session, file, mode_bits)?
     } else {
         let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            EngineError::new(
-                ErrorClass::Io,
-                format!(
-                    "patch: cannot write {}: {error}. Nothing was written.",
-                    file.path.display()
-                ),
-            )
-        })?;
-        let temp = parent.join(format!(
-            ".dalgon-patch-{}-{:032x}.tmp",
-            std::process::id(),
-            nonce_u128()
-        ));
-        let handle = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
+        tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|error| {
-                EngineError::new(
-                    ErrorClass::Io,
-                    format!(
-                        "patch: cannot write {}: {error}. Nothing was written.",
-                        file.path.display()
-                    ),
-                )
-            })?;
+            .map_err(|error| cannot_write(file.path.as_path(), &error))?;
+        let (temp, handle) = create_sibling_temp(parent, mode_bits)
+            .await
+            .map_err(|error| cannot_write(file.path.as_path(), &error))?;
         seen_dirs.insert(parent.to_path_buf());
         (
             PendingTemp::Ordinary {
                 target: file.absolute_path.clone(),
                 temp,
+                mode: mode_bits,
             },
             handle,
         )
     };
+    // The mode is stamped on the open handle before any byte is written and
+    // before publication, so an interruption never publishes a mis-moded
+    // file and a failed stamp removes the temp instead.
     let result = async {
+        #[cfg(unix)]
+        stamp_saved_mode(&handle, mode_bits).await?;
         handle.write_all(after).await?;
         handle.sync_all().await
     }
@@ -339,13 +345,7 @@ async fn stage_temp(
     drop(handle);
     if let Err(error) = result {
         pending.cleanup().await;
-        return Err(EngineError::new(
-            ErrorClass::Io,
-            format!(
-                "patch: cannot write {}: {error}. Nothing was written.",
-                file.path.display()
-            ),
-        ));
+        return Err(cannot_write(file.path.as_path(), &error));
     }
     if file.op == super::super::ir::Operation::Rename {
         let source_parent = file
@@ -357,8 +357,93 @@ async fn stage_temp(
     Ok(Some(pending))
 }
 
+/// Creates a temp beside its target, born with `mode` — the saved bits of an
+/// update or rename, or 0644 for a new file — so a private target's bytes
+/// never sit in a temp wider than their final mode. The umask only narrows
+/// the create mode; callers stamp the exact bits on the handle afterwards.
+async fn create_sibling_temp(
+    parent: &Path,
+    mode: Option<u32>,
+) -> io::Result<(PathBuf, tokio::fs::File)> {
+    let temp = parent.join(format!(
+        ".dalgon-patch-{}-{:032x}.tmp",
+        std::process::id(),
+        nonce_u128()
+    ));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(mode.unwrap_or(0o644));
+    #[cfg(not(unix))]
+    let _ = mode;
+    let handle = options.open(&temp).await?;
+    Ok((temp, handle))
+}
+
+/// One failure text for every refusal in `stage_temp`: the plan is dead,
+/// the temp is gone, and nothing was published.
+fn cannot_write(path: &Path, error: &std::io::Error) -> EngineError {
+    EngineError::new(
+        ErrorClass::Io,
+        format!(
+            "patch: cannot write {}: {error}. Nothing was written.",
+            path.display()
+        ),
+    )
+}
+
+/// Decides the published mode for one staged file. A new file keeps the
+/// create-time 0644; an update keeps the target's mode; a rename keeps the
+/// source's mode. Renames read the source because publication is no-replace:
+/// the destination never carries an earlier mode to preserve.
+#[cfg(unix)]
+async fn staged_mode_bits(
+    file: &StagedFileOwned,
+    target_abs: &Path,
+) -> std::io::Result<Option<u32>> {
+    if file.op == Operation::Create {
+        return Ok(None);
+    }
+    let mode_path = match file.op {
+        Operation::Rename => file.absolute_path.as_path(),
+        _ => target_abs,
+    };
+    let metadata = tokio::fs::metadata(mode_path).await?;
+    Ok(Some(
+        std::os::unix::fs::MetadataExt::mode(&metadata) & 0o777,
+    ))
+}
+
+#[cfg(not(unix))]
+async fn staged_mode_bits(
+    _file: &StagedFileOwned,
+    _target_abs: &Path,
+) -> std::io::Result<Option<u32>> {
+    Ok(None)
+}
+
+/// Fchmods an open handle to `bits`; no-op off Unix.
+#[cfg(unix)]
+async fn stamp_saved_mode(handle: &tokio::fs::File, bits: Option<u32>) -> std::io::Result<()> {
+    let Some(bits) = bits else {
+        return Ok(());
+    };
+    handle
+        .set_permissions(std::fs::Permissions::from_mode(bits))
+        .await
+}
+
+#[cfg(not(unix))]
+async fn stamp_saved_mode(_handle: &tokio::fs::File, _bits: Option<u32>) -> std::io::Result<()> {
+    Ok(())
+}
+
 enum Undo<'a> {
-    RestoreBytes(&'a std::path::Path, &'a [u8]),
+    RestoreBytes {
+        path: &'a std::path::Path,
+        bytes: &'a [u8],
+        mode: Option<u32>,
+    },
     RemoveInstalled(&'a std::path::Path),
     RemoveRenamed(&'a RenameTemp),
     RestoreMoved {
@@ -370,7 +455,7 @@ enum Undo<'a> {
 impl Undo<'_> {
     async fn restore(&self) -> std::io::Result<()> {
         match self {
-            Self::RestoreBytes(path, before) => tokio::fs::write(path, before).await,
+            Self::RestoreBytes { path, bytes, mode } => restore_bytes(path, bytes, *mode).await,
             Self::RemoveInstalled(path) => match tokio::fs::remove_file(path).await {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 result => result,
@@ -379,6 +464,41 @@ impl Undo<'_> {
             Self::RestoreMoved { source, backup } => tokio::fs::rename(backup, source).await,
         }
     }
+}
+
+/// Puts a pre-image back the way an update publishes: a sibling temp born
+/// with the saved mode, written and synced, then renamed over the target.
+/// The published target can be read-only, so it is never opened for writing.
+/// A temp that fails before the rename holds no trusted bytes and goes away.
+/// One that fails at the rename holds the only copy of the original bytes,
+/// so it stays on disk and the error names it.
+async fn restore_bytes(path: &Path, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "restore target has no parent directory",
+        )
+    })?;
+    let (temp, mut handle) = create_sibling_temp(parent, mode).await?;
+    let staged = async {
+        stamp_saved_mode(&handle, mode).await?;
+        handle.write_all(bytes).await?;
+        handle.sync_all().await
+    }
+    .await;
+    drop(handle);
+    if let Err(error) = staged {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error);
+    }
+    tokio::fs::rename(&temp, path).await.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{error}. Pre-image retained at {}", temp.display()),
+        )
+    })
 }
 
 async fn rollback_error(
@@ -403,7 +523,7 @@ async fn rollback_error(
         message.push_str(" Rollback was incomplete. Inspect these paths before retrying:");
         for (action, error) in failures {
             match action {
-                Undo::RestoreBytes(path, _) | Undo::RemoveInstalled(path) => {
+                Undo::RestoreBytes { path, .. } | Undo::RemoveInstalled(path) => {
                     let _ = write!(message, "\n{}: {error}.", path.display());
                 }
                 Undo::RemoveRenamed(rename) => {
@@ -636,12 +756,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_rollback_reports_every_stranded_path_and_preserves_backups() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
-        let session = PatchSession {
-            workspace: workspace.clone(),
+    fn failed_rollback_session(workspace: &std::path::Path) -> PatchSession {
+        PatchSession {
+            workspace: workspace.to_path_buf(),
             session: SessionId::new_v7(),
             generation: GenerationId::new(NonZeroU64::MIN),
             turn: TurnId::new(NonZeroU64::MIN),
@@ -652,7 +769,97 @@ mod tests {
             index: Index::new(None),
             snapshots: Arc::new(SnapshotStore::new([7; 16])),
             cutoff: Some(64),
-        };
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FailedRollbackPaths<'a> {
+        update: &'a std::path::Path,
+        create: &'a std::path::Path,
+        restored: &'a std::path::Path,
+        destination: &'a std::path::Path,
+        source: &'a std::path::Path,
+        earlier: &'a std::path::Path,
+        backup: &'a std::path::Path,
+    }
+
+    async fn seed_failed_rollback(paths: FailedRollbackPaths<'_>) {
+        let FailedRollbackPaths {
+            update,
+            create,
+            restored,
+            destination,
+            source,
+            earlier,
+            backup,
+        } = paths;
+        for path in [update, create, destination, source, earlier] {
+            tokio::fs::create_dir(path).await.expect("blocked restore");
+        }
+        tokio::fs::write(restored, b"after\n")
+            .await
+            .expect("changed file");
+        tokio::fs::write(earlier.join("occupant"), b"preserve\n")
+            .await
+            .expect("occupant");
+        tokio::fs::write(backup, b"original\n")
+            .await
+            .expect("backup");
+    }
+
+    fn failed_rollback_file(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> StagedFileOwned {
+        StagedFileOwned {
+            path: PathBuf::from("failed-source"),
+            absolute_path: source.join("."),
+            before: Some(b"source\n".to_vec().into_boxed_slice()),
+            after: Some(b"source\n".to_vec().into_boxed_slice()),
+            op: Operation::Rename,
+            renamed_to: Some(RenameTarget {
+                path: PathBuf::from("blocked-destination"),
+                absolute_path: destination.to_path_buf(),
+            }),
+            hunks: Vec::new(),
+        }
+    }
+
+    fn failed_rollback_undo(paths: FailedRollbackPaths<'_>) -> Vec<super::Undo<'_>> {
+        let FailedRollbackPaths {
+            update,
+            create,
+            restored,
+            destination,
+            earlier,
+            backup,
+            ..
+        } = paths;
+        vec![
+            super::Undo::RestoreBytes {
+                path: update,
+                bytes: b"before\n",
+                mode: None,
+            },
+            super::Undo::RemoveInstalled(create),
+            super::Undo::RestoreBytes {
+                path: restored,
+                bytes: b"before\n",
+                mode: None,
+            },
+            super::Undo::RemoveInstalled(destination),
+            super::Undo::RestoreMoved {
+                source: earlier,
+                backup: backup.to_path_buf(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_reports_every_stranded_path_and_preserves_backups() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        let session = failed_rollback_session(&workspace);
         let names = [
             "blocked-update",
             "blocked-create",
@@ -672,40 +879,18 @@ mod tests {
             earlier,
             backup,
         ] = &paths;
-        for path in [update, create, destination, source, earlier] {
-            tokio::fs::create_dir(path).await.expect("blocked restore");
-        }
-        tokio::fs::write(restored, b"after\n")
-            .await
-            .expect("changed file");
-        tokio::fs::write(earlier.join("occupant"), b"preserve\n")
-            .await
-            .expect("occupant");
-        tokio::fs::write(backup, b"original\n")
-            .await
-            .expect("backup");
-        let file = StagedFileOwned {
-            path: PathBuf::from("failed-source"),
-            absolute_path: source.join("."),
-            before: Some(b"source\n".to_vec().into_boxed_slice()),
-            after: Some(b"source\n".to_vec().into_boxed_slice()),
-            op: Operation::Rename,
-            renamed_to: Some(RenameTarget {
-                path: PathBuf::from("blocked-destination"),
-                absolute_path: destination.clone(),
-            }),
-            hunks: Vec::new(),
+        let fixture = FailedRollbackPaths {
+            update: update.as_path(),
+            create: create.as_path(),
+            restored: restored.as_path(),
+            destination: destination.as_path(),
+            source: source.as_path(),
+            earlier: earlier.as_path(),
+            backup: backup.as_path(),
         };
-        let mut undo = vec![
-            super::Undo::RestoreBytes(update, b"before\n"),
-            super::Undo::RemoveInstalled(create),
-            super::Undo::RestoreBytes(restored, b"before\n"),
-            super::Undo::RemoveInstalled(destination),
-            super::Undo::RestoreMoved {
-                source: earlier,
-                backup: backup.clone(),
-            },
-        ];
+        seed_failed_rollback(fixture).await;
+        let file = failed_rollback_file(source, destination);
+        let mut undo = failed_rollback_undo(fixture);
         let error = super::trash_source(&session, &file, &[], &mut undo)
             .await
             .expect_err("source cannot move inside itself");
@@ -734,5 +919,42 @@ mod tests {
                 .expect("other rollback continues"),
             b"before\n"
         );
+        // The pre-image whose replacement failed is the only copy of the
+        // original bytes: it stays on disk and the error names it.
+        let mut retained = Vec::new();
+        for entry in std::fs::read_dir(&workspace).expect("read workspace") {
+            let name = entry.expect("directory entry").file_name();
+            if name.to_string_lossy().starts_with(".dalgon-patch-") {
+                retained.push(workspace.join(name));
+            }
+        }
+        assert_eq!(retained.len(), 1, "{retained:?}");
+        let pre_image = &retained[0];
+        assert_eq!(
+            std::fs::read(pre_image).expect("retained pre-image"),
+            b"before\n"
+        );
+        let name = pre_image.to_str().expect("temp path");
+        assert!(error.message.contains(name), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sibling_temp_is_born_with_the_decided_mode() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        // The umask only removes bits at creation, so a temp born with its
+        // decided mode never carries a bit outside it. A constant wider
+        // create mode would show as group or other access on a private file.
+        for (decided, ceiling) in [(Some(0o600), 0o600), (Some(0o400), 0o400), (None, 0o644)] {
+            let (temp, handle) = super::create_sibling_temp(directory.path(), decided)
+                .await
+                .expect("create staged temp");
+            let born = handle.metadata().await.expect("temp metadata").mode() & 0o777;
+            assert_eq!(born & !ceiling, 0, "{decided:?} born as {born:o}");
+            drop(handle);
+            tokio::fs::remove_file(temp).await.expect("remove temp");
+        }
     }
 }

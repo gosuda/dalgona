@@ -29,6 +29,7 @@ fn model() -> dal_core::ModelInfo {
     dal_core::ModelInfo {
         route: dal_core::ModelRoute::from_id("dalgon/normal"),
         name: "test".into(),
+        provider: "".into(),
         caps: dal_core::Caps {
             context_window: None,
             thinking: Box::new([]),
@@ -48,6 +49,7 @@ fn workspace() -> dal_core::Workspace {
 struct FakeServices {
     replies: Mutex<VecDeque<Result<AgentsReply, ServiceError>>>,
     notices: Mutex<Vec<dal_core::Notice>>,
+    cancels: Mutex<Vec<dal_core::SessionId>>,
 }
 
 impl FakeServices {
@@ -55,7 +57,12 @@ impl FakeServices {
         Arc::new(Self {
             replies: Mutex::new(replies.into()),
             notices: Mutex::new(Vec::new()),
+            cancels: Mutex::new(Vec::new()),
         })
+    }
+
+    fn recorded_cancels(&self) -> Vec<dal_core::SessionId> {
+        self.cancels.lock().expect("cancels").clone()
     }
 }
 
@@ -103,6 +110,10 @@ impl Services for FakeServices {
         Box::pin(async { Err(ServiceError::Declined) })
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async { Err(ServiceError::Declined) })
+    }
+
     fn add_session_tools(
         &self,
         _who: &Caller,
@@ -121,7 +132,10 @@ impl Services for FakeServices {
         Box::pin(async { Err(ServiceError::Declined) })
     }
 
-    fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+    fn agents(&self, _who: &Caller, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+        if let AgentsOp::Cancel { id } = &op {
+            self.cancels.lock().expect("cancels").push(*id);
+        }
         let next = self
             .replies
             .lock()
@@ -544,25 +558,95 @@ async fn wait_returns_the_report_and_publishes_the_completion_notice() {
     assert_eq!(notices[0].text.as_ref(), "child worker finished (end_turn)");
 }
 
+fn awaited(id: dal_core::SessionId, text: String) -> Vec<Result<AgentsReply, ServiceError>> {
+    vec![
+        Ok(AgentsReply::Await {
+            report: AgentReport {
+                stop: Stop::EndTurn,
+                text: text.into(),
+                session: id,
+                entry: entry(3),
+            },
+        }),
+        Ok(AgentsReply::Listed(vec![info(
+            id,
+            "worker",
+            AgentState::Done(Stop::EndTurn),
+        )])),
+    ]
+}
+
+fn spill(id: dal_core::SessionId) -> String {
+    let uri = format!("session://{id}/{}", entry(3));
+    format!(
+        "\n[report truncated at 50000 characters; full report: {uri}]\nnext_step: Read the full report with the read tool at {uri}."
+    )
+}
+
+async fn wait_text(id: dal_core::SessionId, services: &Arc<FakeServices>) -> String {
+    let outcome = agent()
+        .run(
+            call(&format!(r#"{{"action":"wait","id":"{id}"}}"#)),
+            ToolCx::for_test(share(services)),
+        )
+        .await;
+    outcome_text(outcome).expect("wait succeeds")
+}
+
 #[tokio::test]
-async fn cancel_returns_the_exact_text_and_is_idempotent() {
+async fn wait_bounds_reports_at_fifty_thousand_unicode_scalars() {
     let id = dal_core::SessionId::new_v7();
+    // N-1 and N pass through byte-identical; the notice still publishes.
+    for text in ["x".repeat(49_999), "x".repeat(50_000)] {
+        let services = FakeServices::with(awaited(id, text.clone()));
+        assert_eq!(wait_text(id, &services).await, text);
+        assert_eq!(services.notices.lock().expect("notices").len(), 1);
+    }
+    // N+1 truncates to exactly the first 50000 scalars plus the spill link.
+    let long = "x".repeat(50_001);
+    let services = FakeServices::with(awaited(id, long));
+    assert_eq!(
+        wait_text(id, &services).await,
+        format!("{}{}", "x".repeat(50_000), spill(id))
+    );
+    // A multibyte scalar straddling the cut stays whole: truncation counts
+    // scalars, so the 50000th scalar ("é") survives and no byte is split.
+    let wide = format!("{}é{}", "x".repeat(49_999), "y".repeat(5));
+    let services = FakeServices::with(awaited(id, wide));
+    assert_eq!(
+        wait_text(id, &services).await,
+        format!("{}é{}", "x".repeat(49_999), spill(id))
+    );
+}
+
+#[tokio::test]
+async fn cancel_reports_the_service_confirmed_id_not_the_requested_one() {
+    // The service confirms what it cancelled, which may differ from the
+    // requested id; the model-visible text must name the confirmation, so
+    // printing the request instead must turn this test red.
+    let requested = dal_core::SessionId::new_v7();
+    let confirmed = dal_core::SessionId::new_v7();
     let services = FakeServices::with(vec![
-        Ok(AgentsReply::Cancelled { id }),
-        Ok(AgentsReply::Cancelled { id }),
+        Ok(AgentsReply::Cancelled { id: confirmed }),
+        Ok(AgentsReply::Cancelled { id: confirmed }),
     ]);
     for _ in 0..2 {
         let outcome = agent()
             .run(
-                call(&format!(r#"{{"action":"cancel","id":"{id}"}}"#)),
+                call(&format!(r#"{{"action":"cancel","id":"{requested}"}}"#)),
                 ToolCx::for_test(share(&services)),
             )
             .await;
         assert_eq!(
             outcome_text(outcome).expect("cancel succeeds"),
-            format!("cancelled child \"{id}\".")
+            format!("cancelled child \"{confirmed}\".")
         );
     }
+    assert_eq!(
+        services.recorded_cancels(),
+        vec![requested, requested],
+        "both cancels reached the service with the requested id"
+    );
 }
 
 #[tokio::test]
@@ -611,10 +695,9 @@ async fn denial_and_cancellation_map_to_typed_outcomes() {
             ToolCx::for_test(share(&denied)),
         )
         .await;
-    assert!(
-        outcome_text(outcome)
-            .expect_err("denied")
-            .contains("denied")
+    assert_eq!(
+        outcome_text(outcome).expect_err("denied"),
+        "denied: the service is not in this extension's inject list"
     );
 
     let cancelled = FakeServices::with(vec![Err(ServiceError::Cancelled)]);
@@ -655,5 +738,10 @@ async fn session_end_cancels_only_active_children() {
     assert!(
         services.replies.lock().expect("replies").is_empty(),
         "every cancel was consumed and the finished child was left alone"
+    );
+    assert_eq!(
+        services.recorded_cancels(),
+        vec![queued, running],
+        "only the queued and running children were cancelled, in list order"
     );
 }

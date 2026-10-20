@@ -201,6 +201,25 @@ async fn job_log_outcome(label: &str, text: &str, log_path: &std::path::Path) ->
     }
 }
 
+/// Maps a failed actor operation to its typed save outcome.
+///
+/// `SessionClosed` keeps its identity. Post-apply persistence failures
+/// arrive as [`AgentError::PersistenceFailed`] and become
+/// [`SaveError::Failed`] with the message preserved; the message names
+/// the failed persistence (journal today, distinctly-worded default
+/// writes in future). Every other [`AgentError`] is a pre-apply
+/// rejection that changed nothing, so it becomes
+/// [`SaveError::Rejected`].
+fn save_error(error: AgentError) -> SaveError {
+    match error {
+        AgentError::SessionClosed { id } => SaveError::SessionClosed { id },
+        AgentError::PersistenceFailed { message } => SaveError::Failed { message },
+        other => SaveError::Rejected {
+            message: other.to_string().into(),
+        },
+    }
+}
+
 /// Labels one command for job table rows.
 fn command_label(cmd: &Command) -> String {
     match cmd {
@@ -246,7 +265,7 @@ impl CommandHost for DriverHost {
     ) -> BoxFuture<'_, Result<(), SaveError>> {
         if super::untrusted_export_path_denied(caller.origin(), &command) {
             return Box::pin(async {
-                Err(SaveError::Failed {
+                Err(SaveError::Rejected {
                     message: super::EXPORT_PATH_DENIED.into(),
                 })
             });
@@ -258,12 +277,7 @@ impl CommandHost for DriverHost {
                 .submit(command, by)
                 .await
                 .map(|_| ())
-                .map_err(|error| match error {
-                    AgentError::SessionClosed { id } => SaveError::SessionClosed { id },
-                    other => SaveError::Failed {
-                        message: other.to_string().into(),
-                    },
-                })
+                .map_err(save_error)
         })
     }
 
@@ -369,7 +383,7 @@ impl CommandHost for DriverHost {
                 })
             })
             .map(|info| {
-                let message_count = counts.get(&info.id).copied().unwrap_or(0);
+                let message_count = live_or_stored_count(&counts, &info);
                 SessionSummary {
                     id: info.id,
                     name: info.name.clone(),
@@ -422,20 +436,20 @@ impl CommandHost for DriverHost {
             .iter()
             .find(|info| info.id.to_string().starts_with(query))
         {
-            return Ok(summarize_row(
-                info,
-                counts.get(&info.id).copied().unwrap_or(0),
-            ));
+            return Ok(summarize_row(info, live_or_stored_count(&counts, info)));
         }
         if let Some(info) = rows.iter().find(|info| {
             info.name
                 .as_ref()
                 .is_some_and(|name| name.as_ref() == query)
         }) {
-            return Ok(summarize_row(
-                info,
-                counts.get(&info.id).copied().unwrap_or(0),
-            ));
+            return Ok(summarize_row(info, live_or_stored_count(&counts, info)));
+        }
+        // The listing above is capped per workspace, so a session far down it
+        // is not among `rows`. The store's own resolution has no cap; a
+        // reference it cannot settle (no match, or ambiguous) is a miss.
+        if let Ok(info) = host.find_session(query) {
+            return Ok(summarize_row(&info, live_or_stored_count(&counts, &info)));
         }
         Err(ResolveMiss::NotFound {
             query: query.into(),
@@ -477,6 +491,10 @@ impl CommandHost for DriverHost {
             .cached_catalog()
             .map(|catalog| CatalogView {
                 entries: catalog.entries().to_vec(),
+                providers: catalog
+                    .providers()
+                    .map(|provider| (provider.id.clone(), provider.family))
+                    .collect(),
             })
     }
 
@@ -489,12 +507,19 @@ impl CommandHost for DriverHost {
         let route = if let Some(route) = &self.route {
             route.clone()
         } else {
-            let Some(default) = self.host.shared.config.model() else {
-                return Vec::new();
-            };
-            match self.resolve_model_inner(default) {
-                Ok(resolved) => resolved.route,
-                Err(_) => return Vec::new(),
+            match self.host.shared.default_model() {
+                // A structured table resolves by route below, so families the
+                // legacy string cannot encode keep their levels.
+                Some(crate::host::DefaultModel::Route(route)) => route,
+                // No structured table: the legacy string keeps its existing
+                // alias-aware resolution path unchanged.
+                Some(crate::host::DefaultModel::Reference(reference)) => {
+                    match self.resolve_model_inner(&reference) {
+                        Ok(resolved) => resolved.route,
+                        Err(_) => return Vec::new(),
+                    }
+                }
+                None => return Vec::new(),
             }
         };
         if let Some(found) = crate::ext::synthetic::find_route(&self.host.shared, &route) {
@@ -671,6 +696,17 @@ fn live_counts(host: &Arc<HostState>) -> HashMap<SessionId, u64> {
         .collect()
 }
 
+/// The leaf-path length a listing row reports: the live session's own count
+/// when it is open here, else the count the store folded from its journal,
+/// else zero for a row whose journal could not be read.
+fn live_or_stored_count(counts: &HashMap<SessionId, u64>, info: &dal_core::SessionInfo) -> u64 {
+    counts
+        .get(&info.id)
+        .copied()
+        .or(info.message_count)
+        .unwrap_or(0)
+}
+
 /// Maps one store row to its command summary.
 fn summarize_row(info: &dal_core::SessionInfo, message_count: u64) -> SessionSummary {
     SessionSummary {
@@ -830,5 +866,57 @@ mod tests {
         let log_path = dir.path().join("job.log");
         let outcome = job_log_outcome("export", "{}", &log_path).await;
         assert!(matches!(outcome, JobOutcome::Exited { code: 0 }));
+    }
+
+    /// The save-error boundary: post-apply persistence failures map to the
+    /// typed `Failed` outcome with the message preserved; every other
+    /// non-closed [`AgentError`] maps to `Rejected`; only a closed session
+    /// keeps its own identity. Asserts on variants and message passthrough,
+    /// never on product prose.
+    #[test]
+    fn save_error_separates_failed_rejected_and_closed() {
+        use super::save_error;
+        use crate::error::{ActualTurn, AgentError, ExpectedTurn, ValidationError};
+        use crate::ext::command::SaveError;
+        use dal_core::{BlobId, ClientId, RequestId, SessionId, TurnId};
+        use std::num::NonZeroU64;
+
+        let session = SessionId::new_v7();
+        let rejections = [
+            AgentError::WrongTurn {
+                expected: ExpectedTurn::NoRunningTurn,
+                actual: ActualTurn::Idle,
+            },
+            AgentError::AlreadyResolved {
+                id: RequestId::new_v7(),
+                by: ClientId::new("core"),
+            },
+            AgentError::SteerFull {
+                turn: TurnId::new(NonZeroU64::new(1).expect("nonzero turn")),
+            },
+            AgentError::Invalid(ValidationError::new("bad answer")),
+            AgentError::BlobNotFound {
+                id: BlobId::from_bytes(b"missing"),
+                session,
+            },
+            AgentError::SessionGone { session },
+        ];
+        for error in rejections {
+            assert!(
+                matches!(save_error(error), SaveError::Rejected { .. }),
+                "a rejection without state change must not report a save failure"
+            );
+        }
+        assert!(matches!(
+            save_error(AgentError::SessionClosed { id: session }),
+            SaveError::SessionClosed { .. }
+        ));
+        let text = "journal write failed: disk full";
+        assert!(matches!(
+            save_error(AgentError::PersistenceFailed {
+                message: text.into()
+            }),
+            SaveError::Failed { message } if message.as_ref() == text
+        ));
     }
 }

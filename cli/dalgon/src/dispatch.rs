@@ -8,6 +8,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use dal_agent::{Env, GrantStore, Host, Product};
+use dal_core::SERVE_DEFAULT_BIND;
 use dal_core::{ClientId, Config, Name, Origin};
 use tokio_util::sync::CancellationToken;
 
@@ -49,24 +50,29 @@ pub(crate) use models::run as models;
 /// Drives `future` until it completes, cancelling `stop` on the first
 /// shutdown signal and abandoning the wait on the second.
 ///
-/// Returns the inner output, or the `128 + signo` code when a second signal
-/// arrives while draining. Dropping the future closes the listener without
-/// waiting out the grace period.
+/// The first signal starts the shutdown ladder, so every later step shares
+/// its one clock. Returns the inner output, or the `128 + signo` code when a
+/// second signal arrives while draining. Dropping the future closes the
+/// listener without waiting out the grace period. `future` must not own the
+/// host close: that step runs after this returns, inside the ladder, and is
+/// never abandoned.
 pub(crate) async fn drive<Fut>(stop: &CancellationToken, future: Fut) -> Result<Fut::Output, u8>
 where
     Fut: Future,
 {
     tokio::pin!(future);
+    let mut signals = edge::ShutdownSignals::register();
     let mut signalled = false;
     loop {
         tokio::select! {
             biased;
             done = &mut future => return Ok(done),
-            code = edge::shutdown_signal() => {
+            code = signals.next() => {
                 if signalled {
                     return Err(code);
                 }
                 signalled = true;
+                exit::Ladder::begin();
                 stop.cancel();
             }
         }
@@ -130,7 +136,7 @@ pub(crate) async fn serve(
     }
     let serve_config = serve::ServeConfig {
         bind: core_serve.bind.to_string(),
-        bind_was_explicit: false,
+        bind_was_explicit: core_serve.bind.as_ref() != SERVE_DEFAULT_BIND,
         port: core_serve.port,
         token_file: core_serve.token_file.clone(),
         approval: cli.approval.map_or(core_serve.approval, map_approval),
@@ -165,20 +171,50 @@ pub(crate) async fn serve(
     };
     let stop = CancellationToken::new();
     let snapshot = edge::terminal_snapshot();
+    let closing = host.clone();
+    let run = serve::ServeRun {
+        host,
+        args: serve_args,
+        config: serve_config,
+        data_root,
+        stop: stop.clone(),
+    };
+    let outcome = run_server(&stop, run, &snapshot).await;
+    // The host always closes, and the close always runs to completion: only
+    // the quiet poll is ever abandoned, so a durable provider credential write
+    // is never detached. A second signal already seen by `drive` skips the
+    // quiet wait; otherwise a later signal during it decides the exit status.
+    // The run's own failure is reported either way.
+    let ladder = exit::Ladder::begin();
+    let closed = if outcome.is_err() {
+        ladder.close_host_after_quiet_wait(closing).await
+    } else {
+        ladder.close_host(closing).await
+    };
+    let code = match outcome {
+        Ok(Ok(code)) => code,
+        Ok(Err(error)) => serve_error(error),
+        Err(code) => ExitCode::from(code),
+    };
+    closed.skipped_by.map_or(code, ExitCode::from)
+}
+
+/// Runs the server under [`drive`]. The stream locks live only as long as the
+/// server: the host close that follows must not hold up other threads that
+/// write diagnostics.
+async fn run_server(
+    stop: &CancellationToken,
+    run: serve::ServeRun,
+    snapshot: &edge::TerminalSnapshot,
+) -> Result<Result<ExitCode, serve::ServeCommandError>, u8> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let stderr = std::io::stderr();
     let mut err = stderr.lock();
-    match drive(
-        &stop,
+    drive(
+        stop,
         serve::run(
-            serve::ServeRun {
-                host,
-                args: serve_args,
-                config: serve_config,
-                data_root,
-                stop: stop.clone(),
-            },
+            run,
             &mut out,
             &mut err,
             snapshot.stderr_tty,
@@ -186,11 +222,6 @@ pub(crate) async fn serve(
         ),
     )
     .await
-    {
-        Ok(Ok(code)) => code,
-        Ok(Err(error)) => serve_error(error),
-        Err(code) => ExitCode::from(code),
-    }
 }
 
 /// Writes the unconfigured-plugin diagnostic for `name`.

@@ -12,7 +12,7 @@ use crate::approval::DenyReason;
 use crate::config::ApprovalMode;
 use crate::content::Part;
 use crate::id::{EntryId, JobId, TurnId};
-use crate::model::{ModelRoute, ThinkingLevel};
+use crate::model::{Family, ModelRoute, ThinkingLevel};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -368,47 +368,112 @@ fn planned_replies_round_trip_with_wire_tags() -> TestResult {
 }
 
 #[test]
-fn command_errors_round_trip() -> TestResult {
+fn command_error_wire_is_adjacently_tagged_with_snake_case_tags() -> TestResult {
     let errors = [
-        CommandError::Unknown {
-            name: "modle".into(),
-            suggestion: Some("model".into()),
-        },
-        CommandError::Busy {
-            cmd: "fork".into(),
-            state: BusyState::Compacting,
-        },
-        CommandError::Arity {
-            cmd: "copy".into(),
-            args: "1".into(),
-        },
-        CommandError::Lex {
-            args: "\"abc".into(),
-            error: LexError::UnclosedQuote { quote: '"', at: 0 },
-        },
-        CommandError::Lex {
-            args: "ab\\".into(),
-            error: LexError::TrailingEscape { at: 2 },
-        },
-        CommandError::JobCap {
-            cmd: "compact".into(),
-        },
-        CommandError::PluginCap,
-        CommandError::Import(ImportFailure::MissingFile {
-            abs: PathBuf::from("/x.jsonl"),
-        }),
-        CommandError::Import(ImportFailure::LineTooLong {
-            abs: PathBuf::from("/x.jsonl"),
-            line: 41,
-        }),
+        (
+            CommandError::Unknown {
+                name: "modle".into(),
+                suggestion: Some("model".into()),
+            },
+            r#"{"type":"unknown","value":{"name":"modle","suggestion":"model"}}"#,
+        ),
+        (
+            CommandError::Unknown {
+                name: "zzz".into(),
+                suggestion: None,
+            },
+            r#"{"type":"unknown","value":{"name":"zzz","suggestion":null}}"#,
+        ),
+        (
+            CommandError::Busy {
+                cmd: "fork".into(),
+                state: BusyState::Compacting,
+            },
+            r#"{"type":"busy","value":{"cmd":"fork","state":"compacting"}}"#,
+        ),
+        (
+            CommandError::Busy {
+                cmd: "fork".into(),
+                state: BusyState::Running,
+            },
+            r#"{"type":"busy","value":{"cmd":"fork","state":"running"}}"#,
+        ),
+        (
+            CommandError::Arity {
+                cmd: "copy".into(),
+                args: "1".into(),
+            },
+            r#"{"type":"arity","value":{"cmd":"copy","args":"1"}}"#,
+        ),
+        (
+            CommandError::Lex {
+                args: "\"abc".into(),
+                error: LexError::UnclosedQuote { quote: '"', at: 0 },
+            },
+            r#"{"type":"lex","value":{"args":"\"abc","error":{"type":"unclosed_quote","quote":"\"","at":0}}}"#,
+        ),
+        (
+            CommandError::Lex {
+                args: "ab\\".into(),
+                error: LexError::TrailingEscape { at: 2 },
+            },
+            r#"{"type":"lex","value":{"args":"ab\\","error":{"type":"trailing_escape","at":2}}}"#,
+        ),
+        (
+            CommandError::JobCap {
+                cmd: "compact".into(),
+            },
+            r#"{"type":"job_cap","value":{"cmd":"compact"}}"#,
+        ),
+        (CommandError::PluginCap, r#"{"type":"plugin_cap"}"#),
+        (
+            CommandError::Import(ImportFailure::MissingFile {
+                abs: PathBuf::from("/x.jsonl"),
+            }),
+            r#"{"type":"import","value":{"type":"missing_file","abs":"/x.jsonl"}}"#,
+        ),
+        (
+            CommandError::Import(ImportFailure::NotSession {
+                abs: PathBuf::from("/x.jsonl"),
+                line: 3,
+                reason: "no header".into(),
+            }),
+            r#"{"type":"import","value":{"type":"not_session","abs":"/x.jsonl","line":3,"reason":"no header"}}"#,
+        ),
+        (
+            CommandError::Import(ImportFailure::LineTooLong {
+                abs: PathBuf::from("/x.jsonl"),
+                line: 41,
+            }),
+            r#"{"type":"import","value":{"type":"line_too_long","abs":"/x.jsonl","line":41}}"#,
+        ),
     ];
-
-    for error in errors {
-        let encoded = sonic_rs::to_string(&error)?;
-        let decoded: CommandError = sonic_rs::from_str(&encoded)?;
-        assert_eq!(decoded, error, "round-trip failed for {encoded}");
+    for (error, wire) in errors {
+        assert_eq!(sonic_rs::to_string(&error)?, wire);
+        assert_eq!(sonic_rs::from_str::<CommandError>(wire)?, error, "{wire}");
     }
     Ok(())
+}
+
+#[test]
+fn command_error_decoder_rejects_shape_drift() {
+    for bad in [
+        r#"{"type":"plugin-cap"}"#,
+        r#"{"type":"future","value":{}}"#,
+        r#"{"type":"busy","value":{"cmd":"fork","state":"idle"}}"#,
+        r#"{"type":"busy","value":{"cmd":"fork"}}"#,
+        r#"{"type":"lex","value":{"args":"a","error":{"type":"unclosed_quote","quote":"ab","at":0}}}"#,
+        r#"{"type":"lex","value":{"args":"a","error":{"type":"unclosed_quote","quote":"\"","at":-1}}}"#,
+        r#"{"type":"lex","value":{"args":"a","error":{"type":"unterminated","at":0}}}"#,
+        r#"{"type":"import","value":{"type":"line_too_long","abs":"/x.jsonl","line":-1}}"#,
+        r#"{"type":"import","value":{"type":"line_too_long","abs":"/x.jsonl"}}"#,
+        r#"{"type":"import","value":{"type":"empty_file","abs":"/x.jsonl"}}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<CommandError>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
 }
 
 #[test]
@@ -563,4 +628,44 @@ proptest! {
         let raw: String = chars.into_iter().collect();
         prop_assert_eq!(reference_tokens(&raw), tokens(&raw));
     }
+}
+
+#[test]
+fn set_model_with_provider_route_round_trips() -> TestResult {
+    let route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("acme-proxy".into()),
+    };
+    let command = Command::SetModel {
+        model: route,
+        save: Save::SessionOnly,
+    };
+    let encoded = sonic_rs::to_string(&command)?;
+    assert!(
+        encoded.contains(r#""provider":"acme-proxy""#),
+        "provider lost on the wire: {encoded}"
+    );
+    let decoded: Command = sonic_rs::from_str(&encoded)?;
+    assert_eq!(decoded, command);
+    Ok(())
+}
+
+#[test]
+fn set_model_without_provider_decodes_to_no_provider() -> TestResult {
+    let decoded: Command = sonic_rs::from_str(
+        r#"{"type":"set_model","model":{"kind":"api","family":"openai_chat","model":"gpt-5"},"save":"session_only"}"#,
+    )?;
+    assert_eq!(
+        decoded,
+        Command::SetModel {
+            model: ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-5".into(),
+                provider: None,
+            },
+            save: Save::SessionOnly,
+        }
+    );
+    Ok(())
 }

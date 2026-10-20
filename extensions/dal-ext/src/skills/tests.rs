@@ -1,6 +1,7 @@
 use super::invoke::{listing, reminder};
 use super::*;
 use crate::letter::{FallbackReason, LetterChunk, LetterFallback};
+use dal_core::{Caps, ModelRoute, ThinkingLevel};
 
 const HEAD: &str =
     "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.";
@@ -651,4 +652,249 @@ fn command_summary_is_cut_to_a_valid_short_line() {
     let summary = &built.commands()[1].0.summary;
     assert!(summary.len() < 80, "{summary}");
     assert_eq!(&**summary, format!("{}…", "a".repeat(76)).as_str());
+}
+
+#[test]
+fn skill_uri_reads() {
+    // Registered across two plugins out of byte order: plugin-b's alpha
+    // claims before plugin-a's beta, and the registry still reports both in
+    // its byte-sorted name order.
+    let alpha = skill("plugin-b", "alpha", "alpha description", false);
+    let beta = skill("plugin-a", "beta", "beta description", false);
+    let registry =
+        SkillRegistry::merge(&[("plugin-b", vec![alpha]), ("plugin-a", vec![beta])]).unwrap();
+    let names: Vec<String> = registry.names().iter().map(ToString::to_string).collect();
+    let resolver = SkillResolver::new(Arc::new(registry));
+
+    // A hit serves the exact loaded body under its canonical URI.
+    for name in &names {
+        let doc = resolver.lookup(name).unwrap();
+        assert_eq!(&*doc.uri, format!("skill://{name}").as_str());
+        assert_eq!(&*doc.text, format!("body of {name}").as_str());
+    }
+
+    // A miss is the typed refusal naming the exact request and sorted alternatives.
+    let err = resolver.lookup("gamma").unwrap_err();
+    assert!(matches!(&err, SchemeError::Failed { .. }));
+    let text = err.to_string();
+    assert!(text.contains("gamma"), "{text}");
+
+    // An empty registry refuses through the same typed error variant.
+    let empty = SkillResolver::new(Arc::new(SkillRegistry::empty()));
+    let empty_err = empty.lookup("gamma").unwrap_err();
+    assert!(matches!(empty_err, SchemeError::Failed { .. }));
+}
+
+#[test]
+fn missing_skill_names_sorted_available_list() {
+    let alpha = skill("plugin-b", "alpha", "alpha description", false);
+    let beta = skill("plugin-a", "beta", "beta description", false);
+    let registry =
+        SkillRegistry::merge(&[("plugin-b", vec![alpha]), ("plugin-a", vec![beta])]).unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("gamma").unwrap_err().to_string();
+    assert!(text.contains("gamma"), "{text}");
+    assert!(text.contains("available: alpha, beta"), "{text}");
+}
+
+#[test]
+fn missing_skill_never_falls_back_to_a_near_name() {
+    let registry =
+        SkillRegistry::merge(&[("p", vec![skill("p", "alpha", "alpha description", false)])])
+            .unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    for near in ["ALPHA", "alph", "alpha ", " alpha", "beta"] {
+        let text = resolver.lookup(near).unwrap_err().to_string();
+        assert_eq!(
+            text,
+            format!("skill {near} does not exist; available: alpha")
+        );
+    }
+    let doc = resolver.lookup("alpha").unwrap();
+    assert_eq!(&*doc.text, "body of alpha");
+}
+
+#[test]
+fn missing_skill_bounds_a_large_registry() {
+    let mut all = Vec::new();
+    for index in 0..25 {
+        let name = format!("skill-{index:02}");
+        all.push(skill("p", &name, "d", false));
+    }
+    let registry = SkillRegistry::merge(&[("p", all)]).unwrap();
+    assert_eq!(registry.names().len(), 25);
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("nope").unwrap_err().to_string();
+    assert!(text.contains("nope"), "{text}");
+    assert!(text.contains("available: "), "{text}");
+    let shown: Vec<String> = (0..20).map(|index| format!("skill-{index:02}")).collect();
+    let expected = format!("available: {}", shown.join(", "));
+    assert!(text.contains(&expected), "{text}");
+    assert!(text.contains("…and 5 more"), "{text}");
+    for hidden in ["skill-20", "skill-24"] {
+        assert!(!text.contains(hidden), "{text}");
+    }
+}
+
+#[test]
+fn missing_skill_empty_registry_names_the_request() {
+    let resolver = SkillResolver::new(Arc::new(SkillRegistry::empty()));
+    let text = resolver.lookup("gamma").unwrap_err().to_string();
+    assert!(text.contains("gamma"), "{text}");
+    assert!(text.contains("no skills are loaded"), "{text}");
+}
+
+fn extension_record(name: &str, description: &str, body: &str) -> SkillRecord {
+    SkillRecord {
+        name: dal_core::Name::parse(name).unwrap(),
+        description: description.into(),
+        body: Arc::from(body),
+        letter2image: false,
+        mcp: None,
+    }
+}
+
+fn plugin_extension(plugin: &str, skills: Vec<SkillRecord>) -> Extension {
+    let mut builder = ExtensionBuilder::new(plugin, "0.1.0", ServiceSet::EMPTY).unwrap();
+    for skill in skills {
+        builder = builder.skill(skill);
+    }
+    builder.build().unwrap()
+}
+
+#[test]
+fn merge_extensions_settles_claims_across_extension_records() {
+    let zeta = plugin_extension(
+        "zeta",
+        vec![
+            extension_record("focus", "zeta focus", "zeta body"),
+            extension_record("other", "zeta other", "zeta body"),
+        ],
+    );
+    let alpha = plugin_extension(
+        "alpha",
+        vec![
+            extension_record("focus", "alpha focus", "alpha body"),
+            extension_record("solo", "alpha solo", "alpha body"),
+        ],
+    );
+    let quiet = plugin_extension("mid", Vec::new());
+    // Slice order is not merge order: `zeta` is listed first, but `alpha`
+    // still owns `focus`, and the skill-free extension contributes nothing.
+    // This is the product seam `cli/dalgon/src/product.rs` merges through.
+    let Err(conflict) = SkillRegistry::merge_extensions(&[zeta, alpha, quiet]) else {
+        panic!("conflicting extension claims merged cleanly");
+    };
+    assert_eq!(
+        conflict.to_string(),
+        "skill 'focus' is already registered by plugin 'alpha'"
+    );
+    let registry = conflict.registry;
+    let owners: Vec<(&str, &str)> = registry.iter().map(|s| (&*s.name, &*s.plugin)).collect();
+    // The clash rejects all of `zeta`: its uncontested `other` leaks nothing.
+    assert_eq!(owners, [("focus", "alpha"), ("solo", "alpha")]);
+    assert_eq!(&*registry.body("focus").unwrap(), "alpha body");
+    assert_eq!(registry.body("other"), None);
+    assert_eq!(
+        registry.section(&empty()).as_deref(),
+        Some(
+            "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.\n- focus: alpha focus\n- solo: alpha solo"
+        )
+    );
+}
+
+#[test]
+fn missing_skill_lists_all_twenty_names_without_a_tail_count() {
+    let mut all = Vec::new();
+    for index in 0..20 {
+        let name = format!("skill-{index:02}");
+        all.push(skill("p", &name, "d", false));
+    }
+    let registry = SkillRegistry::merge(&[("p", all)]).unwrap();
+    let resolver = SkillResolver::new(Arc::new(registry));
+    let text = resolver.lookup("nope").unwrap_err().to_string();
+    let shown: Vec<String> = (0..20).map(|index| format!("skill-{index:02}")).collect();
+    let expected = format!("available: {}", shown.join(", "));
+    assert!(text.contains(&expected), "{text}");
+    assert!(!text.contains("…and"), "{text}");
+}
+
+fn letter_section() -> SkillsSectionFn {
+    let registry = SkillRegistry::merge(&[(
+        "p",
+        vec![
+            skill("p", "alpha", "Review the diff carefully.", true),
+            skill("p", "beta", "Write a changelog entry.", true),
+        ],
+    )])
+    .unwrap();
+    SkillsSectionFn {
+        registry: Arc::new(registry),
+        font: Arc::new(Font::embedded()),
+        memo: Arc::new(OnceLock::new()),
+    }
+}
+
+const TEXT_SECTION: &str = "# Skills\n\
+    Load a skill body before you follow it with the read tool at skill://NAME.\n\
+    - alpha: Review the diff carefully.\n\
+    - beta: Write a changelog entry.";
+const IMAGE_SECTION: &str = "# Skills\n\
+    Load a skill body before you follow it with the read tool at skill://NAME.\n\
+    - alpha\n\
+    - beta";
+
+fn modelinfo(image_input: bool) -> ModelInfo {
+    ModelInfo {
+        route: ModelRoute::Synthetic {
+            id: "p/model".into(),
+        },
+        name: "p/model".into(),
+        provider: "".into(),
+        caps: Caps {
+            context_window: None,
+            thinking: Box::new([ThinkingLevel::Off]),
+            tool_use: false,
+            image_input,
+            custom_grammar: false,
+        },
+    }
+}
+
+/// The section lines for one model and one delivered set: the same pure
+/// composition `render` applies, without a host services handle.
+fn section_text(
+    section_fn: &SkillsSectionFn,
+    model: Option<&ModelInfo>,
+    delivered: &[BlobId],
+) -> Option<String> {
+    section(&section_fn.registry, &section_fn.assembly(model, delivered)).map(str::into_string)
+}
+
+#[test]
+fn letter_section_shows_text_unless_the_model_reads_images() {
+    let section_fn = letter_section();
+    let image = modelinfo(true);
+    let text = modelinfo(false);
+    let all = chunk_digests(&section_fn.drawn());
+    assert_eq!(
+        section_text(&section_fn, Some(&image), &all).as_deref(),
+        Some(IMAGE_SECTION),
+        "delivered letters render as name-only lines"
+    );
+    assert_eq!(
+        section_text(&section_fn, Some(&image), &[]).as_deref(),
+        Some(TEXT_SECTION),
+        "an image model with nothing delivered yet keeps every description as text"
+    );
+    assert_eq!(
+        section_text(&section_fn, Some(&text), &all).as_deref(),
+        Some(TEXT_SECTION),
+        "a text-only model keeps every description as text"
+    );
+    assert_eq!(
+        section_text(&section_fn, None, &all).as_deref(),
+        Some(TEXT_SECTION),
+        "an unresolved model keeps text too, like the input hook gate"
+    );
 }

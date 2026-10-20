@@ -16,6 +16,7 @@ dalgon = { workspace = true, features = ["tui"] }
 dalgona = { path = "../dalgona" }
 dal-agent.workspace = true
 dal-core.workspace = true
+sonic-rs.workspace = true
 uuid = { version = "=1.28.0", features = ["v7"] }
 
 [dev-dependencies]
@@ -24,14 +25,24 @@ dal-provider.workspace = true
 dal-tui.workspace = true
 dal-wire.workspace = true
 futures.workspace = true
-tokio = { version = "=1.53.2", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = "=1.12.0"
-sonic-rs.workspace = true
 toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [[test]]
 name = "dalgona-workspace-graph"
 path = "tests/dalgona-workspace-graph.rs"
+
+[[test]]
+name = "dalgona-alias-01"
+path = "tests/dalgona-alias-01.rs"
+
+[[test]]
+name = "dalgona-assembly-01"
+path = "tests/dalgona-assembly-01.rs"
 
 
 [[test]]

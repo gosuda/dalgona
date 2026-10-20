@@ -226,7 +226,8 @@ runs on the paint thread; budget is 2 s per diagram:
 ### Status line and composer
 
 - Status line: one row, always painted, never truncated on the left. Slots left to
-  right: spinner + state word; model ID; path with `~` contraction plus `(branch)`;
+  right: spinner + state word; model route (`provider/model` for a named provider);
+  path with `~` contraction plus `(branch)`;
   `in {in} out {out}` tokens; `ctx {pct}%`; `agent|s` or `job|s` count; cost.
 - Numeric slots are fixed width and right aligned; a value change rewrites its own
   cells and never shifts neighbors. Segments drop whole from the right. The spinner and
@@ -356,7 +357,8 @@ Startup validation rejects printable-key bindings with the exact string:
 The register details sit in `BRANDING.md`. The style summary: sentence case; verb-first
 actions; no exclamation marks; every error names what happened and the fix. A rule fire
 reads `rule {name} fired. The {subject} matched /{pattern}/.` exactly once per fire. An
-unsent draft blocks quit once: `[y] Discard the draft and quit   [n] Keep editing`.
+unsent draft blocks quit once, asking `[y] Discard the draft and quit` or `[n] Keep editing`;
+focus starts on `Keep editing`.
 
 ## Accessibility
 

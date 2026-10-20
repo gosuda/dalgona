@@ -168,6 +168,7 @@ fn inference_for(reply: &ScriptReply) -> Inference {
                 output_tokens: reply.output_tokens,
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
+                premium_requests: None,
                 cost_usd: None,
             }),
         ],
@@ -211,6 +212,14 @@ impl Services for FakeServices {
 
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         Box::pin(async move { Err(FakeServices::failing("judge fake never reads history")) })
+    }
+
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        Box::pin(async move {
+            Err(FakeServices::failing(
+                "judge fake never reads private outcomes",
+            ))
+        })
     }
 
     fn add_session_tools(

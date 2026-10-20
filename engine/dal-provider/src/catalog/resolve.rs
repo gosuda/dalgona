@@ -11,7 +11,8 @@ use super::compiled_temperature;
 use super::{Catalog, CatalogEntry, CatalogSource, Listing, ResolvedModel, ToolSupport};
 use crate::{
     error::ResolveError,
-    provider::{OPENAI, PROVIDERS, ProviderEntry},
+    family::gitlab::{ProxyRoute, proxy_route},
+    provider::{OPENAI, ProviderEntry},
     thinking::ThinkingSupport,
 };
 
@@ -35,24 +36,49 @@ pub fn resolve(
 
 /// Resolves the model a route names.
 ///
-/// A route keeps its API family but not the provider prefix its model was
-/// configured with, so `openai-responses/gpt-6` becomes the bare id `gpt-6`.
-/// A catalog built without a model list resolves only provider-qualified
-/// ids. The bare id therefore resolves first, and an unknown bare id retries
-/// under the family's own provider prefix. Synthetic and harness routes
-/// resolve by their id.
+/// A route that names its provider selects exactly that provider's row:
+/// aliases, the bare-id search, and the family retry never run, so another
+/// provider listing the same native id is never bound in its place. When the
+/// provider is not configured or serves another API family the route fails
+/// typed ([`ResolveError::UnknownProvider`],
+/// [`ResolveError::ProviderFamilyMismatch`]) instead of resolving elsewhere.
+///
+/// A route without a provider keeps its API family but not the provider
+/// prefix its model was configured with, so `openai-responses/gpt-6`
+/// becomes the bare id `gpt-6`. A catalog built without a model list
+/// resolves only provider-qualified ids. The bare id therefore resolves
+/// first. When it is unknown, or ambiguous between providers of the family,
+/// the route retries under the catalog's single configured owner for that
+/// family. Among several providers of one family, a Chat or Responses route
+/// retries under `openai`, the provider the `openai-chat/` and
+/// `openai-responses/` references name, when that row is configured, serves
+/// the family and resolves the id. That includes an id several providers
+/// list. A retry resolves like a qualified id, so a catalog that lists
+/// models still rejects an id its owner does not list. Every other case
+/// keeps the bare error, so custom providers that share a family and an id
+/// stay ambiguous. Synthetic and harness routes resolve by their id.
 ///
 /// # Errors
 /// Returns the bare-id error when both spellings fail, or when the only
-/// match belongs to a different API family than the route.
+/// match belongs to a different API family than the route; for a route that
+/// names its provider, the typed provider error or the model error of that
+/// provider's own row.
 pub fn resolve_route(
     catalog: &Catalog,
     aliases: &[(Box<str>, Box<str>)],
     route: &ModelRoute,
 ) -> Result<ResolvedModel, ResolveError> {
-    let ModelRoute::Api { family, model } = route else {
+    let ModelRoute::Api {
+        family,
+        model,
+        provider,
+    } = route
+    else {
         return resolve(catalog, aliases, route.id());
     };
+    if let Some(provider) = provider {
+        return resolve_provider_route(catalog, *family, provider, model);
+    }
     let in_family = |resolved: ResolvedModel| {
         matches!(&resolved.route, ModelRoute::Api { family: found, .. } if found == family)
             .then_some(resolved)
@@ -65,21 +91,60 @@ pub fn resolve_route(
     ) {
         return bare;
     }
-    let prefix = match family {
-        Family::Chat => "openai-chat",
-        Family::Responses => "openai-responses",
-        Family::Codex | Family::Anthropic => PROVIDERS
-            .iter()
-            .find(|def| def.family == *family)
-            .map_or("", |def| def.id),
+    // Every family retries under the catalog's single configured owner for
+    // that family when there is one; a lone custom Chat or Responses owner
+    // serves typed routes without guessing. When several owners share the
+    // family, Chat and Responses retry under `openai`, the owner the
+    // `openai-chat/` and `openai-responses/` references name, when that row
+    // serves the family; the retry also settles an id several owners list.
+    // Other families, and several owners without that row, keep the bare
+    // error.
+    let owner =
+        single_family_owner(catalog, *family).or_else(|| canonical_family_owner(catalog, *family));
+    let Some(owner) = owner else {
+        return bare;
     };
-    match resolve(catalog, aliases, &format!("{prefix}/{model}"))
+    if model.is_empty() {
+        return bare;
+    }
+    match resolve(catalog, aliases, &format!("{owner}/{model}"))
         .ok()
         .and_then(in_family)
     {
         Some(resolved) => Ok(resolved),
         None => bare,
     }
+}
+
+/// Resolves the exact row a provider-scoped route names.
+///
+/// The provider is looked up by id before anything else; the native id is
+/// never alias-expanded or searched across providers, and a provider that
+/// serves another family than the route is refused rather than reinterpreted.
+fn resolve_provider_route(
+    catalog: &Catalog,
+    family: Family,
+    provider: &str,
+    model: &str,
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(entry) = catalog
+        .providers
+        .iter()
+        .find(|(candidate, _)| candidate.id.as_ref() == provider)
+        .map(|(entry, _)| entry)
+    else {
+        return Err(ResolveError::UnknownProvider {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    };
+    if entry.family != family {
+        return Err(ResolveError::ProviderFamilyMismatch {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    }
+    resolve_qualified(catalog, entry, model, &format!("{provider}/{model}"))
 }
 
 fn expand_alias<'a>(aliases: &'a [(Box<str>, Box<str>)], reference: &'a str) -> &'a str {
@@ -121,7 +186,44 @@ fn resolve_expanded(
     resolve_bare(catalog, reference, family)
 }
 
+/// The catalog's only configured provider serving `family`, when exactly one does.
+///
+/// Route retry must never guess among several same-family providers: `ollama`
+/// and `ollama-cloud` share a family but not an endpoint, so a family-wide
+/// guess would bind cloud ids to the local row. It must also not prefer a
+/// built-in row the catalog does not configure. Zero or several owners mean no
+/// census retry; only `canonical_family_owner` may still name one.
+fn single_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
+    let mut owners = catalog
+        .providers
+        .iter()
+        .filter(|(provider, _)| provider.family == family)
+        .map(|(provider, _)| provider.id.as_ref());
+    let only = owners.next()?;
+    owners.next().is_none().then_some(only)
+}
+
+/// The configured catalog entry for the family's canonical owner, when the
+/// route grammar names one. `openai-responses` and `openai-chat` both bind
+/// to `openai`; the family check rejects a custom `openai` row that no
+/// longer serves the requested family.
+fn canonical_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
+    let prefix = match family {
+        Family::Chat => "openai-chat",
+        Family::Responses => "openai-responses",
+        _ => return None,
+    };
+    let (owner, owner_family) = family_provider(prefix)?;
+    catalog
+        .providers
+        .iter()
+        .find(|(candidate, _)| candidate.id.as_ref() == owner && candidate.family == owner_family)
+        .map(|(provider, _)| provider.id.as_ref())
+}
+
 /// Maps a family-qualified route prefix to the provider that serves it.
+/// `openai-chat` resolves to the `openai` row when that row serves the Chat
+/// family; the family filter rejects a custom `openai` rebind.
 fn family_provider(prefix: &str) -> Option<(&'static str, Family)> {
     match prefix {
         "openai-responses" => Some((OPENAI.id, Family::Responses)),
@@ -148,6 +250,8 @@ fn resolve_harness(reference: &str) -> Result<ResolvedModel, ResolveError> {
         display_supported: false,
         tool_support: ToolSupport::None,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     };
     Ok(ResolvedModel {
         provider: "dalgon".into(),
@@ -175,7 +279,9 @@ fn resolve_qualified(
                 .find(|entry| entry.provider == provider.id && entry.id.as_ref() == candidate)
         });
     let mut entry = if let Some(entry) = listed {
-        entry.clone()
+        let mut entry = entry.clone();
+        entry.id = id.into();
+        entry
     } else {
         if has_hidden_entry_elsewhere(catalog, provider, id)
             || catalog.source_for(&provider.id) != CatalogSource::Typed
@@ -188,6 +294,7 @@ fn resolve_qualified(
     let route = ModelRoute::Api {
         family: provider.family,
         model: id.into(),
+        provider: Some(provider.id.clone()),
     };
     Ok(ResolvedModel {
         provider: provider.id.clone(),
@@ -331,21 +438,65 @@ pub(crate) fn default_entry(provider: &ProviderEntry, id: &str) -> CatalogEntry 
         listing: Listing::Listed,
         context_window: None,
         max_output: None,
-        thinking: default_thinking(provider.family),
+        thinking: entry_thinking(provider, id),
         image_input: false,
         image_profile: None,
         remote_compact: false,
         supports_reasoning_summaries: false,
         temperature_allowed: compiled_temperature(provider.id.as_ref(), id),
         display_supported: false,
-        tool_support: ToolSupport::Any,
+        tool_support: entry_tool_support(provider.family),
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
+}
+
+fn entry_thinking(provider: &ProviderEntry, id: &str) -> ThinkingSupport {
+    if provider.family == Family::GitLab {
+        return gitlab_thinking(id);
+    }
+    default_thinking(provider.family)
+}
+
+/// Thinking support for one GitLab model id, matching the proxy route the
+/// request will take rather than the shared family label.
+///
+/// The Anthropic route lowers through the Anthropic encoder and needs the
+/// Anthropic contract; the Responses and Completions routes lower through
+/// the `OpenAI` encoders and need the `OpenAI` ladder. This mirrors
+/// [`crate::family::gitlab::proxy_route`], the same function the request
+/// path uses to pick its encoder.
+fn gitlab_thinking(id: &str) -> ThinkingSupport {
+    match proxy_route(id) {
+        ProxyRoute::Anthropic => ThinkingSupport::UnknownAdaptive,
+        ProxyRoute::Responses | ProxyRoute::Completions => ThinkingSupport::OpenAi {
+            accepted: vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+                ThinkingLevel::Max,
+            ],
+            none_supported: true,
+        },
+    }
+}
+
+fn entry_tool_support(family: Family) -> ToolSupport {
+    if family == Family::GoogleGeminiCli {
+        return ToolSupport::None;
+    }
+    ToolSupport::Any
 }
 
 pub(crate) fn bind_family_capabilities(entry: &mut CatalogEntry, family: Family) {
     if family == Family::Chat {
         entry.remote_compact = false;
+    }
+    if family == Family::GoogleGeminiCli {
+        entry.tool_support = ToolSupport::None;
     }
 }
 
@@ -362,6 +513,31 @@ fn default_thinking(family: Family) -> ThinkingSupport {
             ],
             none_supported: true,
         },
-        Family::Anthropic => ThinkingSupport::UnknownAdaptive,
+        // Bedrock speaks the Converse wire with the Anthropic thinking
+        // fragment (`additionalModelRequestFields.thinking`); an OpenAI
+        // effort has no member there and `bedrock::request_body` rejects it
+        // as `ForeignThinking`. Typed Bedrock rows therefore carry the
+        // Anthropic contract, matching the Anthropic family default.
+        Family::Anthropic | Family::Bedrock => ThinkingSupport::UnknownAdaptive,
+        Family::Cursor
+        | Family::Devin
+        | Family::Droid
+        | Family::GitLab
+        | Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleGeminiCli
+        | Family::GoogleAntigravity
+        | Family::Ollama
+        | Family::PiMessages => ThinkingSupport::OpenAi {
+            accepted: Vec::new(),
+            none_supported: true,
+        },
+        // `reasoning_effort: none` only exists on the models that reason, and
+        // a card says whether one does; a row without that knowledge sends no
+        // reasoning control at all instead of one the model may reject.
+        Family::Mistral => ThinkingSupport::OpenAi {
+            accepted: Vec::new(),
+            none_supported: false,
+        },
     }
 }

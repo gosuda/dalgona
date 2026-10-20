@@ -1,15 +1,19 @@
 use super::wire::{
     AnswerWire, AssistantBlocksWire, AssistantStopWire, JobOutcomeWire, JournalPartsWire,
-    OwnerWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire, encode_json,
+    OwnerWire, PrivateOutcomeWire, PurposeWire, TsWire, TurnEndStopWire, UsageWire,
+    checked_premium, encode_json,
 };
 use super::wire_entries::{
     AllowAlwaysWire, ApprovalWire, ArchiveWire, AssistantWire, BeforeRequestMutWire, BootWire,
     BranchSummaryWire, CompactionWire, ExtWire, GrantGivenWire, InferredWire, JobWire, LabelWire,
     LeafWire, MailRecordWire, ModeValueWire, ModeWire, ModelRouteWire, ModelWire, NameWire,
-    ReminderWire, ResolvedWire, RouteWire, RuleFiredWire, ScopedGrantEndedWire, ScopedGrantWire,
-    SessionWire, SourceWire, ThinkingWire, ToolPromotedWire, ToolResultWire, ToolStartWire,
-    TurnEndWire, TurnStartWire, UserWire, WakeAttemptWire,
+    PrivateEndWire, PrivateLoopWire, PrivateStartWire, ReminderWire, ResolutionCauseWire,
+    ResolvedWire, RouteWire, RuleFiredWire, ScopedGrantEndedWire, ScopedGrantWire, SessionWire,
+    SourceWire, ThinkingWire, ToolPromotedWire, ToolResultWire, ToolStartWire, TurnEndWire,
+    TurnStartWire, UserWire, WakeAttemptWire,
 };
+use std::io;
+
 use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteError};
 
 /// Writes one compact line with the format version first, followed by the
@@ -19,43 +23,166 @@ use super::{EncodeError, Entry, EntryKind, JobEvent, ModelRoute, Record, RouteEr
 /// Returns [`EncodeError::Json`] when a member fails to serialize,
 /// [`EncodeError::InvalidCost`] when a usage member carries a reported
 /// cost no integer micro-dollar count can hold,
+/// [`EncodeError::InvalidPremium`] when a usage member carries a non-finite
+/// or negative premium request count,
 /// [`EncodeError::InvalidRoute`] when a model record's or an assistant
-/// route's synthetic or harness id breaks its grammar, and
+/// route's synthetic or harness id breaks its grammar,
+/// [`EncodeError::NullReplay`] when an assistant entry replay holds an
+/// explicit JSON null the decoder rejects, and
 /// [`EncodeError::MismatchedKind`] when a tree record's variant does not
 /// match its entry kind.
 pub fn encode(record: &Record) -> Result<Vec<u8>, EncodeError> {
-    let body = encode_body(record)?;
-    let mut line = Vec::with_capacity(body.len() + 8);
-    line.extend_from_slice(if matches!(record, Record::TurnReserved { .. }) {
-        b"{\"v\":2,"
-    } else {
-        b"{\"v\":1,"
-    });
-    line.extend_from_slice(&body[1..]);
-    line.push(b'\n');
+    let mut line = Vec::new();
+    write_line(record, &mut line)?;
     Ok(line)
+}
+
+/// Measures the exact byte length of the line [`encode`] would emit for this
+/// record, without allocating the line buffer.
+///
+/// # Errors
+/// Returns the same [`EncodeError`] variants as [`encode`].
+pub(crate) fn encoded_len(record: &Record) -> Result<usize, EncodeError> {
+    let mut counter = CountingWriter { len: 0 };
+    write_line(record, &mut counter)?;
+    Ok(counter.len)
+}
+
+fn write_line(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let prefix = if matches!(record, Record::TurnReserved { .. }) {
+        b"{\"v\":2,".as_slice()
+    } else {
+        b"{\"v\":1,".as_slice()
+    };
+    out.write_all(prefix)
+        .map_err(|error| io_to_json_error(&error))?;
+    let dropped = {
+        let mut adapter = BodyWithoutOpeningBrace::new(out);
+        encode_body(record, &mut adapter)?;
+        adapter.dropped
+    };
+    if !dropped {
+        return Err(EncodeError::Json {
+            message: "expected non-empty serialized JSON body".into(),
+        });
+    }
+    out.write_all(b"\n")
+        .map_err(|error| io_to_json_error(&error))?;
+    Ok(())
+}
+
+fn io_to_json_error(error: &io::Error) -> EncodeError {
+    EncodeError::Json {
+        message: error.to_string().into(),
+    }
+}
+
+struct BodyWithoutOpeningBrace<'a> {
+    inner: &'a mut dyn io::Write,
+    dropped: bool,
+}
+
+impl<'a> BodyWithoutOpeningBrace<'a> {
+    fn new(inner: &'a mut dyn io::Write) -> Self {
+        Self {
+            inner,
+            dropped: false,
+        }
+    }
+}
+
+/// Rejects a serialized body whose first byte is not the JSON opening
+/// brace the line writer strips.
+fn expect_opening_brace(buf: &[u8]) -> io::Result<()> {
+    if buf[0] != b'{' {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected opening brace in serialized JSON body",
+        ));
+    }
+    Ok(())
+}
+
+impl io::Write for BodyWithoutOpeningBrace<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.dropped {
+            self.inner.write(buf)
+        } else {
+            expect_opening_brace(buf)?;
+            self.dropped = true;
+            let rest = &buf[1..];
+            if !rest.is_empty() {
+                self.inner.write_all(rest)?;
+            }
+            Ok(buf.len())
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if self.dropped {
+            self.inner.write_all(buf)
+        } else {
+            expect_opening_brace(buf)?;
+            self.dropped = true;
+            self.inner.write_all(&buf[1..])
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct CountingWriter {
+    len: usize,
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(buf.len())
+            .ok_or_else(|| io::Error::other("record length overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.write(buf).map(|_| ())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Encodes one journal record body. The outer match is the record-kind
 /// index: each group owns one domain's wire table, and adding a variant
 /// to `Record` fails here until it joins a group.
-pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_body(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
         Record::User { .. }
         | Record::Assistant { .. }
         | Record::ToolResult { .. }
-        | Record::Reminder { .. } => encode_message_entries(record),
+        | Record::Reminder { .. } => encode_message_entries(record, out),
         Record::Model { .. }
         | Record::Thinking { .. }
         | Record::Approval { .. }
-        | Record::Mode { .. } => encode_setting_entries(record),
-        Record::Compaction { .. } | Record::BranchSummary { .. } => encode_context_entries(record),
+        | Record::Mode { .. } => encode_setting_entries(record, out),
+        Record::Compaction { .. } | Record::BranchSummary { .. } => {
+            encode_context_entries(record, out)
+        }
         Record::Session { .. }
         | Record::Boot { .. }
         | Record::Leaf { .. }
         | Record::Label { .. }
         | Record::Name { .. }
-        | Record::Archive { .. } => encode_meta(record),
+        | Record::Archive { .. } => encode_meta(record, out),
         Record::TurnReserved { .. }
         | Record::TurnStart { .. }
         | Record::ToolStart { .. }
@@ -64,63 +191,39 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
         | Record::Resolved { .. }
         | Record::BeforeRequestMut { .. }
         | Record::ToolPromoted { .. }
-        | Record::WakeAttempt { .. } => encode_control(record),
+        | Record::WakeAttempt { .. } => encode_control(record, out),
         Record::AllowAlways { .. }
         | Record::GrantGiven { .. }
         | Record::ScopedGrant { .. }
-        | Record::ScopedGrantEnded { .. } => encode_grants(record),
+        | Record::ScopedGrantEnded { .. } => encode_grants(record, out),
         Record::Job { .. } | Record::Ext { .. } | Record::Mail { .. } | Record::Inferred { .. } => {
-            encode_effects(record)
+            encode_effects(record, out)
+        }
+        Record::PrivateLoop { .. } | Record::PrivateStart { .. } | Record::PrivateEnd { .. } => {
+            encode_private(record, out)
         }
     }
 }
 
 /// Entry records carrying turn content.
-fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_message_entries(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
         Record::User(entry) => {
             let EntryKind::User { parts } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&UserWire {
-                r#type: "user",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                parts: JournalPartsWire(parts),
-            })
+            encode_json(
+                &UserWire {
+                    r#type: "user",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    parts: JournalPartsWire(parts),
+                },
+                out,
+            )
         }
-        Record::Assistant(entry) => {
-            let EntryKind::Assistant {
-                api,
-                model,
-                content,
-                usage,
-                stop,
-                route,
-            } = &entry.kind
-            else {
-                return Err(EncodeError::MismatchedKind);
-            };
-            if model.is_empty() {
-                return Err(EncodeError::EmptyModel);
-            }
-            if let Some(route) = route {
-                route.check_id(model).map_err(EncodeError::InvalidRoute)?;
-            }
-            encode_json(&AssistantWire {
-                r#type: "assistant",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                api: *api,
-                model: model.as_ref(),
-                content: AssistantBlocksWire(content),
-                usage: UsageWire::new(usage)?,
-                stop: AssistantStopWire(stop),
-                route: *route,
-            })
-        }
+        Record::Assistant(entry) => encode_assistant(entry, out),
         Record::ToolResult(entry) => {
             let EntryKind::ToolResult {
                 call,
@@ -133,87 +236,145 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
             else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ToolResultWire {
-                r#type: "tool_result",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                call,
-                name: name.as_ref(),
-                error: *error,
-                parts: JournalPartsWire(parts),
-                changes,
-                elapsed_ms: *elapsed_ms,
-            })
+            encode_json(
+                &ToolResultWire {
+                    r#type: "tool_result",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    call,
+                    name: name.as_ref(),
+                    error: *error,
+                    parts: JournalPartsWire(parts),
+                    changes,
+                    elapsed_ms: *elapsed_ms,
+                },
+                out,
+            )
         }
         Record::Reminder(entry) => {
             let EntryKind::Reminder { source, text } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ReminderWire {
-                r#type: "reminder",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                source: source.as_ref(),
-                text: text.as_ref(),
-            })
+            encode_json(
+                &ReminderWire {
+                    r#type: "reminder",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    source: source.as_ref(),
+                    text: text.as_ref(),
+                },
+                out,
+            )
         }
         _ => unreachable!("the encode_body index routes only encode_message_entries kinds here"),
     }
 }
 
+/// Validates and writes one assistant record: model id, route grammar, and
+/// replay-null checks run before serialization.
+fn encode_assistant(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let EntryKind::Assistant {
+        api,
+        model,
+        content,
+        usage,
+        stop,
+        route,
+        replay,
+    } = &entry.kind
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    if model.is_empty() {
+        return Err(EncodeError::EmptyModel);
+    }
+    if let Some(route) = route {
+        route.check_id(model).map_err(EncodeError::InvalidRoute)?;
+    }
+    if replay.as_ref().is_some_and(|raw| raw.as_str() == "null") {
+        return Err(EncodeError::NullReplay);
+    }
+    encode_json(
+        &AssistantWire {
+            r#type: "assistant",
+            id: entry.id,
+            parent: entry.parent,
+            at: TsWire(&entry.at),
+            api: *api,
+            model: model.as_ref(),
+            content: AssistantBlocksWire(content),
+            usage: UsageWire::new(usage)?,
+            stop: AssistantStopWire(stop),
+            route: *route,
+            replay: replay.as_ref(),
+            premium_requests: checked_premium(usage)?,
+        },
+        out,
+    )
+}
+
 /// Entry records carrying turn settings.
-fn encode_setting_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_setting_entries(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
         Record::Model(entry) => {
             let EntryKind::Model { route } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_model(entry, route)
+            encode_model(entry, route, out)
         }
         Record::Thinking(entry) => {
             let EntryKind::Thinking { level } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ThinkingWire {
-                r#type: "thinking",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                level: *level,
-            })
+            encode_json(
+                &ThinkingWire {
+                    r#type: "thinking",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    level: *level,
+                },
+                out,
+            )
         }
         Record::Approval(entry) => {
             let EntryKind::Approval { mode } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ApprovalWire {
-                r#type: "approval",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                mode: ModeWire(mode),
-            })
+            encode_json(
+                &ApprovalWire {
+                    r#type: "approval",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    mode: ModeWire(mode),
+                },
+                out,
+            )
         }
         Record::Mode(entry) => {
             let EntryKind::Mode { mode } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ModeValueWire {
-                r#type: "mode",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                mode: *mode,
-            })
+            encode_json(
+                &ModeValueWire {
+                    r#type: "mode",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    mode: *mode,
+                },
+                out,
+            )
         }
         _ => unreachable!("the encode_body index routes only encode_setting_entries kinds here"),
     }
 }
 
 /// Entry records carrying compacted context.
-fn encode_context_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_context_entries(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
         Record::Compaction(entry) => {
             let EntryKind::Compaction {
@@ -228,141 +389,171 @@ fn encode_context_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
             else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&CompactionWire {
-                r#type: "compaction",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                summary,
-                first_kept: *first_kept,
-                tokens_before: *tokens_before,
-                replay,
-                usage: usage.as_ref().map(UsageWire::new).transpose()?,
-                parts: (!parts.is_empty()).then_some(JournalPartsWire(parts)),
-                parts_tokens: (!parts.is_empty()).then_some(*parts_tokens),
-            })
+            encode_json(
+                &CompactionWire {
+                    r#type: "compaction",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    summary,
+                    first_kept: *first_kept,
+                    tokens_before: *tokens_before,
+                    replay,
+                    usage: usage.as_ref().map(UsageWire::new).transpose()?,
+                    parts: (!parts.is_empty()).then_some(JournalPartsWire(parts)),
+                    parts_tokens: (!parts.is_empty()).then_some(*parts_tokens),
+                    premium_requests: match usage {
+                        Some(usage) => checked_premium(usage)?,
+                        None => None,
+                    },
+                },
+                out,
+            )
         }
         Record::BranchSummary(entry) => {
             let EntryKind::BranchSummary { from, summary } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&BranchSummaryWire {
-                r#type: "branch_summary",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                from: *from,
-                summary: summary.as_ref(),
-            })
+            encode_json(
+                &BranchSummaryWire {
+                    r#type: "branch_summary",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    from: *from,
+                    summary: summary.as_ref(),
+                },
+                out,
+            )
         }
         _ => unreachable!("the encode_body index routes only encode_context_entries kinds here"),
     }
 }
 
 /// Session lifecycle records.
-fn encode_meta(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_meta(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
-        Record::Session(header) => encode_json(&SessionWire {
-            r#type: "session",
-            id: &header.id,
-            at: TsWire(&header.at),
-            workspace: &header.workspace,
-            product: &header.product,
-            from: header.from.map(|source| SourceWire {
-                session: source.session,
-                entry: source.entry,
-            }),
-        }),
-        Record::Boot { at, r#gen, version } => encode_json(&BootWire {
-            r#type: "boot",
-            at: TsWire(at),
-            r#gen: *r#gen,
-            version: version.as_ref(),
-        }),
-        Record::Leaf { at, to } => encode_json(&LeafWire {
-            r#type: "leaf",
-            at: TsWire(at),
-            to,
-        }),
-        Record::Label { at, entry, label } => encode_json(&LabelWire {
-            r#type: "label",
-            at: TsWire(at),
-            entry: *entry,
-            label,
-        }),
-        Record::Name { at, name } => encode_json(&NameWire {
-            r#type: "name",
-            at: TsWire(at),
-            name,
-        }),
-        Record::Archive { at, archived } => encode_json(&ArchiveWire {
-            r#type: "archive",
-            at: TsWire(at),
-            archived: *archived,
-        }),
+        Record::Session(header) => encode_json(
+            &SessionWire {
+                r#type: "session",
+                id: &header.id,
+                at: TsWire(&header.at),
+                workspace: &header.workspace,
+                product: &header.product,
+                from: header.from.map(|source| SourceWire {
+                    session: source.session,
+                    entry: source.entry,
+                }),
+            },
+            out,
+        ),
+        Record::Boot { at, r#gen, version } => encode_json(
+            &BootWire {
+                r#type: "boot",
+                at: TsWire(at),
+                r#gen: *r#gen,
+                version: version.as_ref(),
+            },
+            out,
+        ),
+        Record::Leaf { at, to } => encode_json(
+            &LeafWire {
+                r#type: "leaf",
+                at: TsWire(at),
+                to,
+            },
+            out,
+        ),
+        Record::Label { at, entry, label } => encode_json(
+            &LabelWire {
+                r#type: "label",
+                at: TsWire(at),
+                entry: *entry,
+                label,
+            },
+            out,
+        ),
+        Record::Name { at, name } => encode_json(
+            &NameWire {
+                r#type: "name",
+                at: TsWire(at),
+                name,
+            },
+            out,
+        ),
+        Record::Archive { at, archived } => encode_json(
+            &ArchiveWire {
+                r#type: "archive",
+                at: TsWire(at),
+                archived: *archived,
+            },
+            out,
+        ),
         _ => unreachable!("the encode_body index routes only encode_meta kinds here"),
     }
 }
 
-/// Turn control records.
-fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
-    match record {
-        Record::TurnReserved { at, turn } => encode_json(&TurnStartWire {
-            r#type: "turn_reserved",
-            at: TsWire(at),
-            turn: *turn,
-        }),
-        Record::TurnStart { at, turn } => encode_json(&TurnStartWire {
-            r#type: "turn_start",
-            at: TsWire(at),
-            turn: *turn,
-        }),
-        Record::ToolStart { at, turn, call } => encode_json(&ToolStartWire {
-            r#type: "tool_start",
-            at: TsWire(at),
-            turn: *turn,
-            call,
-        }),
-        Record::TurnEnd {
-            at,
-            turn,
-            stop,
-            usage,
-            changes,
-        } => encode_json(&TurnEndWire {
+/// Writes a turn-end record. Validates the summed usage before encoding so
+/// an unrepresentable cost reports [`EncodeError::InvalidCost`] in field
+/// order rather than emitting a rounded line.
+fn encode_turn_end(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::TurnEnd {
+        at,
+        turn,
+        stop,
+        usage,
+        changes,
+    } = record
+    else {
+        unreachable!("encode_turn_end handles only turn-end records")
+    };
+    encode_json(
+        &TurnEndWire {
             r#type: "turn_end",
             at: TsWire(at),
             turn: *turn,
             stop: TurnEndStopWire(stop),
             usage: usage.as_ref().map(UsageWire::new).transpose()?,
             changes,
-        }),
+            premium_requests: match usage {
+                Some(usage) => checked_premium(usage)?,
+                None => None,
+            },
+        },
+        out,
+    )
+}
+
+/// Turn control records.
+fn encode_control(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    match record {
+        Record::TurnReserved { .. } | Record::TurnStart { .. } | Record::ToolStart { .. } => {
+            encode_turn_boundary(record, out)
+        }
+        Record::TurnEnd { .. } => encode_turn_end(record, out),
         Record::RuleFired {
             at,
             turn,
             rule,
             entry,
-        } => encode_json(&RuleFiredWire {
-            r#type: "rule_fired",
-            at: TsWire(at),
-            turn: *turn,
-            rule: rule.as_ref(),
-            entry: *entry,
-        }),
+        } => encode_json(
+            &RuleFiredWire {
+                r#type: "rule_fired",
+                at: TsWire(at),
+                turn: *turn,
+                rule: rule.as_ref(),
+                entry: *entry,
+            },
+            out,
+        ),
         Record::Resolved {
             at,
             request,
             answer,
             by,
             was_default,
-        } => encode_json(&ResolvedWire {
-            r#type: "resolved",
-            at: TsWire(at),
-            request,
-            answer: AnswerWire(answer),
-            by,
-            was_default: *was_default,
-        }),
+            cause,
+        } => encode_resolved(at, request, answer, by, *was_default, *cause, out),
         Record::BeforeRequestMut {
             at,
             turn,
@@ -370,66 +561,137 @@ fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
             field,
             old,
             new,
-        } => encode_json(&BeforeRequestMutWire {
-            r#type: "before_request_mut",
-            at: TsWire(at),
-            turn: *turn,
-            ext: ext.as_ref(),
-            field: field.as_ref(),
-            old: old.as_ref(),
-            new: new.as_ref(),
-        }),
+        } => encode_json(
+            &BeforeRequestMutWire {
+                r#type: "before_request_mut",
+                at: TsWire(at),
+                turn: *turn,
+                ext: ext.as_ref(),
+                field: field.as_ref(),
+                old: old.as_ref(),
+                new: new.as_ref(),
+            },
+            out,
+        ),
         Record::ToolPromoted {
             at,
             tool,
             turn,
             leaf,
-        } => encode_json(&ToolPromotedWire {
-            r#type: "tool_promoted",
-            at: TsWire(at),
-            tool: tool.as_ref(),
-            turn: *turn,
-            leaf: *leaf,
-        }),
+        } => encode_json(
+            &ToolPromotedWire {
+                r#type: "tool_promoted",
+                at: TsWire(at),
+                tool: tool.as_ref(),
+                turn: *turn,
+                leaf: *leaf,
+            },
+            out,
+        ),
         Record::WakeAttempt {
             at,
             turn,
             count,
             jobs,
-        } => encode_json(&WakeAttemptWire {
-            r#type: "wake_attempt",
-            at: TsWire(at),
-            turn: *turn,
-            count: *count,
-            jobs,
-        }),
+        } => encode_json(
+            &WakeAttemptWire {
+                r#type: "wake_attempt",
+                at: TsWire(at),
+                turn: *turn,
+                count: *count,
+                jobs,
+            },
+            out,
+        ),
         _ => unreachable!("the encode_body index routes only encode_control kinds here"),
     }
 }
 
-/// Grant and approval records.
-fn encode_grants(record: &Record) -> Result<Vec<u8>, EncodeError> {
+/// Turn-boundary control records that share one wire shape.
+fn encode_turn_boundary(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
-        Record::AllowAlways { at, tool, by } => encode_json(&AllowAlwaysWire {
-            r#type: "allow_always",
+        Record::TurnReserved { at, turn } => encode_json(
+            &TurnStartWire {
+                r#type: "turn_reserved",
+                at: TsWire(at),
+                turn: *turn,
+            },
+            out,
+        ),
+        Record::TurnStart { at, turn } => encode_json(
+            &TurnStartWire {
+                r#type: "turn_start",
+                at: TsWire(at),
+                turn: *turn,
+            },
+            out,
+        ),
+        Record::ToolStart { at, turn, call } => encode_json(
+            &ToolStartWire {
+                r#type: "tool_start",
+                at: TsWire(at),
+                turn: *turn,
+                call,
+            },
+            out,
+        ),
+        _ => unreachable!("the encode_body index routes only turn-boundary kinds here"),
+    }
+}
+
+/// Writes one resolved-request record.
+fn encode_resolved(
+    at: &jiff::Timestamp,
+    request: &crate::id::RequestId,
+    answer: &crate::request::Answer,
+    by: &crate::id::ClientId,
+    was_default: bool,
+    cause: Option<crate::update::ResolutionCause>,
+    out: &mut dyn io::Write,
+) -> Result<(), EncodeError> {
+    encode_json(
+        &ResolvedWire {
+            r#type: "resolved",
             at: TsWire(at),
-            tool: tool.as_ref(),
+            request,
+            answer: AnswerWire(answer),
             by,
-        }),
+            was_default,
+            cause: cause.map(ResolutionCauseWire),
+        },
+        out,
+    )
+}
+
+/// Grant and approval records.
+fn encode_grants(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    match record {
+        Record::AllowAlways { at, tool, by } => encode_json(
+            &AllowAlwaysWire {
+                r#type: "allow_always",
+                at: TsWire(at),
+                tool: tool.as_ref(),
+                by,
+            },
+            out,
+        ),
         Record::GrantGiven {
             at,
             ext,
             set,
             scope,
             by,
-        } => encode_json(&GrantGivenWire {
-            r#type: "grant_given",
-            at: TsWire(at),
-            ext: ext.as_ref(),
-            set,
-            scope: scope.as_ref(),
-            by,
-        }),
+        } => encode_json(
+            &GrantGivenWire {
+                r#type: "grant_given",
+                at: TsWire(at),
+                ext: ext.as_ref(),
+                set,
+                scope: scope.as_ref(),
+                by,
+            },
+            out,
+        ),
         Record::ScopedGrant {
             at,
             call,
@@ -437,26 +699,32 @@ fn encode_grants(record: &Record) -> Result<Vec<u8>, EncodeError> {
             roots,
             job,
             by,
-        } => encode_json(&ScopedGrantWire {
-            r#type: "scoped_grant",
-            at: TsWire(at),
-            call,
-            prefix,
-            roots,
-            job,
-            by,
-        }),
-        Record::ScopedGrantEnded { at, job } => encode_json(&ScopedGrantEndedWire {
-            r#type: "scoped_grant_ended",
-            at: TsWire(at),
-            job,
-        }),
+        } => encode_json(
+            &ScopedGrantWire {
+                r#type: "scoped_grant",
+                at: TsWire(at),
+                call,
+                prefix,
+                roots,
+                job,
+                by,
+            },
+            out,
+        ),
+        Record::ScopedGrantEnded { at, job } => encode_json(
+            &ScopedGrantEndedWire {
+                r#type: "scoped_grant_ended",
+                at: TsWire(at),
+                job,
+            },
+            out,
+        ),
         _ => unreachable!("the encode_body index routes only encode_grants kinds here"),
     }
 }
 
 /// Async effect records.
-fn encode_effects(record: &Record) -> Result<Vec<u8>, EncodeError> {
+fn encode_effects(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
         Record::Job { at, job, event } => {
             let (literal, kind, outcome, by) = match event {
@@ -469,70 +737,165 @@ fn encode_effects(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 JobEvent::TimedOut => ("timed_out", None, None, None),
                 JobEvent::Orphaned => ("orphaned", None, None, None),
             };
-            encode_json(&JobWire {
-                r#type: "job",
-                at: TsWire(at),
-                job,
-                event: literal,
-                kind,
-                outcome,
-                by,
-            })
+            encode_json(
+                &JobWire {
+                    r#type: "job",
+                    at: TsWire(at),
+                    job,
+                    event: literal,
+                    kind,
+                    outcome,
+                    by,
+                },
+                out,
+            )
         }
         Record::Ext {
             at,
             ext,
             kind,
             body,
-        } => encode_json(&ExtWire {
-            r#type: "ext",
-            at: TsWire(at),
-            ext: ext.as_ref(),
-            kind: kind.as_ref(),
-            body,
-        }),
-        Record::Mail(mail) => encode_json(&MailRecordWire {
-            r#type: "mail",
-            at: TsWire(&mail.at),
-            from: &mail.from,
-            to: &mail.to,
-            mode: mail.mode,
-            text: mail.text.as_ref(),
-            reply_to: &mail.reply_to,
-        }),
+        } => encode_json(
+            &ExtWire {
+                r#type: "ext",
+                at: TsWire(at),
+                ext: ext.as_ref(),
+                kind: kind.as_ref(),
+                body,
+            },
+            out,
+        ),
+        Record::Mail(mail) => encode_json(
+            &MailRecordWire {
+                r#type: "mail",
+                at: TsWire(&mail.at),
+                from: &mail.from,
+                to: &mail.to,
+                mode: mail.mode,
+                text: mail.text.as_ref(),
+                reply_to: &mail.reply_to,
+            },
+            out,
+        ),
         Record::Inferred {
             at,
             who,
             purpose,
             usage,
-        } => encode_json(&InferredWire {
-            r#type: "inferred",
-            at: TsWire(at),
-            who: OwnerWire(who),
-            purpose: PurposeWire(purpose),
-            usage: UsageWire::new(usage)?,
-        }),
+        } => encode_json(
+            &InferredWire {
+                r#type: "inferred",
+                at: TsWire(at),
+                who: OwnerWire(who),
+                purpose: PurposeWire(purpose),
+                usage: UsageWire::new(usage)?,
+                premium_requests: checked_premium(usage)?,
+            },
+            out,
+        ),
         _ => unreachable!("the encode_body index routes only encode_effects kinds here"),
+    }
+}
+
+/// Owner-scoped private audit records. Non-tree, format 1, no entry id, no
+/// turn accounting. Member order matches the wire structs, which match the
+/// Record field order.
+fn encode_private(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    match record {
+        Record::PrivateLoop {
+            at,
+            r#loop,
+            who,
+            turn,
+        } => encode_json(
+            &PrivateLoopWire {
+                r#type: "private_loop",
+                at: TsWire(at),
+                r#loop,
+                who: OwnerWire(who),
+                turn: *turn,
+            },
+            out,
+        ),
+        Record::PrivateStart {
+            at,
+            r#loop,
+            token,
+            who,
+            turn,
+            round,
+            call,
+            name,
+            args,
+        } => encode_json(
+            &PrivateStartWire {
+                r#type: "private_start",
+                at: TsWire(at),
+                r#loop,
+                token,
+                who: OwnerWire(who),
+                turn: *turn,
+                round: *round,
+                call,
+                name: name.as_ref(),
+                args,
+            },
+            out,
+        ),
+        Record::PrivateEnd {
+            at,
+            r#loop,
+            token,
+            outcome,
+        } => encode_json(
+            &PrivateEndWire {
+                r#type: "private_end",
+                at: TsWire(at),
+                r#loop,
+                token,
+                outcome: PrivateOutcomeWire(outcome),
+            },
+            out,
+        ),
+        _ => unreachable!("the encode_body index routes only encode_private kinds here"),
     }
 }
 
 /// Writes a model record. An API route keeps the byte-exact format-1
 /// `api`, `model` members; a synthetic or harness route writes one
 /// `route` member after its id passes the same grammar the decoder checks.
-pub(super) fn encode_model(entry: &Entry, route: &ModelRoute) -> Result<Vec<u8>, EncodeError> {
+fn encode_model(
+    entry: &Entry,
+    route: &ModelRoute,
+    out: &mut dyn io::Write,
+) -> Result<(), EncodeError> {
     let route = match route {
         ModelRoute::Api { model, .. } if model.is_empty() => {
             return Err(EncodeError::EmptyModel);
         }
-        ModelRoute::Api { family, model } => {
-            return encode_json(&ModelWire {
-                r#type: "model",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                api: *family,
-                model: model.as_ref(),
-            });
+        ModelRoute::Api {
+            provider: Some(provider),
+            ..
+        } if provider.is_empty() => {
+            return Err(EncodeError::EmptyProvider);
+        }
+        ModelRoute::Api {
+            family,
+            model,
+            provider,
+        } => {
+            return encode_json(
+                &ModelWire {
+                    r#type: "model",
+                    id: entry.id,
+                    parent: entry.parent,
+                    at: TsWire(&entry.at),
+                    api: *family,
+                    model: model.as_ref(),
+                    provider: provider.as_deref(),
+                },
+                out,
+            );
         }
         ModelRoute::Synthetic { id } => {
             if !ModelRoute::is_valid_synthetic_id(id) {
@@ -551,11 +914,14 @@ pub(super) fn encode_model(entry: &Entry, route: &ModelRoute) -> Result<Vec<u8>,
             RouteWire::Harness { id }
         }
     };
-    encode_json(&ModelRouteWire {
-        r#type: "model",
-        id: entry.id,
-        parent: entry.parent,
-        at: TsWire(&entry.at),
-        route,
-    })
+    encode_json(
+        &ModelRouteWire {
+            r#type: "model",
+            id: entry.id,
+            parent: entry.parent,
+            at: TsWire(&entry.at),
+            route,
+        },
+        out,
+    )
 }

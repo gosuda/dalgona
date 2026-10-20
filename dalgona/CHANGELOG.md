@@ -1,6 +1,22 @@
 # Changelog
 
 ## Unreleased
+- Compile and run the orchestration constants truth-table tests. The test
+  module was never declared, so none of its tests ever ran. The aliases check
+  is now a source scan that fails on any twin literal of an owner constant,
+  and a new test holds the monitor clamps the page states to the ranges the
+  config enforces. Other new attack tests pin exact edges for the web,
+  history record, review, eval pack, run repeats, collapse, control-leak,
+  goal objective, and rule-set limits.
+- Run the released-artifact gates (`dalgona-release-10`, `-11`, `-12`) only
+  when `DALGONA_RELEASED_ARTIFACTS` is set. They install the published crate
+  and the tag's release assets, so a plain `cargo test` before a release no
+  longer fails on artifacts that cannot exist yet. The tag-only CI job sets
+  the variable. Each gate now reads the expected version from the workspace
+  metadata instead of a fixed `0.1.0`.
+- Stop waiting on an MCP tool call when its turn is cancelled. The client
+  tells the server the request is abandoned and the cancelled turn ends at
+  once instead of holding until the call deadline.
 - Cancel and join the blocking render worker when history compaction times
   out before reporting the timeout.
 - Cooperatively cancel dropped history runs at checkpoints so workers stop
@@ -74,6 +90,9 @@
 - Fix MCP step-up authorization prompts repeated by concurrent tool calls: the server's "insufficient scope" reply now prompts the user once for the extra permission, and a declined or cancelled prompt answers later calls without asking again until a fresh token is stored.
 - Fix `/abort` and session end with orchestration children: every queued or running child and its descendants are cancelled, and a failed cancel or list no longer stops the sweep. `/abort` reports each failure with the child id, and `agents cancel` tries every named id and reports each refusal.
 - Fix `/abort` errors for missing orchestration grants: the message now names the plugin and the service and says to approve the grant request, then try again.
+- Add the `procs` battery, the twelfth bundled battery. It registers one deferred tool, `procs`, that lists this session's background jobs and greps their retained output; `tool_search` finds it and a first successful call by name promotes it. It asks for the `jobs` service only, and other sessions' jobs stay invisible. Set `[plugin.procs] enabled = false` or name `procs` in `disabled_batteries` to remove it. The page is `dalgona://procs`.
+- Show the command the starter ran in `procs` list rows, collapsed to one line and cut at 80 characters, and match `query` against the label or the full command, not the truncated display. A detached `exec` job carries its validated command; a job started without one shows its label.
+- Make `dalgona://symbols` a pointer to `dal://symbols` instead of a copy of the dal manual page; the shared symbol-search reference lives in the dal manual only.
 
 ## 0.1.0 (2026-09-26)
 

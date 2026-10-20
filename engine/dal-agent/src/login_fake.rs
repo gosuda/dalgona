@@ -10,7 +10,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use dal_provider::{LoginEndpoints, ProviderError};
+use dal_provider::{EnvSnapshot, LoginEndpoints, ProviderError};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -23,6 +23,10 @@ pub const ACCESS_TOKEN: &str = "fake-access-token";
 pub const REFRESH_TOKEN: &str = "fake-refresh-token";
 /// The device code the fake device endpoint shows.
 pub const USER_CODE: &str = "ABCD-EFGH";
+/// The device code the fake Copilot device endpoint returns.
+pub const DEVICE_CODE: &str = "fake-device-code";
+/// The verification URL the fake Copilot device endpoint names.
+pub const VERIFICATION_URI: &str = "https://github.com/login/device";
 
 /// One request the server received.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +47,9 @@ pub enum TokenReply {
     Issue,
     /// Answer `400` with an `invalid_grant` body.
     Reject,
+    /// Answer `200` with an `authorization_pending` body on device token polls
+    /// without ever issuing an access token.
+    DevicePending,
 }
 
 /// A running fake OAuth server; dropping it stops it.
@@ -86,8 +93,10 @@ impl FakeOAuth {
         codex_callback_port: u16,
         claude_callback_port: u16,
     ) -> Result<LoginEndpoints, ProviderError> {
-        Ok(LoginEndpoints::loopback(&self.base)?
-            .with_callback_ports(codex_callback_port, claude_callback_port))
+        Ok(
+            LoginEndpoints::loopback(&self.base, &EnvSnapshot::default())?
+                .with_callback_ports(codex_callback_port, claude_callback_port),
+        )
     }
 
     /// Every request received so far, in arrival order.
@@ -204,12 +213,20 @@ async fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
 fn answer(request: &Recorded, reply: TokenReply) -> (u16, String) {
     let token_path = matches!(
         request.path.as_str(),
-        "/oauth/token" | "/claude/v1/oauth/token"
+        "/oauth/token" | "/claude/v1/oauth/token" | "/login/oauth/access_token"
     );
     if token_path && reply == TokenReply::Reject {
         return (
             400,
             String::from(r#"{"error":"invalid_grant","error_description":"code was rejected"}"#),
+        );
+    }
+    if request.path == "/login/oauth/access_token" && reply == TokenReply::DevicePending {
+        return (
+            200,
+            String::from(
+                r#"{"error":"authorization_pending","error_description":"approval pending"}"#,
+            ),
         );
     }
     match request.path.as_str() {
@@ -218,6 +235,18 @@ fn answer(request: &Recorded, reply: TokenReply) -> (u16, String) {
             200,
             format!(
                 r#"{{"access_token":"{ACCESS_TOKEN}","refresh_token":"{REFRESH_TOKEN}","expires_in":3600}}"#
+            ),
+        ),
+        "/login/device/code" => (
+            200,
+            format!(
+                r#"{{"device_code":"{DEVICE_CODE}","user_code":"{USER_CODE}","verification_uri":"{VERIFICATION_URI}","interval":1,"expires_in":900}}"#
+            ),
+        ),
+        "/login/oauth/access_token" => (
+            200,
+            format!(
+                r#"{{"access_token":"{ACCESS_TOKEN}","token_type":"bearer","scope":"read:user"}}"#
             ),
         ),
         "/api/accounts/deviceauth/usercode" => (

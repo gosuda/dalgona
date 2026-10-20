@@ -50,6 +50,22 @@ fn names_that_could_escape_the_pack_root_are_refused() {
 }
 
 #[test]
+fn a_file_whose_stem_is_a_dot_name_is_refused() {
+    let dir = root("dotstem");
+    for stem in [".", ".."] {
+        let path = dir.join(format!("{stem}{PACK_SUFFIX}"));
+        std::fs::write(&path, USER).unwrap();
+        let refused = resolve(path.to_str().unwrap(), &dir).unwrap_err();
+        assert!(
+            matches!(refused, ResolveError::BadName),
+            "{stem}: {refused}"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn an_unknown_name_names_the_user_directory() {
     let dir = root("unknown");
     let text = resolve("nothing", &dir).unwrap_err().to_string();

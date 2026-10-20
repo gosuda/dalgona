@@ -12,7 +12,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::error::WireError;
-use crate::remote::{RemoteAgent, RemoteDelivery, RemoteEndpoint, RemoteHost, backoff};
+use crate::remote::{
+    RemoteAgent, RemoteDelivery, RemoteEndpoint, RemoteHost, RemoteModel, backoff,
+};
 
 const SESSION: &str = "018f0f62-3b00-7000-8000-000000000001";
 const WAIT_SESSION: &str = "018f0f62-3b00-7000-8000-000000000002";
@@ -421,6 +423,7 @@ async fn host_operations_without_a_version_1_method_are_typed_errors() {
     let route = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt".into(),
+        provider: None,
     };
     let request = ModelRequest {
         purpose: Purpose::Turn,
@@ -441,6 +444,138 @@ async fn host_operations_without_a_version_1_method_are_typed_errors() {
             "{operation} is not a typed unsupported error"
         );
     }
+}
+
+#[tokio::test]
+async fn a_server_that_predates_model_routes_lists_its_rows_without_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (listener, endpoint) = endpoint(dir.path());
+    let server = async {
+        let mut peer = Peer::initialized(&listener).await;
+        let (id, _) = peer.expect("models/list").await;
+        // The version-1 row: no `route`, no `reference`. One current row
+        // rides in the same list: a row is judged by its own members.
+        peer.reply(
+            id,
+            sonic_rs::json!({"models": [
+                {"id": "gpt-4o", "provider": "openai", "name": "GPT-4o", "contextWindow": 128_000},
+                {"id": "acme/fast", "provider": "acme", "name": "acme/fast"},
+                {
+                    "id": "gpt-4o",
+                    "provider": "openai",
+                    "name": "GPT-4o via acme-proxy",
+                    "route": {
+                        "kind": "api",
+                        "family": "openai_chat",
+                        "model": "gpt-4o",
+                        "provider": "acme-proxy",
+                    },
+                    "reference": "acme-proxy/gpt-4o",
+                },
+            ]}),
+        )
+        .await;
+        peer
+    };
+    let client = async {
+        let host = RemoteHost::connect(endpoint).await.expect("connect");
+        host.models().await
+    };
+    let (_peer, models) = tokio::time::timeout(
+        Duration::from_secs(10),
+        Box::pin(async { tokio::join!(server, client) }),
+    )
+    .await
+    .expect("model listing finishes");
+    let models = models.expect("an old server's rows are not refused");
+    assert_eq!(
+        models,
+        [
+            RemoteModel {
+                id: "gpt-4o".into(),
+                provider: "openai".into(),
+                name: "GPT-4o".into(),
+                context_window: Some(128_000),
+                route: None,
+                reference: None,
+            },
+            RemoteModel {
+                id: "acme/fast".into(),
+                provider: "acme".into(),
+                name: "acme/fast".into(),
+                context_window: None,
+                route: None,
+                reference: None,
+            },
+            RemoteModel {
+                id: "gpt-4o".into(),
+                provider: "openai".into(),
+                name: "GPT-4o via acme-proxy".into(),
+                context_window: None,
+                route: Some(ModelRoute::Api {
+                    family: Family::Chat,
+                    model: "gpt-4o".into(),
+                    provider: Some("acme-proxy".into()),
+                }),
+                reference: Some("acme-proxy/gpt-4o".into()),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_model_row_with_a_malformed_route_or_reference_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (listener, endpoint) = endpoint(dir.path());
+    let bad = [
+        sonic_rs::json!({"id": "a", "provider": "openai", "name": "A", "route": null}),
+        sonic_rs::json!({"id": "b", "provider": "openai", "name": "B", "reference": 7}),
+        sonic_rs::json!({
+            "id": "c",
+            "provider": "openai",
+            "name": "C",
+            "route": {"kind": "mystery", "id": "acme/fast"},
+        }),
+    ];
+    let server = async {
+        let mut peer = Peer::initialized(&listener).await;
+        for row in &bad {
+            let (id, _) = peer.expect("models/list").await;
+            peer.reply(id, sonic_rs::json!({"models": [row.clone()]}))
+                .await;
+        }
+        // The refusal is per list: the connection stays usable.
+        let (id, _) = peer.expect("models/list").await;
+        peer.reply(
+            id,
+            sonic_rs::json!({"models": [
+                {"id": "gpt-4o", "provider": "openai", "name": "GPT-4o"},
+            ]}),
+        )
+        .await;
+        peer
+    };
+    let client = async {
+        let host = RemoteHost::connect(endpoint).await.expect("connect");
+        let mut refused = Vec::new();
+        for _ in 0..3 {
+            refused.push(host.models().await);
+        }
+        (refused, host.models().await)
+    };
+    let (_peer, (refused, recovered)) = tokio::time::timeout(
+        Duration::from_secs(10),
+        Box::pin(async { tokio::join!(server, client) }),
+    )
+    .await
+    .expect("model listing finishes");
+    for (index, outcome) in refused.iter().enumerate() {
+        assert!(
+            matches!(outcome, Err(WireError::Protocol { code: -32700, .. })),
+            "row {index} must be refused, got {outcome:?}"
+        );
+    }
+    assert_eq!(recovered.expect("a later list decodes").len(), 1);
 }
 
 #[tokio::test]

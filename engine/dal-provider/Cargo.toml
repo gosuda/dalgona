@@ -11,23 +11,33 @@ dal-core.workspace = true
 dal-store.workspace = true
 futures.workspace = true
 jiff.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml = { workspace = true, features = ["preserve_order"] }
 url.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+bytes.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+hmac.workspace = true
+prost.workspace = true
+process-wrap.workspace = true
+quick-xml.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+[features]
+test-support = []
 
 [dev-dependencies]
 proptest.workspace = true
-hyper = { workspace = true, features = ["server", "http1"] }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
 [lints]

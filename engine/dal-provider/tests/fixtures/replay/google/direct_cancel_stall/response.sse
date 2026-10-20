@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"half"}]},"index":0}],"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9},"modelVersion":"gemini-3-pro","responseId":"resp-cancel-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" and the rest"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":6,"totalTokenCount":15},"modelVersion":"gemini-3-pro","responseId":"resp-cancel-1"}
+

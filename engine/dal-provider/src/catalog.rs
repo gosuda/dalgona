@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use dal_core::{Family, ModelRoute, ThinkingLevel};
+use dal_core::{Family, ModelPrice, ModelRoute, ThinkingLevel};
 
 use crate::{
     auth::credential::Credential, error::ProviderError, provider::ProviderEntry,
@@ -117,6 +117,16 @@ pub struct CatalogEntry {
     pub display_supported: bool,
     /// Whether verified provider metadata allows constrained custom-grammar tools.
     pub custom_grammar: bool,
+    /// Premium requests a user-initiated request costs, when the provider measured it.
+    ///
+    /// `None` means no premium measurement was reported; aggregates containing
+    /// such a row stay unknown rather than assuming zero.
+    pub premium_multiplier: Option<f64>,
+    /// USD-per-million-token rates for local cost estimates, when known.
+    ///
+    /// `None` means the price is unknown; callers fall back to configured or
+    /// compiled prices. Copilot rows carry the live flat rate card here.
+    pub price: Option<ModelPrice>,
 }
 
 /// Visibility in a provider model listing.
@@ -153,7 +163,19 @@ impl ToolSupport {
             Self::ChatWhenNoReasoning => match family {
                 Family::Chat => matches!(thinking, ThinkingLevel::Off),
                 Family::Responses | Family::Codex => true,
-                Family::Anthropic => false,
+                Family::Anthropic
+                | Family::Bedrock
+                | Family::Cursor
+                | Family::Devin
+                | Family::Droid
+                | Family::GitLab
+                | Family::GoogleGenerativeAi
+                | Family::GoogleVertex
+                | Family::GoogleGeminiCli
+                | Family::GoogleAntigravity
+                | Family::Mistral
+                | Family::Ollama
+                | Family::PiMessages => false,
             },
         }
     }
@@ -202,6 +224,15 @@ impl Catalog {
     #[must_use]
     pub fn entries(&self) -> &[CatalogEntry] {
         &self.entries
+    }
+
+    /// Returns the configured providers in catalog order.
+    ///
+    /// Each entry names its provider id and the API family it serves. A row
+    /// in [`Catalog::entries`] whose provider is absent here (a built-in row
+    /// for a provider the configuration does not list) cannot be resolved.
+    pub fn providers(&self) -> impl Iterator<Item = &ProviderEntry> + '_ {
+        self.providers.iter().map(|(provider, _)| provider)
     }
 
     fn source_for(&self, provider: &str) -> CatalogSource {

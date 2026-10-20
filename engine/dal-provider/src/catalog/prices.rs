@@ -9,6 +9,7 @@ pub(crate) struct PriceRow {
     pub(crate) model: &'static str,
     pub(crate) input: Option<f64>,
     pub(crate) cached_input: Option<f64>,
+    pub(crate) cache_write: Option<f64>,
     pub(crate) output: Option<f64>,
     pub(crate) reasoning: Option<f64>,
 }
@@ -55,8 +56,10 @@ pub fn compiled_temperature(provider: &str, id: &str) -> bool {
 
 /// Returns the compiled USD-per-million-token rates for an exact provider/model id.
 ///
-/// Missing models have no compiled price. A missing rate in an otherwise
-/// priced row contributes zero rather than inventing a different rate.
+/// Missing models have no compiled price. A missing input, cached-input,
+/// output, or reasoning rate in an otherwise priced row contributes zero
+/// rather than inventing a different rate. A missing cache-write rate stays
+/// unknown and falls back to the input rate at cost time.
 #[must_use]
 pub fn compiled_price(model: &str) -> Option<ModelPrice> {
     let index = PRICE_ROWS
@@ -74,6 +77,7 @@ pub fn compiled_price(model: &str) -> Option<ModelPrice> {
         cached_input: row.cached_input.unwrap_or(0.0),
         output: row.output.unwrap_or(0.0),
         reasoning: row.reasoning.unwrap_or(0.0),
+        cache_write: row.cache_write,
         tiers,
     })
 }

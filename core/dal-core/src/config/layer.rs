@@ -52,12 +52,28 @@ impl Config {
         Ok(config)
     }
 
+    /// Reload-validates a rendered user TOML document without touching live state.
+    ///
+    /// Parses and validates exactly as [`Config::load`] would, discarding the
+    /// result; the caller keeps its scratch snapshot only when this succeeds.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the document has a syntax error, an unknown
+    /// key, or an invalid value.
+    pub fn validate_user_toml(product: ConfigProduct, user_toml: &str) -> Result<(), ConfigError> {
+        Self::load(product, std::path::Path::new(""), "", Some(user_toml)).map(|_| ())
+    }
+
     /// Returns a copy with the supplied command-line flag overrides applied.
     #[must_use]
     pub fn with_overrides(&self, overrides: &ConfigOverrides) -> Self {
         let mut config = self.clone();
         if let Some(model) = &overrides.model {
             config.model = Some(model.clone());
+            // A command-line model flag outranks the file: it names a bare
+            // string with no structured family, so the file's structured
+            // route must not shadow it in `default_model_route`.
+            config.model_route = None;
         }
         if let Some(mode) = overrides.mode {
             config.mode = mode;
@@ -119,6 +135,26 @@ impl Config {
     #[must_use]
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// Returns the authoritative structured default route, when the user
+    /// configuration sets the `model_route` table.
+    #[must_use]
+    pub fn model_route(&self) -> Option<&crate::model::ModelRoute> {
+        self.model_route.as_ref()
+    }
+
+    /// Returns the effective default route: the structured `model_route`
+    /// table when present, else the legacy `model` string decoded with
+    /// [`ModelRoute::from_id`], else nothing.
+    ///
+    /// [`ModelRoute::from_id`]: crate::model::ModelRoute::from_id
+    #[must_use]
+    pub fn default_model_route(&self) -> Option<crate::model::ModelRoute> {
+        if let Some(route) = self.model_route.clone() {
+            return Some(route);
+        }
+        self.model.as_deref().map(crate::model::ModelRoute::from_id)
     }
 
     /// Returns the configured reasoning level.
@@ -191,6 +227,116 @@ impl Config {
             }
         }
         self.tui.diagrams = enabled;
+        Ok(document.to_string())
+    }
+
+    /// Updates the user TOML with the default execution mode.
+    ///
+    /// The existing TOML document is edited in place so unrelated settings,
+    /// extension tables, and comments remain intact.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the document is invalid or `mode` is not
+    /// a string.
+    pub fn update_default_mode(
+        &mut self,
+        mode: Mode,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = parse_user_document(user_toml)?;
+        replace_top_string(
+            &mut document,
+            "mode",
+            "normal, eval-first, eval-only",
+            mode.as_str(),
+        )?;
+        self.mode = mode;
+        Ok(document.to_string())
+    }
+
+    /// Updates the user TOML with the default reasoning level.
+    ///
+    /// The existing TOML document is edited in place so unrelated settings,
+    /// extension tables, and comments remain intact.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the document is invalid or `thinking` is
+    /// not a string.
+    pub fn update_default_thinking(
+        &mut self,
+        level: crate::model::ThinkingLevel,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = parse_user_document(user_toml)?;
+        replace_top_string(
+            &mut document,
+            "thinking",
+            "off, minimal, low, medium, high, xhigh, max",
+            level.name(),
+        )?;
+        self.thinking = level;
+        Ok(document.to_string())
+    }
+
+    /// Updates the user TOML with the default approval policy.
+    ///
+    /// The existing TOML document is edited in place so unrelated settings,
+    /// extension tables, and comments remain intact.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the document is invalid or `approval` is
+    /// not a string.
+    pub fn update_default_approval(
+        &mut self,
+        mode: ApprovalMode,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = parse_user_document(user_toml)?;
+        replace_top_string(
+            &mut document,
+            "approval",
+            "ask, edits, all",
+            approval_as_str(mode),
+        )?;
+        self.approval = mode;
+        Ok(document.to_string())
+    }
+
+    /// Updates the user TOML with the default model route.
+    ///
+    /// The existing TOML document is edited in place so unrelated settings,
+    /// extension tables, and comments remain intact. Both the legacy `model`
+    /// string (the [`ModelRoute::family_qualified_reference`] mirror for old
+    /// readers) and the authoritative `model_route` table are replaced
+    /// atomically in the same document.
+    ///
+    /// An API route that names its provider also writes `provider` in the
+    /// table; the legacy `model` string never carries it. A route without a
+    /// provider writes exactly the table earlier versions wrote. A version
+    /// from before `provider` existed refuses a table that has the member
+    /// (its table decoder rejects unknown members), so a file saved with a
+    /// provider route does not load there.
+    ///
+    /// [`ModelRoute::family_qualified_reference`]: crate::model::ModelRoute::family_qualified_reference
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the document is invalid or `model` is not
+    /// a string.
+    pub fn update_default_model(
+        &mut self,
+        route: &crate::model::ModelRoute,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = parse_user_document(user_toml)?;
+        replace_top_string(
+            &mut document,
+            "model",
+            "non-empty model id",
+            &route.family_qualified_reference(),
+        )?;
+        replace_model_route_table(&mut document, route);
+        self.model = Some(route.family_qualified_reference().into_boxed_str());
+        self.model_route = Some(route.clone());
         Ok(document.to_string())
     }
 
@@ -362,6 +508,7 @@ impl Config {
         Self {
             mode: Mode::Normal,
             model: None,
+            model_route: None,
             thinking: crate::model::ThinkingLevel::Medium,
             approval: ApprovalMode::Ask,
             screen: Screen::Inline,
@@ -382,7 +529,7 @@ impl Config {
             ask_clamp: None,
             aliases: std::collections::BTreeMap::new(),
             serve: ServeConfig {
-                bind: Box::<str>::from("127.0.0.1"),
+                bind: Box::<str>::from(crate::config::types::SERVE_DEFAULT_BIND),
                 port: 7437,
                 token_file: data_root.join("serve.token"),
                 approval: ApprovalMode::Ask,
@@ -408,6 +555,9 @@ impl Config {
         }
         if let Some(value) = layer.model.take() {
             self.model = Some(value);
+        }
+        if let Some(value) = layer.model_route.take() {
+            self.model_route = Some(value);
         }
         if let Some(value) = layer.thinking.take() {
             self.thinking = value;
@@ -484,6 +634,124 @@ impl Config {
                 }
             }
         }
+    }
+}
+
+/// Parses the user TOML into an editable document; a missing file edits as
+/// an empty document so the first persisted default creates the file.
+fn parse_user_document(user_toml: Option<&str>) -> Result<toml_edit::DocumentMut, ConfigError> {
+    user_toml
+        .unwrap_or_default()
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| ConfigError::Syntax {
+            line: None,
+            message: error.to_string().into_boxed_str(),
+        })
+}
+
+/// Replaces a top-level string while keeping its leading decor (comments and
+/// blank lines stay attached to the key). A missing key is inserted; a
+/// present non-string is rejected instead of silently retyped.
+fn replace_top_string(
+    document: &mut toml_edit::DocumentMut,
+    key: &str,
+    expected: &str,
+    rendered: &str,
+) -> Result<(), ConfigError> {
+    let Some(item) = document.get_mut(key) else {
+        document.insert(key, toml_edit::value(rendered));
+        return Ok(());
+    };
+    let Some(value) = item.as_value_mut() else {
+        return Err(invalid_value(
+            key,
+            item.to_string().into_boxed_str(),
+            expected,
+        ));
+    };
+    if !matches!(value, toml_edit::Value::String(_)) {
+        return Err(invalid_value(
+            key,
+            value.to_string().into_boxed_str(),
+            expected,
+        ));
+    }
+    let decor = value.decor().clone();
+    let mut replacement = toml_edit::Value::from(rendered);
+    *replacement.decor_mut() = decor;
+    *value = replacement;
+    Ok(())
+}
+
+/// Replaces the top-level `model_route` table wholesale with the structured
+/// form of `route`. Sibling keys keep their position and decor; comments
+/// inside a previous `model_route` table do not survive the replacement.
+/// Stale kind members are dropped by construction: only the members of the
+/// selected kind are written.
+fn replace_model_route_table(
+    document: &mut toml_edit::DocumentMut,
+    route: &crate::model::ModelRoute,
+) {
+    use crate::model::ModelRoute;
+    let mut table = toml_edit::Table::new();
+    match route {
+        ModelRoute::Api {
+            family,
+            model,
+            provider,
+        } => {
+            table.insert("kind", toml_edit::value("api"));
+            table.insert("family", toml_edit::value(family_wire(*family)));
+            table.insert("model", toml_edit::value(model.as_ref()));
+            // Provider-less routes keep their byte-identical file shape: the
+            // member is written only when the route names its provider.
+            if let Some(provider) = provider.as_ref() {
+                table.insert("provider", toml_edit::value(provider.as_ref()));
+            }
+        }
+        ModelRoute::Synthetic { id } => {
+            table.insert("kind", toml_edit::value("synthetic"));
+            table.insert("id", toml_edit::value(id.as_ref()));
+        }
+        ModelRoute::Harness { id } => {
+            table.insert("kind", toml_edit::value("harness"));
+            table.insert("id", toml_edit::value(id.as_ref()));
+        }
+    }
+    document.insert("model_route", toml_edit::Item::Table(table));
+}
+
+/// Renders an approval policy with its canonical configuration spelling.
+fn approval_as_str(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::Edits => "edits",
+        ApprovalMode::All => "all",
+    }
+}
+
+/// Renders a provider family with its `model_route.family` wire name: the
+/// [`crate::model::Family`] serde names, matching the
+/// [`parse_model_route`](super::values::parse_model_route) grammar.
+fn family_wire(family: crate::model::Family) -> &'static str {
+    use crate::model::Family;
+    match family {
+        Family::Chat => "openai_chat",
+        Family::Responses => "openai_responses",
+        Family::Codex => "openai_codex",
+        Family::Anthropic => "anthropic",
+        Family::Bedrock => "bedrock",
+        Family::Cursor => "cursor",
+        Family::Devin => "devin",
+        Family::Droid => "droid",
+        Family::GitLab => "gitlab",
+        Family::GoogleGenerativeAi => "google-generative-ai",
+        Family::GoogleVertex => "google-vertex",
+        Family::GoogleGeminiCli => "google-gemini-cli",
+        Family::GoogleAntigravity => "google-antigravity",
+        Family::Mistral => "mistral",
+        Family::Ollama => "ollama",
+        Family::PiMessages => "pi-messages",
     }
 }
 

@@ -9,17 +9,71 @@ use sonic_rs::JsonValueTrait;
 
 use std::{collections::BTreeSet, fs, process::Command};
 
+/// The native release lanes. Every workflow runner builds for its own host,
+/// so the native archive assertion admits exactly these six triples and
+/// fails any other runner instead of checking a foreign archive.
+const NATIVE_TARGETS: [&str; 6] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+];
+
+/// The dalgona product version read from its own manifest, so the release
+/// tag tracks independent dalgona bumps instead of this gates crate's
+/// version. Mirrors the oracle in dalgona-alias-01.rs.
+fn dalgona_product_version() -> support::TestResult<String> {
+    let manifest =
+        std::fs::read_to_string(support::repo_root().join("dalgona/dalgona/Cargo.toml"))?;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(version) = line.strip_prefix("version = ") {
+            let version = version.trim().trim_matches('"');
+            if !version.is_empty() {
+                return Ok(version.to_owned());
+            }
+        }
+    }
+    Err("dalgona/dalgona/Cargo.toml carries no version line".into())
+}
+
+/// The runner's own host triple, read from `cargo -vV` the same way
+/// cargo-dist derives its native build target, so the gate always selects
+/// and checks the current native lane instead of a hard-coded row.
+fn cargo_host_target() -> support::TestResult<String> {
+    let output = support::run_command(Command::new("cargo").arg("-vV"))?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout)?;
+    for line in text.lines() {
+        if let Some(host) = line.strip_prefix("host: ") {
+            return Ok(host.trim_end().to_owned());
+        }
+    }
+    Err("cargo -vV reported no host target triple".into())
+}
+
 #[test]
-fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::TestResult<()> {
+fn dalgona_native_archive_has_only_binaries_metadata_and_man_pages() -> support::TestResult<()> {
     let workspace = support::repo_root();
-    let tag = format!("dalgona-v{}", env!("CARGO_PKG_VERSION"));
+    let target = cargo_host_target()?;
+    assert!(
+        NATIVE_TARGETS.contains(&target.as_str()),
+        "the runner triple {target} is not one of the six native release lanes"
+    );
+    let tag = format!("dalgona-v{}", dalgona_product_version()?);
     let build = support::run_command(
         Command::new("dist")
             .args([
                 "build",
                 "--tag",
                 &tag,
-                "--target=x86_64-unknown-linux-gnu",
+                &format!("--target={target}"),
                 "--output-format=json",
             ])
             .current_dir(&workspace),
@@ -30,15 +84,25 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
         String::from_utf8_lossy(&build.stderr)
     );
     let manifest: sonic_rs::Value = sonic_rs::from_slice(&build.stdout)?;
+    // cargo-dist zips Windows archives flat and tars the other platforms
+    // under a target-named root directory, the same shapes release-06
+    // pins from the product binstall metadata.
+    let windows = target.contains("windows");
+    let archive_name = format!(
+        "dalgona-{target}.{}",
+        if windows { "zip" } else { "tar.xz" }
+    );
     let archive = manifest
         .get("artifacts")
-        .and_then(|artifacts| artifacts.get("dalgona-x86_64-unknown-linux-gnu.tar.xz"))
+        .and_then(|artifacts| artifacts.get(&archive_name))
         .and_then(|artifact| artifact.get("path"))
         .and_then(sonic_rs::Value::as_str)
         .map(std::path::Path::new)
-        .ok_or("cargo-dist omitted the Dalgona Linux archive path")?;
+        .ok_or(format!(
+            "cargo-dist omitted the Dalgona {target} archive path"
+        ))?;
     if !archive.is_file() {
-        return Err("cargo-dist produced no Dalgona Linux tar.xz archive".into());
+        return Err(format!("cargo-dist produced no {archive_name} archive").into());
     }
     let listing = support::run_command(Command::new("tar").arg("-tf").arg(archive))?;
     assert!(
@@ -47,14 +111,27 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
         String::from_utf8_lossy(&listing.stderr)
     );
     let listed = String::from_utf8(listing.stdout)?;
-    let members: BTreeSet<_> = listed
+    // Tar members hang under dalgona-{target}/; the Windows zip is flat.
+    // Directory headers carry a trailing slash on every tar flavor, so
+    // normalize before comparing: the packaged shape is identical.
+    let root = format!("dalgona-{target}/");
+    let members: BTreeSet<String> = listed
         .lines()
-        .filter_map(|line| line.split_once('/').map(|(_, member)| member.to_owned()))
-        .filter(|member| !member.is_empty())
+        .map(|line| line.trim_end_matches('/'))
+        .filter_map(|line| {
+            if windows {
+                (!line.is_empty()).then(|| line.to_owned())
+            } else {
+                line.strip_prefix(root.as_str())
+                    .filter(|member| !member.is_empty())
+                    .map(ToOwned::to_owned)
+            }
+        })
         .collect();
+    let exe = if windows { ".exe" } else { "" };
     let mut expected = BTreeSet::from([
-        "dalgona".to_owned(),
-        "dg".to_owned(),
+        format!("dalgona{exe}"),
+        format!("dg{exe}"),
         "README.md".to_owned(),
         "LICENSE.md".to_owned(),
         "CHANGELOG.md".to_owned(),
@@ -73,4 +150,24 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
     }
     assert_eq!(members, expected);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_oracle_reads_the_dalgona_manifest() -> support::TestResult<()> {
+        let version = dalgona_product_version()?;
+        assert!(
+            version.split('.').count() >= 2,
+            "oracle version is not dotted: {version}"
+        );
+        assert_eq!(
+            version,
+            support::dalgona_version()?,
+            "the manifest scrape must agree with cargo metadata"
+        );
+        Ok(())
+    }
 }

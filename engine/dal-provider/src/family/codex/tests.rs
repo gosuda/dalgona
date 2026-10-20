@@ -59,6 +59,7 @@ fn wire_with_credential(
         model: dal_core::ModelRoute::Api {
             family: dal_core::Family::Codex,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("system"),
         tools: Vec::<ModelToolSpec>::new().into(),
@@ -480,5 +481,40 @@ fn before_turn_text_follows_its_user_message_in_the_body() {
 
 #[test]
 fn websocket_frame_rejects_a_body_without_the_responses_stream_member() {
-    assert!(websocket_frame(br#"{"model":"gpt-6-luna"}"#).is_err());
+    assert!(matches!(
+        websocket_frame(br#"{"model":"gpt-6-luna"}"#),
+        Err(ProviderError::InvalidRequest { .. })
+    ));
+}
+
+#[test]
+fn websocket_frame_cuts_only_the_last_stream_member_and_refuses_what_it_cannot_frame() {
+    // A tool schema may hold the very same two adjacent members; only the
+    // body's own, which comes last, is the stream marker.
+    let hostile = br#"{"model":"m","tools":[{"parameters":{"a":1,"stream":true,"include":[1]}}],"store":false,"stream":true,"include":["x"],"prompt_cache_key":"s"}"#;
+    let frame = websocket_frame(hostile).expect("a body that ends in its own stream member frames");
+    assert_eq!(
+        std::str::from_utf8(&frame).expect("JSON frame is UTF-8"),
+        r#"{"type":"response.create","model":"m","tools":[{"parameters":{"a":1,"stream":true,"include":[1]}}],"store":false,"include":["x"],"prompt_cache_key":"s"}"#
+    );
+    // Not streaming, no `include`, no stream member at all, and bodies that
+    // are not one object: each is refused, none is cut into a frame.
+    for body in [
+        r#"{"model":"m","stream":false,"include":[]}"#,
+        r#"{"model":"m","stream":true}"#,
+        r#"{"model":"m","include":[]}"#,
+        r#"{"model":"m","stream":true,"include":[]"#,
+        "[]",
+        "{",
+        "}",
+        "",
+    ] {
+        assert!(
+            matches!(
+                websocket_frame(body.as_bytes()),
+                Err(ProviderError::InvalidRequest { .. })
+            ),
+            "{body:?} must be refused"
+        );
+    }
 }

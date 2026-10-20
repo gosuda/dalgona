@@ -59,6 +59,9 @@ enabled = true
 [plugin.plan]
 enabled = true
 
+[plugin.procs]
+enabled = true
+
 [plugin.web]
 enabled = true
 provider = "brave"

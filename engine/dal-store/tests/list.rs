@@ -290,7 +290,7 @@ async fn continue_skips_archived_newest() {
     assert_eq!(
         dal_store::NO_EARLIER_SESSION,
         "No earlier session in this workspace. dalgon started a new session.",
-        "the CLI-owned caller text is unchanged"
+        "the exported notice constant keeps its wording (no caller reads it yet)"
     );
     let tie_workspace = Workspace::new(temp.path().join("tie")).expect("tie workspace is absolute");
     let tie_store = Store::new(data_root, tie_workspace, Product::Dalgona);
@@ -773,5 +773,357 @@ async fn list_limit_of_one_returns_one_of_two_sessions() {
     assert!(
         page.next_before.is_some(),
         "the second session is reachable by cursor"
+    );
+}
+
+fn leaf(to: u64) -> Record {
+    Record::Leaf {
+        at: timestamp(),
+        to: Some(entry_id(to)),
+    }
+}
+
+fn message_count_of(store: &Store, id: SessionId) -> Option<u64> {
+    let page = store
+        .list(ListQuery {
+            limit: Some(500),
+            cursor: None,
+            search: None,
+        })
+        .expect("listing succeeds");
+    page.items
+        .iter()
+        .find(|info| info.id == id)
+        .expect("the session is listed")
+        .message_count
+}
+
+/// The listed count is the length of the visible leaf path: the store parents
+/// each appended entry on the current leaf, a leaf record moves it, and
+/// entries on other branches do not count. A durable session with no entry (a journal of
+/// header and boot only) lists zero, not unknown.
+#[tokio::test]
+async fn listing_counts_the_entries_on_the_visible_leaf_path() {
+    let (_temp, store, _) = setup("list-leaf-count");
+    let empty = fixed_id(1);
+    let mut journal = store.create_session(empty);
+    journal
+        .materialize()
+        .await
+        .expect("empty session materializes");
+    journal.close().await.expect("empty session closes");
+    assert_eq!(message_count_of(&store, empty), Some(0), "no entry is zero");
+
+    // 1 -> 2 -> 3, then the leaf moves back to 1 and 4 starts a sibling branch.
+    let branched = fixed_id(2);
+    let mut journal = store.create_session(branched);
+    journal
+        .append(vec![
+            user(1, "a"),
+            user(2, "b"),
+            user(3, "c"),
+            leaf(1),
+            user(4, "d"),
+        ])
+        .await
+        .expect("append");
+    journal.close().await.expect("session closes");
+    assert_eq!(
+        message_count_of(&store, branched),
+        Some(2),
+        "the last appended entry is the leaf: path 1 -> 4"
+    );
+
+    let moved = fixed_id(3);
+    let mut journal = store.create_session(moved);
+    journal
+        .append(vec![
+            user(1, "a"),
+            user(2, "b"),
+            user(3, "c"),
+            leaf(1),
+            user(4, "d"),
+            leaf(3),
+        ])
+        .await
+        .expect("append");
+    journal.close().await.expect("session closes");
+    assert_eq!(
+        message_count_of(&store, moved),
+        Some(3),
+        "a leaf record moves the path to 1 -> 2 -> 3"
+    );
+}
+
+/// A cache written before the count existed lacks the member. It reads as a
+/// miss and the journal is rescanned: the count is still exact, never zero.
+#[tokio::test]
+async fn an_info_cache_without_the_count_rescans_the_journal() {
+    let (temp, store, _) = setup("list-count-old-cache");
+    let id = fixed_id(1);
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "a"), user(2, "b"), user(3, "c")])
+        .await
+        .expect("append");
+    journal.close().await.expect("session closes");
+    let info = store.session_file(id).with_file_name("info.json");
+    let text = fs::read_to_string(&info).expect("the open wrote its cache");
+    let cut = text
+        .find(",\"message_count\"")
+        .expect("the cache carries the count");
+    fs::write(&info, format!("{}}}", &text[..cut])).expect("rewrite the cache as an old writer");
+
+    let fresh = Store::new(
+        temp.path().join("data"),
+        Workspace::new(temp.path().join("workspace")).expect("absolute workspace"),
+        Product::Dalgona,
+    );
+    assert_eq!(message_count_of(&fresh, id), Some(3));
+}
+
+/// A leaf that names an entry the journal never appended is corruption at
+/// rest, not an empty branch: the rewritten tail invalidates the cache, the
+/// listing rescans the journal, validation refuses the dangling reference,
+/// and the count lists as unknown (`None`) — never `Some(0)`, never the
+/// pre-damage count.
+#[tokio::test]
+async fn listing_reports_unknown_count_for_a_leaf_without_its_entry() {
+    let (temp, store, workspace) = setup("list-leaf-unknown");
+    let id = fixed_id(1);
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "a"), user(2, "b"), leaf(2)])
+        .await
+        .expect("append");
+    journal.close().await.expect("session closes");
+    assert_eq!(
+        message_count_of(&store, id),
+        Some(2),
+        "two entries list two before the damage"
+    );
+
+    // Read the real journal bytes and flip only the final Leaf record's
+    // target id: the last line is the exact on-disk shape of the leaf move,
+    // so replacing just its `"to":` number keeps every other byte intact.
+    // The rewritten journal invalidates the cache; removing it forces the
+    // rescan anyway.
+    let journal_path = store.session_file(id);
+    let text = fs::read_to_string(&journal_path).expect("read the real journal");
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let last = lines.pop().expect("journal ends in a real leaf line");
+    assert!(
+        last.contains("\"leaf\"") && last.contains("\"to\":2}"),
+        "the final line is the real leaf move to entry 2, got: {last}"
+    );
+    lines.push(last.replacen("\"to\":2}", "\"to\":777777}", 1));
+    let mut staged = lines.join("\n");
+    staged.push('\n');
+    fs::write(&journal_path, staged).expect("stage the dangling leaf");
+    fs::remove_file(journal_path.with_file_name("info.json")).expect("drop the cache");
+
+    let fresh = Store::new(temp.path().join("data"), workspace, Product::Dalgona);
+    assert_eq!(
+        message_count_of(&fresh, id),
+        None,
+        "a leaf without its entry lists unknown, not zero and not the old count"
+    );
+}
+
+/// Lookups and uniqueness checks read identity only. A cache that predates
+/// the message count still answers them, so `--resume NAME` never rescans
+/// every journal in the workspace just because the count is absent; only a
+/// listing, which shows the count, falls back to the journal.
+#[tokio::test]
+async fn name_resolution_trusts_an_info_cache_that_predates_the_count() {
+    let (temp, store, workspace) = setup("resolve-old-cache");
+    let id = fixed_id(1);
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "first")])
+        .await
+        .expect("append");
+    journal.set_name(Some("kept")).await.expect("name appends");
+    journal.close().await.expect("session closes");
+
+    let info = store.session_file(id).with_file_name("info.json");
+    let text = fs::read_to_string(&info).expect("the close wrote its cache");
+    let cut = text
+        .find(",\"message_count\"")
+        .expect("the cache carries the count");
+    fs::write(&info, format!("{}}}", &text[..cut])).expect("rewrite the cache as an old writer");
+    // Same-length garbage over the journal: a rescan could not recover the
+    // name, so only the cache can answer for it.
+    let journal_path = store.session_file(id);
+    let len = usize::try_from(fs::metadata(&journal_path).expect("journal stats").len())
+        .expect("journal length fits");
+    fs::write(&journal_path, vec![b'x'; len]).expect("damage the journal in place");
+
+    let fresh = Store::new(
+        temp.path().join("data"),
+        workspace.clone(),
+        Product::Dalgona,
+    );
+    assert_eq!(
+        fresh.resolve(&workspace, "kept").expect("identity read"),
+        id,
+        "the identity read trusts the cache"
+    );
+    assert_eq!(
+        message_count_of(&fresh, id),
+        None,
+        "a listing needs the count, rescans, and finds the damage"
+    );
+}
+
+/// `Store::info` reads one session's listing row by id, with no page and no
+/// cap, and reports a missing session as not found.
+#[tokio::test]
+async fn info_reads_one_session_by_id() {
+    let (_temp, store, _) = setup("info-by-id");
+    let id = fixed_id(7);
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "a"), user(2, "b"), user(3, "c")])
+        .await
+        .expect("append");
+    journal.set_name(Some("solo")).await.expect("name appends");
+    journal.close().await.expect("session closes");
+
+    let info = store.info(id).expect("a stored session reads");
+    assert_eq!(info.id, id);
+    assert_eq!(info.name.as_deref(), Some("solo"));
+    assert_eq!(info.message_count, Some(3));
+    assert!(matches!(
+        store.info(fixed_id(8)),
+        Err(StoreError::NotFound { .. })
+    ));
+}
+
+fn page(
+    store: &Store,
+    limit: u32,
+    cursor: Option<&str>,
+    search: Option<&str>,
+) -> dal_core::Page<dal_core::SessionInfo, Box<str>> {
+    store
+        .list(ListQuery {
+            limit: Some(limit),
+            cursor: cursor.map(Into::into),
+            search: search.map(Into::into),
+        })
+        .expect("listing succeeds")
+}
+
+async fn store_with_sessions(tag: &str, count: u64) -> (TempDir, Store) {
+    let (temp, store, _) = setup(tag);
+    for n in 1..=count {
+        let mut journal = store.create_session(fixed_id(n));
+        journal
+            .append(vec![user(1, "needle in a haystack")])
+            .await
+            .expect("session appends");
+        journal.close().await.expect("session closes");
+    }
+    (temp, store)
+}
+
+/// A page that reaches the last session must say so: a cursor on the final
+/// full page would send every client back for one more empty request.
+#[tokio::test]
+async fn paging_reports_no_cursor_once_the_limit_reaches_the_last_session() {
+    let (_temp, store) = store_with_sessions("list-edge-pages", 3).await;
+    for search in [None, Some("needle")] {
+        let all = page(&store, 3, None, search);
+        assert_eq!(all.items.len(), 3, "limit == count returns every session");
+        assert_eq!(
+            all.next_before, None,
+            "limit == count: nothing remains ({search:?})"
+        );
+        let roomy = page(&store, 4, None, search);
+        assert_eq!(
+            roomy.items.len(),
+            3,
+            "limit == count + 1 returns every session"
+        );
+        assert_eq!(
+            roomy.next_before, None,
+            "limit == count + 1: nothing remains ({search:?})"
+        );
+
+        let first = page(&store, 2, None, search);
+        assert_eq!(first.items.len(), 2, "limit == count - 1 fills the page");
+        let cursor = first
+            .next_before
+            .as_deref()
+            .expect("one session remains, so a cursor is issued");
+        let rest = page(&store, 2, Some(cursor), search);
+        assert_eq!(
+            rest.items.len(),
+            1,
+            "the cursor reaches exactly the remainder"
+        );
+        assert_eq!(
+            rest.next_before, None,
+            "the remainder ends the listing ({search:?})"
+        );
+        let ids: Vec<_> = first
+            .items
+            .iter()
+            .chain(&rest.items)
+            .map(|info| info.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![fixed_id(3), fixed_id(2), fixed_id(1)],
+            "newest first, with no session repeated or skipped"
+        );
+    }
+}
+
+/// Id prefixes shorter than four characters are too ambiguous to resolve; the
+/// boundary is exact on both sides.
+#[tokio::test]
+async fn resolve_prefix_length_boundaries_hold_on_both_sides() {
+    let (_temp, store, workspace) = setup("list-prefix-bounds");
+    let id = fixed_id(1);
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "only session")])
+        .await
+        .expect("session appends");
+    journal.close().await.expect("session closes");
+    let full = id.to_string();
+    assert!(
+        matches!(
+            store.resolve(&workspace, &full[..3]),
+            Err(StoreError::NoMatch { .. })
+        ),
+        "a 3-character prefix never resolves"
+    );
+    assert_eq!(
+        store
+            .resolve(&workspace, &full[..4])
+            .expect("4-character prefix resolves"),
+        id,
+        "a 4-character prefix is the shortest that resolves"
+    );
+    assert_eq!(
+        store
+            .resolve(&workspace, &full[..35])
+            .expect("35-character prefix resolves"),
+        id,
+        "a prefix one character short of the full id resolves"
+    );
+    assert_eq!(
+        store.resolve(&workspace, &full).expect("full id resolves"),
+        id
+    );
+    assert!(
+        matches!(
+            store.resolve(&workspace, &format!("{full}1")),
+            Err(StoreError::NoMatch { .. })
+        ),
+        "an id plus one extra character matches nothing"
     );
 }

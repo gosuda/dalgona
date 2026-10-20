@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Recovered."}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11},"modelVersion":"gemini-3-pro","responseId":"resp-cut-3"}
+

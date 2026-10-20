@@ -54,3 +54,75 @@ fn json_mode_emits_one_result_or_one_error() -> Result<(), Box<dyn Error + Send 
     assert!(response.get("result").is_some());
     Ok(())
 }
+
+/// The failure half of the contract: a provider that has nothing to say
+/// produces exactly one JSON-RPC error frame, no result frame, an error exit,
+/// and nothing on stderr.
+#[test]
+fn json_mode_failure_emits_exactly_one_error_frame_and_no_result()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let config_dir = home.join(".config/dal");
+    let data_dir = home.join(".local/share/dal");
+    fs::create_dir_all(&config_dir)?;
+    fs::create_dir_all(&data_dir)?;
+    let empty_script = dir.path().join("empty-script.jsonl");
+    fs::write(&empty_script, "")?;
+    fs::write(
+        config_dir.join("dal.toml"),
+        format!(
+            "model = \"openai-responses/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
+            empty_script.to_string_lossy()
+        ),
+    )?;
+    let output = Command::new(dalgon_binary()?)
+        .current_dir(&home)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .args(["--json", "Say something the script cannot supply."])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{:?}", output.status);
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "",
+        "JSON mode keeps stderr clean"
+    );
+    let stdout = String::from_utf8(output.stdout)?;
+    let frames = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(frames.len(), 1, "exactly one frame, got: {stdout:?}");
+    let response: sonic_rs::Value = sonic_rs::from_str(frames[0])?;
+    assert!(
+        response.get("result").is_none(),
+        "a failed run must not also report a result: {stdout}"
+    );
+    assert!(response.get("id").is_some_and(JsonValueTrait::is_null));
+    let error = response
+        .get("error")
+        .ok_or_else(|| format!("the frame has no error member: {stdout}"))?;
+    assert_eq!(
+        error.get("code").and_then(JsonValueTrait::as_i64),
+        Some(-32000)
+    );
+    assert!(
+        error
+            .get("message")
+            .and_then(JsonValueTrait::as_str)
+            .is_some_and(|message| message.contains("script exhausted")),
+        "the error names the failure: {stdout}"
+    );
+    assert!(
+        error
+            .get("data")
+            .and_then(|data| data.get("hint"))
+            .and_then(JsonValueTrait::as_str)
+            .is_some_and(|hint| !hint.is_empty()),
+        "the error carries a hint: {stdout}"
+    );
+    Ok(())
+}

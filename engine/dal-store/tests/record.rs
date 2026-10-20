@@ -1,16 +1,17 @@
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
 #![expect(clippy::too_many_lines, reason = "integration tests fail loudly")]
-//! Format-1 codec round-trips, oracles, and refusal reasons.
+//! Journal line codec round-trips, oracles, and refusal reasons.
 
 mod support;
 
-use std::num::NonZeroU64;
+use std::{fs, num::NonZeroU64};
 
 use dal_core::{
     Answer, ApprovalMode, AssistantRoute, AssistantStop, Block, CallId, ClientId, Entry, EntryId,
-    EntryKind, Family, Gen, Header, InferredPurpose, JobEvent, JobId, JournalPart, Mail, MailMode,
-    Mode, ModelRoute, Owner, Product, RawJson, Record, RequestId, SessionId, Source, ThinkingLevel,
-    TurnEndStop, TurnId, Usage, Workspace, decode, encode, scan_head,
+    EntryKind, EntryView, Family, Gen, Header, InferredPurpose, JobEvent, JobId, JournalPart, Mail,
+    MailMode, Mode, ModelRoute, Owner, PrivateEffectId, PrivateLoopId, PrivateOutcome, Product,
+    RawJson, Record, RequestId, SessionId, Source, ThinkingLevel, TurnEndStop, TurnId, Usage,
+    Workspace, decode, encode, scan_head,
 };
 use dal_store::Store;
 use proptest::prelude::*;
@@ -44,6 +45,16 @@ fn session_id() -> SessionId {
     SessionId::parse("0192aa00-0000-7000-8000-000000000003").expect("fixed session id parses")
 }
 
+fn private_loop_id() -> PrivateLoopId {
+    PrivateLoopId::parse("0192aa00-0000-7000-8000-000000000004")
+        .expect("fixed private loop id parses")
+}
+
+fn private_effect_id() -> PrivateEffectId {
+    PrivateEffectId::parse("0192aa00-0000-7000-8000-000000000005")
+        .expect("fixed private effect id parses")
+}
+
 fn workspace() -> Workspace {
     Workspace::new(std::env::temp_dir().join("dal-store-record-corpus"))
         .expect("absolute test workspace")
@@ -56,6 +67,7 @@ fn usage() -> Usage {
         output_tokens: 5,
         reasoning_tokens: Some(1),
         cache_write_tokens: 3,
+        premium_requests: None,
         cost_usd: None,
     }
 }
@@ -79,9 +91,13 @@ fn assistant_entry(id: u64) -> Entry {
             api: Family::Chat,
             model: "test-model".into(),
             route: Some(AssistantRoute::Api(Family::Chat)),
-            content: vec![Block::Text { text: "hi".into() }],
+            content: vec![Block::Text {
+                text: "hi".into(),
+                replay: None,
+            }],
             usage: usage(),
             stop: AssistantStop::Done,
+            replay: None,
         },
     }
 }
@@ -136,6 +152,7 @@ fn corpus() -> Vec<Record> {
                 route: ModelRoute::Api {
                     family: Family::Chat,
                     model: "m".into(),
+                    provider: None,
                 },
             },
         }),
@@ -198,6 +215,10 @@ fn corpus() -> Vec<Record> {
             name: Some("parser fix".into()),
         },
         Record::Archive { at, archived: true },
+        Record::TurnReserved {
+            at,
+            turn: turn_id(3),
+        },
         Record::TurnStart {
             at,
             turn: turn_id(3),
@@ -226,6 +247,7 @@ fn corpus() -> Vec<Record> {
             answer: Answer::Approve,
             by: ClientId::new("tester"),
             was_default: false,
+            cause: None,
         },
         Record::AllowAlways {
             at,
@@ -295,16 +317,99 @@ fn corpus() -> Vec<Record> {
             },
             usage: usage(),
         },
+        Record::PrivateLoop {
+            at,
+            r#loop: private_loop_id(),
+            who: Owner::Extension {
+                name: "history".into(),
+                origin: "bundled".into(),
+            },
+            turn: Some(turn_id(3)),
+        },
+        Record::PrivateStart {
+            at,
+            r#loop: private_loop_id(),
+            token: private_effect_id(),
+            who: Owner::Core,
+            turn: None,
+            round: 2,
+            call: CallId::new("call-private"),
+            name: "read".into(),
+            args: RawJson::parse(r#"{"path":"a.rs"}"#).expect("private args parse"),
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: private_loop_id(),
+            token: private_effect_id(),
+            outcome: PrivateOutcome::Settled {
+                is_error: false,
+                parts: vec![JournalPart::Text { text: "ok".into() }],
+            },
+        },
+        Record::PrivateEnd {
+            at,
+            r#loop: private_loop_id(),
+            token: private_effect_id(),
+            outcome: PrivateOutcome::Indeterminate,
+        },
     ]
 }
+
+/// Every durable record type literal, spelled out so that a record type
+/// missing from the corpus above shows up as a failure.
+const RECORD_TAGS: [&str; 36] = [
+    "session",
+    "boot",
+    "user",
+    "assistant",
+    "tool_result",
+    "reminder",
+    "model",
+    "thinking",
+    "approval",
+    "mode",
+    "compaction",
+    "branch_summary",
+    "leaf",
+    "label",
+    "name",
+    "archive",
+    "turn_reserved",
+    "turn_start",
+    "tool_start",
+    "turn_end",
+    "rule_fired",
+    "resolved",
+    "allow_always",
+    "grant_given",
+    "scoped_grant",
+    "scoped_grant_ended",
+    "before_request_mut",
+    "tool_promoted",
+    "wake_attempt",
+    "job",
+    "ext",
+    "mail",
+    "inferred",
+    "private_loop",
+    "private_start",
+    "private_end",
+];
 
 fn assert_oracle(line: &[u8], record: &Record) {
     let text = std::str::from_utf8(line).expect("canonical lines are UTF-8");
     let value: sonic_rs::Value = sonic_rs::from_str(text).expect("line parses as JSON");
+    // Turn reservations are the one record that requires format 2; every
+    // other record keeps format 1.
+    let version = if record.tag() == "turn_reserved" {
+        2
+    } else {
+        1
+    };
     assert_eq!(
         value.get("v").and_then(sonic_rs::JsonValueTrait::as_u64),
-        Some(1),
-        "oracle sees format version 1"
+        Some(version),
+        "oracle sees the record's format version"
     );
     assert_eq!(
         value.get("type").and_then(sonic_rs::JsonValueTrait::as_str),
@@ -320,9 +425,11 @@ fn assert_oracle(line: &[u8], record: &Record) {
 #[test]
 fn roundtrip_literal_lines() {
     let records = corpus();
-    assert!(
-        records.len() >= 31,
-        "corpus covers every format-1 record type"
+    let covered: std::collections::BTreeSet<&str> = records.iter().map(Record::tag).collect();
+    let expected: std::collections::BTreeSet<&str> = RECORD_TAGS.into_iter().collect();
+    assert_eq!(
+        covered, expected,
+        "the corpus covers every record type and no other"
     );
     for record in &records {
         let line = encode(record).expect("record encodes");
@@ -351,7 +458,7 @@ fn roundtrip_literal_lines() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
     #[test]
-    fn proptest_roundtrip_against_value_oracle(index in 0usize..32, salt in 0u64..1000) {
+    fn proptest_roundtrip_against_value_oracle(index in 0usize..64, salt in 0u64..1000) {
         let records = corpus();
         let record = &records[index % records.len()];
         let line = encode(record).expect("record encodes");
@@ -567,4 +674,260 @@ async fn mail_and_synthetic_inferred_records_replay() {
         "inferred retains its synthetic id"
     );
     assert_eq!(kept_inferred.2, &usage(), "inferred retains its usage");
+}
+
+/// Appends one assistant replay line to a real durable store journal.
+///
+/// Returns the store handle plus the session id, the exact encoded line, and
+/// the durable journal bytes. The store stays open for the caller: the live
+/// journal owns the session, so the caller drives both lifecycles.
+async fn durable_replay_journal(temp: &TempDir) -> (Store, SessionId, Vec<u8>, Vec<u8>) {
+    let workspace =
+        Workspace::new(temp.path().join("workspace")).expect("temporary workspace is absolute");
+    let store = Store::new(temp.path().join("data"), workspace, Product::Dalgona);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![Record::User(user_entry(1, "start"))])
+        .await
+        .expect("user appends");
+    let mut entry = assistant_entry(2);
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("assistant_entry holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse(r#"{"reasoning":[1,2,3]}"#).expect("replay payload parses"));
+    let record = Record::Assistant(entry);
+    let line = encode(&record).expect("replay record encodes");
+    journal
+        .append(vec![record])
+        .await
+        .expect("assistant with replay appends");
+    journal.close().await.expect("close the live journal");
+    let on_disk = fs::read(store.session_file(id)).expect("read journal");
+    (store, id, line, on_disk)
+}
+
+/// The expected view of the replayed assistant entry, built from the exact
+/// encoded line so ids and parents come from the same source as the file.
+fn expected_replay_view(line: &[u8]) -> EntryView {
+    let decoded = decode(line).expect("replay line decodes");
+    let Record::Assistant(mut entry) = decoded.record else {
+        unreachable!("the staged line holds an assistant entry");
+    };
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("the staged line holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse(r#"{"reasoning":[1,2,3]}"#).expect("replay parses"));
+    EntryView {
+        id: entry.id,
+        parent: entry.parent,
+        kind: entry.kind,
+    }
+}
+
+#[tokio::test]
+async fn replayed_entry_reads_back_only_from_complete_lines() {
+    let temp = TempDir::new("record-replay-boundary");
+    let (store, id, line, on_disk) = durable_replay_journal(&temp).await;
+    let journal_path = store.session_file(id);
+    let root = temp.path().join("data");
+    let replay = expected_replay_view(&line);
+    let newline = on_disk.len() - line.len();
+    for cut in newline..on_disk.len() {
+        let truncated = &on_disk[..cut];
+        fs::write(&journal_path, truncated).expect("stage a cut inside the replay line");
+        let torn = Store::read_session_entry(&root, id, entry_id(2))
+            .expect_err("the torn replay line is not an entry");
+        assert!(
+            matches!(&torn, dal_store::StoreError::UnknownEntry { id: found, entry }
+                if *found == id && *entry == entry_id(2)),
+            "a cut at {cut} reads as an unknown entry, got {torn:?}"
+        );
+        let user = Store::read_session_entry(&root, id, entry_id(1))
+            .expect("the user entry stays reachable");
+        assert_eq!(user.id, entry_id(1), "cut {cut}: the requested entry");
+        assert_eq!(user.parent, None, "cut {cut}: the root has no parent");
+        assert_eq!(
+            fs::read(&journal_path).expect("read staged journal"),
+            truncated,
+            "a cut at {cut} never triggers repair or rewrite"
+        );
+    }
+    fs::write(&journal_path, &on_disk).expect("restore the full journal");
+    let found = Store::read_session_entry(&root, id, entry_id(2))
+        .expect("the complete replay line is an entry");
+    assert_eq!(found, replay, "the replay payload survives the read");
+    for cut in 1..newline {
+        let truncated = &on_disk[..cut];
+        fs::write(&journal_path, truncated).expect("stage a cut inside earlier lines");
+        assert!(
+            Store::read_session_entry(&root, id, entry_id(2)).is_err(),
+            "the replay entry is gone at cut {cut}"
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("read staged journal"),
+            truncated,
+            "a cut at {cut} never triggers repair or rewrite"
+        );
+    }
+    fs::write(&journal_path, &on_disk).expect("restore the full journal");
+}
+
+#[tokio::test]
+async fn null_replay_append_is_refused_without_a_partial_write() {
+    let temp = TempDir::new("record-null-replay");
+    let (store, id, _, on_disk) = durable_replay_journal(&temp).await;
+    let journal_path = store.session_file(id);
+    let mut entry = assistant_entry(3);
+    let EntryKind::Assistant { replay, .. } = &mut entry.kind else {
+        unreachable!("assistant_entry holds an assistant kind");
+    };
+    *replay = Some(RawJson::parse("null").expect("explicit null parses"));
+    let (mut reopened, _) = store
+        .open_session(id)
+        .await
+        .expect("the durable session reopens");
+    let baseline = fs::read(&journal_path).expect("read the reopened journal");
+    assert!(
+        baseline.len() > on_disk.len() && baseline.starts_with(&on_disk),
+        "reopen appends its recovery boot after the durable prefix"
+    );
+    let error = reopened
+        .append(vec![Record::Assistant(entry)])
+        .await
+        .expect_err("a null replay is refused at the append boundary");
+    reopened.close().await.expect("close the reopened session");
+    assert_eq!(
+        error.to_string(),
+        "cannot encode a null assistant replay",
+        "exact NullReplay refusal"
+    );
+    assert_eq!(
+        fs::read(&journal_path).expect("read the journal"),
+        baseline,
+        "the refused batch left the journal byte-identical"
+    );
+}
+
+fn model_entry(id: u64, parent: u64, route: ModelRoute) -> Record {
+    Record::Model(Entry {
+        id: entry_id(id),
+        parent: Some(entry_id(parent)),
+        at: timestamp(),
+        kind: EntryKind::Model { route },
+    })
+}
+
+fn reopened_records(journal: &[Record]) -> Vec<Vec<u8>> {
+    journal
+        .iter()
+        .map(|record| encode(record).expect("record encodes"))
+        .collect()
+}
+
+#[tokio::test]
+async fn provider_model_record_persists_with_route_intact() {
+    let temp = TempDir::new("record-provider-model");
+    let (store, _) = store_in(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![Record::User(user_entry(1, "start"))])
+        .await
+        .expect("user entry appends");
+    let route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "m".into(),
+        provider: Some("acme".into()),
+    };
+    let model = model_entry(2, 1, route.clone());
+    let text = std::str::from_utf8(&encode(&model).expect("model encodes"))
+        .expect("journal line is utf-8")
+        .to_owned();
+    assert!(text.contains("\"provider\":\"acme\""), "{text}");
+    journal
+        .append(vec![model])
+        .await
+        .expect("provider model appends");
+    let before = reopened_records(journal.records());
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store.open_session(id).await.expect("session reopens");
+    let after = reopened_records(reopened.records());
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "reopen appends exactly one recovery boot"
+    );
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "durable prefix survives reopen byte-for-byte"
+    );
+    let kept = reopened
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::Model(entry) => Some(entry),
+            _ => None,
+        })
+        .expect("provider model record reopens");
+    assert!(
+        matches!(&kept.kind, EntryKind::Model { route: kept_route } if kept_route == &route),
+        "the provider route did not survive reopen"
+    );
+}
+
+#[tokio::test]
+async fn legacy_provider_less_model_record_still_reads() {
+    let temp = TempDir::new("record-legacy-model");
+    let (store, _) = store_in(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![Record::User(user_entry(1, "start"))])
+        .await
+        .expect("user entry appends");
+    let model = model_entry(
+        2,
+        1,
+        ModelRoute::Api {
+            family: Family::Chat,
+            model: "m".into(),
+            provider: None,
+        },
+    );
+    let text = std::str::from_utf8(&encode(&model).expect("model encodes"))
+        .expect("journal line is utf-8")
+        .to_owned();
+    assert!(!text.contains("provider"), "{text}");
+    journal
+        .append(vec![model])
+        .await
+        .expect("legacy model appends");
+    let before = reopened_records(journal.records());
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store.open_session(id).await.expect("session reopens");
+    let after = reopened_records(reopened.records());
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "reopen appends exactly one recovery boot"
+    );
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "durable prefix survives reopen byte-for-byte"
+    );
+    let kept = reopened
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::Model(entry) => Some(entry),
+            _ => None,
+        })
+        .expect("legacy model record reopens");
+    assert!(
+        matches!(&kept.kind, EntryKind::Model { route } if route.provider().is_none()),
+        "reopen invented a provider"
+    );
 }

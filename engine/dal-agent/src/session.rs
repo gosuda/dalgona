@@ -21,90 +21,183 @@ pub(crate) mod subscriber;
 pub(crate) mod tasks;
 pub(crate) mod turn;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 use dal_core::ext::{Mail as ExtMail, Receipt, SidecarName};
 use dal_core::{
-    Answer, BlobId, ClientId, Command, EntryId, Name, Reply, RequestId, SessionId, TurnOp,
+    Answer, BlobId, CallId, ClientId, Command, EntryId, Name, Owner, PrivateEffectId,
+    PrivateLoopId, PrivateOutcome, RawJson, Reply, RequestId, SessionId, TurnId, TurnOp,
     TurnOpReply,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::time::Instant;
 
 use self::subscriber::SubscriberShared;
-use crate::error::AgentError;
+use crate::broker::{Broker, Resolved};
+use crate::error::{AgentError, ServiceError};
+use crate::ext::services::MAX_OPEN_ASKS;
 
 /// Bounded command channel into one session actor.
 pub(crate) const COMMAND_CHANNEL: usize = 64;
 
-/// Detached resolutions are bounded by the armed approval slots (one ask
-/// slot plus one run slot per session), so [`PENDING_CAP`] has an order of
-/// magnitude of headroom; reaching it means a slot leaked its guard, and
-/// the push trips in debug while keeping the item, because drop-time
-/// terminal delivery never sheds.
-const PENDING_CAP: usize = 16;
 /// Settled ids gate slot reuse; ids of sessions that never re-ask would
 /// accumulate, so the set restarts past [`SETTLED_CAP`]. Eviction only
 /// fails a reuse check closed (`ask_busy`), never reopens a slot early.
 const SETTLED_CAP: usize = 4096;
 
-/// Drop-time resolutions that bypass the command mailbox.
+/// Structural bound on the withdrawals lane, derived from admission: every
+/// armed service slot ([`MAX_OPEN_ASKS`] ask slots plus the one run slot)
+/// contributes at most one withdrawal claim over its occupancy lifetime —
+/// the broker claims each request at most once and the admission entry
+/// stays occupied until the actor settles the claim — so the lane can hold
+/// no more than that many items while admission keeps its slots occupied.
+const WITHDRAWAL_BOUND: usize = MAX_OPEN_ASKS + 1;
+const _: () = assert!(WITHDRAWAL_BOUND == MAX_OPEN_ASKS + 1);
+
+/// Service resolutions claimed for the session actor.
 ///
-/// The synchronous producer is an [`AskSlot`](crate::ext::services) drop,
-/// which cannot await the actor mailbox. Entries are keyed by [`RequestId`]:
-/// the broker resolves each id at most once, and the armed approval slots
-/// bound the armed guards, so `pending` holds at most a handful of items
-/// against its reserved capacity. [`mark_settled`](Self::mark_settled)
-/// records the ids the actor has journaled, letting the next ask reuse the
-/// slot only after the previous terminal record landed.
-#[derive(Default)]
+/// The inbox owns the session broker: every claim it routes performs its
+/// broker compare-and-swap under the [`Pending`] lock, so
+/// [`close`](Self::close) fences claims as well as entries and each request
+/// reaches the inbox at most once. Two lanes feed one drain:
+///
+/// - `withdrawals`: drop-time withdrawals and local-deadline expiries of
+///   armed services slots. An armed slot's admission entry stays occupied
+///   until [`mark_settled`](Self::mark_settled), so the lane holds at most
+///   [`WITHDRAWAL_BOUND`] claims; reaching that in debug means an admission
+///   entry leaked its guard, and the claim is still kept (delivery never
+///   sheds).
+/// - `cancelled`: turn-cancel claims of reported requests, in broker open
+///   order. Each item is one distinct broker slot moved to `core` exactly
+///   once, so the lane needs no numeric cap.
+///
+/// Claims whose question the fold never accepted (a `Asked` that was never
+/// enqueued, or a closed fold) fold to `Ok` with no emit and release their
+/// waiter fail-closed; [`mark_settled`](Self::mark_settled) still records
+/// them so the producer's admission frees without any fabricated record.
 pub(crate) struct ResolutionInbox {
-    pending: std::sync::Mutex<VecDeque<(RequestId, actor::TurnWork)>>,
+    broker: Arc<Broker>,
+    pending: std::sync::Mutex<Pending>,
     settled: std::sync::Mutex<HashSet<RequestId>>,
     notify: Notify,
 }
 
+/// The claimed-but-undrained resolutions of one session.
+struct Pending {
+    withdrawals: VecDeque<Resolved>,
+    cancelled: VecDeque<Resolved>,
+    closed: bool,
+}
+
 impl ResolutionInbox {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(broker: Arc<Broker>) -> Self {
         Self {
-            pending: std::sync::Mutex::new(VecDeque::with_capacity(PENDING_CAP)),
+            broker,
+            pending: std::sync::Mutex::new(Pending {
+                withdrawals: VecDeque::with_capacity(WITHDRAWAL_BOUND),
+                cancelled: VecDeque::new(),
+                closed: false,
+            }),
             settled: std::sync::Mutex::new(HashSet::new()),
             notify: Notify::new(),
         }
     }
 
-    /// Queues one detached resolution. The armed approval slots bound the
-    /// producers, so reaching [`PENDING_CAP`] means a slot leaked its
-    /// guard: trip in debug and keep the item, because drop-time terminal
-    /// delivery never sheds.
-    pub(crate) fn push(&self, id: RequestId, work: actor::TurnWork) {
+    /// Claims one armed services slot for its holder. `expiry: None`
+    /// withdraws the request (cause `Withdrawn`); `Some(unattended)` expires
+    /// it through `Broker::expire_one`, which records `NoController` when
+    /// `unattended` and `TimedOut` otherwise. The caller computes
+    /// `unattended` before calling, so no attachment lock nests under
+    /// `pending`. A closed inbox claims nothing: the actor's own open-request
+    /// sweep releases those waiters fail-closed after the fence.
+    ///
+    /// Returns the claimed request id as the receipt. `Some(id)` queued a
+    /// claim whose settlement will free the caller's admission entry.
+    /// `None` means nothing claimed — the slot was already resolved by
+    /// another winner (a client answer or the actor's expiry sweep, both of
+    /// which journal before releasing), or the fence owns it — so no
+    /// `mark_settled` will ever arrive for this id and the caller frees its
+    /// admission entry at once. Without that receipt a lost race would
+    /// strand the entry and wedge the battery at its cap. The receipt is a
+    /// copyable id: the queued claim keeps the payload, the caller learns
+    /// only whether a settlement is coming.
+    pub(crate) fn withdraw(&self, id: RequestId, expiry: Option<bool>) -> Option<RequestId> {
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(slot) = pending.iter_mut().find(|(known, _)| *known == id) {
-            slot.1 = work;
-        } else {
-            debug_assert!(
-                pending.len() < PENDING_CAP,
-                "detached resolutions exceed the armed slots"
-            );
-            pending.push_back((id, work));
+        if pending.closed {
+            return None;
         }
+        let claim = match expiry {
+            None => self.broker.withdraw(id),
+            Some(unattended) => self.broker.expire_one(id, Instant::now(), unattended),
+        };
+        let claim = claim?;
+        debug_assert!(
+            pending.withdrawals.len() < WITHDRAWAL_BOUND,
+            "withdrawal claims exceed the armed service slots"
+        );
+        let receipt = claim.request.id;
+        pending.withdrawals.push_back(claim);
+        drop(pending);
+        self.notify.notify_one();
+        Some(receipt)
+    }
+
+    /// Classifies a turn cancel through the broker under the inbox lock.
+    /// Reported slots are claimed and queued; unreported slots keep their
+    /// claim parked for `Broker::report_opened`. An empty claim set causes
+    /// no enqueue and no notify. A closed inbox claims nothing.
+    pub(crate) fn cancel_turn(&self, turn: TurnId) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.closed {
+            return;
+        }
+        let claims = self.broker.cancel_turn(turn);
+        if claims.is_empty() {
+            return;
+        }
+        pending.cancelled.extend(claims);
         drop(pending);
         self.notify.notify_one();
     }
 
-    pub(crate) fn take(&self) -> Option<(RequestId, actor::TurnWork)> {
-        self.pending
+    /// Withdrawals first, then cancelled claims.
+    pub(crate) fn take(&self) -> Option<Resolved> {
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending
+            .withdrawals
             .pop_front()
+            .or_else(|| pending.cancelled.pop_front())
     }
 
-    pub(crate) fn mark_settled(&self, id: RequestId) {
-        self.pending
+    /// Fences claims and entries: a later `withdraw` or `cancel_turn`
+    /// claims nothing (the actor's open-request sweep releases those
+    /// waiters), and the finite remainder returns for the caller to fold
+    /// or release.
+    pub(crate) fn close(&self) -> Vec<Resolved> {
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(known, _)| *known != id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.closed = true;
+        let mut rest = Vec::with_capacity(pending.withdrawals.len() + pending.cancelled.len());
+        rest.extend(pending.withdrawals.drain(..));
+        rest.extend(pending.cancelled.drain(..));
+        rest
+    }
+
+    /// Records that the actor settled one drained item. Claims are
+    /// single-winner under the inbox lock, so an id appears at most once;
+    /// nothing is retained from the lanes here.
+    pub(crate) fn mark_settled(&self, id: RequestId) {
         let mut settled = self
             .settled
             .lock()
@@ -168,6 +261,11 @@ pub(crate) enum ActorRequest {
         /// The busy or texted statuses after the poll.
         reply: oneshot::Sender<Vec<dal_core::ExtStatus>>,
     },
+    /// Wait until the last ended turn's driver confirmation has been folded.
+    Settle {
+        /// Sent once the actor has folded the pending turn confirmation.
+        reply: oneshot::Sender<()>,
+    },
     /// Flush the journal, close subscriber queues, and stop the actor.
     Shutdown {
         /// Shutdown acknowledgement.
@@ -221,6 +319,42 @@ pub(crate) enum ActorRequest {
         /// The append request.
         req: ExtRecordRequest,
     },
+    /// Journal one private-loop birth before its first effect.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
+    PrivateLoop {
+        /// The birth request.
+        req: PrivateLoopRequest,
+    },
+    /// Journal one private-effect start before the effect runs.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
+    PrivateStart {
+        /// The start request.
+        req: PrivateStartRequest,
+    },
+    /// Journal one private-effect terminal outcome.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
+        )
+    )]
+    PrivateEnd {
+        /// The end request.
+        req: PrivateEndRequest,
+    },
     /// Attach the capability-scoped services for hook dispatch.
     Services {
         /// The session services.
@@ -270,6 +404,64 @@ pub(crate) struct ExtRecordRequest {
     pub body: dal_core::RawJson,
     /// The journal position after the receipt, or the append failure.
     pub reply: oneshot::Sender<Result<dal_core::EntryId, crate::error::ServiceError>>,
+}
+
+/// One durable private-loop birth with its reply channel.
+///
+/// The reply arrives only after the actor commits the birth; a pre-append
+/// validation conflict answers with the error without appending, while an
+/// append failure answers with the error and folds/publishes nothing.
+pub(crate) struct PrivateLoopRequest {
+    /// The loop identity minted once at Loop construction.
+    pub r#loop: PrivateLoopId,
+    /// The loop owner minted from the registering extension.
+    pub who: Owner,
+    /// The captured turn, when the loop runs inside a session turn.
+    pub turn: Option<TurnId>,
+    /// The birth acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), AgentError>>,
+}
+
+/// One durable private-effect start with its reply channel.
+///
+/// The reply arrives only after the actor commits the start; the caller
+/// must not run the effect until it does. `call` and `args` are
+/// live-execution correlation only: they ride the journal record, never
+/// the fold pairing row.
+pub(crate) struct PrivateStartRequest {
+    /// The loop identity.
+    pub r#loop: PrivateLoopId,
+    /// The effect identity.
+    pub token: PrivateEffectId,
+    /// The effect owner; must match the loop birth.
+    pub who: Owner,
+    /// The captured turn; must match the loop birth.
+    pub turn: Option<TurnId>,
+    /// The private round number.
+    pub round: u32,
+    /// The live-execution call identity; correlation only.
+    pub call: CallId,
+    /// The tool name.
+    pub name: Box<str>,
+    /// The raw tool arguments; journal-only, never published.
+    pub args: RawJson,
+    /// The start acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), ServiceError>>,
+}
+
+/// One durable private-effect terminal outcome with its reply channel.
+///
+/// The reply arrives only after the actor commits the end and publishes
+/// the terminal. Exactly one end exists per (`loop`, `token`).
+pub(crate) struct PrivateEndRequest {
+    /// The loop identity.
+    pub r#loop: PrivateLoopId,
+    /// The effect identity.
+    pub token: PrivateEffectId,
+    /// The terminal outcome.
+    pub outcome: PrivateOutcome,
+    /// The end acknowledgement, or the validation/append failure.
+    pub reply: oneshot::Sender<Result<(), ServiceError>>,
 }
 
 /// One mailbox delivery to this session.
@@ -458,12 +650,31 @@ impl SessionHandle {
         .await
     }
 
-    /// Flushes the journal, closes subscriber queues, and stops the actor.
-    pub(crate) async fn shutdown(&self) {
+    /// Resolves once the actor has folded the driver confirmation for the
+    /// last ended turn, so turn-end observer records are durable before
+    /// session-end observers sweep per-turn state. A closed session
+    /// resolves as [`AgentError::SessionClosed`].
+    pub(crate) async fn settled(&self) -> Result<(), AgentError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::Settle { reply })
+            .await
+    }
+
+    /// Classifies every open request of the opening and running turn for
+    /// shutdown before any lifecycle fire: reported claims reach the inbox
+    /// while it still accepts them, so their terminal record is `Cancelled`
+    /// rather than `Withdrawn`. The host close paths call this before
+    /// cancelling lifecycle tokens or aborting tasks; a second call
+    /// classifies nothing (the tokens are already fired).
+    pub(crate) fn begin_shutdown(&self) {
         self.control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cancel_opening_for_shutdown();
+    }
+
+    /// Flushes the journal, closes subscriber queues, and stops the actor.
+    pub(crate) async fn shutdown(&self) {
+        self.begin_shutdown();
         let _ = self
             .roundtrip(|reply| ActorRequest::Shutdown { reply })
             .await;
@@ -507,23 +718,6 @@ impl SessionHandle {
             .map_err(|_| AgentError::SessionClosed { id: self.session })
     }
 
-    /// Reports one broker resolution without awaiting the actor. The inbox
-    /// is owned by the actor and preserves the resolution, keyed by request,
-    /// when the service mailbox is full. Causality holds: the actor takes
-    /// each resolution before draining the service requests already queued,
-    /// including its matching `Asked`, then folds the terminal outcome.
-    pub(crate) fn work_detached(&self, work: actor::TurnWork) {
-        let actor::TurnWork::Answered { resolved } = &work else {
-            debug_assert!(
-                false,
-                "only broker resolutions may bypass the command mailbox"
-            );
-            let _ = self.tx.try_send(ActorRequest::Work { work });
-            return;
-        };
-        self.resolutions.push(resolved.request.id, work);
-    }
-
     /// Borrows the actor-owned resolution inbox, so the host can hand the
     /// same owner to the session services for settle-gated slot reuse.
     pub(crate) fn resolutions(&self) -> std::sync::Arc<ResolutionInbox> {
@@ -564,6 +758,119 @@ impl SessionHandle {
             .await
     }
 
+    /// Journals one private-loop birth and awaits the actor receipt.
+    ///
+    /// Uses the opening-safe lane like every other durable service commit,
+    /// so a birth during opening-hook suspension cannot deadlock. A closed
+    /// lane surfaces as [`AgentError::SessionClosed`]; a pre-append
+    /// validation conflict surfaces as [`AgentError::Invalid`] without
+    /// appending. An append failure surfaces as
+    /// [`AgentError::PersistenceFailed`] instead: validation passed, but
+    /// the birth record did not persist. It folds/publishes nothing
+    /// (irreversible store errors may leave a partial write; the next
+    /// open repairs it).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
+    pub(crate) async fn private_loop_born(
+        &self,
+        r#loop: PrivateLoopId,
+        who: Owner,
+        turn: Option<TurnId>,
+    ) -> Result<(), AgentError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateLoop {
+            req: PrivateLoopRequest {
+                r#loop,
+                who,
+                turn,
+                reply,
+            },
+        })
+        .await?
+    }
+
+    /// Journals one private-effect start and awaits the actor receipt.
+    ///
+    /// The caller must not run the effect until this returns `Ok`: the
+    /// start-before-effect order is an order on durable writes, never on
+    /// sends. A closed lane surfaces as a [`ServiceError`] failure with
+    /// the standard closed-record text (same literal as the backend's
+    /// closed-record error). A validation conflict appends nothing; an
+    /// append failure folds/publishes no row or terminal (reopen repairs).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
+    pub(crate) async fn private_start(
+        &self,
+        r#loop: PrivateLoopId,
+        token: PrivateEffectId,
+        who: Owner,
+        turn: Option<TurnId>,
+        round: u32,
+        call: CallId,
+        name: Box<str>,
+        args: RawJson,
+    ) -> Result<(), ServiceError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateStart {
+            req: PrivateStartRequest {
+                r#loop,
+                token,
+                who,
+                turn,
+                round,
+                call,
+                name,
+                args,
+                reply,
+            },
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::failed(None, "the session closed before the record was journaled.")
+        })?
+    }
+
+    /// Journals one private-effect terminal outcome and awaits the actor receipt.
+    ///
+    /// On `Ok` the terminal is durable, folded, and published to the shared
+    /// index. A validation rejection appends nothing; an append failure
+    /// folds/publishes nothing and leaves the row Started in memory, which
+    /// the next open repairs to [`PrivateOutcome::Indeterminate`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
+        )
+    )]
+    pub(crate) async fn private_end(
+        &self,
+        r#loop: PrivateLoopId,
+        token: PrivateEffectId,
+        outcome: PrivateOutcome,
+    ) -> Result<(), ServiceError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::PrivateEnd {
+            req: PrivateEndRequest {
+                r#loop,
+                token,
+                outcome,
+                reply,
+            },
+        })
+        .await
+        .map_err(|_| {
+            ServiceError::failed(None, "the session closed before the record was journaled.")
+        })?
+    }
+
     /// Runs one turn operation.
     pub(crate) async fn turn(&self, req: TurnRequest) -> Result<(), AgentError> {
         let sender = self.turn_sender(&req);
@@ -583,44 +890,59 @@ impl SessionHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dal_core::{Owner, Question, Request};
+    use dal_core::{Owner, Question};
+    use std::time::Duration;
 
-    fn withdrawn(id: RequestId) -> actor::TurnWork {
-        actor::TurnWork::Answered {
-            resolved: crate::broker::Resolved {
-                request: Request {
-                    id,
-                    turn: None,
-                    owner: Owner::Core,
-                    question: Question::Text {
-                        prompt: "proceed?".into(),
-                        placeholder: None,
-                    },
-                    timeout: std::time::Duration::from_secs(1),
-                    default: Answer::Cancel,
-                },
-                answer: Answer::Cancel,
-                by: ClientId::new("core"),
-                resolution: crate::broker::Resolution::Cancelled,
-                was_default: false,
-            },
+    fn text_question(prompt: &str) -> Question {
+        Question::Text {
+            prompt: prompt.into(),
+            placeholder: None,
         }
     }
 
-    /// A full command mailbox keeps every detached resolution, in order:
-    /// drop-time withdrawals never shed.
-    #[tokio::test]
-    async fn a_full_mailbox_keeps_every_detached_resolution() {
-        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL);
-        let (opening_tx, _opening_rx) = mpsc::channel(COMMAND_CHANNEL);
-        let inbox = std::sync::Arc::new(ResolutionInbox::new());
+    /// One actor port, broker, and inbox: the handle's cell is wired to the
+    /// same inbox the tests drain. The receivers stay alive for the caller;
+    /// a dropped receiver turns every `tx` send into `SessionClosed`.
+    fn fixture() -> (
+        SessionHandle,
+        std::sync::Arc<Broker>,
+        std::sync::Arc<ResolutionInbox>,
+        mpsc::Receiver<ActorRequest>,
+        mpsc::Receiver<ActorRequest>,
+    ) {
+        let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
+        let (opening_tx, opening_rx) = mpsc::channel(COMMAND_CHANNEL);
+        let broker = std::sync::Arc::new(Broker::new());
+        let inbox = std::sync::Arc::new(ResolutionInbox::new(std::sync::Arc::clone(&broker)));
         let handle = SessionHandle::new(
             SessionId::new_v7(),
             tx,
             opening_tx,
-            std::sync::Arc::new(std::sync::Mutex::new(control::ControlCell::new())),
+            std::sync::Arc::new(std::sync::Mutex::new(control::ControlCell::new(
+                std::sync::Arc::clone(&inbox),
+            ))),
             std::sync::Arc::clone(&inbox),
         );
+        (handle, broker, inbox, rx, opening_rx)
+    }
+
+    fn open_turnless(broker: &Broker, prompt: &str, turn: impl Into<Option<TurnId>>) -> RequestId {
+        broker
+            .open(
+                Owner::Core,
+                text_question(prompt),
+                turn,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .0
+            .id
+    }
+
+    /// A full command mailbox keeps every withdrawal claim, in drop order:
+    /// the inbox bypasses the mailbox entirely and never sheds.
+    #[tokio::test]
+    async fn a_full_mailbox_keeps_every_withdrawal_claim() {
+        let (handle, broker, inbox, _rx, _opening_rx) = fixture();
         for _ in 0..COMMAND_CHANNEL {
             handle
                 .work(actor::TurnWork::TaskFailed {
@@ -630,14 +952,205 @@ mod tests {
                 .await
                 .expect("mailbox space");
         }
-        let first = RequestId::new_v7();
-        let second = RequestId::new_v7();
-        handle.work_detached(withdrawn(first));
-        handle.work_detached(withdrawn(second));
-        let (kept_first, _) = inbox.take().expect("the first withdrawal is kept");
-        let (kept_second, _) = inbox.take().expect("the second withdrawal is kept");
-        assert_eq!(kept_first, first);
-        assert_eq!(kept_second, second);
+        let first = open_turnless(&broker, "first?", None);
+        let second = open_turnless(&broker, "second?", None);
+        inbox.withdraw(first, None);
+        inbox.withdraw(second, None);
+        // The broker claim is single-winner: a repeat withdraw adds nothing.
+        inbox.withdraw(first, None);
+        let kept_first = inbox.take().expect("the first withdrawal is kept");
+        let kept_second = inbox.take().expect("the second withdrawal is kept");
+        assert_eq!(kept_first.request.id, first);
+        assert_eq!(kept_second.request.id, second);
+        assert_eq!(kept_first.cause, dal_core::ResolutionCause::Withdrawn);
+        assert_eq!(kept_second.cause, dal_core::ResolutionCause::Withdrawn);
         assert!(inbox.take().is_none());
+    }
+
+    /// The armed-slot tripwire: sixteen ask slots plus one run slot, each
+    /// contributing one claim, stay under the derived bound in debug.
+    #[tokio::test]
+    async fn armed_slots_withdrawal_claims_fit_the_derived_bound() {
+        let (_handle, broker, inbox, _, _) = fixture();
+        let mut ids = Vec::new();
+        for n in 0..=MAX_OPEN_ASKS {
+            ids.push(open_turnless(&broker, &format!("ask {n}?"), None));
+        }
+        for id in &ids {
+            inbox.withdraw(*id, None);
+        }
+        for id in &ids {
+            let claim = inbox.take().expect("every claim is kept in order");
+            assert_eq!(claim.request.id, *id);
+            assert_eq!(claim.cause, dal_core::ResolutionCause::Withdrawn);
+        }
+        assert!(inbox.take().is_none());
+    }
+
+    /// Expired claims carry the unattended probe: attended expiries are
+    /// `TimedOut`, unattended ones `NoController`, and a request whose
+    /// deadline has not passed claims nothing yet.
+    #[tokio::test(start_paused = true)]
+    async fn expiry_claims_carry_the_unattended_probe() {
+        let (_handle, broker, inbox, _, _) = fixture();
+        let attended = open_turnless(&broker, "attended?", None);
+        let unattended = open_turnless(&broker, "unattended?", None);
+        let early = open_turnless(&broker, "early?", None);
+        inbox.withdraw(attended, Some(false));
+        inbox.withdraw(unattended, Some(true));
+        assert!(
+            inbox.take().is_none(),
+            "an unexpired request claims nothing"
+        );
+        tokio::time::advance(Duration::from_secs(60)).await;
+        inbox.withdraw(attended, Some(false));
+        inbox.withdraw(unattended, Some(true));
+        let attended_claim = inbox.take().expect("the attended expiry claims");
+        assert_eq!(attended_claim.request.id, attended);
+        assert_eq!(attended_claim.cause, dal_core::ResolutionCause::TimedOut);
+        let unattended_claim = inbox.take().expect("the unattended expiry claims");
+        assert_eq!(unattended_claim.request.id, unattended);
+        assert_eq!(
+            unattended_claim.cause,
+            dal_core::ResolutionCause::NoController
+        );
+        assert!(early_claim_is_still_open(&broker, early));
+    }
+
+    fn early_claim_is_still_open(broker: &Broker, id: RequestId) -> bool {
+        broker
+            .open_requests()
+            .iter()
+            .any(|request| request.id == id)
+    }
+
+    /// A turn cancel claims reported slots in broker open order and parks
+    /// unreported ones for `report_opened`; a second cancel adds nothing.
+    #[tokio::test]
+    async fn cancel_turn_claims_reported_and_parks_unreported_once() {
+        let (_handle, broker, inbox, _, _) = fixture();
+        let turn = TurnId::new(std::num::NonZeroU64::new(7).unwrap());
+        let first = open_turnless(&broker, "first?", turn);
+        let second = open_turnless(&broker, "second?", turn);
+        let third = open_turnless(&broker, "third?", turn);
+        assert!(broker.report_opened(second).is_none());
+        inbox.cancel_turn(turn);
+        let claims: Vec<RequestId> = std::iter::from_fn(|| inbox.take())
+            .map(|claim| claim.request.id)
+            .collect();
+        assert_eq!(claims, vec![second], "only the reported slot queues");
+        let still_open = broker
+            .open_requests()
+            .into_iter()
+            .map(|request| request.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !still_open.contains(&second),
+            "a claimed slot leaves the open set: {still_open:?}"
+        );
+        let parked: Vec<RequestId> = broker
+            .parked()
+            .into_iter()
+            .map(|claim| claim.request.id)
+            .collect();
+        assert_eq!(parked, vec![first, third], "unreported claims park");
+        inbox.cancel_turn(turn);
+        assert!(inbox.take().is_none(), "a repeat cancel claims nothing");
+        assert!(
+            broker.report_opened(first).is_some(),
+            "the parked claim hands over"
+        );
+        assert!(broker.report_opened(third).is_some());
+    }
+
+    /// Withdrawals drain before cancelled claims, and `close` fences both
+    /// lanes: post-fence producers claim nothing, and the fence's remainder
+    /// returns withdrawals first.
+    #[tokio::test]
+    async fn close_fences_claims_and_returns_the_remainder() {
+        let (_handle, broker, inbox, _, _) = fixture();
+        let turn = TurnId::new(std::num::NonZeroU64::new(9).unwrap());
+        let withdrawn = open_turnless(&broker, "withdrawn?", None);
+        let cancelled = open_turnless(&broker, "cancelled?", turn);
+        let late = open_turnless(&broker, "late?", None);
+        assert!(broker.report_opened(cancelled).is_none());
+        inbox.withdraw(withdrawn, None);
+        inbox.cancel_turn(turn);
+        let closed = inbox.close();
+        assert_eq!(closed.len(), 2, "close returns the finite remainder");
+        assert_eq!(closed[0].request.id, withdrawn, "withdrawals first");
+        assert_eq!(closed[1].request.id, cancelled);
+        // The fence: producers after close claim nothing and queue nothing.
+        inbox.withdraw(late, None);
+        inbox.cancel_turn(turn);
+        let late_open = broker
+            .open_requests()
+            .iter()
+            .any(|request| request.id == late);
+        assert!(late_open, "a post-fence producer claims nothing");
+        assert!(inbox.take().is_none());
+    }
+
+    /// Settlement is one-shot per drained claim, in both directions.
+    #[tokio::test]
+    async fn settlement_marks_are_recorded_once_per_claim() {
+        let (_handle, broker, inbox, _, _) = fixture();
+        let id = open_turnless(&broker, "settled?", None);
+        inbox.withdraw(id, None);
+        let claim = inbox.take().expect("the claim");
+        inbox.mark_settled(claim.request.id);
+        assert!(inbox.take_settled(id), "the first consume observes settle");
+        assert!(!inbox.take_settled(id), "the mark is single-winner");
+        assert!(
+            broker.open_requests().iter().all(|open| open.id != id),
+            "the claim left the slot resolved"
+        );
+    }
+
+    /// A dropped actor lane turns a private-loop birth into `SessionClosed`.
+    #[tokio::test]
+    async fn private_loop_birth_reports_a_closed_session() {
+        let (handle, _broker, _inbox, _, _) = fixture();
+        let error = handle
+            .private_loop_born(PrivateLoopId::new_v7(), Owner::Core, None)
+            .await
+            .expect_err("a closed lane reports its failure");
+        assert!(
+            matches!(error, AgentError::SessionClosed { .. }),
+            "a closed birth keeps the agent error shape: {error:?}"
+        );
+    }
+
+    /// Dropped actor lanes turn private start/end receipts into failed
+    /// service errors with the standard closed-record text.
+    #[tokio::test]
+    async fn private_start_and_end_report_a_closed_session() {
+        let (handle, _broker, _inbox, _, _) = fixture();
+        let r#loop = PrivateLoopId::new_v7();
+        let token = PrivateEffectId::new_v7();
+        let args = RawJson::parse("{}").expect("literal test args parse");
+        let start = handle
+            .private_start(
+                r#loop,
+                token,
+                Owner::Core,
+                None,
+                0,
+                CallId::new("call-1"),
+                "read".into(),
+                args,
+            )
+            .await;
+        assert!(
+            matches!(&start, Err(crate::error::ServiceError::Failed { .. })),
+            "a closed start keeps the service failure shape: {start:?}"
+        );
+        let end = handle
+            .private_end(r#loop, token, PrivateOutcome::Indeterminate)
+            .await;
+        assert!(
+            matches!(&end, Err(crate::error::ServiceError::Failed { .. })),
+            "a closed end keeps the service failure shape: {end:?}"
+        );
     }
 }

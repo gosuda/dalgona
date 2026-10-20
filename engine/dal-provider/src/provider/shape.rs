@@ -26,7 +26,24 @@ impl Shape {
     #[must_use]
     pub const fn of_family(family: Family) -> Self {
         match family {
-            Family::Chat | Family::Responses => Self::Plain,
+            // These families have no dedicated header shape, so `Shape::headers`
+            // builds the plain set for them; an adapter that builds its own
+            // headers does not consult it. Every one is named, so a new family
+            // must choose a shape here.
+            Family::Chat
+            | Family::Responses
+            | Family::Bedrock
+            | Family::Cursor
+            | Family::Devin
+            | Family::Droid
+            | Family::GitLab
+            | Family::GoogleGenerativeAi
+            | Family::GoogleVertex
+            | Family::GoogleGeminiCli
+            | Family::GoogleAntigravity
+            | Family::Mistral
+            | Family::Ollama
+            | Family::PiMessages => Self::Plain,
             Family::Anthropic => Self::Claude,
             Family::Codex => Self::Codex,
         }
@@ -37,6 +54,13 @@ impl Shape {
         provider: &ProviderEntry,
         credential: &Credential,
     ) -> Result<Vec<(String, String)>, ProviderError> {
+        // `auth = none` is a contract about every shape: the entry sends no
+        // credential, whatever a resolver found for it. Checking here, ahead
+        // of the family dispatch, keeps a stored OAuth login or an API key
+        // from reaching a bearer, Claude-marker, or Codex header.
+        if provider.auth == AuthStyle::None && !matches!(credential, Credential::None) {
+            return Err(credential_under_none(provider));
+        }
         match self {
             Self::Plain => plain_headers(provider, credential),
             Self::Claude => claude_headers(provider, credential),
@@ -50,22 +74,32 @@ fn plain_headers(
     credential: &Credential,
 ) -> Result<Vec<(String, String)>, ProviderError> {
     match credential {
-        Credential::ApiKey { key } => Ok(vec![(
-            match provider.auth {
-                AuthStyle::Bearer => String::from("authorization"),
-                AuthStyle::XApiKey => String::from("x-api-key"),
-            },
-            match provider.auth {
-                AuthStyle::Bearer => format!("Bearer {}", key.expose()),
-                AuthStyle::XApiKey => key.expose().to_owned(),
-            },
-        )]),
-        Credential::OAuth(oauth) => Ok(vec![(
-            String::from("authorization"),
-            format!("Bearer {}", oauth.access_token.expose()),
-        )]),
+        Credential::ApiKey { key } => Ok(vec![key_header(provider, key.expose())?]),
+        Credential::OAuth(oauth) => Ok(vec![bearer_header(oauth.access_token.expose())]),
+        // A `none` entry needs no credential and gets no header; every other
+        // style still refuses to build a request without one.
+        Credential::None if provider.auth == AuthStyle::None => Ok(Vec::new()),
         Credential::None => Err(no_credentials(provider)),
     }
+}
+
+/// The `authorization` header that carries an OAuth access token.
+fn bearer_header(token: &str) -> (String, String) {
+    (String::from("authorization"), format!("Bearer {token}"))
+}
+
+/// The header that carries `key` under the entry's authorization style.
+fn key_header(provider: &ProviderEntry, key: &str) -> Result<(String, String), ProviderError> {
+    let (name, value) = match provider.auth {
+        AuthStyle::Bearer => ("authorization", format!("Bearer {key}")),
+        AuthStyle::XApiKey => ("x-api-key", key.to_owned()),
+        AuthStyle::ApiKey => ("api-key", key.to_owned()),
+        // Unreachable through `Shape::headers`, which refuses a held
+        // credential under `none` first; the arm keeps the match exhaustive
+        // and refuses rather than invent a header if a caller reaches it.
+        AuthStyle::None => return Err(credential_under_none(provider)),
+    };
+    Ok((String::from(name), value))
 }
 
 fn claude_headers(
@@ -110,5 +144,16 @@ fn codex_headers(
 fn no_credentials(provider: &ProviderEntry) -> ProviderError {
     ProviderError::NoCredentials {
         provider: provider.id.to_string(),
+    }
+}
+
+/// The refusal for a held credential under `auth = none`. The text is fixed
+/// and names only the provider id, never a key, token, or account.
+fn credential_under_none(provider: &ProviderEntry) -> ProviderError {
+    ProviderError::InvalidRequest {
+        message: format!(
+            "{} sends no credential, so it cannot send an API key or an OAuth login",
+            provider.id
+        ),
     }
 }

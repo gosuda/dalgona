@@ -4,6 +4,11 @@
 //!
 //! The second half of the session task: everything that runs after a
 //! `SubmitJob` action, plus the record-derived counts both triggers share.
+//! The shared context carries each selected letter's stored text through
+//! `letter://`, oldest first with id labels, prefix-fit to the judge budget.
+//! A context that cannot be built fails with a typed, sanitized cause:
+//! budget exhaustion and unresolvable letter text are non-retryable, a
+//! cancelled read is neutral, and any other service failure is transient.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -11,7 +16,7 @@ use std::sync::Arc;
 use dal_agent::error::ServiceError;
 use dal_core::ext::{JobsOp, JobsReply, Name, SidecarName, SidecarOp};
 use dal_core::{EntryId, RawJson};
-use dal_ext::judge::{Gate, Judge, JudgeError, JudgeOpen};
+use dal_ext::judge::{Gate, Judge, JudgeError, JudgeOpen, SHARED_MAX};
 use jiff::{Timestamp, Unit};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -23,6 +28,12 @@ use super::{JobMode, Task, TaskMsg};
 
 /// Fixed notice when the session carries no sidecar service (ephemeral).
 const EPHEMERAL_NOTICE: &str = "history: auto-dream is unavailable in an ephemeral session.";
+
+/// Non-retryable text: a selected letter resolves to no stored text.
+const SOURCE_MISSING: &str = "history: a selected letter has no stored text.";
+
+/// Non-retryable text: the host failed to read a selected letter's text.
+const SOURCE_UNREADABLE: &str = "history: a selected letter's stored text could not be read.";
 
 /// One dream letter record body for the journal write.
 #[derive(Serialize)]
@@ -107,9 +118,15 @@ impl Task {
             self.finish_gate_off(rx, mode).await;
             return;
         }
-        let shared = self.shared_context();
+        let (shared, fitted) = match self.shared_context().await {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.finish_context_error(rx, error, mode).await;
+                return;
+            }
+        };
         match judge.summarize(&shared, DREAM_PROMPT).await {
-            Ok(summary) => self.commit(rx, summary, mode).await,
+            Ok(summary) => self.commit(rx, summary, mode, fitted).await,
             Err(error) => self.finish_judge_error(rx, error, mode).await,
         }
     }
@@ -164,20 +181,55 @@ impl Task {
         self.cancel_job().await;
     }
 
+    /// Classifies one context failure into neutral, non-retryable, or
+    /// transient outcomes; the batch stays unreflected in every case.
+    ///
+    /// A budget failure reuses the judge's own non-retryable
+    /// [`JudgeError::SharedTooLarge`] text, so it is the failure the judge
+    /// would have reported for the same context. Texts carry no letter id
+    /// and no stored text.
+    async fn finish_context_error(
+        &mut self,
+        rx: &mut mpsc::Receiver<TaskMsg>,
+        error: ContextError,
+        mode: JobMode,
+    ) {
+        let event = match error {
+            ContextError::Cancelled => DreamEvent::JobCancelled,
+            ContextError::Transient => mode.failure(),
+            ContextError::TooLarge { len } => {
+                mode.non_retryable(JudgeError::SharedTooLarge { len }.to_string())
+            }
+            ContextError::SourceMissing => mode.non_retryable(SOURCE_MISSING.to_owned()),
+            ContextError::SourceUnreadable => mode.non_retryable(SOURCE_UNREADABLE.to_owned()),
+        };
+        self.fire(rx, event).await;
+        self.cancel_job().await;
+    }
+
     /// Fires the transient failure for the current job mode.
     async fn fail_transient(&mut self, rx: &mut mpsc::Receiver<TaskMsg>, mode: JobMode) {
         self.fire(rx, mode.failure()).await;
     }
 
     /// Appends the dream record, then marks consumed and rewrites the sidecar.
-    async fn commit(&mut self, rx: &mut mpsc::Receiver<TaskMsg>, summary: String, mode: JobMode) {
+    ///
+    /// Only the fitted ids whose text reached the shared context are
+    /// consumed; the remainder stays unreflected for a later run.
+    async fn commit(
+        &mut self,
+        rx: &mut mpsc::Receiver<TaskMsg>,
+        summary: String,
+        mode: JobMode,
+        fitted: Vec<String>,
+    ) {
         let ordinal = self.dreams.saturating_add(1);
-        let ids: Vec<String> = self.batch.iter().map(|letter| letter.id.clone()).collect();
+        let count = u32::try_from(fitted.len()).unwrap_or(u32::MAX);
         let body = DreamBody {
             v: 1,
             id: format!("dream/{ordinal}"),
             kind: "dream",
-            letters: ids,
+            letters: fitted,
             summary,
         };
         let Ok(text) = sonic_rs::to_string(&body) else {
@@ -207,7 +259,6 @@ impl Task {
                 self.fail_transient(rx, mode).await;
             }
             Ok(_) => {
-                let count = u32::try_from(self.batch.len()).unwrap_or(u32::MAX);
                 self.fire(rx, mode.success()).await;
                 self.recount().await;
                 self.write_sidecar().await;
@@ -285,17 +336,65 @@ impl Task {
         self.batch = batch;
     }
 
-    /// Builds the judge shared context from records (see module docs).
-    fn shared_context(&self) -> String {
+    /// Resolves every batch letter's stored text through `letter://` and
+    /// renders the bounded judge shared context, oldest first.
+    ///
+    /// Each fitted letter contributes its documented id label plus its exact
+    /// stored text after the carried summaries. Letters past the shared
+    /// budget stay unreflected for a later run, so the prompt never grows
+    /// without bound and the commit consumes only fitted ids.
+    ///
+    /// A non-empty batch yields at least one fitted id on success. The oldest
+    /// letter is never truncated, skipped, or split across calls: when it
+    /// cannot fit with the carried summaries and header, the whole context
+    /// fails with [`ContextError::TooLarge`] and nothing is consumed. A later
+    /// letter that does not fit ends the prefix instead.
+    ///
+    /// # Errors
+    /// [`ContextError::TooLarge`] when the carried summaries and header, or
+    /// the oldest letter's block, already exceed the budget;
+    /// [`ContextError::SourceMissing`] when a letter resolves to no text;
+    /// [`ContextError::SourceUnreadable`] when the host reports a read
+    /// failure; [`ContextError::Cancelled`] when the read is cancelled; and
+    /// [`ContextError::Transient`] for any other service failure.
+    async fn shared_context(&self) -> Result<(String, Vec<String>), ContextError> {
         let mut shared = String::new();
         for summary in &self.summaries {
             shared.push_str(summary);
             shared.push_str("\n\n");
         }
-        shared.push_str("Unreflected letters: ");
-        let ids: Vec<&str> = self.batch.iter().map(|letter| letter.id.as_str()).collect();
-        shared.push_str(&ids.join(", "));
-        shared
+        shared.push_str("Unreflected letters (oldest first):\n");
+        if shared.len() > SHARED_MAX {
+            return Err(ContextError::TooLarge { len: shared.len() });
+        }
+        let mut fitted: Vec<String> = Vec::new();
+        for letter in &self.batch {
+            let uri = format!("letter://{}", letter.id);
+            let doc = match self.services.scheme(&self.caller, &uri).await {
+                Ok(Some(doc)) => doc,
+                Ok(None) => return Err(ContextError::SourceMissing),
+                Err(ServiceError::Cancelled) => return Err(ContextError::Cancelled),
+                Err(ServiceError::Failed { .. }) => return Err(ContextError::SourceUnreadable),
+                Err(_) => return Err(ContextError::Transient),
+            };
+            let len = shared
+                .len()
+                .saturating_add(uri.len())
+                .saturating_add(doc.text.len())
+                .saturating_add(2);
+            if len > SHARED_MAX {
+                if fitted.is_empty() {
+                    return Err(ContextError::TooLarge { len });
+                }
+                break;
+            }
+            shared.push_str(&uri);
+            shared.push('\n');
+            shared.push_str(&doc.text);
+            shared.push('\n');
+            fitted.push(letter.id.clone());
+        }
+        Ok((shared, fitted))
     }
 
     /// Atomically rewrites `dream.json` from live state.
@@ -333,6 +432,25 @@ impl Task {
             )
             .await;
     }
+}
+
+/// Why the judge shared context could not be built; the batch stays
+/// unreflected for every cause.
+enum ContextError {
+    /// The carried summaries, header, and oldest letter cannot fit the judge
+    /// budget; `len` is the byte length the context would have needed.
+    /// Non-retryable.
+    TooLarge { len: usize },
+    /// A selected letter resolves to no stored text. Non-retryable.
+    SourceMissing,
+    /// The host reported a failed read of a selected letter's text. The
+    /// scheme surface folds resolver and store failures into one text, so
+    /// this is non-retryable; the six-hour probe retries it. Non-retryable.
+    SourceUnreadable,
+    /// The text read was cancelled; reported, never counted as failure.
+    Cancelled,
+    /// Any other service failure; retried under the transient policy.
+    Transient,
 }
 
 /// Returns the current UTC time as RFC 3339 with milliseconds.

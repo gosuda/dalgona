@@ -23,8 +23,11 @@ fn options(aliases: &[(&str, &str)]) -> RouterOptions {
     }
 }
 
+/// One catalog row as `Host::models` produces it: an API route names the
+/// provider that listed it, and `provider` repeats that identity.
 fn info(route: ModelRoute) -> ModelInfo {
     ModelInfo {
+        provider: route.provider().unwrap_or_default().into(),
         route,
         name: "model".into(),
         caps: Caps {
@@ -37,27 +40,28 @@ fn info(route: ModelRoute) -> ModelInfo {
     }
 }
 
-fn api(family: Family, model: &str) -> ModelRoute {
+fn api(family: Family, model: &str, provider: &str) -> ModelRoute {
     ModelRoute::Api {
         family,
         model: model.into(),
+        provider: Some(provider.into()),
     }
 }
 
 fn catalog() -> Vec<ModelInfo> {
     vec![
-        info(api(Family::Chat, "gpt-4o")),
-        info(api(Family::Responses, "o3")),
-        info(api(Family::Codex, "gpt-5-codex")),
-        info(api(Family::Anthropic, "claude-sonnet-4")),
-        info(api(Family::Chat, "org/nested-model")),
+        info(api(Family::Chat, "gpt-4o", "acme-proxy")),
+        info(api(Family::Responses, "o3", "openai")),
+        info(api(Family::Codex, "gpt-5-codex", "openai-codex")),
+        info(api(Family::Anthropic, "claude-sonnet-4", "anthropic")),
+        info(api(Family::Chat, "org/nested-model", "acme-proxy")),
         info(ModelRoute::Synthetic {
             id: "team/fast".into(),
         }),
         info(ModelRoute::Harness {
             id: "dalgon/normal".into(),
         }),
-        info(api(Family::Chat, "gpt-4o")),
+        info(api(Family::Chat, "gpt-4o", "openai")),
     ]
 }
 
@@ -108,9 +112,14 @@ fn every_listed_id_resolves_to_its_own_identity() {
             let ResolvedModel::Route(route) = resolved else {
                 panic!("catalog id {id} resolved away from its route: {resolved:?}");
             };
+            assert!(
+                route.same_model(&entry.route),
+                "catalog id {id} resolved to the wrong route {route:?}"
+            );
             assert_eq!(
-                &route, &entry.route,
-                "catalog id {id} resolved to the wrong route"
+                route.provider(),
+                None,
+                "the router id namespace names no provider"
             );
         }
     }
@@ -126,9 +135,49 @@ fn catalog_ids_round_trip_to_their_routes() {
             (ResolvedModel::Harness(mode), ModelRoute::Harness { id }) => {
                 assert_eq!(mode.id(), id.as_ref());
             }
-            (ResolvedModel::Route(route), expected) => assert_eq!(&route, expected),
+            (ResolvedModel::Route(route), expected) => {
+                assert!(
+                    route.same_model(expected),
+                    "{expected:?} resolved to {route:?}"
+                );
+                assert_eq!(route.provider(), None, "{expected:?} gained a provider");
+            }
             (other, expected) => panic!("{expected:?} resolved to {other:?}"),
         }
+    }
+}
+
+#[test]
+fn providers_sharing_a_family_and_model_list_one_router_id_naming_no_provider() {
+    let options = options(&[]);
+    let catalog = [
+        info(api(Family::Chat, "gpt-4o", "openai")),
+        info(api(Family::Chat, "gpt-4o", "acme-proxy")),
+    ];
+    let ids = listed_ids(&BTreeMap::new(), &catalog);
+    assert_eq!(
+        ids.iter().filter(|id| *id == "openai-chat/gpt-4o").count(),
+        1,
+        "both providers list the one id: {ids:?}"
+    );
+    let resolved = resolve_model(&options, "openai-chat/gpt-4o").expect("the listed id resolves");
+    let ResolvedModel::Route(route) = resolved else {
+        panic!("an API id resolved to {resolved:?}");
+    };
+    assert_eq!(route, api_without_provider(Family::Chat, "gpt-4o"));
+    // A route that names no provider is a different selection by `==` but
+    // the same model for both providers' catalog rows.
+    for entry in &catalog {
+        assert_ne!(route, entry.route);
+        assert!(route.same_model(&entry.route));
+    }
+}
+
+fn api_without_provider(family: Family, model: &str) -> ModelRoute {
+    ModelRoute::Api {
+        family,
+        model: model.into(),
+        provider: None,
     }
 }
 

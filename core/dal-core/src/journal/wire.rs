@@ -1,7 +1,9 @@
+use std::io;
+
 use super::wire_entries::BlockWire;
 use super::{
     Answer, AssistantStop, Block, EncodeError, Entry, InferredPurpose, JobOutcome, JournalPart,
-    Owner, RawJson, Record, Serialize, TurnEndStop, Usage, fmt,
+    Owner, PrivateOutcome, RawJson, Record, Serialize, TurnEndStop, Usage, fmt,
 };
 
 impl Record {
@@ -42,6 +44,9 @@ impl Record {
             Self::Ext { .. } => "ext",
             Self::Mail(_) => "mail",
             Self::Inferred { .. } => "inferred",
+            Self::PrivateLoop { .. } => "private_loop",
+            Self::PrivateStart { .. } => "private_start",
+            Self::PrivateEnd { .. } => "private_end",
         }
     }
 
@@ -67,9 +72,14 @@ impl Record {
 // Encode side: ordered member structs per record, hand-rolled lenses for
 // the members whose durable literals differ from the wire shapes.
 
-pub(super) fn encode_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, EncodeError> {
-    sonic_rs::to_vec(value).map_err(|error| EncodeError::Json {
-        message: error.to_string().into(),
+pub(super) fn encode_json<T: Serialize + ?Sized>(
+    value: &T,
+    out: &mut dyn io::Write,
+) -> Result<(), EncodeError> {
+    sonic_rs::to_writer(sonic_rs::writer::BufferedWriter::new(out), value).map_err(|error| {
+        EncodeError::Json {
+            message: error.to_string().into(),
+        }
     })
 }
 
@@ -208,6 +218,16 @@ pub(super) fn micro_cost(usage: &Usage) -> Result<Option<u64>, EncodeError> {
     Ok(Some(micros as u64))
 }
 
+pub(super) fn checked_premium(usage: &Usage) -> Result<Option<f64>, EncodeError> {
+    let Some(premium) = usage.premium_requests else {
+        return Ok(None);
+    };
+    if !premium.is_finite() || premium < 0.0 {
+        return Err(EncodeError::InvalidPremium);
+    }
+    Ok(Some(premium))
+}
+
 impl Serialize for UsageWire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -312,6 +332,43 @@ impl Serialize for JobOutcomeWire<'_> {
     }
 }
 
+/// The `outcome` member of a private end record:
+/// `{"type":"settled","is_error":<bool>,"parts":[...]}` or
+/// `{"type":"indeterminate"}`.
+/// Settled parts ride the journal part wire so digest-backed spellings keep
+/// their shared `"type":"image"` / `"type":"blob"` + `blob` member order.
+pub(super) struct PrivateOutcomeWire<'a>(pub(super) &'a PrivateOutcome);
+
+impl Serialize for PrivateOutcomeWire<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            PrivateOutcome::Settled { is_error, parts } => {
+                #[derive(Serialize)]
+                struct SettledMember<'a> {
+                    r#type: &'static str,
+                    is_error: bool,
+                    parts: JournalPartsWire<'a>,
+                }
+                SettledMember {
+                    r#type: "settled",
+                    is_error: *is_error,
+                    parts: JournalPartsWire(parts),
+                }
+                .serialize(serializer)
+            }
+            PrivateOutcome::Indeterminate => {
+                #[derive(Serialize)]
+                struct IndeterminateMember {
+                    r#type: &'static str,
+                }
+                IndeterminateMember {
+                    r#type: "indeterminate",
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
 pub(super) struct JournalPartsWire<'a>(pub(super) &'a [JournalPart]);
 
 impl Serialize for JournalPartsWire<'_> {

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use dal_agent::ext::{Extension, ExtensionBuilder};
 use dal_core::{Origin, RegistrationError, ServiceSet};
 use dalgona_batteries::{
-    ask, eval, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work,
+    ask, eval, history, judged, mcp, orchestration, procs, quality, review, skills, ttsr_rules,
+    web, work,
 };
 
 const PAGES: &[(&str, &str)] = &[
@@ -34,6 +35,7 @@ const PAGES: &[(&str, &str)] = &[
     ("web", web::WEB_DOC),
     ("workflows", orchestration::docs::WORKFLOWS_DOC),
     ("plan", include_str!("docs/plan.md")),
+    ("procs", procs::PROCS_DOC),
     ("todo", include_str!("docs/todo.md")),
     ("work", work::PLAN_DOC),
 ];
@@ -53,23 +55,12 @@ fn title(text: &str) -> &str {
         .map_or("", |line| line.trim_start_matches('#').trim())
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "the generated dal manual must contain the shared symbols page"
-)]
-static DAL_SYMBOLS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    dalgon::product::builtin_manuals()
-        .into_iter()
-        .find(|manual| manual.scheme == "dal")
-        .and_then(|manual| {
-            manual
-                .pages
-                .into_iter()
-                .find(|(page, _)| page == "symbols")
-                .map(|(_, text)| text)
-        })
-        .expect("generated dal manual must contain the symbols page")
-});
+/// The `dalgona://symbols` page: a pointer to the shared reference, not a copy.
+///
+/// Symbol search is documented once in the dal manual. This path stays so
+/// `dalgona://symbols` keeps resolving, but its body points at
+/// `dal://symbols` instead of duplicating it.
+const SYMBOLS_POINTER: &str = "# Symbols\n\nThe symbol-search reference lives in the dal manual: read `dal://symbols` (`dalgon docs dal://symbols`).\n";
 
 fn pages() -> Vec<(String, String)> {
     let mut pages: Vec<(String, String)> = PAGES
@@ -79,7 +70,7 @@ fn pages() -> Vec<(String, String)> {
     if let Some(page) = pages.iter_mut().find(|(path, _)| path == "orchestration") {
         page.1 = orchestration_page();
     }
-    pages.push(("symbols".to_owned(), DAL_SYMBOLS.as_str().to_owned()));
+    pages.push(("symbols".to_owned(), SYMBOLS_POINTER.to_owned()));
     pages
 }
 

@@ -1,29 +1,36 @@
-//! Prompt sections: one immutable section per extension.
+//! Prompt sections: ordered sections contributed by an extension.
 //!
 //! A [`PromptSection`] is either [`PromptSection::Static`] fixed bytes or
-//! [`PromptSection::Session`] bytes rendered through a [`SectionFn`] once at
-//! session open and again only on generation publish. The
-//! builder enforces at most one section per extension
-//! ([`MAX_SECTIONS_PER_EXTENSION`]); this module only carries the data.
+//! [`PromptSection::Session`] bytes rendered through a [`SectionFn`]
+//! whenever the driver assembles a provider request. An extension may
+//! register several sections at distinct [`PromptOrder`] positions; the
+//! builder rejects two sections at the same order
+//! ([`dal_core::RegistrationError::DuplicatePromptSection`], capacity
+//! [`MAX_SECTIONS_PER_EXTENSION`]). This module only carries the data.
 //!
 //! Render inputs ride one read-only aggregate ([`SectionCx`]): the
 //! session/turn/services/caller view plus the generation snapshot id, the
-//! model-visible tool list, and the resolved instruction / `SYSTEM.md`
-//! content. [`SectionFn::render`] covers all of them through `cx`, so prompt
-//! and guard consumers share one signature.
+//! model-visible tool list, the resolved model's metadata, and the resolved
+//! instruction / `SYSTEM.md` content. [`SectionFn::render`] covers all of
+//! them through `cx`, so prompt and guard consumers share one signature.
 
 use std::any::Any;
 use std::sync::Arc;
 
-use dal_core::{Gen, SessionId, TurnId, Visibility};
+use dal_core::{BlobId, Gen, ModelInfo, SessionId, TurnId, Visibility};
 
 use super::{Caller, Services, ToolDescription};
 
 /// Joins rendered sections with one blank line, byte-stable.
 pub const SECTION_SEPARATOR: &str = "\n\n";
 
-/// One prompt section per extension; the builder rejects the second.
-pub const MAX_SECTIONS_PER_EXTENSION: usize = 1;
+/// Prompt slots an extension may fill: the closed [`PromptOrder`] domain.
+///
+/// One section per order is the design rule (two at the same order are
+/// rejected); this bound is derived as the highest position plus one, so
+/// admitting every distinct order is possible without an arbitrary count.
+// Widening u8 -> usize; lossless.
+pub const MAX_SECTIONS_PER_EXTENSION: usize = PromptOrder::DocsLine.position() as usize + 1;
 
 /// Product prompt section order.
 ///
@@ -77,9 +84,10 @@ impl PromptOrder {
 
 /// Read-only render context for one [`SectionFn::render`] call.
 ///
-/// Borrowed views keep the section pure: the host owns caching (render once
-/// at open, again only on generation publish). `services` is carried for
-/// identity only; render calls no [`Services`] methods.
+/// Borrowed views keep the section pure: the driver renders sections when it
+/// assembles each provider request, so a render always sees the current
+/// model. `services` is carried for identity only; render calls no
+/// [`Services`] methods.
 pub struct SectionCx<'a> {
     /// Owner state retained by the session setup, when any.
     pub state: Option<&'a (dyn Any + Send + Sync)>,
@@ -95,6 +103,14 @@ pub struct SectionCx<'a> {
     pub snapshot: Gen,
     /// Model-visible tool descriptions of the current generation.
     pub tools: &'a [ToolDescription],
+    /// Digests of the images the request being assembled already carries, in
+    /// history or current input. A section hides a description behind a
+    /// name-only line only when its image is among these, so a hidden
+    /// description is always backed by its image in the same request.
+    pub delivered_images: &'a [BlobId],
+    /// The resolved route's model metadata at render time, `None` when the
+    /// route did not resolve.
+    pub model: Option<&'a ModelInfo>,
     /// Resolved session instructions, when present.
     pub instructions: Option<&'a str>,
     /// Resolved `SYSTEM.md` content, when present.

@@ -144,18 +144,37 @@ pub enum WiredBlock {
 ///
 /// Returns `None` for disabled settings, unsupported blocks, and text that is
 /// not exactly one fenced block. The disabled path returns before inspecting
-/// the text or touching the cache.
+/// the text or touching the cache. The fence language comes back with the
+/// block so committed-card callers stop re-parsing it.
 #[must_use]
 pub fn wire_block(
     settings: &DiagramSettings,
     cache: &RenderCache,
     text: &str,
     width_cells: usize,
-) -> Option<WiredBlock> {
+) -> Option<(DiagramKind, WiredBlock)> {
     if !settings.enabled {
         return None;
     }
     let (kind, source) = fenced_source(text)?;
+    wire_source(settings, cache, kind, source, width_cells).map(|wired| (kind, wired))
+}
+
+/// Schedules or resolves one diagram source; `None` means disabled.
+/// Everything `wire_block` does after `fenced_source` accepts, minus the
+/// whole-block gate, so the markdown pipeline can wire one embedded fence at
+/// a time.
+#[must_use]
+pub fn wire_source(
+    settings: &DiagramSettings,
+    cache: &RenderCache,
+    kind: DiagramKind,
+    source: &str,
+    width_cells: usize,
+) -> Option<WiredBlock> {
+    if !settings.enabled {
+        return None;
+    }
     Some(
         match cache.get_or_schedule(kind, source.as_bytes(), width_cells) {
             Some(DiagramOutcome::Art(art)) => WiredBlock::Art(art),
@@ -598,7 +617,7 @@ mod tests {
         }
         assert!(matches!(
             wire_block(&settings, &cache, source, 80),
-            Some(WiredBlock::Fallback { kind: DiagramKind::D2, reason, source })
+            Some((_, WiredBlock::Fallback { kind: DiagramKind::D2, reason, source }))
                 if reason.as_ref() == "d2 is not installed" && source.as_ref() == " a -> b "
         ));
     }
@@ -630,9 +649,12 @@ mod tests {
         );
         assert!(matches!(
             wired,
-            Some(WiredBlock::Pending {
-                kind: DiagramKind::D2
-            })
+            Some((
+                _,
+                WiredBlock::Pending {
+                    kind: DiagramKind::D2
+                }
+            ))
         ));
         assert!(started.elapsed() < Duration::from_millis(500));
         for _ in 0..200 {

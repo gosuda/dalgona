@@ -41,8 +41,8 @@ use dal_core::{
 use dal_provider::{
     AuthStyle, CatalogEntry, CompactOutcome, Effort, EnvSnapshot, EventStream, Listing, NoticeSink,
     Provider, ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet,
-    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
-    Transport,
+    ProviderSettings, ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall,
+    ToolSupport, Transport,
 };
 use hyper::{
     Request, Response,
@@ -104,6 +104,8 @@ fn entry(provider: &str, model: &str) -> CatalogEntry {
         temperature_allowed: false,
         display_supported: true,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -157,6 +159,7 @@ fn minimal_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([]),
@@ -174,6 +177,7 @@ fn snapshot_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([read_tool()]),
@@ -189,6 +193,7 @@ fn compact_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from(""),
         tools: Arc::from([]),
@@ -246,6 +251,7 @@ fn build_set(
             key_env: key_env.map(Into::into),
             auth,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     };
@@ -309,6 +315,7 @@ impl Harness {
                 route: ModelRoute::Api {
                     family: Family::Anthropic,
                     model: MODEL.into(),
+                    provider: None,
                 },
                 entry: entry(provider_id, MODEL),
             })
@@ -322,6 +329,7 @@ impl Harness {
                 route: ModelRoute::Api {
                     family: Family::Anthropic,
                     model: MODEL.into(),
+                    provider: None,
                 },
                 entry: compact_entry(provider_id, MODEL),
             })
@@ -385,6 +393,7 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             reasoning_tokens: None,
             cache_write_tokens: 0,
             cost_usd: None,
+            premium_requests: None,
         },
     }
 }
@@ -797,6 +806,7 @@ async fn anthropic_native_tool_search_session_replays_the_search_pair() {
                 family: Family::Anthropic,
                 model: MODEL.into(),
             },
+            replay: None,
             parts: vec![
                 AssistantPart::Thinking {
                     text: String::new().into(),
@@ -806,6 +816,7 @@ async fn anthropic_native_tool_search_session_replays_the_search_pair() {
                     call: CallId::new(call.id.clone()),
                     name: call.name.clone().into(),
                     args,
+                    replay: None,
                 },
             ],
         },
@@ -1145,6 +1156,7 @@ async fn capture_turn(
             route: ModelRoute::Api {
                 family: Family::Anthropic,
                 model: MODEL.into(),
+                provider: None,
             },
             entry: entry(provider_id, MODEL),
         })
@@ -1181,6 +1193,7 @@ async fn anthropic_api_key_header_distinction() {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([read_tool()]),
@@ -1269,6 +1282,16 @@ async fn anthropic_bearer_header_distinction() {
         "bearer request sends no beta header"
     );
     assert!(!recorded.has("x-app"), "bearer request sends no app marker");
+    assert!(
+        recorded
+            .value("user-agent")
+            .is_some_and(|agent| !agent.contains("claude-cli")),
+        "bearer request keeps the library user-agent"
+    );
+    assert!(
+        !recorded.body_text().contains("Claude Code"),
+        "bearer request adds no OAuth identity block"
+    );
 }
 
 #[tokio::test]
@@ -1278,6 +1301,7 @@ async fn anthropic_oauth_header_distinction() {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([read_tool(), web_search_tool()]),

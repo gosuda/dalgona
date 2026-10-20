@@ -26,6 +26,11 @@
 //!   session actor before it answers; `records` reads the caller's own rows
 //!   on the current leaf path from the actor's published snapshot. No other
 //!   extension's rows are visible.
+//! - `private_outcomes` is an own-data read like `records`: no inject check
+//!   and no grant. The host-minted caller goes to the backend verbatim, which
+//!   derives the owner from it, filters the published terminal index, and
+//!   never waits on the actor. Only the calling extension's terminal
+//!   private-effect facts come back; the raw arguments never do.
 //!
 //! The run-output mapping leaves `stderr_tail` empty until the process
 //! layer exposes a separate stderr tail.
@@ -50,9 +55,9 @@ use crate::proc::{ProcResult, ProcStatus, SpawnOpts, StopReason};
 use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
-    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
+    AgentsOp, AgentsReply, Answer, CallId, DenyReason, EntryId, FetchRequest, FetchResponse,
+    Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview,
+    PrivateEffect, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
     StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
@@ -95,47 +100,27 @@ pub struct SessionServices {
 /// Cap on concurrently open extension asks. Real callers are blocked tool
 /// calls and permitted cells, so the cap only exists to keep the set
 /// bounded against a looping script; over the cap the raise is refused
-/// with the busy error (backpressure, never a silent drop).
-const MAX_OPEN_ASKS: usize = 16;
+/// with the busy error (backpressure, never a silent drop). The count
+/// includes armed slots and armed slots whose withdrawal the actor has not
+/// settled yet, so it bounds the session's withdrawal claims too; the
+/// inbox derives its lane bound from this constant.
+pub(crate) const MAX_OPEN_ASKS: usize = 16;
 
-/// Marks the withdrawal in the broker and renders the resolution to
-/// journal, or `None` when the guard was disarmed or the request was
-/// already resolved. A local deadline instead uses broker expiry, so its
-/// journal record carries `Resolution::Unavailable` and the request default.
-fn withdraw_request(
-    armed: bool,
-    expired: bool,
-    broker: &Broker,
-    request: &Request,
-) -> Option<crate::broker::Resolved> {
-    if !armed {
-        return None;
-    }
-    if expired {
-        return broker.expire_one(request.id, Instant::now());
-    }
-    let by = ClientId::new("core");
-    let answered = broker
-        .answer(request.id, Answer::Cancel, by.clone())
-        .is_ok();
-    answered.then(|| crate::broker::Resolved {
-        request: request.clone(),
-        answer: Answer::Cancel,
-        by,
-        resolution: Resolution::Cancelled,
-        was_default: false,
-    })
-}
-
-/// Releases one extension-ask slot on drop and resolves a withdrawn broker
-/// request as `Cancel`. A stranded request would stay answerable on every
-/// front end while nobody consumes its reply. The withdrawal is the
-/// request's first resolution: the broker mark here wins late answers, and
-/// the actor-owned inbox journals it before the fold broadcasts the
-/// retirement after the record.
+/// Releases one extension-ask slot. The withdrawal is the request's first
+/// resolution: the inbox claims the broker slot under its lock, which wins
+/// late answers, and the actor journals the claim before the fold
+/// broadcasts the retirement after the record.
+///
+/// Admission lifetime: while the guard is armed the slot's id stays in
+/// `ask_open` after the drop, so the next admission cannot reuse the
+/// capacity until the actor settles the claim (see
+/// [`ResolutionInbox::mark_settled`](crate::session::ResolutionInbox::mark_settled)).
+/// A guard that saw its waiter settle frees the entry at once — the waiter
+/// is released only after the terminal record's journal receipt, so the
+/// settlement is already durable.
 struct AskSlot<'a> {
     slot: &'a Mutex<HashSet<RequestId>>,
-    broker: &'a Broker,
+    resolutions: std::sync::Arc<crate::session::ResolutionInbox>,
     backend: Arc<dyn SessionBackend>,
     request: Request,
     armed: bool,
@@ -145,43 +130,70 @@ struct AskSlot<'a> {
 
 impl Drop for AskSlot<'_> {
     fn drop(&mut self) {
-        let resolved = withdraw_request(self.armed, self.expired, self.broker, &self.request);
+        if !self.armed {
+            let mut open = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            open.remove(&self.request.id);
+            return;
+        }
+        // The attachment probe runs before any inbox lock nests under it.
+        let expiry = self.expired.then(|| !self.backend.answerer_attached());
+        self.free_unless_claimed(self.resolutions.withdraw(self.request.id, expiry));
+    }
+}
+
+impl AskSlot<'_> {
+    /// Frees this slot's admission entry unless a claim queued: `Some(id)`
+    /// means the actor will settle that claim and the entry must stay
+    /// occupied until then; `None` means another winner resolved the slot or
+    /// the fence owns it, so no settlement will arrive for this id and
+    /// keeping the entry would wedge the battery at its cap.
+    fn free_unless_claimed(&self, receipt: Option<RequestId>) {
+        if receipt.is_some() {
+            return;
+        }
         let mut open = self
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         open.remove(&self.request.id);
-        drop(open);
-        if let Some(resolved) = resolved {
-            self.backend.request_resolved(resolved);
-        }
     }
 }
 
 /// The one open run-approval slot: same withdrawal discipline as
-/// [`AskSlot`], but exclusive until its terminal record is settled.
+/// [`AskSlot`], but exclusive until its terminal record is settled. A run
+/// has no local timer — its broker deadline settles through the actor's
+/// expiry sweep — so its withdrawal never expires, only withdraws.
 struct RunSlot<'a> {
     slot: &'a Mutex<Option<RequestId>>,
-    broker: &'a Broker,
-    backend: Arc<dyn SessionBackend>,
+    resolutions: std::sync::Arc<crate::session::ResolutionInbox>,
     request: Request,
     armed: bool,
-    expired: bool,
 }
 
 impl Drop for RunSlot<'_> {
     fn drop(&mut self) {
-        let resolved = withdraw_request(self.armed, self.expired, self.broker, &self.request);
+        if !self.armed {
+            let mut slot = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_some_and(|id| id == self.request.id) {
+                *slot = None;
+            }
+            return;
+        }
+        if self.resolutions.withdraw(self.request.id, None).is_some() {
+            return;
+        }
         let mut slot = self
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_some_and(|id| id == self.request.id) {
             *slot = None;
-        }
-        drop(slot);
-        if let Some(resolved) = resolved {
-            self.backend.request_resolved(resolved);
         }
     }
 }
@@ -253,7 +265,10 @@ impl SessionServices {
             // A fired token fails before any gate or wait: the turn is
             // already cancelled, so no new work may start under it.
             Some(token) if token.is_cancelled() => Err(ServiceError::Cancelled),
-            Some(token) => Ok(token),
+            // The caller receives a child of the turn token: it observes the
+            // turn's cancellation, but a holder firing it cannot fire the
+            // turn root, so a later user cancel still classifies honestly.
+            Some(token) => Ok(token.child_token()),
             None => Ok(self.cancel.clone()),
         }
     }
@@ -429,7 +444,7 @@ impl SessionServices {
         let secs = crate::broker::default_timeout(&question).as_secs();
         let owner = Owner::Extension {
             name: who.ext.as_str().into(),
-            origin: origin_name(who.origin).into(),
+            origin: origin_text_shared(who.origin).into(),
         };
         let deadline = Instant::now() + crate::broker::default_timeout(&question);
         let (request, waiter) = {
@@ -451,11 +466,9 @@ impl SessionServices {
         };
         let mut guard = RunSlot {
             slot: &self.run_open,
-            broker: &self.broker,
-            backend: Arc::clone(&self.backend),
+            resolutions: Arc::clone(&self.resolutions),
             request: request.clone(),
             armed: true,
-            expired: false,
         };
         self.backend
             .request_opened(request.clone())
@@ -473,6 +486,7 @@ impl SessionServices {
             answer,
             by,
             resolution,
+            ..
         }) = settled
         else {
             return Err(ServiceError::Cancelled);
@@ -492,16 +506,15 @@ impl SessionServices {
                 };
                 self.run_spawned(req, approved, &cancel).await
             }
-            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(
-                match resolution {
-                    Resolution::Unavailable => format!(
-                        "Permission denied: run needed approval and no one answered within {secs} s."
-                    ),
-                    Resolution::Answered | Resolution::Cancelled => {
-                        format!("Permission denied: run was declined by {}.", by.as_str())
-                    }
-                },
-            ))),
+            (Resolution::Unavailable, Answer::Decline) => {
+                Err(ServiceError::Denied(DenyReason::Unavailable {
+                    what: format!("run approval with no answer within {secs} s").into(),
+                }))
+            }
+            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(format!(
+                "Permission denied: run was declined by {}.",
+                by.as_str()
+            )))),
             (_, Answer::Cancel) => Err(ServiceError::Denied(DenyReason::Unavailable {
                 what: "approval cancelled".into(),
             })),
@@ -583,7 +596,13 @@ pub const MCP_UNAVAILABLE_TEXT: &str =
 /// next to it.
 pub const SIDECAR_EPHEMERAL_TEXT: &str = "sidecar is unavailable for ephemeral sessions";
 
-fn origin_name(origin: Origin) -> &'static str {
+/// Renders one extension origin to its owner text.
+///
+/// This is the single Origin-to-text renderer shared by the synthetic write
+/// path's owner mint and the private-outcomes read filter: two renderers is
+/// a silent-empty-read divergence risk, since owner equality would fail if
+/// either drifted.
+pub(crate) fn origin_text_shared(origin: Origin) -> &'static str {
     match origin {
         Origin::Bundled => "bundled",
         Origin::User => "user",
@@ -598,6 +617,16 @@ impl Services for SessionServices {
         let path = path.to_owned();
         Box::pin(async move {
             Self::check_inject(&who, Service::FsRead)?;
+            // The backend serves one absolute location, the session's own
+            // `jobs/` directory where the exec tool spills its log, and only
+            // to a Builtin caller. Any other origin keeps the workspace-only
+            // reach its grant declares, and is refused before a grant
+            // question can open for a path no answer could make readable.
+            if who.origin() != Origin::Builtin && std::path::Path::new(&path).is_absolute() {
+                return Err(ServiceError::Denied(DenyReason::out_of_scope(format!(
+                    "path \"{path}\""
+                ))));
+            }
             self.gated(&who, Service::FsRead).await?;
             self.backend.fs_read(&path).await
         })
@@ -688,12 +717,16 @@ impl Services for SessionServices {
                     .ask_open
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // A dropped armed slot keeps its id occupied until the actor
+                // settles its withdrawal claim, so only settled entries free
+                // capacity here.
+                open.retain(|id| !self.resolutions.take_settled(*id));
                 if open.len() >= MAX_OPEN_ASKS {
                     return Err(ServiceError::ask_busy());
                 }
                 let owner = Owner::Extension {
                     name: who.ext.as_str().into(),
-                    origin: origin_name(who.origin).into(),
+                    origin: origin_text_shared(who.origin).into(),
                 };
                 let deadline = Instant::now() + self.ask_timeout;
                 let (request, answer) = self.broker.open(owner, question, turn, deadline);
@@ -702,7 +735,7 @@ impl Services for SessionServices {
             };
             let mut guard = AskSlot {
                 slot: &self.ask_open,
-                broker: &self.broker,
+                resolutions: Arc::clone(&self.resolutions),
                 backend: Arc::clone(&self.backend),
                 request: request.clone(),
                 armed: true,
@@ -749,13 +782,14 @@ impl Services for SessionServices {
         let client = self.mcp_client.clone();
         Box::pin(async move {
             Self::check_inject(&who, Service::Mcp)?;
+            let cancel = self.call_cancel(&who)?;
             self.gated(&who, Service::Mcp).await?;
             let Some(client) = client else {
                 return Err(ServiceError::Denied(DenyReason::Unavailable {
                     what: "MCP client".into(),
                 }));
             };
-            client.call(&who, req).await
+            client.call(&who, req, cancel).await
         })
     }
 
@@ -966,6 +1000,15 @@ impl Services for SessionServices {
                 .map(|record| Box::new(record.body.clone()))
                 .collect())
         })
+    }
+
+    fn private_outcomes(&self, who: &Caller) -> ServiceFuture<'_, Vec<PrivateEffect>> {
+        // Forward-only: no owner construction and no filtering here, so no
+        // inject check and no grant either — an own-data read like
+        // `records`, `history_texts`, and `scheme`. Derivation and filtering
+        // are backend-owned.
+        let who = who.clone();
+        Box::pin(async move { self.backend.private_outcomes(&who).await })
     }
 
     fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

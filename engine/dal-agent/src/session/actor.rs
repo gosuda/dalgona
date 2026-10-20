@@ -11,31 +11,35 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
-    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StateError,
-    StateKey, StateNs, StateOp, StateRecord, StreamFireAction,
+    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, InputVerdict, Origin, Receipt,
+    StateError, StateKey, StateNs, StateOp, StateRecord, StreamFireAction,
 };
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, EntryId,
     EntryKind, Event, Family, InferFailure, Inference, MailMode, ModelRoute, Name, Part,
-    PartialResponse, Phase, Policy, Record, Rejection, Reply, Request, RequestId, ResolvedCall,
-    Session, SessionId, StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState,
-    UpdateKind, Workspace,
+    PartialResponse, Phase, Policy, PrivateConflict, PrivateEffectId, PrivateLoopId, Record,
+    Rejection, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Session, SessionId,
+    StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState, UpdateKind,
+    Workspace,
 };
 use dal_store::Journal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::control::ControlCell;
-use super::driver::WatchDelivery;
+use super::driver::{WatchDelivery, opening_model};
 use super::shared::Shared;
 use super::status::{STATUS_POLL, sweep};
 use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
 use crate::broker::{AnswerWait, Broker, Resolved, default_timeout};
 use crate::error::{ActualTurn, AgentError, ServiceError, TurnPhase, ValidationError, deny_text};
 use crate::ext::Services;
+use crate::ext::generation::Generation;
 use crate::ext::hooks::{
-    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, join_before_turn,
+    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, input_failed_notice,
+    join_before_turn,
 };
+use crate::host::default_store::{DefaultUpdate, persist_default};
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
@@ -251,6 +255,8 @@ pub(crate) struct ActorDeps {
     pub(crate) backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     /// The owner for background work that must stop before the journal closes.
     pub(crate) tasks: crate::session::tasks::SessionTasks,
+    /// The default reasoning level this session opened under.
+    pub(crate) thinking: dal_core::ThinkingLevel,
 }
 
 /// Lifecycle latches for one session actor.
@@ -330,6 +336,11 @@ pub(crate) struct Actor {
     host: Arc<crate::host::HostState>,
     pending_commands: VecDeque<ReplyTx>,
     settling: Option<TurnId>,
+    /// One-shot replies parked by [`ActorRequest::Settle`], drained when a
+    /// folded driver confirmation clears [`Self::settling`]. A waiter whose
+    /// receiver is gone (its close timed out) removes itself on the next
+    /// drain.
+    settle_waiters: Vec<oneshot::Sender<()>>,
     /// Broker resolutions held until their journal emit has been observed.
     pending_releases: Vec<Resolved>,
     broken: Option<Box<str>>,
@@ -340,6 +351,9 @@ pub(crate) struct Actor {
     /// right after the actor spawns.
     backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     tasks: crate::session::tasks::SessionTasks,
+    /// The default reasoning level this session opened under; a default
+    /// saved later reaches only sessions opened after it.
+    thinking: dal_core::ThinkingLevel,
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
@@ -550,9 +564,14 @@ const OPENING_CHANNEL: usize = COMMAND_CHANNEL;
 pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
     let (opening_tx, opening_rx) = mpsc::channel(OPENING_CHANNEL);
-    let control = Arc::new(Mutex::new(ControlCell::new()));
+    // The inbox owns the broker so every claim does its compare-and-swap
+    // under the inbox lock; the cell needs the inbox for classification, so
+    // both are built here before the actor takes the broker.
+    let resolutions = Arc::new(crate::session::ResolutionInbox::new(Arc::clone(
+        &deps.broker,
+    )));
+    let control = Arc::new(Mutex::new(ControlCell::new(Arc::clone(&resolutions))));
     let (driver_tx, ops_rx) = mpsc::channel(DRIVER_CHANNEL);
-    let resolutions = Arc::new(crate::session::ResolutionInbox::new());
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
@@ -573,11 +592,13 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         host: deps.host,
         pending_commands: VecDeque::new(),
         settling: None,
+        settle_waiters: Vec::new(),
         pending_releases: Vec::new(),
         broken: None,
         services: None,
         backend: deps.backend,
         tasks: deps.tasks,
+        thinking: deps.thinking,
     };
     let handle = SessionHandle::new(
         deps.session,
@@ -648,6 +669,10 @@ struct FoldOutcome {
     delivered: Vec<dal_core::ext::ReadView>,
     /// A cancelled turn whose end update waits for its journal receipts.
     cancelled_end: Option<TurnId>,
+    /// A just-folded `RequestOpened` whose parked turn-cancel claim hands
+    /// over only after the fold accepted the event; `None` for every other
+    /// work report. A rejected `RequestOpened` leaves the claim parked.
+    opened: Option<RequestId>,
 }
 
 struct WatchCommit {
@@ -810,13 +835,18 @@ impl Actor {
             effects,
             asks,
             policy: self.fold.policy(self.answerer_attached()),
-            model: self
-                .fold
-                .requested_model()
-                .cloned()
-                .or_else(|| self.fold.active_model().cloned()),
+            model: self.requested_route(),
             family: self.fold.active_family(),
         }
+    }
+
+    /// The route the next request names: the one the caller selected, else
+    /// the route of the live turn. `None` leaves the host default.
+    fn requested_route(&self) -> Option<ModelRoute> {
+        self.fold
+            .requested_model()
+            .or_else(|| self.fold.active_model())
+            .cloned()
     }
 
     /// Reports whether a frontend can answer approval questions.
@@ -890,6 +920,16 @@ impl Actor {
             }
         }
         self.drain_resolutions().await;
+        // Run exit: fence the inbox and release every remainder
+        // waiter-only — folded leftovers were already settled, and parked
+        // claims of never-folded requests never publish. No producer can
+        // hang on a waiter the gone actor would never release.
+        for resolved in self.resolutions.close() {
+            self.broker.cancel(&resolved);
+        }
+        for parked in self.broker.parked() {
+            self.broker.cancel(&parked);
+        }
     }
 
     /// Folds mailbox requests that arrived before a woken inbox resolution.
@@ -952,9 +992,12 @@ impl Actor {
     /// so the services slot reopens only after the terminal record landed.
     async fn drain_resolutions(&mut self) {
         let already_waiting = self.flags.begin_hook_suspension();
-        while let Some((id, work)) = self.resolutions.take() {
+        while let Some(resolved) = self.resolutions.take() {
             self.drain_service_queued().await;
-            self.on_work(work).await;
+            let id = resolved.request.id;
+            self.on_work(TurnWork::Answered { resolved }).await;
+            // Every drained item settles its id, including unknown-question
+            // fail-closed claims — that is what frees services admission.
             self.resolutions.mark_settled(id);
         }
         if !already_waiting {
@@ -995,6 +1038,13 @@ impl Actor {
                 self.on_shutdown().await;
                 let _ = reply.send(());
             }
+            ActorRequest::Settle { reply } => {
+                if self.settling.is_none() {
+                    let _ = reply.send(());
+                } else {
+                    self.settle_waiters.push(reply);
+                }
+            }
             ActorRequest::Work { work } => {
                 self.on_work(work).await;
             }
@@ -1022,6 +1072,15 @@ impl Actor {
             }
             ActorRequest::ExtRecord { req } => {
                 self.on_ext_record(req).await;
+            }
+            ActorRequest::PrivateLoop { req } => {
+                self.on_private_loop(req).await;
+            }
+            ActorRequest::PrivateStart { req } => {
+                self.on_private_start(req).await;
+            }
+            ActorRequest::PrivateEnd { req } => {
+                self.on_private_end(req).await;
             }
             ActorRequest::Inferred {
                 who,
@@ -1126,9 +1185,12 @@ impl Actor {
         };
         let mut queue: VecDeque<Effect> = VecDeque::new();
         let mut effects = Vec::new();
-        let outcome = self.classify(work, &mut queue, &mut effects);
+        let mut outcome = self.classify(work, &mut queue, &mut effects);
         if let Some(event) = outcome.event {
-            self.step(event, &mut effects);
+            match outcome.opened.take() {
+                Some(opened) => self.fold_opened(event, opened, &mut queue, &mut effects),
+                None => self.step(event, &mut effects),
+            }
         }
         queue.extend(effects);
         let durable = self.execute(queue.into(), None).await;
@@ -1297,7 +1359,12 @@ impl Actor {
     ) -> FoldOutcome {
         let mut outcome = FoldOutcome::default();
         let event = match work {
-            TurnWork::Asked { request } => Some(Event::RequestOpened { request }),
+            TurnWork::Asked { request } => {
+                // The actor folds the event itself below, then hands over
+                // the parked claim only when the fold accepted it.
+                outcome.opened = Some(request.id);
+                Some(Event::RequestOpened { request })
+            }
             TurnWork::CallStarted { turn, call } => Some(Event::CallStarted { turn, call }),
             TurnWork::Settled {
                 turn,
@@ -1369,14 +1436,23 @@ impl Actor {
             TurnWork::Cancelled { turn, stop } => {
                 if self.settling == Some(turn) {
                     self.settling = None;
+                    // The last ended turn is confirmed: its turn-end hooks
+                    // have finished their journal writes, so a teardown that
+                    // parked on the settle barrier may run session-end hooks.
+                    // Waiters whose close timed out hold dead receivers and
+                    // drop out here.
+                    for waiter in std::mem::take(&mut self.settle_waiters) {
+                        let _ = waiter.send(());
+                    }
                 }
                 // Cancelled turns defer their `TurnEnded` to this driver
                 // confirmation — the kill ladder of an in-flight call has
                 // completed by now; other stops already published at `Emit`.
                 if stop == dal_core::Stop::Cancelled {
-                    let resolved = self
-                        .broker
-                        .resolve_turn(turn, Answer::Cancel, core_client());
+                    // The driver confirmed the cancel, so leftover asks
+                    // journal `Cancelled` — the single durable record that
+                    // frees every abandoned admission entry on this turn.
+                    let resolved = self.broker.resolve_turn(turn, ResolutionCause::Cancelled);
                     for item in resolved {
                         self.queue_resolved_or_cancel(&item, queue);
                     }
@@ -1427,6 +1503,29 @@ impl Actor {
         let _ = self.fold.step(event, Timestamp::now(), effects);
     }
 
+    /// Steps the fold for one `TurnWork::Asked`, then queues the request's
+    /// parked turn-cancel claim only when the fold accepted its
+    /// `RequestOpened` — so the claim's `RequestResolved` always follows the
+    /// open. A rejected open leaves the claim parked; the run-exit sweep
+    /// releases its waiter, so no producer hangs on a fold it missed.
+    fn fold_opened(
+        &mut self,
+        event: Event,
+        opened: RequestId,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let accepted = self.fold.step(event, Timestamp::now(), effects).is_ok();
+        queue.extend(std::mem::take(effects));
+        if !accepted {
+            return;
+        }
+        let Some(claim) = self.broker.report_opened(opened) else {
+            return;
+        };
+        self.queue_resolved_or_cancel(&claim, queue);
+    }
+
     /// Marks complete read views delivered at the shared cursor so later
     /// captures freeze the right cutoff.
     fn mark_delivered(&mut self, delivered: &[dal_core::ext::ReadView]) {
@@ -1442,10 +1541,58 @@ impl Actor {
         }
     }
 
+    /// Runs the fenced, finite shutdown drain. Classification already
+    /// happened in `SessionHandle::begin_shutdown` before any lifecycle
+    /// fire, so nothing here classifies; every drain below is a bounded
+    /// loop, never a recursive future. `Shutdown` travels the command
+    /// lane, so this opening-lane drain cannot re-enter this function.
     async fn on_shutdown(&mut self) {
-        self.control().cancel_opening();
+        // 1. Quiesce session tasks; their drops claim and enqueue.
         self.tasks.stop().await;
-
+        // 2. No nested execute may open a turn past this point.
+        let already = self.flags.begin_hook_suspension();
+        // 3. Fence the opening lane: new sends fail `SessionClosed`, so
+        // producers never publish past this point.
+        self.opening_rx.close();
+        self.flags.mark_opening_closed();
+        // 4. Fold everything enqueued before the fence. `Receiver::close`
+        // makes `recv` return `None` once the buffer and the permits
+        // reserved before the close are exhausted, so this is finite.
+        // Boxed: `on_request` can step `Shutdown`, which awaits this
+        // function again, so the unboxed futures would recurse in type.
+        while let Some(request) = self.opening_rx.recv().await {
+            Box::pin(self.on_request(request)).await;
+        }
+        // 5. Fence the inbox claims and fold the finite remainder after
+        // their `Asked`; each id settles so admission frees without a
+        // fabricated record.
+        for resolved in self.resolutions.close() {
+            let id = resolved.request.id;
+            self.on_work(TurnWork::Answered { resolved }).await;
+            self.resolutions.mark_settled(id);
+        }
+        // 6. Overdue slots become `TimedOut` or `NoController`, as on the
+        // steady-state tick.
+        self.sweep_expiry().await;
+        // 7. Claim every still-unresolved open request. Slots the fold
+        // registered journal `Withdrawn`; unregistered slots release
+        // waiter-only through the fail-closed path, never published.
+        let mut queue = VecDeque::new();
+        for request in self.broker.open_requests() {
+            if let Some(claim) = self.broker.withdraw(request.id) {
+                self.queue_resolved_or_cancel(&claim, &mut queue);
+            }
+        }
+        self.execute(queue.into_iter().collect(), None).await;
+        // 8. No wake-opening tail: the hook reentrancy guard exits once.
+        if !already {
+            self.flags.exit_hook_wait();
+        }
+        // 9. Unclassified lifecycle re-fire, after the drains, while the
+        // opening-shutdown marker stays set.
+        self.control().cancel_opening();
+        // 10. Journal, snapshot, then the closing latch that breaks the run
+        // loop.
         let _ = self.journal.close().await;
         self.shared.close_all();
         self.flags.mark_closing();
@@ -1458,21 +1605,57 @@ impl Actor {
         }
         self.sweep_expiry().await;
         self.flags.note_submit(&command);
+        let default = DefaultUpdate::requested(&command);
         let mut effects = Vec::new();
         let stepped = self.fold.step(
             Event::Command { cmd: command, by },
             Timestamp::now(),
             &mut effects,
         );
-        match stepped {
-            Err(rejection) => {
+        match (stepped, default) {
+            (Err(rejection), _) => {
                 let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
-            Ok(()) => {
+            (Ok(()), None) => {
                 let _ = self.execute(effects, Some(reply)).await;
             }
+            (Ok(()), Some(default)) => self.execute_then_persist(effects, default, reply).await,
         }
+    }
+
+    /// Runs one `Save::SessionAndDefault` setting, then persists it as the
+    /// product default only after its settings journal append succeeded.
+    ///
+    /// A rejected or journal-failed operation writes nothing and forwards its
+    /// outcome unchanged. A failed default write keeps the journaled session
+    /// as is and replies `PersistenceFailed` with the writer's distinct
+    /// wording (remote-gated or `default write failed`), never a success.
+    async fn execute_then_persist(
+        &mut self,
+        effects: Vec<Effect>,
+        default: DefaultUpdate,
+        reply: ReplyTx,
+    ) {
+        let (local, mut outcome) = oneshot::channel();
+        let _ = self.execute(effects, Some(local)).await;
+        // Setting commands settle their reply inside this frame; an absent
+        // outcome means the frame dropped it, and dropping `reply` here
+        // reports the same closed channel the plain path would.
+        let Ok(result) = outcome.try_recv() else {
+            return;
+        };
+        if result.is_err() {
+            let _ = reply.send(result);
+            return;
+        }
+        let result = match persist_default(&self.host.shared, &default).await {
+            Ok(()) => result,
+            Err(error) => Err(AgentError::PersistenceFailed {
+                message: error.to_string().into(),
+            }),
+        };
+        let _ = reply.send(result);
     }
 
     /// Fires the turn token before the fold step touches any channel.
@@ -1636,9 +1819,13 @@ impl Actor {
     /// then feeds the joined verdict as a Guard event.
     ///
     /// Prompt and follow-up openings run the input hooks before the
-    /// `before_turn` hooks; wake openings skip the input hooks. A cancel that
-    /// lands while the hooks run wins: the fold drops a verdict whose phase
-    /// moved on.
+    /// `before_turn` hooks; wake openings skip the input hooks. The folded
+    /// input content reaches the fold as an `Input` guard ahead of the
+    /// `before_turn` guard, so the first `User` record and the provider
+    /// request carry the same final parts. A cancelled opening keeps its
+    /// admitted content: transforms from an opening that did not finish are
+    /// not admitted. A cancel that lands while the hooks run wins: the fold
+    /// drops a verdict whose phase moved on.
     async fn drive_opening(&mut self) -> Option<Vec<Effect>> {
         if self.settling.is_some() {
             return None;
@@ -1657,30 +1844,12 @@ impl Actor {
             turn_deadline: deadline,
             script: self.hook_script(),
         };
-        let mut content = content;
-        if run_input {
-            for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
-                let cx = scope.cx(&caller, Some(turn));
-                let step = self
-                    .pump_opening(dispatch_input(
-                        extension.name(),
-                        &cx,
-                        matches!(extension.origin(), Origin::Builtin),
-                        generation.inputs(index),
-                        &InputEvent {
-                            content: content.clone(),
-                        },
-                    ))
-                    .await;
-                content = step.content;
-                for notice in step.notices {
-                    self.notice(turn, "hook.input", &notice);
-                }
-                if step.stop {
-                    break;
-                }
-            }
-        }
+        let content = if run_input {
+            self.fold_input_hooks(&scope, &generation, turn, content)
+                .await
+        } else {
+            content
+        };
         let event = BeforeTurn {
             turn,
             text: content_text(&content).into(),
@@ -1706,12 +1875,26 @@ impl Actor {
             return None;
         }
         self.control().end_opening(turn);
+        // Digests first: `guard_input` takes `content`, and the marker below
+        // must name exactly what the admitted entry carries.
+        let admitted = Self::admitted_digests(&content);
+        let mut effects = Vec::new();
+        // Only a guard-admitted transform counts as delivered. Cancelled
+        // turns still fall through below so their plain user entry lands
+        // (pinned), but they must leave no marker, or every later input
+        // would freeze on images no request ever carried. The refuse
+        // condition is unchanged: guard refusal still ends the opening here.
+        let guard_ok =
+            run_input && !cancel.is_cancelled() && self.guard_input(turn, content, &mut effects);
+        if run_input && !cancel.is_cancelled() && !guard_ok {
+            self.control().cancel_opening();
+            return None;
+        }
         let add = join_before_turn(&texts).map(Into::into);
         let Ok(outcome) = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(add))
         else {
             return None;
         };
-        let mut effects = Vec::new();
         if self
             .fold
             .step(
@@ -1726,10 +1909,167 @@ impl Actor {
             )
             .is_ok()
         {
+            if guard_ok {
+                self.mark_admitted_images(&admitted, &mut effects);
+            }
             return Some(effects);
         }
         self.control().cancel_opening();
         None
+    }
+
+    /// Digests of the image parts in folded input content. Text-only input
+    /// yields none, so callers pay nothing unless images are actually
+    /// admitted.
+    fn admitted_digests(content: &[Part]) -> Vec<BlobId> {
+        let mut digests = Vec::new();
+        for part in content {
+            match part {
+                Part::Image { bytes, mime } if mime.starts_with("image/") => {
+                    let bytes: &[u8] = bytes;
+                    digests.push(BlobId::from_bytes(bytes));
+                }
+                Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => {
+                    digests.push(*blob_id);
+                }
+                _ => {}
+            }
+        }
+        digests
+    }
+
+    /// Journals a `letter_delivered` marker in the same batch as the admitted
+    /// user entry, so the two land atomically: the marker names every image
+    /// digest the entry carries, letter or otherwise, and later inputs tell
+    /// delivered letters from records that never reached a request.
+    ///
+    /// The marker is best-effort and purely additive. Cancellations,
+    /// shutdowns, and refusals return before this point, so a dropped
+    /// transform leaves no marker. When the batch holds no user entry there
+    /// is nothing to mark. Body shape contract, mirrored by the strict
+    /// reader in extensions/dal-ext/src/letter.rs and pinned by its
+    /// `letter_first_prompt` tests: `{"v":1,"digests":[<64-hex>...]}`.
+    fn mark_admitted_images(&mut self, digests: &[BlobId], effects: &mut [Effect]) {
+        if digests.is_empty() {
+            return;
+        }
+        let Some(body) = Self::delivered_body(digests) else {
+            return;
+        };
+        let Some(emit) = effects.iter_mut().find_map(|effect| match effect {
+            Effect::Emit(emit)
+                if emit
+                    .records
+                    .iter()
+                    .any(|record| matches!(record, Record::User(_))) =>
+            {
+                Some(emit)
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.fold.fold_ext("letter", "letter_delivered", &body);
+        emit.records.push(Record::Ext {
+            at: Timestamp::now(),
+            ext: "letter".into(),
+            kind: "letter_delivered".into(),
+            body,
+        });
+        self.shared.sync_ext(&self.fold);
+    }
+
+    /// Renders one `letter_delivered` body for `digests`. Hex strings keep
+    /// the shape valid JSON without an engine-side JSON dependency; the
+    /// strict reader side parses each back through `BlobId`.
+    fn delivered_body(digests: &[BlobId]) -> Option<dal_core::RawJson> {
+        let list = digests
+            .iter()
+            .map(|digest| format!("\"{digest}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("{{\"v\":1,\"digests\":[{list}]}}");
+        dal_core::RawJson::parse(&text).ok()
+    }
+
+    /// Folds every extension's `input` hooks over `content` in canonical
+    /// order and returns the final parts. Transforms feed the next hook and
+    /// the first stopping extension ends the fold. A share that would leave
+    /// non-empty input without parts is refused with one notice and keeps
+    /// the running content, as a failed hook does. Every hook sees the model
+    /// the request will resolve (`opening_model`), so a hook can adapt its
+    /// content to the model's capabilities before anything is journaled.
+    async fn fold_input_hooks(
+        &mut self,
+        scope: &HookScope<'_>,
+        generation: &Generation,
+        turn: TurnId,
+        content: Vec<Part>,
+    ) -> Vec<Part> {
+        let hooked = hook_fanout(generation, Some(turn))
+            .any(|(index, ..)| !generation.inputs(index).is_empty());
+        let model = if hooked {
+            let shared = Arc::clone(&self.host.shared);
+            let requested = self.requested_route();
+            // The session's opening thinking, not the live default: a default
+            // saved later reaches only sessions opened after it.
+            let thinking = self.thinking;
+            // Boxed: the resolution future would otherwise push this fold
+            // (and its `drive_opening` caller) over the `large_future` cap.
+            Box::pin(self.pump_opening(async move {
+                opening_model(&shared, requested.as_ref(), thinking).await
+            }))
+            .await
+        } else {
+            None
+        };
+        let mut event = InputEvent { content, model };
+        for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
+            let cx = scope.cx(&caller, Some(turn));
+            let step = self
+                .pump_opening(dispatch_input(
+                    extension.name(),
+                    &cx,
+                    matches!(extension.origin(), Origin::Builtin),
+                    generation.inputs(index),
+                    &event,
+                ))
+                .await;
+            for notice in step.notices {
+                self.notice(turn, "hook.input", &notice);
+            }
+            if step.content.is_empty() && !event.content.is_empty() {
+                self.notice(turn, "hook.input", &input_failed_notice(extension.name()));
+            } else {
+                event.content = step.content;
+            }
+            if step.stop {
+                break;
+            }
+        }
+        event.content
+    }
+
+    /// Feeds the folded input content to the fold as one `Input` guard.
+    /// Returns `false` when the fold refuses the guard. The guard emits no
+    /// record and no effect; the `before_turn` guard that follows journals
+    /// the first `User` record with these parts. Empty content is only an
+    /// admitted empty follow-up, which no hook replaced: nothing to send.
+    fn guard_input(&mut self, turn: TurnId, content: Vec<Part>, effects: &mut Vec<Effect>) -> bool {
+        if content.is_empty() {
+            return true;
+        }
+        let verdict = HookVerdict::Input(InputVerdict::Transform(content));
+        let Ok(outcome) = HookOutcome::new(HookEvent::Input, verdict) else {
+            return false;
+        };
+        let event = Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome,
+        };
+        self.fold.step(event, Timestamp::now(), effects).is_ok()
     }
 
     /// Publishes one turn-scoped hook notice.
@@ -1784,9 +2124,15 @@ impl Actor {
             UpdateKind::TurnEnded { turn, stop } => {
                 assert!(self.settling.replace(*turn).is_none());
                 self.control().end_turn(*turn);
-                let resolved = self
-                    .broker
-                    .resolve_turn(*turn, Answer::Cancel, core_client());
+                // The turn's terminal record is already journaled; its
+                // backstop cause is `Cancelled` when the driver confirmed a
+                // cancel and `Withdrawn` for any other end.
+                let cause = if *stop == dal_core::Stop::Cancelled {
+                    ResolutionCause::Cancelled
+                } else {
+                    ResolutionCause::Withdrawn
+                };
+                let resolved = self.broker.resolve_turn(*turn, cause);
                 for item in resolved {
                     self.queue_resolved_or_cancel(&item, queue);
                 }
@@ -1833,6 +2179,7 @@ impl Actor {
                     answer: item.answer.clone(),
                     by,
                     was_default: item.was_default,
+                    cause: item.cause,
                 },
                 Timestamp::now(),
                 &mut effects,
@@ -1901,6 +2248,146 @@ impl Actor {
         Ok(position)
     }
 
+    /// Journals one private-loop birth after pre-validation, and answers
+    /// only after the journal receipt.
+    ///
+    /// The fold transition is checked BEFORE the durable append: the store
+    /// performs no private validation, so a persisted invalid birth would
+    /// fail the next open at replay. The transition commits only after the
+    /// receipt, then the shared snapshot syncs (which publishes private
+    /// terminals first) before the reply. A rejected birth appends nothing;
+    /// a failed append folds/publishes nothing (irreversible store errors
+    /// may partially write; the next open repairs).
+    async fn on_private_loop(&mut self, req: super::PrivateLoopRequest) {
+        let super::PrivateLoopRequest {
+            r#loop,
+            who,
+            turn,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(AgentError::Invalid(ValidationError::new(
+                broken.clone(),
+            ))));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_loop(r#loop) {
+            let _ = reply.send(Err(private_loop_conflict(conflict, r#loop)));
+            return;
+        }
+        let record = Record::PrivateLoop {
+            at: Timestamp::now(),
+            r#loop,
+            who: who.clone(),
+            turn,
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(AgentError::PersistenceFailed { message }));
+            return;
+        }
+        self.fold.fold_private_loop(r#loop, who, turn);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
+    /// Journals one private-effect start after pre-validation, and answers
+    /// only after the journal receipt.
+    ///
+    /// Same ordering as [`Self::on_private_loop`]. `call` and `args` ride
+    /// the journal record for live-execution correlation; the fold pairing
+    /// row keeps only the attribution subset (`who`, `turn`, `round`,
+    /// `name`). The caller runs the effect only after this replies `Ok`.
+    async fn on_private_start(&mut self, req: super::PrivateStartRequest) {
+        let super::PrivateStartRequest {
+            r#loop,
+            token,
+            who,
+            turn,
+            round,
+            call,
+            name,
+            args,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(ServiceError::failed(None, broken.clone())));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_start(r#loop, token, &who, turn) {
+            let _ = reply.send(Err(private_effect_conflict(conflict, r#loop, token)));
+            return;
+        }
+        let record = Record::PrivateStart {
+            at: Timestamp::now(),
+            r#loop,
+            token,
+            who: who.clone(),
+            turn,
+            round,
+            call,
+            name: name.clone(),
+            args,
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(ServiceError::failed(None, message)));
+            return;
+        }
+        self.fold
+            .fold_private_start(r#loop, token, &who, turn, round, &name);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
+    /// Journals one private-effect terminal outcome after pre-validation,
+    /// and answers only after the journal receipt.
+    ///
+    /// Same ordering as [`Self::on_private_loop`]. On `Ok` the terminal is
+    /// durable, folded, and published. A rejected end appends nothing; a
+    /// failed append folds/publishes nothing and leaves the row Started in
+    /// memory, which the next open repairs to
+    /// [`dal_core::PrivateOutcome::Indeterminate`].
+    async fn on_private_end(&mut self, req: super::PrivateEndRequest) {
+        let super::PrivateEndRequest {
+            r#loop,
+            token,
+            outcome,
+            reply,
+        } = req;
+        if let Some(broken) = &self.broken {
+            let _ = reply.send(Err(ServiceError::failed(None, broken.clone())));
+            return;
+        }
+        if let Err(conflict) = self.fold.check_private_end(r#loop, token) {
+            let _ = reply.send(Err(private_effect_conflict(conflict, r#loop, token)));
+            return;
+        }
+        let record = Record::PrivateEnd {
+            at: Timestamp::now(),
+            r#loop,
+            token,
+            outcome: outcome.clone(),
+        };
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(ServiceError::failed(None, message)));
+            return;
+        }
+        self.fold.fold_private_end(r#loop, token, outcome);
+        self.shared.sync_ext(&self.fold);
+        let _ = reply.send(Ok(()));
+    }
+
     /// Refreshes fold-owned counters in the shared snapshot.
     fn refresh_stats(&self) {
         self.shared.sync_ext(&self.fold);
@@ -1960,7 +2447,14 @@ impl Actor {
     }
 
     async fn sweep_expiry(&mut self) {
-        let expired = self.broker.expire(Instant::now());
+        // The caller computes controller availability per request class:
+        // approvals and grants expire `NoController` with no approval
+        // answerer attached; everything else expires `TimedOut` unless no
+        // ask answerer is attached. The probe runs after the broker lock is
+        // released, so it may take any attachment lock the registry needs.
+        let expired = self
+            .broker
+            .expire(Instant::now(), |question| self.unattended(question));
         if expired.is_empty() {
             return;
         }
@@ -1971,6 +2465,17 @@ impl Actor {
             }
         }
         self.execute(queue.into_iter().collect(), None).await;
+    }
+
+    /// Says whether no answerer for `question` is attached, by the class
+    /// that could have resolved it.
+    fn unattended(&self, question: &dal_core::Question) -> bool {
+        match question {
+            dal_core::Question::Approval { .. } | dal_core::Question::Grant { .. } => {
+                !self.shared.attached_approval()
+            }
+            _ => !self.shared.attached_ask(),
+        }
     }
     /// Publishes one content-addressed blob through the journal.
     fn put_blob(&mut self, bytes: Vec<u8>) -> Result<BlobId, AgentError> {
@@ -2424,6 +2929,41 @@ fn read_views(outcome: &dal_core::SettledOutcome) -> Vec<dal_core::ext::ReadView
         ToolData::Find(_) | ToolData::Symbols(_) => {}
     }
     views
+}
+
+/// Maps a loop-birth validation conflict onto the agent error contract.
+///
+/// The text is the fold-owned shape description plus the rejected loop
+/// identity. No append is attempted on this path, so the journal stays
+/// byte-identical and the reply carries the whole failure.
+fn private_loop_conflict(conflict: PrivateConflict, r#loop: PrivateLoopId) -> AgentError {
+    AgentError::Invalid(ValidationError::new(format!(
+        "private loop {}: {}",
+        r#loop,
+        conflict.detail()
+    )))
+}
+
+/// Maps a private-effect validation conflict onto the service failure
+/// contract.
+///
+/// Shared by the start and end paths: both carry the same (`loop`, `token`)
+/// identity and the same fold-owned shape text, and both reject before any
+/// append, so one mapper covers both without duplicating the text rule.
+fn private_effect_conflict(
+    conflict: PrivateConflict,
+    r#loop: PrivateLoopId,
+    token: PrivateEffectId,
+) -> ServiceError {
+    ServiceError::failed(
+        None,
+        format!(
+            "private effect {} in loop {}: {}",
+            token,
+            r#loop,
+            conflict.detail()
+        ),
+    )
 }
 
 /// Whether a journal failure leaves the session unwritable. Mirrors

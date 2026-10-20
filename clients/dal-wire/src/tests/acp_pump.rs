@@ -7,7 +7,8 @@ use std::time::Duration;
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
     Answer, CallId, ClientId, Config, ConfigProduct, Gen, Notice, Owner, Preview, Question,
-    Request, RequestId, Seq, SessionId, Stop, StreamChannel, TurnId, Update, UpdateKind, Workspace,
+    Request, RequestId, ResolutionCause, Seq, SessionId, Stop, StreamChannel, TurnId, Update,
+    UpdateKind, Workspace,
 };
 use sonic_rs::{JsonValueTrait, Value};
 use tokio::sync::{Mutex, mpsc};
@@ -231,6 +232,7 @@ async fn pump_keeps_reading_updates_while_a_permission_is_outstanding() {
             id: asked.id,
             answer: Answer::Approve,
             by: ClientId::new("tui#1"),
+            cause: Some(ResolutionCause::Answered),
         })
         .await;
         assert_eq!(cancelled_id(&fx.frame().await), client);

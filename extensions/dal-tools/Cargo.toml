@@ -58,8 +58,18 @@ rustix = { workspace = true, features = ["fs"] }
 windows-sys.workspace = true
 
 [dev-dependencies]
+dal-provider = { path = "../../engine/dal-provider" }
 proptest.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "patch_adversarial"
+path = "tests/patch_adversarial.rs"
+
+[[test]]
+name = "guard_lifecycle"
+path = "tests/guard_lifecycle.rs"
+required-features = ["symbols"]
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     path::PathBuf,
+    sync::Arc,
 };
 
 use dal_core::{
@@ -20,7 +21,7 @@ pub(crate) use ledger::LedgerError;
 pub(crate) use ops::{JobsCtx, run_jobs_op};
 pub(crate) use reap::reap_detached;
 
-use ledger::{Ledger, Line};
+use ledger::{Ended, Ledger, Line};
 use lines::LineRing;
 
 use crate::error::{AgentError, ToolError, ValidationError};
@@ -54,6 +55,9 @@ pub(crate) struct JobRecord {
     pub(crate) id: JobId,
     /// The human-readable job label.
     pub(crate) label: Box<str>,
+    /// The command text the starter supplied, shared with every later read;
+    /// `None` when the starter supplied none.
+    pub(crate) command: Option<Arc<str>>,
     /// The durable output file for the job.
     pub(crate) log_path: PathBuf,
     state: JobState,
@@ -78,6 +82,7 @@ impl JobRecord {
         Self {
             id,
             label: label.into(),
+            command: None,
             log_path,
             state: JobState::Queued,
             started: false,
@@ -88,6 +93,14 @@ impl JobRecord {
             lines: LineRing::default(),
             cancel,
         }
+    }
+
+    /// Attaches the command text the starter supplied, sharing one copy
+    /// across every later list and status read.
+    #[must_use]
+    pub(crate) fn with_command(mut self, command: Arc<str>) -> Self {
+        self.command = Some(command);
+        self
     }
 
     /// Runs the job under `parent`: its cancel cascades and its end raises no
@@ -113,6 +126,9 @@ pub(crate) struct FinishedJob {
     pub(crate) id: JobId,
     /// The human-readable job label.
     pub(crate) label: Box<str>,
+    /// The command text the starter supplied, kept through settlement;
+    /// `None` when it supplied none.
+    pub(crate) command: Option<Arc<str>>,
     /// The durable output file for the job.
     pub(crate) log_path: PathBuf,
     /// The terminal outcome.
@@ -201,7 +217,7 @@ impl JobTable {
             held: recovered.held,
             ..Self::default()
         };
-        for report in recovered.ended {
+        for Ended { report, command } in recovered.ended {
             let activity = Timestamp::now();
             let tail: Box<[u8]> = report.text.as_bytes().into();
             let mut record = JobRecord::new(
@@ -210,6 +226,7 @@ impl JobTable {
                 job_log(&report.id),
                 CancellationToken::new(),
             );
+            record.command.clone_from(&command);
             record.state = JobState::Done;
             record.started = true;
             record.tail.clone_from(&tail);
@@ -220,6 +237,7 @@ impl JobTable {
             table.finished.push(FinishedJob {
                 id: report.id,
                 label: report.label.clone(),
+                command,
                 log_path: job_log(&report.id),
                 outcome: report.outcome.clone(),
                 tail,
@@ -428,7 +446,7 @@ impl JobTable {
         outcome: JobOutcome,
         tail: Box<[u8]>,
     ) -> Option<FinishedJob> {
-        let (was_active, top_level, label, log_path, activity) = {
+        let (was_active, top_level, label, command, log_path, activity) = {
             let record = self.jobs.get_mut(&id)?;
             if record.state == JobState::Done {
                 return None;
@@ -441,6 +459,7 @@ impl JobTable {
                 was_active,
                 record.parent.is_none(),
                 record.label.clone(),
+                record.command.clone(),
                 record.log_path.clone(),
                 record.activity,
             )
@@ -455,6 +474,7 @@ impl JobTable {
         let finished = FinishedJob {
             id,
             label,
+            command,
             log_path,
             outcome,
             tail,
@@ -488,7 +508,8 @@ impl JobTable {
                     .into_owned()
                     .into_boxed_str(),
             };
-            self.outbox.push(Ledger::end(&report));
+            self.outbox
+                .push(Ledger::end(&report, finished.command.clone()));
             self.reports.push_back(PendingReport {
                 report,
                 taken: false,
@@ -741,6 +762,7 @@ impl JobTable {
                     label: record.label.clone(),
                     state: JobStateView::Running,
                     log: Some(record.log_path.clone()),
+                    command: record.command.clone(),
                     last_activity_at: record.activity,
                 });
             }
@@ -757,6 +779,7 @@ impl JobTable {
                     label: record.label.clone(),
                     state,
                     log: Some(record.log_path.clone()),
+                    command: record.command.clone(),
                     last_activity_at: record.activity,
                 });
             }
@@ -767,6 +790,7 @@ impl JobTable {
                 label: job.label.clone(),
                 state: JobStateView::Done(job.outcome.clone()),
                 log: Some(job.log_path.clone()),
+                command: job.command.clone(),
                 last_activity_at: job.activity,
             });
         }
@@ -946,6 +970,104 @@ mod tests {
         assert_eq!(jobs.wait(id), Some(JobOutcome::Exited { code: 0 }));
         jobs.drain_finished();
         assert_eq!(jobs.wait(id), None);
+        Ok(())
+    }
+
+    #[test]
+    fn list_carries_the_command_through_the_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+        let mut jobs = JobTable::new();
+        let command: Arc<str> = Arc::from("cargo build --release");
+        let record = record(CancellationToken::new()).with_command(Arc::clone(&command));
+        let id = record.id;
+        jobs.reserve(record)
+            .map_err(|error| Box::<dyn std::error::Error>::from(format!("{error:?}")))?;
+        // The same shared allocation backs the running and the finished row.
+        jobs.mark_running(id)?;
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label.as_ref(), "command");
+        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
+        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::new([]));
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].state,
+            JobStateView::Done(JobOutcome::Exited { code: 0 })
+        );
+        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
+        Ok(())
+    }
+
+    #[test]
+    fn commandless_jobs_list_with_no_command() -> Result<(), Box<dyn std::error::Error>> {
+        let mut jobs = JobTable::new();
+        let record = record(CancellationToken::new());
+        let id = record.id;
+        jobs.reserve(record)
+            .map_err(|error| Box::<dyn std::error::Error>::from(format!("{error:?}")))?;
+        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::new([]));
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].command, None, "no starter command means None");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_ledger_keeps_the_command_for_reopened_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("open ledger");
+        let id = JobId::new_v7();
+        let command: Arc<str> = Arc::from("sleep 2");
+        jobs.reserve(
+            JobRecord::new(
+                id,
+                "exec",
+                root.path().join("exec.log"),
+                CancellationToken::new(),
+            )
+            .with_command(Arc::clone(&command)),
+        )
+        .expect("reserve exec job");
+        jobs.mark_running(id)?;
+        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::from(&b"out"[..]));
+        jobs.flush().await.expect("persist ended report");
+        drop(jobs);
+
+        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen ledger");
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
+        // The written line carries the command only when set.
+        let text = std::fs::read_to_string(root.path().join("reports.jsonl")).expect("ledger text");
+        assert!(text.contains("\"command\""), "{text}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_old_ledger_line_without_a_command_restores_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        // A hand-written pre-command End line: the same shape the service
+        // wrote before the field existed.
+        let line = concat!(
+            r#"{"e":"end","id":"01980000-0000-7000-8000-00000000000a","#,
+            r#""label":"legacy","outcome":{"state":"exited","code":0},"text":"out"}"#,
+        );
+        std::fs::write(root.path().join("reports.jsonl"), format!("{line}\n"))
+            .expect("write legacy ledger");
+        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen legacy ledger");
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label.as_ref(), "legacy");
+        assert_eq!(listed[0].command, None);
         Ok(())
     }
 

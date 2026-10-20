@@ -35,6 +35,7 @@ pub(super) struct PartialGuardBands {
 pub(super) struct ParsedLayer {
     pub(super) mode: Option<Mode>,
     pub(super) model: Option<Box<str>>,
+    pub(super) model_route: Option<crate::model::ModelRoute>,
     pub(super) thinking: Option<crate::model::ThinkingLevel>,
     pub(super) approval: Option<ApprovalMode>,
     pub(super) screen: Option<Screen>,
@@ -95,6 +96,7 @@ impl PartialRules {
 pub(super) struct PartialPrice {
     pub(super) input: Option<f64>,
     pub(super) cached_input: Option<f64>,
+    pub(super) cache_write: Option<f64>,
     pub(super) output: Option<f64>,
     pub(super) reasoning: Option<f64>,
     pub(super) tiers: Option<Box<[crate::model::PriceTier]>>,
@@ -106,6 +108,7 @@ impl PartialPrice {
     pub(super) fn merge(&mut self, later: &Self) {
         self.input = later.input.or(self.input);
         self.cached_input = later.cached_input.or(self.cached_input);
+        self.cache_write = later.cache_write.or(self.cache_write);
         self.output = later.output.or(self.output);
         self.reasoning = later.reasoning.or(self.reasoning);
         if let Some(tiers) = &later.tiers {
@@ -120,6 +123,7 @@ impl PartialPrice {
                 Ok(crate::model::ModelPrice {
                     input,
                     cached_input,
+                    cache_write: self.cache_write,
                     output,
                     reasoning,
                     tiers,
@@ -150,6 +154,7 @@ impl PartialPrice {
 pub(super) struct FileText {
     pub(super) mode: Option<toml::Value>,
     pub(super) model: Option<toml::Value>,
+    pub(super) model_route: Option<toml::Value>,
     pub(super) thinking: Option<toml::Value>,
     pub(super) approval: Option<toml::Value>,
     pub(super) screen: Option<toml::Value>,
@@ -210,6 +215,7 @@ pub(super) struct RulesText {
 pub(super) struct PriceText {
     pub(super) input: Option<toml::Value>,
     pub(super) cached_input: Option<toml::Value>,
+    pub(super) cache_write: Option<toml::Value>,
     pub(super) output: Option<toml::Value>,
     pub(super) reasoning: Option<toml::Value>,
     pub(super) tiers: Option<toml::Value>,

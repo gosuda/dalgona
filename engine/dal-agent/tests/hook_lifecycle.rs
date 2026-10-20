@@ -288,6 +288,7 @@ impl ModelHandler for Model {
                         reasoning_tokens: None,
                         cache_write_tokens: 0,
                         cost_usd: None,
+                        premium_requests: None,
                     },
                 }),
                 Ok(StreamEvent::Stop {
@@ -318,6 +319,7 @@ impl ModelHandler for AccountingModel {
                             reasoning_tokens: None,
                             cache_write_tokens: 0,
                             cost_usd: None,
+                            premium_requests: None,
                         },
                     })
                 })

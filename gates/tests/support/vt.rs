@@ -467,6 +467,46 @@ impl VtRecorder {
     }
 }
 
+/// A terminal that follows a growing PTY capture, parsing only new bytes.
+#[derive(Debug)]
+pub struct FollowedScreen {
+    recorder: VtRecorder,
+    consumed: usize,
+}
+
+impl FollowedScreen {
+    /// Creates a blank terminal with the PTY's geometry.
+    #[must_use]
+    pub fn new(columns: u16, rows: u16) -> Self {
+        Self {
+            recorder: VtRecorder::new(columns, rows),
+            consumed: 0,
+        }
+    }
+
+    /// Parses what `capture` gained since the last call, then reports whether a
+    /// visible row contains `needle`.
+    pub fn shows(&mut self, capture: &[u8], needle: &str) -> bool {
+        self.recorder.feed(&capture[self.consumed..]);
+        self.consumed = capture.len();
+        self.recorder
+            .screen_rows()
+            .iter()
+            .any(|row| row.contains(needle))
+    }
+
+    /// The visible rows as trimmed text, one per line.
+    #[must_use]
+    pub fn visible(&self) -> String {
+        self.recorder
+            .screen_rows()
+            .iter()
+            .map(|row| row.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 fn blank_screen(columns: usize, rows: usize) -> Vec<Vec<String>> {
     (0..rows).map(|_| blank_row(columns)).collect()
 }

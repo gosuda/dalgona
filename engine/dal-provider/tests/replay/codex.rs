@@ -16,8 +16,8 @@ use dal_core::{
 use dal_provider::{
     AuthStore, AuthStyle, BeforeRequest, BeforeRequestInput, BeforeRequestPatch, CatalogEntry,
     CompactOutcome, Credential, EnvSnapshot, Listing, NoticeSink, OAuthCredential, ProviderConfig,
-    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ResolvedModel, SecretString,
-    StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel,
+    SecretString, StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -64,6 +64,8 @@ fn entry() -> CatalogEntry {
         temperature_allowed: false,
         display_supported: false,
         custom_grammar: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -101,6 +103,7 @@ fn request(purpose: Purpose) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Codex,
             model: MODEL.into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([]),
@@ -164,6 +167,7 @@ fn config(base: &str) -> ProviderConfig {
             key_env: None,
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 4,
+            settings: ProviderSettings::default(),
         }],
         scripted: None,
     }
@@ -183,6 +187,7 @@ fn setup(
         route: ModelRoute::Api {
             family: Family::Codex,
             model: MODEL.into(),
+            provider: None,
         },
         entry,
     };
@@ -248,6 +253,67 @@ async fn codex_https_text_turn() {
     assert!(usage.cost_usd.is_none());
     assert!(matches!(stop, Some(StopReason::EndTurn)));
     assert_eq!(server.addr().ip().to_string(), "127.0.0.1");
+    assert_eq!(server.mismatches(), [] as [String; 0]);
+    assert_eq!(server.consumed(), 1);
+    server.finish().await.expect("replay consumed");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A copy of the `https_text_turn` case under `dir` whose credential headers
+/// must equal the stored values, where the shared fixture matches any value.
+fn exact_credential_case(dir: &std::path::Path) -> std::path::PathBuf {
+    let source = replay_server::fixture_dir("codex", "https_text_turn");
+    let case = dir.join("exact-credentials");
+    std::fs::create_dir_all(&case).expect("case dir");
+    for name in ["request_body.json", "response.sse"] {
+        std::fs::copy(source.join(name), case.join(name)).expect("fixture file copies");
+    }
+    let toml = std::fs::read_to_string(source.join("exchange.toml")).expect("fixture reads");
+    let exact = toml
+        .replace(
+            r#""authorization" = "<redacted>""#,
+            &format!(r#""authorization" = "Bearer {ACCESS_TOKEN}""#),
+        )
+        .replace(
+            r#""chatgpt-account-id" = "<redacted>""#,
+            &format!(r#""chatgpt-account-id" = "{ACCOUNT_ID}""#),
+        );
+    assert!(
+        exact.contains(ACCESS_TOKEN) && exact.contains(ACCOUNT_ID),
+        "the wildcard headers were rewritten"
+    );
+    std::fs::write(case.join("exchange.toml"), exact).expect("case writes");
+    case
+}
+
+/// The shared fixtures match `authorization` and `chatgpt-account-id` as
+/// `<redacted>`, so they prove only that the headers are present. This case
+/// requires the exact stored access token (not the refresh token or the ID
+/// token) and the exact stored account id on the wire.
+#[tokio::test]
+async fn codex_https_turn_sends_the_stored_access_token_and_account_id() {
+    let dir = temp_dir("exact-credentials");
+    let case = exact_credential_case(&dir);
+    let server = replay_server::ReplayServer::start(&case)
+        .await
+        .expect("replay server starts");
+    let (_set, provider) = setup(&server.base_url(), &dir, entry());
+    let notices: NoticeSink = Arc::new(|_| {});
+    let cancel = CancellationToken::new();
+    let hooks: Vec<Arc<dyn BeforeRequest>> = vec![Arc::new(TemperatureHook)];
+    let stream = provider
+        .open(session(), &request(Purpose::Turn), &hooks, notices, &cancel)
+        .await
+        .expect("codex turn opens");
+    let mut texts = String::new();
+    let mut events = std::pin::pin!(stream);
+    while let Some(event) = events.next().await {
+        if let StreamEvent::TextDelta { text } = event.expect("the exact credential headers match")
+        {
+            texts.push_str(&text);
+        }
+    }
+    assert_eq!(texts, "Hello");
     assert_eq!(server.mismatches(), [] as [String; 0]);
     assert_eq!(server.consumed(), 1);
     server.finish().await.expect("replay consumed");

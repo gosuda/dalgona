@@ -12,6 +12,7 @@ use crate::transport::MemoryTransport;
 mod auth;
 mod capabilities;
 mod drain;
+mod models;
 mod turns;
 
 /// Runs `client` against `serve_rpc` on a memory transport.

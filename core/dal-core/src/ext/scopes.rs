@@ -242,6 +242,14 @@ pub struct SessionEnd {
 pub struct InputEvent {
     /// The input content, including any image or blob parts.
     pub content: Vec<Part>,
+    /// The model resolved for these input hooks from the session's selection
+    /// or configured default. The first request and any compaction before it
+    /// reuse this resolution while the requested route stays unchanged.
+    /// An explicit model selection before the request can replace it without
+    /// running these hooks again. `None` means the route did not resolve at
+    /// input time, so its capabilities are unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelInfo>,
 }
 
 /// Context supplied to a before-turn hook.

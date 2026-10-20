@@ -100,6 +100,9 @@ pub struct ModeProjection {
     pub non_eval_only: bool,
 }
 
+/// Loopback address the endpoint binds when `serve.bind` is unset.
+pub const SERVE_DEFAULT_BIND: &str = "127.0.0.1";
+
 /// Configuration for serving the local control endpoint.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -177,6 +180,7 @@ use super::ask::{AskConfig, AskTimeoutClamp};
 pub struct Config {
     pub(super) mode: Mode,
     pub(super) model: Option<Box<str>>,
+    pub(super) model_route: Option<crate::model::ModelRoute>,
     pub(super) thinking: crate::model::ThinkingLevel,
     pub(super) approval: ApprovalMode,
     pub(super) screen: Screen,

@@ -12,7 +12,7 @@ fn batteries_page_matches_registry_and_config() -> support::TestResult<()> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    // The live registry is exactly the eleven bundled batteries: dropping one
+    // The live registry is exactly the bundled battery set: dropping one
     // from the product fails here even when the markdown still names it.
     assert_eq!(registry.len(), support::BATTERIES.len());
     for name in support::BATTERIES {

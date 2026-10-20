@@ -37,11 +37,37 @@ pub struct Usage {
     pub reasoning_tokens: Option<u64>,
     /// Input tokens written to cache, already counted as uncached input.
     pub cache_write_tokens: u64,
+    /// Premium requests consumed, when the provider measured them.
+    ///
+    /// `None` means the provider reported no premium measurement: an
+    /// aggregate containing such a response is unknown, never zero.
+    /// `Some(0.0)` is a measured zero. A premium-only response carries no
+    /// token or cost measurement, so local pricing leaves it unknown even
+    /// when a price exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premium_requests: Option<f64>,
     /// Provider-supplied USD cost, if reported.
     pub cost_usd: Option<f64>,
 }
 
 impl Usage {
+    /// Reports whether the provider measured nothing.
+    ///
+    /// True when every counter is zero and neither a reasoning split nor a
+    /// cost was reported. Such a response is "no measurement", never a free
+    /// one: a zero cost computed from it by local pricing is not spend that
+    /// anything has verified. An explicit reasoning count or cost, even zero,
+    /// is a reported measurement.
+    #[must_use]
+    pub const fn is_unreported(&self) -> bool {
+        self.input_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.output_tokens == 0
+            && self.reasoning_tokens.is_none()
+            && self.cache_write_tokens == 0
+            && self.cost_usd.is_none()
+    }
+
     /// Returns the provider-reported cost first, then configured pricing,
     /// then compiled pricing; absent sources leave the cost unknown.
     ///
@@ -102,6 +128,13 @@ pub struct ModelPrice {
     pub output: f64,
     /// Separately reported reasoning rate.
     pub reasoning: f64,
+    /// Cache-write rate, when it differs from uncached input.
+    ///
+    /// `None` keeps the historical fallback to the applicable input rate.
+    /// Tier writes resolve `tier.cache_write` then `base.cache_write` then
+    /// `tier.input` then `base.input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
     /// Request-wide context tiers, in any order.
     #[serde(default)]
     pub tiers: Box<[PriceTier]>,
@@ -115,7 +148,11 @@ impl ModelPrice {
     /// Tiers select one complete request-wide rate card using
     /// [`Usage::input_tokens`]. That counter already includes cached input and
     /// cache writes; cache writes use the tier's separate rate when present,
-    /// otherwise that tier's input rate.
+    /// otherwise the base cache-write rate, otherwise that tier's input rate,
+    /// otherwise the base input rate.
+    ///
+    /// A premium-only response carries no token measurement, so it stays
+    /// unknown even when a price exists.
     ///
     /// Returns `None` for negative or non-finite rates, cache-counter
     /// underflow, or a non-finite computed total.
@@ -125,6 +162,9 @@ impl ModelPrice {
         reason = "token counters need conversion to USD rates; floating-point rounding is inherent to the price representation"
     )]
     pub fn cost_usd(&self, usage: &Usage) -> Option<f64> {
+        if usage.is_unreported() && usage.premium_requests.is_some() {
+            return None;
+        }
         let (input, cached_input, cache_write, output, reasoning) =
             self.rates_for(usage.input_tokens);
         let valid_rate = |rate: f64| rate.is_finite() && rate >= 0.0;
@@ -160,7 +200,7 @@ impl ModelPrice {
             return (
                 self.input,
                 self.cached_input,
-                self.input,
+                self.cache_write.unwrap_or(self.input),
                 self.output,
                 self.reasoning,
             );
@@ -168,7 +208,10 @@ impl ModelPrice {
         (
             tier.input.unwrap_or(self.input),
             tier.cached_input.unwrap_or(self.cached_input),
-            tier.cache_write.unwrap_or(tier.input.unwrap_or(self.input)),
+            tier.cache_write
+                .or(self.cache_write)
+                .or(tier.input)
+                .unwrap_or(self.input),
             tier.output.unwrap_or(self.output),
             tier.reasoning.unwrap_or(self.reasoning),
         )
@@ -185,6 +228,7 @@ mod tests {
             cached_input: 1.0,
             output: 2.0,
             reasoning: 3.0,
+            cache_write: None,
             tiers: vec![
                 PriceTier {
                     size: 100,
@@ -216,6 +260,7 @@ mod tests {
             output_tokens: 100,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.000_299));
@@ -260,6 +305,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 101,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.001_212));
@@ -274,6 +320,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 201,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.00402));
@@ -288,6 +335,7 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.0001));
@@ -302,9 +350,126 @@ mod tests {
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 100,
+            premium_requests: None,
             cost_usd: None,
         };
         assert_eq!(price.cost_usd(&usage), Some(0.0016));
+    }
+
+    #[test]
+    fn base_cache_write_rate_prices_writes_distinct_from_input() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: Some(5.0),
+            tiers: Box::default(),
+        };
+        let usage = Usage {
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 100,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.0005));
+    }
+
+    #[test]
+    fn tier_writes_inherit_base_cache_write_before_tier_input() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: Some(5.0),
+            tiers: vec![PriceTier {
+                size: 100,
+                input: Some(10.0),
+                cached_input: None,
+                cache_write: None,
+                output: None,
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
+        };
+        let usage = Usage {
+            input_tokens: 101,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 101,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.000_505));
+    }
+
+    #[test]
+    fn absent_base_cache_write_keeps_the_input_fallback() {
+        let price = ModelPrice {
+            input: 1.0,
+            cached_input: 1.0,
+            output: 2.0,
+            reasoning: 3.0,
+            cache_write: None,
+            tiers: vec![PriceTier {
+                size: 100,
+                input: Some(10.0),
+                cached_input: None,
+                cache_write: None,
+                output: None,
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
+        };
+        let usage = Usage {
+            input_tokens: 101,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 101,
+            premium_requests: None,
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.00101));
+    }
+
+    #[test]
+    fn premium_only_usage_stays_unknown_even_with_a_price() {
+        let price = price();
+        for premium in [0.0, 1.5] {
+            let usage = Usage {
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                premium_requests: Some(premium),
+                cost_usd: None,
+            };
+            assert!(usage.is_unreported());
+            assert_eq!(price.cost_usd(&usage), None);
+            assert_eq!(usage.cost_usd(Some(&price), None), None);
+        }
+    }
+
+    #[test]
+    fn premium_alongside_tokens_still_prices_tokens() {
+        let price = price();
+        let usage = Usage {
+            input_tokens: 99,
+            cached_input_tokens: 0,
+            output_tokens: 100,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(2.0),
+            cost_usd: None,
+        };
+        assert_eq!(price.cost_usd(&usage), Some(0.000_299));
     }
 }
 /// A provider-neutral inference request.

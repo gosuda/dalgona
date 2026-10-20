@@ -1,0 +1,4 @@
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]},"index":0}],"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9},"modelVersion":"gemini-3-flash-agent","responseId":"cca-resp-1"},"traceId":"trace-cca-1"}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" there."}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3,"totalTokenCount":12},"modelVersion":"gemini-3-flash-agent","responseId":"cca-resp-1"},"traceId":"trace-cca-1"}
+

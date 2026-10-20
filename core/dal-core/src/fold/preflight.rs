@@ -1,12 +1,65 @@
 use std::collections::HashSet;
 
-use super::helpers::{invalid, unsettled_calls, wrong_turn};
+use super::helpers::{invalid, unsettled_call_count, wrong_turn, zero_usage};
 use super::types::{MAX_INTERRUPTS, MAX_STEERS, MAX_WAKE_RUN, Overflow};
 use super::{
     Answer, CallId, CancelScope, Command, Event, Expect, HookEvent, HookOutcome, HookVerdict,
     InferFailure, Name, PartialResponse, Phase, Rejection, RequestId, Session, Stop, StreamEvent,
-    StreamVerdict, ToolCallVerdict, TurnId, TurnStage, TurnState,
+    StreamVerdict, ToolCallVerdict, TurnId, TurnStage, TurnState, Usage,
 };
+use crate::update::ResolutionCause;
+
+/// The usage the fold journals for a completed response: the last
+/// measurement the stream carried, or zero when it carried none.
+fn response_usage(inference: &super::Inference) -> Usage {
+    inference
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .unwrap_or_else(zero_usage)
+}
+
+/// Rejects a broker resolution whose cause contradicts its answer or its
+/// default flag.
+///
+/// A contradictory record would state something false in the journal: a
+/// timeout carrying a client's answer, or a cancellation that approved a
+/// tool. The fold refuses such a live input before it changes the session,
+/// so no contradiction reaches the journal or subscribers.
+fn check_resolution_cause(
+    answer: &Answer,
+    was_default: bool,
+    cause: ResolutionCause,
+) -> Result<(), Rejection> {
+    let deadline = matches!(
+        cause,
+        ResolutionCause::TimedOut | ResolutionCause::NoController
+    );
+    if deadline != was_default {
+        return Err(invalid(
+            "a resolution is a request default exactly when its cause is a deadline",
+        ));
+    }
+    let abandoned = matches!(
+        cause,
+        ResolutionCause::Cancelled | ResolutionCause::Withdrawn
+    );
+    if abandoned && *answer != Answer::Cancel {
+        return Err(invalid(
+            "a cancelled or withdrawn request resolves with the cancel answer",
+        ));
+    }
+    if *answer == Answer::ApproveForSession && cause != ResolutionCause::Answered {
+        return Err(invalid(
+            "only a client answer can approve a tool for the session",
+        ));
+    }
+    Ok(())
+}
 
 impl Session {
     pub(super) fn preflight(&self, event: &Event) -> Result<(), Rejection> {
@@ -19,16 +72,24 @@ impl Session {
             Event::Wake { .. } => self.preflight_wake(),
             Event::GrantResolved {
                 request,
-                answer: Answer::ApproveForSession,
-                by: Some(_),
-                was_default: false,
-            } => self.preflight_session_grant(*request),
+                answer,
+                by,
+                was_default,
+                cause,
+            } => {
+                check_resolution_cause(answer, *was_default, *cause)?;
+                if *answer == Answer::ApproveForSession && by.is_some() {
+                    self.preflight_session_grant(*request)
+                } else {
+                    Ok(())
+                }
+            }
             Event::Guard {
                 turn,
                 call,
                 extension,
                 outcome,
-            } => self.preflight_guard(*turn, call.is_some(), extension.is_some(), outcome),
+            } => self.preflight_guard(*turn, call.as_ref(), extension.is_some(), outcome),
             Event::StreamRetry { turn, reminder } => {
                 self.preflight_stream_entries(*turn, usize::from(reminder.is_some()))
             }
@@ -46,21 +107,76 @@ impl Session {
             } => self.preflight_stream_end(*turn, result, partial.as_ref()),
             Event::Cancel {
                 scope: CancelScope::Turn(turn),
-                ..
-            } => self.preflight_cancel(*turn),
+                partial,
+            } => self.preflight_cancel(*turn, partial.as_ref()),
             Event::Settled { turn, call, .. } => self.preflight_settled(*turn, call),
+            Event::Boundary { turn } => self.preflight_boundary(*turn),
             Event::Inferred { usage, .. } if matches!(&self.phase, Phase::Running { .. }) => {
-                let mut totals = self.turn_totals.clone();
-                totals.add_usage(*usage)
+                self.turn_totals.check_usage(*usage)
             }
             Event::CompactionSettled {
                 turn,
                 outcome: Ok(summary),
             } if summary.tokens_after < summary.tokens_before => {
-                self.preflight_compaction_entry(*turn)
+                self.preflight_compaction_entry(*turn, summary.usage)
             }
             _ => Ok(()),
         }
+    }
+
+    /// Checks that `count` entry ids remain.
+    pub(super) fn reserve_entries(&self, count: usize) -> Result<(), Rejection> {
+        let count = u64::try_from(count).map_err(|_| invalid("too many entries"))?;
+        self.entries_available(count)
+    }
+
+    /// The entries `boundary` journals for a turn standing at its boundary:
+    /// the queued steer, the suppressed rule injects, the finished-jobs
+    /// reminder, and the pending reminders a turn ending there delivers.
+    ///
+    /// An upper bound: pending reminders count even when the boundary goes on
+    /// to open another round, so a refusal can only be early, never late.
+    pub(super) fn boundary_entries(&self) -> usize {
+        let flags = &self.turn_flags;
+        let ending = flags.pending_reminders.len();
+        let steer = usize::from(self.steers_queued() > 0);
+        if flags.end_after_boundary && steer == 0 {
+            return ending;
+        }
+        steer + flags.pending_suppressed.len() + usize::from(!self.ended_jobs.is_empty()) + ending
+    }
+
+    fn preflight_boundary(&self, turn: TurnId) -> Result<(), Rejection> {
+        match &self.phase {
+            Phase::Running {
+                turn: active,
+                stage: TurnStage::Boundary,
+                ..
+            } if *active == turn => self.reserve_entries(self.boundary_entries()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks the entries a blocked call journals: its failed result, and the
+    /// boundary when it was the last call pending.
+    fn preflight_block(&self, turn: TurnId, call: &CallId) -> Result<(), Rejection> {
+        let Phase::Running {
+            turn: active,
+            stage: TurnStage::Dispatching { pending },
+            ..
+        } = &self.phase
+        else {
+            return Ok(());
+        };
+        if *active != turn || !pending.iter().any(|item| item.call == *call) {
+            return Ok(());
+        }
+        let boundary = if pending.len() == 1 {
+            self.boundary_entries()
+        } else {
+            0
+        };
+        self.reserve_entries(1 + boundary)
     }
 
     /// Checks that `count` entry ids remain, so a transition that journals
@@ -121,22 +237,25 @@ impl Session {
     pub(super) fn preflight_guard(
         &self,
         turn: TurnId,
-        has_call: bool,
+        call: Option<&CallId>,
         has_extension: bool,
         outcome: &HookOutcome,
     ) -> Result<(), Rejection> {
         match outcome.event() {
             HookEvent::BeforeTurn => {
-                let reminder = u64::from(
+                let reminder = usize::from(
                     matches!(outcome.verdict(), HookVerdict::BeforeTurn(Some(text)) if !text.is_empty()),
                 );
+                // `begin_turn` journals the reminder, then runs the boundary.
                 match &self.phase {
                     Phase::Settling {
                         follow_up: Some((next_turn, _)),
                         ..
-                    } if *next_turn == turn => self.entries_available(1 + reminder),
-                    Phase::Opening { turn: active, .. } if *active == turn && reminder == 1 => {
-                        self.entries_available(1)
+                    } if *next_turn == turn => {
+                        self.reserve_entries(1 + reminder + self.boundary_entries())
+                    }
+                    Phase::Opening { turn: active, .. } if *active == turn => {
+                        self.reserve_entries(reminder + self.boundary_entries())
                     }
                     _ => Ok(()),
                 }
@@ -144,14 +263,17 @@ impl Session {
             HookEvent::ToolCall if matches!(&self.phase, Phase::Running { turn: active, stage: TurnStage::Dispatching { .. }, .. } if *active == turn) => {
                 match outcome.verdict() {
                     HookVerdict::ToolCall(ToolCallVerdict::Block { .. })
-                        if !has_call || !has_extension =>
+                        if call.is_none() || !has_extension =>
                     {
                         Err(invalid(
                             "tool-call block requires call and extension identities",
                         ))
                     }
-                    HookVerdict::ToolCall(ToolCallVerdict::Rewrite { .. }) if !has_call => {
+                    HookVerdict::ToolCall(ToolCallVerdict::Rewrite { .. }) if call.is_none() => {
                         Err(invalid("tool-call rewrite requires a call identity"))
+                    }
+                    HookVerdict::ToolCall(ToolCallVerdict::Block { .. }) => {
+                        call.map_or(Ok(()), |call| self.preflight_block(turn, call))
                     }
                     _ => Ok(()),
                 }
@@ -195,6 +317,9 @@ impl Session {
             }
             _ => (usize::from(partial_entry), true, true),
         };
+        if let Some(partial) = partial.filter(|_| response_entries > 0) {
+            self.turn_totals.check_usage(partial.usage)?;
+        }
         let pending = if drains_pending {
             self.turn_flags.pending_reminders.len()
         } else {
@@ -202,7 +327,7 @@ impl Session {
         };
         let tool_entries = if ends_turn {
             match &self.phase {
-                Phase::Running { stage, .. } => unsettled_calls(stage.clone(), partial).len(),
+                Phase::Running { stage, .. } => unsettled_call_count(stage, partial),
                 _ => 0,
             }
         } else {
@@ -217,8 +342,22 @@ impl Session {
     }
 
     fn preflight_response_entries(&self, inference: &super::Inference) -> Result<(), Rejection> {
+        // A native compaction outcome answers a compaction request, never a
+        // turn stream. Refuse it here: once `stream_ended` has recorded the
+        // answering route the fold can no longer back out.
+        if inference
+            .events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Compaction { .. }))
+        {
+            return Err(invalid(
+                "native compaction outcome appeared in a turn stream",
+            ));
+        }
         let stop = inference.events.iter().rev().find_map(|event| match event {
             StreamEvent::Stop(stop) => Some(*stop),
+            // The capture rides the closing entry; it journals no entry of
+            // its own and cannot open one, so it counts nothing here.
             _ => None,
         });
         let calls = if stop == Some(Stop::EndTurn) {
@@ -247,9 +386,25 @@ impl Session {
                     }
                     | StreamEvent::ThinkingReplay { .. }
                     | StreamEvent::ToolCall { .. } => true,
-                    _ => false,
+                    // MessageReplay is not visible output: it never opens an
+                    // entry, with or without tool calls. Tool-argument
+                    // fragments are not content either, and a native
+                    // compaction outcome is a refused event, not an entry.
+                    StreamEvent::Delta {
+                        channel: super::StreamChannel::ToolArgs { .. },
+                        ..
+                    }
+                    | StreamEvent::MessageReplay { .. }
+                    | StreamEvent::Usage(_)
+                    | StreamEvent::Stop(_)
+                    | StreamEvent::Compaction { .. } => false,
                 }),
         );
+        // A journaled response entry folds its usage into the turn totals;
+        // refuse an overflowing measurement before anything changes.
+        if response == 1 {
+            self.turn_totals.check_usage(response_usage(inference))?;
+        }
         let reminders = if stop == Some(Stop::Cancelled) {
             0
         } else {
@@ -292,13 +447,20 @@ impl Session {
         self.entries_available(count)
     }
 
-    pub(super) fn preflight_cancel(&self, turn: TurnId) -> Result<(), Rejection> {
+    pub(super) fn preflight_cancel(
+        &self,
+        turn: TurnId,
+        partial: Option<&PartialResponse>,
+    ) -> Result<(), Rejection> {
         match &self.phase {
-            Phase::Opening { turn: active, .. } | Phase::Running { turn: active, .. }
-                if *active == turn =>
-            {
-                Ok(())
-            }
+            // An opening turn has no stream: the cancel returns to idle and
+            // never reads the partial.
+            Phase::Opening { turn: active, .. } if *active == turn => Ok(()),
+            Phase::Running {
+                turn: active,
+                stage,
+                ..
+            } if *active == turn => self.preflight_cancel_entries(stage, partial),
             Phase::Settling { turn: active, .. } if *active == turn => Err(wrong_turn(
                 Expect::After(turn),
                 TurnState::Settling { turn: *active },
@@ -309,6 +471,32 @@ impl Session {
             )),
             _ => Err(wrong_turn(Expect::After(turn), TurnState::Idle)),
         }
+    }
+
+    /// Checks what cancelling a running turn journals before the cancel
+    /// changes anything: the partial response (its model route, its usage, its
+    /// entry) and one failed result per call the turn still owes.
+    fn preflight_cancel_entries(
+        &self,
+        stage: &TurnStage,
+        partial: Option<&PartialResponse>,
+    ) -> Result<(), Rejection> {
+        let journaled = partial.filter(|partial| !partial.content.is_empty());
+        if let Some(partial) = journaled {
+            if self.active_model.is_none() || self.active_family.is_none() {
+                return Err(invalid(
+                    "partial assistant content has no active model route",
+                ));
+            }
+            self.turn_totals.check_usage(partial.usage)?;
+        }
+        // `end_turn` fails every call `unsettled_calls` names; count the same
+        // list so the reservation cannot drift from what the cancel journals.
+        let count = unsettled_call_count(stage, partial)
+            .checked_add(usize::from(journaled.is_some()))
+            .ok_or_else(|| invalid("too many cancel entries"))?;
+        let count = u64::try_from(count).map_err(|_| invalid("too many cancel entries"))?;
+        self.entries_available(count)
     }
 
     pub(super) fn preflight_settled(&self, turn: TurnId, call: &CallId) -> Result<(), Rejection> {
@@ -322,7 +510,13 @@ impl Session {
                     .iter()
                     .any(|item| item.call == *call && item.started) =>
             {
-                self.entries_available(1)
+                // The last call to settle also runs the boundary.
+                let boundary = if pending.len() == 1 {
+                    self.boundary_entries()
+                } else {
+                    0
+                };
+                self.reserve_entries(1 + boundary)
             }
             Phase::Running { turn: active, .. } if *active == turn => {
                 Err(invalid("tool result was not pending"))
@@ -331,7 +525,11 @@ impl Session {
         }
     }
 
-    pub(super) fn preflight_compaction_entry(&self, turn: Option<TurnId>) -> Result<(), Rejection> {
+    pub(super) fn preflight_compaction_entry(
+        &self,
+        turn: Option<TurnId>,
+        usage: Option<Usage>,
+    ) -> Result<(), Rejection> {
         let phase_matches = match (turn, &self.phase) {
             (None, Phase::Compacting { .. }) => true,
             (
@@ -344,10 +542,17 @@ impl Session {
             ) => turn == *active,
             _ => false,
         };
-        if phase_matches && (self.next_entry.is_none() || self.compactions == u32::MAX) {
-            Err(invalid("entry or compaction counter space exhausted"))
-        } else {
-            Ok(())
+        if !phase_matches {
+            return Ok(());
+        }
+        if self.next_entry.is_none() || self.compactions == u32::MAX {
+            return Err(invalid("entry or compaction counter space exhausted"));
+        }
+        // The compactor's own inference usage folds into the turn totals
+        // after the compaction entry is journaled; refuse an overflow first.
+        match usage {
+            Some(usage) => self.turn_totals.check_usage(usage),
+            None => Ok(()),
         }
     }
     pub(super) fn preflight_command(&self, cmd: &Command) -> Result<(), Rejection> {
@@ -398,6 +603,18 @@ impl Session {
             Command::MoveLeaf(id) if !self.tree.entries.contains_key(id) => {
                 Err(invalid("unknown entry id"))
             }
+            // Any other phase is refused or handled by `cancel` before it
+            // changes anything; a running turn needs its entries reserved.
+            Command::Cancel {
+                scope: CancelScope::Turn(turn),
+            } => match &self.phase {
+                Phase::Running {
+                    turn: active,
+                    stage,
+                    ..
+                } if active == turn => self.preflight_cancel_entries(stage, None),
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }
@@ -432,6 +649,177 @@ impl Session {
             Phase::Running { turn, .. } => TurnState::Running { turn: *turn },
             Phase::Settling { turn, .. } => TurnState::Settling { turn: *turn },
             Phase::Compacting { job: Some(job) } => TurnState::Compacting { job: *job },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::QuestionRef;
+    use super::super::{ClientId, Effect, Emit, Record, UpdateKind};
+    use super::*;
+    use crate::update::ResolutionCause::{Answered, Cancelled, NoController, TimedOut, Withdrawn};
+
+    const STAMP: jiff::Timestamp = jiff::Timestamp::UNIX_EPOCH;
+    const TOOL: &str = "deploy.web-x.list";
+
+    /// A session tracking one turnless question, as `RequestOpened` leaves it.
+    fn tracked(tool: Option<&str>) -> (Session, RequestId) {
+        let mut session = Session::replay([], STAMP).unwrap().0;
+        let request = RequestId::new_v7();
+        session.open_questions.push((
+            request,
+            QuestionRef {
+                tool: tool.map(Into::into),
+                turn: None,
+            },
+        ));
+        (session, request)
+    }
+
+    /// The live event the actor builds from one broker resolution.
+    fn resolution(
+        request: RequestId,
+        answer: Answer,
+        was_default: bool,
+        cause: ResolutionCause,
+    ) -> Event {
+        Event::GrantResolved {
+            request,
+            answer,
+            by: (!was_default).then(|| ClientId::new("tester")),
+            was_default,
+            cause,
+        }
+    }
+
+    #[test]
+    fn a_coherent_resolution_folds_and_publishes_its_cause() {
+        let coherent = [
+            (Answered, Answer::Approve, false),
+            (Answered, Answer::Decline, false),
+            (Answered, Answer::Cancel, false),
+            (TimedOut, Answer::Decline, true),
+            (TimedOut, Answer::Cancel, true),
+            (NoController, Answer::Decline, true),
+            (Cancelled, Answer::Cancel, false),
+            (Withdrawn, Answer::Cancel, false),
+        ];
+        for (cause, answer, was_default) in coherent {
+            let (mut session, request) = tracked(None);
+            let mut out = Vec::new();
+            session
+                .step(
+                    resolution(request, answer.clone(), was_default, cause),
+                    STAMP,
+                    &mut out,
+                )
+                .unwrap();
+            let [Effect::Emit(emit)] = out.as_slice() else {
+                panic!("{cause:?} must emit exactly one batch: {out:?}");
+            };
+            assert!(
+                matches!(
+                    emit.records.as_slice(),
+                    [Record::Resolved { answer: recorded, was_default: flag, cause: journaled, .. }]
+                        if *recorded == answer && *flag == was_default && *journaled == Some(cause)
+                ),
+                "{cause:?} must journal its own cause: {:?}",
+                emit.records
+            );
+            assert!(
+                matches!(
+                    emit.updates.as_slice(),
+                    [UpdateKind::RequestResolved { cause: published, .. }]
+                        if *published == Some(cause)
+                ),
+                "{cause:?} must publish its own cause: {:?}",
+                emit.updates
+            );
+            assert_eq!(
+                session.open_questions,
+                [],
+                "a resolved request must leave no open question"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contradictory_resolution_is_refused_before_it_changes_anything() {
+        let contradictory = [
+            // Only a deadline resolves with the request default.
+            (Answered, Answer::Approve, true),
+            (Cancelled, Answer::Cancel, true),
+            (Withdrawn, Answer::Cancel, true),
+            (TimedOut, Answer::Decline, false),
+            (NoController, Answer::Decline, false),
+            // Nobody answered a cancelled or withdrawn request.
+            (Cancelled, Answer::Approve, false),
+            (Withdrawn, Answer::Decline, false),
+            // A session allowance needs a real client answer.
+            (Cancelled, Answer::ApproveForSession, false),
+            (Withdrawn, Answer::ApproveForSession, false),
+            (TimedOut, Answer::ApproveForSession, true),
+            (NoController, Answer::ApproveForSession, true),
+        ];
+        for (cause, answer, was_default) in contradictory {
+            let (mut session, request) = tracked(Some(TOOL));
+            let before = session.clone();
+            let mut out = Vec::new();
+            let result = session.step(
+                resolution(request, answer.clone(), was_default, cause),
+                STAMP,
+                &mut out,
+            );
+            assert!(
+                matches!(result, Err(Rejection::Invalid { .. })),
+                "{cause:?} with {answer:?} (default {was_default}) must be refused: {result:?}"
+            );
+            assert_eq!(session, before, "a refused resolution changes nothing");
+            assert!(out.is_empty(), "a refused resolution emits nothing");
+        }
+    }
+
+    #[test]
+    fn only_a_client_answer_mints_a_session_allowance() {
+        let tool = Name::parse_mapped_tool(TOOL).unwrap();
+        let (mut session, request) = tracked(Some(TOOL));
+        let mut out = Vec::new();
+        session
+            .step(
+                resolution(request, Answer::ApproveForSession, false, Answered),
+                STAMP,
+                &mut out,
+            )
+            .unwrap();
+        assert!(session.allow_always().contains(&tool));
+
+        // The fold's own mint guard holds even when a caller skips preflight.
+        for cause in [TimedOut, Cancelled, Withdrawn, NoController] {
+            let (mut session, request) = tracked(Some(TOOL));
+            let mut emit = Emit::default();
+            session
+                .grant_resolved(
+                    request,
+                    &Answer::ApproveForSession,
+                    Some(ClientId::new("tester")),
+                    false,
+                    cause,
+                    STAMP,
+                    &mut emit,
+                )
+                .unwrap();
+            assert!(
+                session.allow_always().is_empty(),
+                "{cause:?} must not mint a session allowance"
+            );
+            assert!(
+                !emit
+                    .records
+                    .iter()
+                    .any(|record| matches!(record, Record::AllowAlways { .. })),
+                "{cause:?} must not journal a session allowance"
+            );
         }
     }
 }

@@ -175,7 +175,7 @@ impl Generation {
                     poll: Arc::clone(poll),
                 });
             }
-            if let Some(section) = ext.prompt_section() {
+            for section in ext.prompt_sections() {
                 prompt_sections.push((index, section.clone()));
             }
             rule_files.extend(ext.rule_files().iter().cloned());

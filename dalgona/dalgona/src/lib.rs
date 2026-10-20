@@ -11,7 +11,7 @@ mod sections;
 
 use dal_agent::ext::Extension;
 use dalgona_batteries::{
-    ask, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work,
+    ask, history, judged, mcp, orchestration, procs, quality, review, skills, ttsr_rules, web, work,
 };
 use sections::Sections;
 
@@ -20,6 +20,7 @@ const BATTERY_HISTORY: &str = "history";
 const BATTERY_JUDGED: &str = "judged";
 const BATTERY_MCP: &str = "mcp";
 const BATTERY_ORCHESTRATION: &str = "orchestration";
+const BATTERY_PROCS: &str = "procs";
 const BATTERY_QUALITY: &str = "quality";
 const BATTERY_REVIEW: &str = "review";
 const BATTERY_SKILLS: &str = "skills";
@@ -33,6 +34,7 @@ const BATTERY_NAMES: &[&str] = &[
     BATTERY_JUDGED,
     BATTERY_MCP,
     BATTERY_ORCHESTRATION,
+    BATTERY_PROCS,
     BATTERY_QUALITY,
     BATTERY_REVIEW,
     BATTERY_SKILLS,
@@ -100,11 +102,13 @@ fn compose(
     sections: Sections,
     parts: &mut dalgon::Parts,
 ) -> Result<Vec<Extension>, dalgon::BuildError> {
+    parts.ttsr_lane = true;
     let Sections {
         history: history_config,
         judged: judged_config,
         mcp: mcp_settings,
         orchestration: mut orchestration_config,
+        procs: procs_config,
         quality: quality_config,
         review: review_config,
         plan: plan_config,
@@ -136,6 +140,9 @@ fn compose(
         let built = orchestration::orchestration(orchestration_config)?;
         orchestration_view = Some(built.view);
         batteries.push(built.extension);
+    }
+    if selected(cx, BATTERY_PROCS) && procs_config.enabled {
+        batteries.push(procs::procs()?);
     }
     if selected(cx, BATTERY_QUALITY) {
         let guard = sections::guard(cx.config)?;

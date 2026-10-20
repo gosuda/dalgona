@@ -390,6 +390,39 @@ impl Replay {
             Record::Ext {
                 ext, kind, body, ..
             } => session.fold_ext(ext, kind, body),
+            Record::PrivateLoop {
+                r#loop, who, turn, ..
+            } => {
+                if let Err(conflict) = session.check_private_loop(*r#loop) {
+                    return Err(contradiction(conflict.detail()));
+                }
+                session.fold_private_loop(*r#loop, who.clone(), *turn);
+            }
+            Record::PrivateStart {
+                r#loop,
+                token,
+                who,
+                turn,
+                round,
+                name,
+                ..
+            } => {
+                if let Err(conflict) = session.check_private_start(*r#loop, *token, who, *turn) {
+                    return Err(contradiction(conflict.detail()));
+                }
+                session.fold_private_start(*r#loop, *token, who, *turn, *round, name);
+            }
+            Record::PrivateEnd {
+                r#loop,
+                token,
+                outcome,
+                ..
+            } => {
+                if let Err(conflict) = session.check_private_end(*r#loop, *token) {
+                    return Err(contradiction(conflict.detail()));
+                }
+                session.fold_private_end(*r#loop, *token, outcome.clone());
+            }
             Record::Label {
                 entry,
                 label: Some(label),
@@ -470,6 +503,7 @@ impl Replay {
             };
             self.session.job_settled(job, JobOutcome::Lost, &mut emit);
         }
+        self.session.repair_private_ends(now, &mut records);
         let mut session = self.session;
         session.restore_branch_state(session.tree.leaf)?;
         let generation = session.next_generation()?;

@@ -65,6 +65,7 @@ impl ModelHandler for Fusion {
             request.model = ModelRoute::Api {
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
+                provider: None,
             };
             cx.forward(request, &[]).await
         })
@@ -201,7 +202,7 @@ async fn establish_persisted_control(
         matches!(record, Record::Assistant(entry)
             if matches!(&entry.kind, EntryKind::Assistant { content, .. }
                 if content.iter().any(|block| matches!(block,
-                    Block::Text { text } if text.as_ref() == "Fused"))))
+                    Block::Text { text, .. } if text.as_ref() == "Fused"))))
     });
     assert!(persisted_prompt, "control persists the user prompt");
     assert!(persisted_answer, "control persists the scripted answer");

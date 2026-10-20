@@ -297,6 +297,10 @@ impl Services for FakeServices {
         unavailable(&self.side_calls)
     }
 
+    fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+        unavailable(&self.side_calls)
+    }
+
     fn add_session_tools(
         &self,
         _who: &Caller,

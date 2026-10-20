@@ -146,6 +146,12 @@ pub(super) fn opt_text_member(
     }
 }
 
+/// Reads one raw JSON member exactly as written, `null` included.
+pub(super) fn raw_json_member(member: &Member<'_>, name: &str) -> Result<RawJson, DecodeError> {
+    let (offset, raw) = (member.offset, member.value);
+    RawJson::parse(raw).map_err(|error| invalid(offset, format!("member `{name}`: {error}")))
+}
+
 pub(super) fn opt_raw_json_member(
     member: &Member<'_>,
     name: &str,
@@ -153,10 +159,7 @@ pub(super) fn opt_raw_json_member(
     if is_null(member) {
         return Ok(None);
     }
-    let (offset, raw) = (member.offset, member.value);
-    RawJson::parse(raw)
-        .map(Some)
-        .map_err(|error| invalid(offset, format!("member `{name}`: {error}")))
+    raw_json_member(member, name).map(Some)
 }
 
 pub(super) fn parts_member(member: &Member<'_>) -> Result<Vec<JournalPart>, DecodeError> {
@@ -247,12 +250,17 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
         .map(|member| text_member(&member, "text"))
         .transpose()?;
     let replay = want(&mut members, "replay")
-        .map(|member| opt_raw_json_member(&member, "replay"))
-        .transpose()?
-        .flatten();
+        .map(|member| raw_json_member(&member, "replay"))
+        .transpose()?;
+    // A text or tool_call block reads `"replay":null` as no payload. A
+    // reasoning block always carries one, and the fold writes
+    // `RawJson::null()` as the empty placeholder, so only there is `null` a
+    // value and only an absent member is malformed.
+    let null_is_absent = |raw: Option<RawJson>| raw.filter(|raw| raw.as_str() != "null");
     match ty.as_ref() {
         "text" => Ok(Block::Text {
             text: text.ok_or_else(|| invalid(offset, "a text block needs `text`"))?,
+            replay: null_is_absent(replay),
         }),
         "reasoning" => Ok(Block::Reasoning {
             text: text.ok_or_else(|| invalid(offset, "a reasoning block needs `text`"))?,
@@ -274,7 +282,12 @@ pub(super) fn decode_block(value: &str, offset: usize) -> Result<Block, DecodeEr
                 })
                 .transpose()?
                 .ok_or_else(|| invalid(offset, "a tool_call block needs `input`"))?;
-            Ok(Block::ToolCall { id, name, input })
+            Ok(Block::ToolCall {
+                id,
+                name,
+                input,
+                replay: null_is_absent(replay),
+            })
         }
         kind => Err(invalid(
             offset,
@@ -343,7 +356,48 @@ pub(super) fn usage_member(member: &Member<'_>) -> Result<Option<Usage>, DecodeE
         reasoning_tokens: reasoning,
         cache_write_tokens: cache_write,
         cost_usd,
+        premium_requests: None,
     }))
+}
+
+pub(super) fn opt_premium_requests_member(
+    members: &mut Members<'_>,
+) -> Result<Option<f64>, DecodeError> {
+    let Some(member) = want(members, "premium_requests") else {
+        return Ok(None);
+    };
+    let (offset, raw) = (member.offset, member.value);
+    let value: f64 =
+        sonic_rs::from_slice(raw.as_bytes()).map_err(|error| invalid(offset, error.to_string()))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(invalid(
+            offset,
+            "member `premium_requests` must be a finite nonnegative number",
+        ));
+    }
+    Ok(Some(value))
+}
+
+pub(super) fn usage_with_premium(members: &mut Members<'_>) -> Result<Usage, DecodeError> {
+    let mut usage = usage_member(&need(members, "usage")?)?
+        .ok_or_else(|| invalid(0, "member `usage` must be an object"))?;
+    usage.premium_requests = opt_premium_requests_member(members)?;
+    Ok(usage)
+}
+
+pub(super) fn opt_usage_with_premium(
+    members: &mut Members<'_>,
+) -> Result<Option<Usage>, DecodeError> {
+    let usage = usage_member(&need(members, "usage")?)?;
+    let premium = opt_premium_requests_member(members)?;
+    match (usage, premium) {
+        (Some(mut usage), premium) => {
+            usage.premium_requests = premium;
+            Ok(Some(usage))
+        }
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(invalid(0, "member `premium_requests` needs `usage`")),
+    }
 }
 
 pub(super) fn owner_member(member: &Member<'_>) -> Result<Owner, DecodeError> {
@@ -383,17 +437,28 @@ pub(super) fn purpose_member(member: &Member<'_>) -> Result<InferredPurpose, Dec
 }
 
 /// Reads a model record's route: either the format-1 `api` and `model`
-/// pair or one `route` member, never both.
+/// pair (with an optional `provider`) or one `route` member, never both.
+/// A record without `provider` decodes as a route that names none.
 pub(super) fn model_route_members(members: &mut Members<'_>) -> Result<ModelRoute, DecodeError> {
     let route = want(members, "route");
     let api = want(members, "api");
     let model = want(members, "model");
+    let provider = want(members, "provider");
     match (route, api, model) {
         (None, Some(api), Some(model)) => Ok(ModelRoute::Api {
             family: json_member(&api)?,
             model: model_id_member(&model)?,
+            provider: provider
+                .map(|member| provider_id_member(&member))
+                .transpose()?,
         }),
-        (Some(route), None, None) => route_member(&route),
+        (Some(route), None, None) => match provider {
+            Some(provider) => Err(invalid(
+                provider.offset,
+                "member `provider` cannot appear with `route`",
+            )),
+            None => route_member(&route),
+        },
         (Some(route), _, _) => Err(invalid(
             route.offset,
             "member `route` cannot appear with `api` or `model`",
@@ -401,6 +466,17 @@ pub(super) fn model_route_members(members: &mut Members<'_>) -> Result<ModelRout
         (None, None, _) => Err(invalid(0, "missing member `api`")),
         (None, Some(_), None) => Err(invalid(0, "missing member `model`")),
     }
+}
+
+/// Reads a `provider` id member; an empty id cannot name a configured
+/// provider, and `null` is malformed rather than absent.
+pub(super) fn provider_id_member(member: &Member<'_>) -> Result<Box<str>, DecodeError> {
+    let offset = member.offset;
+    let provider = text_member(member, "provider")?;
+    if provider.is_empty() {
+        return Err(invalid(offset, "member `provider` must not be empty"));
+    }
+    Ok(provider)
 }
 
 /// Reads a `model` id member; an empty id cannot name a provider model.

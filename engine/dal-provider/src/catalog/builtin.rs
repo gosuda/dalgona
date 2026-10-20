@@ -136,6 +136,8 @@ fn codex_reserve_entry(accepted: Vec<ThinkingLevel>) -> CatalogEntry {
         custom_grammar: false,
         temperature_allowed: false,
         display_supported: false,
+        premium_multiplier: None,
+        price: None,
     }
 }
 
@@ -168,5 +170,7 @@ fn openai_entry(
         custom_grammar: false,
         temperature_allowed: false,
         display_supported: false,
+        premium_multiplier: None,
+        price: None,
     }
 }

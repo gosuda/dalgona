@@ -40,6 +40,7 @@ dal-tools = { workspace = true, features = ["symbols"] }
 dal-wire.workspace = true
 thiserror.workspace = true
 jiff.workspace = true
+tracing.workspace = true
 serde.workspace = true
 sonic-rs.workspace = true
 toml.workspace = true
@@ -62,6 +63,7 @@ windows-sys.workspace = true
 clap_mangen = "=0.3.3"
 dal-agent = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
