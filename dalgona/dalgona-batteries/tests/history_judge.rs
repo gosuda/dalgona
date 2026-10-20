@@ -287,6 +287,25 @@ fn dream_records(records: &[Record]) -> Vec<DreamBody> {
         .collect()
 }
 
+/// The judge ledger rows the session journal holds, oldest first. Each row
+/// carries the call's status and its bounded cause, never the submitted
+/// context, so a failed call explains itself without exposing letter text.
+fn judge_ledger_rows(records: &[Record]) -> Vec<String> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let Record::Ext {
+                ext, kind, body, ..
+            } = record
+            else {
+                return None;
+            };
+            (ext.as_ref() == "history" && kind.as_ref() == "judge")
+                .then(|| body.as_str().to_owned())
+        })
+        .collect()
+}
+
 /// What one scenario left behind.
 struct Observed {
     /// The auto-dream notice after each trigger prompt, in order.
@@ -295,6 +314,8 @@ struct Observed {
     bodies: Vec<String>,
     /// The dream records committed to the journal.
     dreams: Vec<DreamBody>,
+    /// The judge ledger rows the journal holds: why a call failed.
+    judge_rows: Vec<String>,
 }
 
 /// The loopback model endpoint owning its listener and handler tasks in
@@ -436,6 +457,7 @@ async fn run_scenario(seed: &Seed, rounds: usize) -> Result<Observed, Box<dyn St
     let store = Store::new(data.clone(), workspace, dal_core::Product::Dalgona);
     let (mut journal, _) = store.open_session(session).await?;
     let dreams = dream_records(journal.records());
+    let judge_rows = judge_ledger_rows(journal.records());
     journal.close().await?;
     let bodies = captured
         .bodies
@@ -448,6 +470,7 @@ async fn run_scenario(seed: &Seed, rounds: usize) -> Result<Observed, Box<dyn St
         notices,
         bodies,
         dreams,
+        judge_rows,
     })
 }
 
@@ -544,7 +567,10 @@ async fn history_consolidation_uses_session_judge_identity() -> TestResult {
     let observed = run_scenario(&Seed::uniform(), 1).await?;
     assert_eq!(
         observed.notices,
-        [format!("Auto-dream consolidated {LETTERS} letters.")]
+        [format!("Auto-dream consolidated {LETTERS} letters.")],
+        "judge ledger rows: {:?}; judge requests received: {}",
+        observed.judge_rows,
+        judge_requests(&observed.bodies).len()
     );
     assert_eq!(
         observed.dreams.len(),
@@ -566,6 +592,13 @@ async fn history_consolidation_uses_session_judge_identity() -> TestResult {
         "the submitted context carries the dream summary request"
     );
     assert_oldest_first_texts(&submitted, LETTERS);
+    let wire: sonic_rs::Value =
+        sonic_rs::from_str(judge_requests(&observed.bodies)[0]).expect("judge call is JSON");
+    assert_eq!(
+        wire.get("model").and_then(JsonValueTrait::as_str),
+        Some("gpt-6-luna"),
+        "the judge call sends the configured model id on the wire"
+    );
     Ok(())
 }
 
@@ -578,7 +611,13 @@ async fn history_consolidation_consumes_only_the_fitted_oldest_prefix() -> TestR
         dangling: None,
     };
     let observed = run_scenario(&seed, 1).await?;
-    assert_eq!(observed.dreams.len(), 1, "one dream record is committed");
+    assert_eq!(
+        observed.dreams.len(),
+        1,
+        "one dream record is committed; judge ledger rows: {:?}; judge requests received: {}",
+        observed.judge_rows,
+        judge_requests(&observed.bodies).len()
+    );
     let fitted = observed.dreams[0].letters.len();
     assert!(
         (1..LETTERS).contains(&fitted),

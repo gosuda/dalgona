@@ -5,6 +5,7 @@
 //! Catalog fetches happen per request here; the driver caches the
 //! resolved model across a turn's requests.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -345,10 +346,20 @@ async fn open_stream(
                 message: error.to_string(),
             }
         })?;
+    let bound = bound_to(req, &resolved.route);
     let provider = providers.provider(resolved)?;
     provider
-        .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)
+        .open(deps.session, &bound, &[], Arc::new(|_: String| {}), cancel)
         .await
+}
+
+fn bound_to<'a>(req: &'a ModelRequest, resolved: &ModelRoute) -> Cow<'a, ModelRequest> {
+    if matches!(req.model, ModelRoute::Api { .. }) {
+        return Cow::Borrowed(req);
+    }
+    let mut bound = req.clone();
+    bound.model = resolved.clone();
+    Cow::Owned(bound)
 }
 
 /// Normalizes decoding-level provider events to recorded core events.
@@ -477,4 +488,74 @@ fn valid_prefix_len(bytes: &[u8]) -> usize {
         end -= 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use dal_core::{Family, ModelRequest, ModelRoute, Purpose, RequestParams};
+
+    use super::bound_to;
+
+    fn request(model: ModelRoute) -> ModelRequest {
+        ModelRequest {
+            purpose: Purpose::Judge,
+            model,
+            system: Arc::from("system"),
+            tools: Arc::from(Vec::new()),
+            context: Arc::from(Vec::new()),
+            params: RequestParams::default(),
+            cache_key: None,
+        }
+    }
+
+    fn resolved() -> ModelRoute {
+        ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: Some("openai".into()),
+        }
+    }
+
+    #[test]
+    fn an_identity_route_binds_to_the_resolved_api_route() {
+        let req = request(ModelRoute::from_id("openai/gpt-6-luna"));
+        assert!(
+            matches!(req.model, ModelRoute::Synthetic { .. }),
+            "a configured provider/model string types as synthetic"
+        );
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, resolved());
+        assert_eq!(bound.system, req.system);
+        assert_eq!(bound.purpose, req.purpose);
+        assert!(matches!(bound, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn an_api_route_keeps_its_own_pin_and_is_not_cloned() {
+        let own = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: None,
+        };
+        let req = request(own.clone());
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, own);
+        assert!(matches!(bound, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn an_api_route_with_a_provider_pin_keeps_it_and_is_not_cloned() {
+        let own = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6-luna".into(),
+            provider: Some("openai".into()),
+        };
+        let req = request(own.clone());
+        let bound = bound_to(&req, &resolved());
+        assert_eq!(bound.model, own);
+        assert!(matches!(bound, Cow::Borrowed(_)));
+    }
 }

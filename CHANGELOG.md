@@ -7,6 +7,11 @@
   blobs back as inline text, as it already did for images. An absent blob or
   a blob that is not valid UTF-8 fails the turn before any request is sent and
   names the blob.
+- Open judge and other identity-named requests on the route the catalog
+  resolves. A `provider/model` string that no registered model owns used to
+  reach the HTTP provider as a synthetic route and fail with "an HTTP provider
+  needs a concrete API model route", so history consolidation failed for every
+  configured judge. A request that already names an API route keeps it.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
   absent when the starter supplied none), it survives settlement and the job
