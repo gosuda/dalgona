@@ -659,7 +659,62 @@ mod tests {
         (tmp, host, agent)
     }
 
-    const DENIAL_FIXTURE: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"c1\",\"name\":\"editgate\"},{\"type\":\"tool_call_started\",\"id\":\"c2\",\"name\":\"execgate\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"c1\",\"name\":\"editgate\",\"args\":{\"kind\":\"parsed\",\"value\":{}}},{\"id\":\"c2\",\"name\":\"execgate\",\"args\":{\"kind\":\"parsed\",\"value\":{}}}]}},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":4,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}}]}\n{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"Hello\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
+    /// The two gated tools of the denial fixture: `editgate` is Patch class
+    /// and `execgate` is Exec class, so each needs a different approval rung.
+    const EDIT_TOOL: &str = "editgate";
+    const EXEC_TOOL: &str = "execgate";
+    /// What the model says once both of its gated calls were denied.
+    const DENIAL_REPLY: &str = "Hello";
+
+    fn usage_json(input_tokens: u32, output_tokens: u32) -> sonic_rs::Value {
+        sonic_rs::json!({
+            "input_tokens": input_tokens,
+            "cached_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": null,
+            "cache_write_tokens": 0,
+            "cost_usd": null
+        })
+    }
+
+    /// The replay fixture of the denial run, one typed step per line: the
+    /// first response calls both gated tools and stops for tool use, the
+    /// second answers with [`DENIAL_REPLY`]. The lines go through the JSON
+    /// encoder, so they are valid JSON by construction; the scripted provider
+    /// refuses a line that is not exactly one typed step.
+    fn denial_fixture() -> String {
+        let parsed_call = |id: &str, name: &str| sonic_rs::json!({"id": id, "name": name, "args": {"kind": "parsed", "value": {}}});
+        let steps = [
+            sonic_rs::json!({
+                "kind": "events",
+                "events": [
+                    {"type": "tool_call_started", "id": "c1", "name": EDIT_TOOL},
+                    {"type": "tool_call_started", "id": "c2", "name": EXEC_TOOL},
+                    {
+                        "type": "tool_calls_done",
+                        "calls": [parsed_call("c1", EDIT_TOOL), parsed_call("c2", EXEC_TOOL)]
+                    },
+                    {"type": "usage", "usage": usage_json(10, 4)},
+                    {"type": "stop", "reason": "tool_use"}
+                ]
+            }),
+            sonic_rs::json!({
+                "kind": "events",
+                "events": [
+                    {"type": "text_delta", "text": DENIAL_REPLY},
+                    {"type": "tool_calls_done", "calls": []},
+                    {"type": "usage", "usage": usage_json(12, 5)},
+                    {"type": "stop", "reason": "end_turn"}
+                ]
+            }),
+        ];
+        let mut text = String::new();
+        for step in &steps {
+            text.push_str(&step.to_string());
+            text.push('\n');
+        }
+        text
+    }
 
     /// An approval-gated test tool: Patch class for `editgate`, Exec class
     /// for `execgate`. With nobody attached to answer, `ask` denies both as
@@ -684,11 +739,22 @@ mod tests {
         }
 
         fn patch() -> Self {
-            Self::gated("editgate", true)
+            Self::gated(EDIT_TOOL, true)
         }
 
         fn exec() -> Self {
-            Self::gated("execgate", false)
+            Self::gated(EXEC_TOOL, false)
+        }
+
+        fn class(&self) -> ToolClass {
+            if self.patch {
+                ToolClass::Patch
+            } else {
+                ToolClass::Exec {
+                    read_only: false,
+                    grant: None,
+                }
+            }
         }
     }
 
@@ -702,14 +768,7 @@ mod tests {
         }
 
         fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
-            if self.patch {
-                Ok(ToolClass::Patch)
-            } else {
-                Ok(ToolClass::Exec {
-                    read_only: false,
-                    grant: None,
-                })
-            }
+            Ok(self.class())
         }
 
         fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
@@ -734,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(&data).expect("data dir");
         std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let fixture = data.join("script.jsonl");
-        std::fs::write(&fixture, DENIAL_FIXTURE).expect("fixture");
+        std::fs::write(&fixture, denial_fixture()).expect("fixture");
         let user = format!(
             "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
             fixture.to_string_lossy().replace('\\', "\\\\")
@@ -1065,15 +1124,20 @@ mod tests {
             .await
             .expect("run");
         assert_eq!(outcome, PrintOutcome::Denied);
-        assert_eq!(String::from_utf8(stdout).expect("utf8"), "Hello");
+        assert_eq!(
+            String::from_utf8(stdout).expect("utf8"),
+            DENIAL_REPLY,
+            "stdout carries the model's text and no denial note"
+        );
         assert_eq!(
             String::from_utf8(stderr).expect("utf8"),
             concat!(
                 "dalgon: approval is ask and no terminal is attached: patch and exec calls are denied. Re-run with --approval all to approve them.\n",
                 "dalgon: editgate needs approval; print mode cannot ask. Rerun with --approval edits.\n",
                 "dalgon: execgate needs approval; print mode cannot ask. Rerun with --approval all.\n",
-                "dalgon: 2 calls denied by approval mode.\n"
-            )
+                "dalgon: 2 calls denied by approval mode.\n",
+            ),
+            "one notice, then one note per denied call in call order naming the lowest approval rung that allows it, then the summary"
         );
         host.shutdown(Duration::from_secs(1)).await;
     }
