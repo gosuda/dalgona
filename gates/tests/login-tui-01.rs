@@ -233,10 +233,29 @@ impl Session {
         .into())
     }
 
-    fn finish(self) -> Fallible<()> {
+    /// Presses Esc and waits for the composer to repaint after `from`;
+    /// returns the new offset.
+    fn press_escape(&self, from: usize) -> Fallible<usize> {
         self.type_text("\u{1b}");
-        std::thread::sleep(Duration::from_millis(100));
+        self.wait_for("Ask dal to change code", from)
+    }
+
+    /// Dismisses any open surface with Ctrl+C, quits with Ctrl+D, and fails
+    /// if the loop has not ended within 20 seconds.
+    fn finish(self) -> Fallible<()> {
+        self.type_text("\u{3}");
         self.type_text("\u{4}");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !self.thread.is_finished() {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "the terminal loop did not quit on Ctrl+D; screen:\n{}",
+                    self.screen()
+                )
+                .into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         self.thread
             .join()
             .map_err(|_| "terminal loop panicked")?
@@ -270,7 +289,7 @@ fn login_openai_codex_completes_on_the_browser_callback_then_logout_removes_it()
         Some(Credential::OAuth(oauth)) if oauth.account_id.as_deref() == Some("acct-fake")
     ));
 
-    session.type_text("\u{1b}");
+    let mark = session.press_escape(mark)?;
     session.type_text("/logout\r");
     session.wait_for("openai-codex · oauth", mark)?;
     let mark = session.wait_for("All providers", mark)?;
@@ -357,7 +376,7 @@ fn login_openai_masks_the_key_and_logout_all_asks_first() -> Fallible<()> {
     )?;
     seeded.store()?;
 
-    session.type_text("\u{1b}");
+    let mark = session.press_escape(mark)?;
     session.type_text("/logout\r");
     let mark = session.wait_for("openai · api_key", mark)?;
     // Rows: anthropic, openai, then All providers; filter to the last row.
