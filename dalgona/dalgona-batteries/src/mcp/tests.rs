@@ -2570,9 +2570,20 @@ async fn cancelled_http_call_stops_waiting_for_a_silent_server() {
     fixture.prompt().await;
     fixture.turn_ended().await;
     let turn = submit_prompt(&fixture).await;
-    tokio::time::timeout(Duration::from_secs(10), recording.calls_seen.notified())
-        .await
-        .expect("the silent server receives tools/call");
+    let call_seen = recording.calls_seen.notified();
+    tokio::pin!(call_seen);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            fixture.answer_pending().await;
+            let arrived =
+                tokio::time::timeout(Duration::from_millis(100), call_seen.as_mut()).await;
+            if arrived.is_ok() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the silent server receives tools/call");
     fixture
         .agent
         .submit(Command::Cancel {
@@ -2656,7 +2667,6 @@ async fn cancelled_call_before_send_writes_no_tool_call() {
             scripted_tool_step("entry-gated", &entry, "{}"),
             scripted_final_step(),
             scripted_tool_step("echo-gated", &echo, "{}"),
-            scripted_final_step(),
             scripted_tool_step("echo-after", &echo, "{}"),
             scripted_final_step(),
         ],
