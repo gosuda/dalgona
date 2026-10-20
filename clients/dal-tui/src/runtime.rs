@@ -112,6 +112,9 @@ struct Session {
     inflight: Option<InflightRun>,
     /// Set when Ctrl+Z asked the loop to park the terminal and raise SIGTSTP.
     suspend: bool,
+    /// Set when Ctrl+G asked the loop to run the external editor on a
+    /// temp copy of the draft.
+    external_edit: bool,
     /// The blob read worker serving the open expand view, for structured
     /// cancellation and a clean join at teardown.
     blob_load: Option<BlobReadWork>,
@@ -1006,6 +1009,13 @@ where
         }
         surfaces.poll_signin(opts, io, &mut model_source);
         poll_model_retry(&mut surfaces.session, &mut model_source);
+        if surfaces.session.external_edit {
+            surfaces.session.external_edit = false;
+            run_external_editor(opts, io, state, &mut surfaces);
+            // The editor owned the screen: whatever it left must not survive
+            // a diff paint that finds every row unchanged.
+            painter.invalidate();
+        }
         if surfaces.session.suspend {
             surfaces.session.suspend = false;
             suspend_and_continue(io, state, opts, &theme, &mut painter, &mut surfaces)?;
@@ -2494,6 +2504,9 @@ fn apply_composer_action(
         // uses, then raises SIGTSTP; the loop's resume path re-enters the
         // recorded modes and repaints. Windows leaves the key unbound.
         Some(Action::Suspend) => session.suspend = true,
+        // Ctrl+G edits the draft in the configured editor; the loop runs the
+        // child between frames so a blocked editor never starves the pump.
+        Some(Action::ExternalEditor) => session.external_edit = true,
         Some(Action::ExpandCollapse) => {
             let opened = entries.iter().rev().find_map(|entry| {
                 crate::render::expanded_card(entry, diagrams).map(|card| {
@@ -2801,6 +2814,70 @@ fn reenter_modes(
             .map_err(|error| format!("cannot re-enter grapheme mode: {error}"))?;
     }
     Ok(())
+}
+
+/// Runs the configured external editor on a temp copy of the draft and
+/// reads the result back into the composer. A nonzero exit cancels the edit:
+/// the draft stays untouched and no notice appears. A failure to prepare, start, or
+/// read back the edit also leaves the draft untouched and surfaces an error
+/// notice. A successful exit replaces the draft, checkpoints undo, puts the
+/// caret at the end, and refreshes the completion state for the new draft.
+/// The terminal restores before the child runs and re-enters the recorded
+/// modes after, exactly like the suspend path.
+fn run_external_editor(
+    opts: &TuiOptions,
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    surfaces: &mut Surfaces,
+) {
+    let saved = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let restore = crate::term::restore_bytes(&saved);
+    let run = (|| -> Result<Option<String>, String> {
+        let mut tmp = tempfile::NamedTempFile::new()
+            .map_err(|error| format!("cannot create a temp file for the editor: {error}"))?;
+        std::io::Write::write_all(&mut tmp, surfaces.session.composer.text().as_bytes())
+            .map_err(|error| format!("cannot write the draft: {error}"))?;
+        let path = tmp.path().to_path_buf();
+        io.write(&restore)
+            .map_err(|error| format!("cannot restore the terminal: {error}"))?;
+        io.disable_raw();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the external editor is the terminal client's own process edge"
+        )]
+        let outcome = {
+            let mut command = std::process::Command::new(opts.editor.as_ref());
+            command.arg(&path);
+            command
+                .status()
+                .map_err(|error| format!("cannot start the editor: {error}"))
+        };
+        // The terminal re-enters its modes whether or not the child ran, so
+        // a missing editor never leaves the interface parked in cooked mode.
+        reenter_modes(io, state, opts, &saved)?;
+        let status = outcome?;
+        if !status.success() {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|error| format!("cannot read the edited draft: {error}"))
+    })();
+    match run {
+        Ok(Some(text)) => {
+            surfaces.session.composer.set(&text);
+            // The editor may have replaced a draft the completion ring wrote
+            // or completed; the ring and its candidates follow the new draft.
+            surfaces.session.update_popup();
+        }
+        Ok(None) => {}
+        Err(message) => surfaces
+            .live
+            .notice_as(crate::theme::Role::Error, format!("note: {message}")),
+    }
 }
 
 /// `r` in the failed model picker requests one retry through the real model
