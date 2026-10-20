@@ -306,3 +306,49 @@ fn piped_blank_input_is_refused_and_stores_nothing() -> Result<(), Box<dyn Error
     }
     Ok(())
 }
+
+/// A piped key forgives its trailing line ending and nothing else. A line break
+/// or control character inside the key can never be sent as an HTTP header, so
+/// saving it would report success and then fail at the first request with an
+/// error that never names the key. It is refused before anything is stored, and
+/// the refusal never echoes the key.
+#[test]
+fn piped_key_forgives_only_its_trailing_line_ending() -> Result<(), Box<dyn Error>> {
+    for input in ["sk-key", "sk-key\n", "sk-key\r\n", "sk-key\n\n"] {
+        let fixture = CliFixture::new()?;
+        let output =
+            fixture.output_with_stdin(&["login", "anthropic", "--api-key"], input.as_bytes())?;
+        assert_eq!(output.status.code(), Some(0), "{input:?}");
+        let saved: Value = sonic_rs::from_str(&fs::read_to_string(fixture.auth_file())?)?;
+        assert_eq!(
+            saved["anthropic"]["key"].as_str(),
+            Some("sk-key"),
+            "{input:?}"
+        );
+    }
+    for input in [
+        "sk-line1\nsk-line2\n",
+        "sk-line1\r\nsk-line2",
+        "sk-line1\nsk-line2",
+        "sk-nul\u{0}key\n",
+        "\u{1b}[31msk-esc\n",
+        "sk-del\u{7f}key\n",
+    ] {
+        let fixture = CliFixture::new()?;
+        let output =
+            fixture.output_with_stdin(&["login", "anthropic", "--api-key"], input.as_bytes())?;
+
+        assert_eq!(output.status.code(), Some(1), "{input:?} was accepted");
+        assert_eq!(output.stdout, [] as [u8; 0], "{input:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr)?,
+            "dalgon: cannot read standard input: the key holds a line break or control character\nPipe the key: printf %s \"$KEY\" | dalgon login PROVIDER --api-key\n",
+            "{input:?}"
+        );
+        assert!(
+            !fixture.auth_file().exists(),
+            "{input:?} wrote a credential file"
+        );
+    }
+    Ok(())
+}
