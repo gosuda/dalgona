@@ -2565,13 +2565,32 @@ fn apply_composer_action(
 }
 
 /// Picker keys: Esc dismisses, Enter activates the focused option, and
-/// arrows plus plain characters drive selection and filter text.
+/// characters edit the filter. While the filter is empty the `j`/`k` move
+/// keys and Space take their documented filter-free meanings: move, and
+/// toggle a multi picker row. On a non-empty filter every unmodified
+/// character, Space included, stays filter text; Ctrl+Space (0x00) toggles
+/// from either state. PageUp/PageDown/Home/End and the Ctrl+P/N/B/F chords
+/// resolve through the key table in both states, so bound picker keys never
+/// go runtime-dead. `resolve_in` is mode-agnostic, so the kitty argument is
+/// inert.
 fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    match key.code {
-        KeyCode::Esc => session.picker = None,
-        KeyCode::Enter => {
+    let Some(picker) = session.picker.as_mut() else {
+        return;
+    };
+    let table_action = resolve_in(key, false, &[Owner::Picker]);
+    // The empty filter admits the documented plain-letter keys before the
+    // filter-text arm; a non-empty filter sends every unmodified character
+    // to the query, and Ctrl+Space (0x00) toggles from either state.
+    let filter_empty = picker.filter().is_empty();
+    if apply_picker_table_action(picker, key, table_action, filter_empty) {
+        return;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => session.picker = None,
+        (KeyCode::Enter, _) => {
             match session
                 .picker
                 .as_mut()
@@ -2600,47 +2619,104 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                 Some(_) | None => session.picker = None,
             }
         }
-        KeyCode::Up => {
-            if let Some(picker) = &mut session.picker {
-                picker.move_selection(false);
-            }
+        (KeyCode::Up, _) => picker.move_selection(false),
+        (KeyCode::Down, _) => picker.move_selection(true),
+        (KeyCode::Backspace, _) => picker.remove_filter_char(),
+        (KeyCode::Char('r'), KeyModifiers::NONE) => apply_model_retry_key(session),
+        (KeyCode::Char(' '), KeyModifiers::NONE) if filter_empty => {
+            // picker.rs owns the contract: toggle_selected is a no-op on a
+            // single picker, so unmodified Space never joins the filter on
+            // an empty query and never invents a check where none exists.
+            picker.toggle_selected();
         }
-        KeyCode::Down => {
-            if let Some(picker) = &mut session.picker {
-                picker.move_selection(true);
-            }
+        (KeyCode::Char('j'), KeyModifiers::NONE) if filter_empty => {
+            picker.move_selection(true);
         }
-        KeyCode::Backspace => {
-            if let Some(picker) = &mut session.picker {
-                picker.remove_filter_char();
-            }
+        (KeyCode::Char('k'), KeyModifiers::NONE) if filter_empty => {
+            picker.move_selection(false);
         }
-        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
-            apply_model_retry_key(session);
-        }
-        KeyCode::Char(' ')
-            if key.modifiers == KeyModifiers::NONE
-                && session
-                    .picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.filter().is_empty()) =>
-        {
-            if let Some(picker) = &mut session.picker {
-                // picker.rs owns the contract: toggle_selected is a no-op on a
-                // single picker, so unmodified Space never joins the filter on
-                // an empty query and never invents a check where none exists.
-                picker.toggle_selected();
-            }
-        }
-        KeyCode::Char(character)
-            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-        {
-            if let Some(picker) = &mut session.picker {
-                picker.add_filter_char(character);
-            }
+        (KeyCode::Char(character), KeyModifiers::NONE)
+        | (KeyCode::Char(character), KeyModifiers::SHIFT) => {
+            picker.add_filter_char(character);
         }
         _ => {}
     }
+}
+
+/// Applies the key-table picker actions: move, page, jump, and the guarded
+/// toggle. Returns whether the key was one of them, so only keys the table
+/// leaves alone reach the literal-key arms of `apply_picker_key`.
+fn apply_picker_table_action(
+    picker: &mut PickerUi,
+    key: crate::keys::Key,
+    action: Option<Action>,
+    filter_empty: bool,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let plain = key.modifiers == KeyModifiers::NONE;
+    match action {
+        Some(Action::PickerToggle) => {
+            let is_ctrl_space =
+                key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if is_ctrl_space || filter_empty {
+                picker.toggle_selected();
+            } else {
+                picker.add_filter_char(' ');
+            }
+        }
+        Some(Action::PickerMoveUp) => {
+            // Plain `k` moves only on an empty filter (DESIGN guarded
+            // letters); on a non-empty filter it rejoins the query instead
+            // of stealing filter text. Up and Ctrl+P always move.
+            if !filter_empty && plain && key.code == KeyCode::Char('k') {
+                picker.add_filter_char('k');
+            } else {
+                picker.move_selection(false);
+            }
+        }
+        Some(Action::PickerMoveDown) => {
+            // Plain `j` moves only on an empty filter; otherwise it filters.
+            // Down and Ctrl+N always move.
+            if !filter_empty && plain && key.code == KeyCode::Char('j') {
+                picker.add_filter_char('j');
+            } else {
+                picker.move_selection(true);
+            }
+        }
+        Some(Action::PickerPageUp) => {
+            let step = picker.visible_range().len().max(1);
+            for _ in 0..step {
+                picker.move_selection(false);
+            }
+        }
+        Some(Action::PickerPageDown) => {
+            let step = picker.visible_range().len().max(1);
+            for _ in 0..step {
+                picker.move_selection(true);
+            }
+        }
+        Some(Action::PickerFirst) => {
+            let count = picker.visible_len();
+            for _ in 0..count {
+                if picker.is_selected(0) {
+                    break;
+                }
+                picker.move_selection(false);
+            }
+        }
+        Some(Action::PickerLast) => {
+            let last = picker.visible_len().saturating_sub(1);
+            for _ in 0..picker.visible_len() {
+                if picker.is_selected(last) {
+                    break;
+                }
+                picker.move_selection(true);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Suspends the process on POSIX:
@@ -3126,6 +3202,188 @@ mod tests {
         );
         assert!(session.picker.is_none());
         assert_eq!(session.pending_commands.len(), 1);
+    }
+
+    #[test]
+    fn empty_filter_routes_j_k_space_and_d_before_filter_text() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let rows = vec![
+            crate::picker::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            crate::picker::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::scoped_models_picker(rows, &[], "")),
+            ..Session::default()
+        };
+        // j moves down on the empty filter instead of joining the query.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_selected(1)),
+            "j moves on the empty filter"
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("")
+        );
+        // Space toggles the focused row on a multi picker.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_checked(1)),
+            "space checks the focused row"
+        );
+        // k moves back up.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_selected(0)),
+            "k moves on the empty filter"
+        );
+        // d joins the filter on a non-resume picker: no picker outside
+        // the resume list promises deletion.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("d"),
+            "d filters outside the resume picker"
+        );
+        // Backspace empties the query again, so the letters below start a
+        // fresh one that the GPT row matches.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("")
+        );
+
+        // Once the filter holds text, plain letters join the query again.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("g")
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("gp")
+        );
+        // Ctrl+Space (0x00) toggles from a non-empty filter.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_checked(0)),
+            "ctrl+space toggles while the filter holds text"
+        );
+    }
+
+    #[test]
+    fn ctrl_p_n_move_in_both_filter_states_and_space_filters_when_nonempty() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let rows = || {
+            vec![
+                crate::picker::ScopedModelRow {
+                    id: "openai/gpt-6".into(),
+                    label: "GPT 6".into(),
+                },
+                crate::picker::ScopedModelRow {
+                    id: "anthropic/opus-4".into(),
+                    label: "Opus 4".into(),
+                },
+            ]
+        };
+        let mut session = Session {
+            picker: Some(crate::picker::scoped_models_picker(rows(), &[], "")),
+            ..Session::default()
+        };
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session.picker.as_ref().is_some_and(|p| p.is_selected(1)),
+            "ctrl+n moves on an empty filter"
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session.picker.as_ref().is_some_and(|p| p.is_selected(0)),
+            "ctrl+p moves on an empty filter"
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("o")
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session.picker.as_ref().is_some(),
+            "ctrl+n never dismisses a non-empty picker"
+        );
+        let checked_before = session.picker.as_ref().is_some_and(|p| p.is_checked(0));
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("o "),
+            "space filters once text is present"
+        );
+        assert_eq!(
+            session.picker.as_ref().map(|p| p.is_checked(0)),
+            Some(checked_before),
+            "space does not toggle on a non-empty filter"
+        );
     }
 
     #[test]

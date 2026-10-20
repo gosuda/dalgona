@@ -220,11 +220,11 @@ impl PickerUi {
     }
 
     /// Pasted text joins the query like typed characters: the one-line
-    /// filter drops newlines (same normalization as the sign-in input),
-    /// refiltering once, and never activates a row or submits.
+    /// filter drops every control character (same normalization as the
+    /// sign-in input), refiltering once, and never activates a row or
+    /// submits.
     pub(crate) fn paste(&mut self, text: &str) {
-        self.filter
-            .extend(text.chars().filter(|c| !matches!(c, '\r' | '\n')));
+        self.filter.extend(text.chars().filter(|c| !c.is_control()));
         self.refilter();
     }
 

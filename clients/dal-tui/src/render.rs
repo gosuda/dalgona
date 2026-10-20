@@ -471,53 +471,99 @@ fn expanded_overlay_rows(
 /// options, then the hint. The no-match `/model {id}` fallback is a
 /// selectable row like the options: it needs the same `>` focus marker, not
 /// just a color.
-fn picker_overlay_rows(picker: &PickerUi) -> Vec<RenderRow> {
-    let mut rows = vec![RenderRow::new(picker.title.clone(), Role::Accent)];
-    if let Some(id) = picker.model_filter_fallback() {
-        let selected = picker.is_selected(picker.selected_fallback_index());
-        rows.push(RenderRow::new(
-            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
-            if selected { Role::Accent } else { Role::Dim },
-        ));
-    } else {
-        let range = picker.visible_range();
-        if picker.is_empty() {
-            rows.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
-        }
-        for index in range {
-            if let Some(option) = picker.visible_option(index) {
-                let selected = picker.is_selected(index);
-                // Multi-select rows carry the check marker the request dialogs
-                // use ([x]/[ ]); single-select rows keep the plain gutter.
-                let check = picker
-                    .is_multi()
-                    .then(|| {
-                        if picker.is_checked(index) {
-                            "[x] "
-                        } else {
-                            "[ ] "
-                        }
-                    })
-                    .unwrap_or_default();
-                rows.push(RenderRow::new(
-                    format!(
-                        "{} {check}{}",
-                        if selected { ">" } else { " " },
-                        escape(&option.label)
-                    ),
-                    if selected { Role::Accent } else { Role::Dim },
-                ));
-            }
-        }
-    }
-    rows.push(RenderRow::new(
+///
+/// Focus is reverse video plus the `>` marker, never color alone (DESIGN.md
+/// Focus and overlays / Accessibility): the focused row selects its whole
+/// text, so `NO_COLOR` still paints the theme's reversed selection style.
+///
+/// The window never exceeds `overlay_budget`, the sibling arms' contract:
+/// title plus hint keep one row each and the middle keeps a selection-
+/// centered window of the remainder, so every option stays reachable
+/// through the arrows at shrunk sizes and the status row keeps the last row.
+fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRow> {
+    let title = RenderRow::new(picker.title.clone(), Role::Accent);
+    let hint = RenderRow::new(
         if picker.is_settings() {
             crate::copy::ids::SETTINGS_HINT
         } else {
             crate::copy::ids::PICKER_HINT
         },
         Role::Dim,
-    ));
+    );
+    let option_row = |text: String, selected: bool| {
+        let mut row = RenderRow::new(text, if selected { Role::Accent } else { Role::Dim });
+        if selected {
+            row.selected.push(0..row.text.len());
+        }
+        row
+    };
+    let mut middle: Vec<RenderRow> = Vec::new();
+    let mut selected_pos = 0;
+    if let Some(id) = picker.model_filter_fallback() {
+        let selected = picker.is_selected(picker.selected_fallback_index());
+        middle.push(option_row(
+            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
+            selected,
+        ));
+    } else {
+        let range = picker.visible_range();
+        if picker.is_empty() {
+            middle.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
+        }
+        for index in range {
+            let Some(option) = picker.visible_option(index) else {
+                continue;
+            };
+            let selected = picker.is_selected(index);
+            if selected {
+                selected_pos = middle.len();
+            }
+            // Multi-select rows carry the check marker the request dialogs
+            // use ([x]/[ ]); single-select rows keep the plain gutter.
+            let check = picker
+                .is_multi()
+                .then(|| {
+                    if picker.is_checked(index) {
+                        "[x] "
+                    } else {
+                        "[ ] "
+                    }
+                })
+                .unwrap_or_default();
+            middle.push(option_row(
+                format!(
+                    "{} {check}{}",
+                    if selected { ">" } else { " " },
+                    escape(&option.label)
+                ),
+                selected,
+            ));
+        }
+    }
+    if overlay_budget == 0 {
+        return Vec::new();
+    }
+    if middle.len() + 2 <= overlay_budget {
+        let mut rows = Vec::with_capacity(middle.len() + 2);
+        rows.push(title);
+        rows.extend(middle);
+        rows.push(hint);
+        return rows;
+    }
+    if overlay_budget == 1 {
+        return vec![title];
+    }
+    if overlay_budget == 2 {
+        return vec![title, hint];
+    }
+    let allowed = overlay_budget.saturating_sub(2).max(1).min(middle.len());
+    let start = selected_pos
+        .saturating_sub(allowed / 2)
+        .min(middle.len().saturating_sub(allowed));
+    let mut rows = Vec::with_capacity(overlay_budget);
+    rows.push(title);
+    rows.extend(middle.into_iter().skip(start).take(allowed));
+    rows.push(hint);
     rows
 }
 
@@ -570,7 +616,7 @@ fn overlay_rows(
     } else if let Some(signin) = input.signin {
         bottom.extend(signin.rows(w, mode, budget.overlay));
     } else if let Some(picker) = input.picker {
-        bottom.extend(picker_overlay_rows(picker));
+        bottom.extend(picker_overlay_rows(picker, budget.overlay));
     } else if let Some(choice) = input.exit_draft {
         // The focused verb paints the selection range and leads the row, so
         // a narrow frame can never clip the verb Enter activates. The
@@ -2506,6 +2552,167 @@ mod tests {
     }
 
     #[test]
+    fn picker_overlay_rows_stay_within_region_budget_at_shrunk_sizes() {
+        use crate::frame::{RegionBudget, RegionRequest};
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..20)
+            .map(|n| PickerOption {
+                label: format!("model-{n:02}"),
+                action: PickerAction::Command(dal_core::Command::Run {
+                    name: "model".into(),
+                    args: format!("provider/model-{n:02}").into(),
+                    expected: None,
+                }),
+            })
+            .collect();
+        let picker = PickerUi::new("Pick a model", "", options);
+        assert_eq!(picker.visible_len(), 20);
+
+        let full = super::picker_overlay_rows(&picker, 15);
+        assert_eq!(
+            full.len(),
+            8,
+            "title + 6-option window + hint at usable sizes: {:?}",
+            full.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+        let shrunk = super::picker_overlay_rows(&picker, 5);
+        assert_eq!(
+            shrunk.len(),
+            5,
+            "80x10 overlay budget is 5 rows, emission must not exceed it"
+        );
+        assert!(
+            shrunk.iter().any(|row| row.text.contains("model-00")),
+            "the selected row stays visible in the shrunk window: {:?}",
+            shrunk
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(super::picker_overlay_rows(&picker, 1).len(), 1);
+        assert_eq!(super::picker_overlay_rows(&picker, 2).len(), 2);
+
+        let mut moved = picker.clone();
+        for _ in 0..10 {
+            moved.move_selection(true);
+        }
+        let window = super::picker_overlay_rows(&moved, 5);
+        assert_eq!(window.len(), 5);
+        assert!(
+            window.iter().any(|row| row.text.contains("model-10")),
+            "a mid-list selection recenters instead of clipping away: {:?}",
+            window
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let budget = RegionBudget::allocate(
+            80,
+            10,
+            RegionRequest {
+                overlay: Some(picker.visible_len().max(1) + 2),
+                ..RegionRequest::default()
+            },
+        );
+        assert_eq!(budget.overlay, 5);
+        assert_eq!(budget.cap, 6);
+
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        let input = super::FrameInput {
+            view: &view,
+            screen: crate::Screen::Inline,
+            composer: "",
+            cursor: 0,
+            exit_draft: None,
+            branch: None,
+            popup: &[],
+            live: &live,
+            dialog: &dialog,
+            picker: Some(&picker),
+            help: None,
+            signin: None,
+            transcript: &transcript,
+            viewport: &viewport,
+            opts: &opts,
+            kitty_keyboard: false,
+            theme: &theme,
+            diagram_settings: DiagramSettings::default(),
+            diagram_cache: &cache,
+        };
+        let rows = super::frame_rows(input, 80, 10);
+        assert!(
+            rows.len() <= budget.cap,
+            "shrunk live block must not exceed its cap: {} > {}",
+            rows.len(),
+            budget.cap
+        );
+        assert!(
+            rows.iter().any(|row| row.text.contains("model-")),
+            "the picker stays painted at shrunk sizes: {:?}",
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn picker_focus_paints_reverse_video_not_color_alone() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..4)
+            .map(|n| PickerOption {
+                label: format!("opt-{n}"),
+                action: PickerAction::Noop,
+            })
+            .collect();
+        let mut picker = PickerUi::new("Pick", "", options);
+        picker.move_selection(true);
+        let rows = super::picker_overlay_rows(&picker, 12);
+        let selected: Vec<&super::RenderRow> =
+            rows.iter().filter(|row| !row.selected.is_empty()).collect();
+        assert_eq!(
+            selected.len(),
+            1,
+            "exactly the focused row carries the reverse-video selection"
+        );
+        assert_eq!(selected[0].selected, vec![0..selected[0].text.len()]);
+        assert_eq!(selected[0].text, "> opt-1");
+    }
+
+    #[test]
+    fn picker_fallback_row_paints_the_same_focus() {
+        use crate::picker::model_picker;
+
+        let picker = model_picker(&[], "acme/gpt-6");
+        assert_eq!(picker.model_filter_fallback(), Some("acme/gpt-6"));
+        let rows = super::picker_overlay_rows(&picker, 12);
+        let fallback = rows
+            .iter()
+            .find(|row| row.text.contains("/model acme/gpt-6"))
+            .expect("the typed-id fallback row paints");
+        assert_eq!(
+            fallback.selected,
+            vec![0..fallback.text.len()],
+            "the selectable fallback gets the same reverse-video focus: {fallback:?}"
+        );
+    }
+
+    #[test]
     fn a_multi_picker_paints_check_markers_and_the_same_focus() {
         use crate::picker::{PickerAction, PickerOption, PickerUi};
 
@@ -2517,7 +2724,7 @@ mod tests {
             .collect();
         let mut picker = PickerUi::new("Pick", "", options);
         picker.with_multi([0]);
-        let rows = super::picker_overlay_rows(&picker);
+        let rows = super::picker_overlay_rows(&picker, 12);
         let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
         assert!(
             texts.iter().any(|text| text.starts_with("> [x] ")),
@@ -2549,7 +2756,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let single_rows = super::picker_overlay_rows(&single);
+        let single_rows = super::picker_overlay_rows(&single, 12);
         let texts: Vec<&str> = single_rows.iter().map(|row| row.text.as_str()).collect();
         assert!(
             !texts

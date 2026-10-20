@@ -138,10 +138,24 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Picker,
+        action: Action::PickerMoveUp,
+        label: "Move up",
+        default: key(KeyCode::Char('p'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Picker,
         action: Action::PickerMoveDown,
         label: "Move down",
         default: key(KeyCode::Down, NONE),
         legacy: Some(key(KeyCode::Char('j'), NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerMoveDown,
+        label: "Move down",
+        default: key(KeyCode::Char('n'), CTRL),
+        legacy: None,
     },
     Binding {
         owner: Owner::Picker,
@@ -152,10 +166,24 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Picker,
+        action: Action::PickerPageUp,
+        label: "Page up",
+        default: key(KeyCode::Char('b'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Picker,
         action: Action::PickerPageDown,
         label: "Page down",
         default: key(KeyCode::PageDown, NONE),
         legacy: Some(key(KeyCode::PageDown, NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerPageDown,
+        label: "Page down",
+        default: key(KeyCode::Char('f'), CTRL),
+        legacy: None,
     },
     Binding {
         owner: Owner::Picker,
@@ -191,6 +219,13 @@ pub const BINDINGS: &[Binding] = &[
         label: "Delete row",
         default: key(KeyCode::Char('d'), NONE),
         legacy: Some(key(KeyCode::Char('d'), NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerToggle,
+        label: "Toggle row",
+        default: key(KeyCode::Char(' '), NONE),
+        legacy: Some(key(KeyCode::Char(' '), CTRL)),
     },
     Binding {
         owner: Owner::App,
