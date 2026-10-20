@@ -150,12 +150,11 @@ impl Projection {
                 // publication carries `Some` (replace, possibly empty on
                 // clear). Catalog gaps never reach here: scope is stored
                 // verbatim and never intersected with the catalog.
-                let scope = settings
-                    .scoped_models
-                    .clone()
-                    .or_else(|| self.settings.scoped_models.clone());
-                self.settings = settings.clone();
-                self.settings.scoped_models = scope;
+                let mut next_settings = settings.clone();
+                if next_settings.scoped_models.is_none() {
+                    next_settings.scoped_models = self.settings.scoped_models.take();
+                }
+                self.settings = next_settings;
             }
             UpdateKind::Usage(usage) => {
                 self.usage = usage.clone();
