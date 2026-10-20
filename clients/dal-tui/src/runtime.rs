@@ -115,6 +115,8 @@ struct Session {
     /// Set when Ctrl+G asked the loop to run the external editor on a
     /// temp copy of the draft.
     external_edit: bool,
+    /// Set when Ctrl+L asked the loop to rewrite the whole live block.
+    clear_region: bool,
     /// The blob read worker serving the open expand view, for structured
     /// cancellation and a clean join at teardown.
     blob_load: Option<BlobReadWork>,
@@ -1019,6 +1021,9 @@ where
         if surfaces.session.suspend {
             surfaces.session.suspend = false;
             suspend_and_continue(io, state, opts, &theme, &mut painter, &mut surfaces)?;
+        }
+        if std::mem::take(&mut surfaces.session.clear_region) {
+            repaint_live_region(io, state, opts, &theme, &mut painter, &mut surfaces)?;
         }
         surfaces.write_copies(io);
         surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
@@ -2507,6 +2512,9 @@ fn apply_composer_action(
         // Ctrl+G edits the draft in the configured editor; the loop runs the
         // child between frames so a blocked editor never starves the pump.
         Some(Action::ExternalEditor) => session.external_edit = true,
+        // Ctrl+L clears the live region: the next paint rewrites the whole
+        // block, which also repairs any rows a bidi payload mangled.
+        Some(Action::ClearRegion) => session.clear_region = true,
         Some(Action::ExpandCollapse) => {
             let opened = entries.iter().rev().find_map(|entry| {
                 crate::render::expanded_card(entry, diagrams).map(|card| {
@@ -3207,6 +3215,27 @@ mod tests {
             "typed draft",
             "a dismissed search leaves the draft alone"
         );
+    }
+
+    #[test]
+    fn control_l_sets_the_clear_region_flag_and_recalls_nothing() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut session = Session::default();
+        session.composer.set("draft stays");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+        assert!(session.clear_region, "Ctrl+L arms the repaint");
+        assert_eq!(
+            session.composer.text(),
+            "draft stays",
+            "Ctrl+L never edits the draft"
+        );
+        assert_eq!(session.pending_commands, []);
+        assert_eq!(session.pending_answers, []);
     }
 
     #[test]
