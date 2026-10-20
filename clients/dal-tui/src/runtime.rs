@@ -650,45 +650,94 @@ fn snapshot_page() -> PageReq {
     PageReq::default()
 }
 
-type PanicHook = Box<dyn for<'a> Fn(&std::panic::PanicHookInfo<'a>) + Send + Sync + 'static>;
-
-struct PanicHookGuard {
-    previous: Arc<Mutex<Option<PanicHook>>>,
+/// The terminal states a panic must put right: one per live pass.
+///
+/// A process has one panic hook, and `take_hook` and `set_hook` panic when a
+/// thread that is already panicking calls them. A pass that swapped the hook
+/// in on attach and back on detach would therefore abort the process when a
+/// panic unwound it (a panic inside a destructor during unwinding aborts), and
+/// two passes alive together would overwrite each other's hook and could
+/// leave a stale one behind. So the hook goes in once, for the process, and a
+/// pass only lists its terminal state here while it owns the terminal.
+struct PanicRestorers {
+    live: Mutex<Vec<Arc<Mutex<TermState>>>>,
 }
 
-impl PanicHookGuard {
-    fn install(state: Arc<Mutex<TermState>>) -> Self {
-        let previous = Arc::new(Mutex::new(Some(std::panic::take_hook())));
-        let owned = Arc::clone(&previous);
-        std::panic::set_hook(Box::new(move |info| {
+impl PanicRestorers {
+    const fn new() -> Self {
+        Self {
+            live: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn add(&self, state: &Arc<Mutex<TermState>>) {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::clone(state));
+    }
+
+    /// Forgets `state`, so the list keeps no terminal its pass has released.
+    fn remove(&self, state: &Arc<Mutex<TermState>>) {
+        let mut live = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = live.iter().position(|held| Arc::ptr_eq(held, state)) {
+            live.swap_remove(index);
+        }
+    }
+
+    /// Hands `restore` the current modes of every live terminal. The list
+    /// lock is released before any state is locked or written, so the hook
+    /// never waits on a lock it can be holding while it runs.
+    fn restore_all(&self, mut restore: impl FnMut(&TermState)) {
+        let live: Vec<Arc<Mutex<TermState>>> = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for state in live {
             let saved = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             restore(&saved);
-            if let Some(previous) = owned
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-            {
+        }
+    }
+}
+
+static PANIC_RESTORERS: PanicRestorers = PanicRestorers::new();
+static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+
+/// A pass's claim on the process panic hook: while it lives, a panic anywhere
+/// in the process restores this pass's terminal before the previous hook
+/// reports the panic.
+///
+/// The first guard puts the hook in; it stays for the life of the process and
+/// always hands the panic on to the hook that was there before it. Dropping a
+/// guard only forgets its terminal, which is safe while a panic unwinds.
+struct PanicHookGuard {
+    state: Arc<Mutex<TermState>>,
+}
+
+impl PanicHookGuard {
+    fn install(state: Arc<Mutex<TermState>>) -> Self {
+        PANIC_HOOK.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                PANIC_RESTORERS.restore_all(restore);
                 previous(info);
-            }
-        }));
-        Self { previous }
+            }));
+        });
+        PANIC_RESTORERS.add(&state);
+        Self { state }
     }
 }
 
 impl Drop for PanicHookGuard {
     fn drop(&mut self) {
-        let _ = std::panic::take_hook();
-        if let Some(previous) = self
-            .previous
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            std::panic::set_hook(previous);
-        }
+        PANIC_RESTORERS.remove(&self.state);
     }
 }
 
@@ -3965,6 +4014,103 @@ mod run_command_tests {
             joined.recv_timeout(Duration::from_secs(5)).is_ok(),
             "the worker must stop without the host ever replying"
         );
+    }
+}
+
+#[cfg(test)]
+mod panic_hook_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{PanicHookGuard, PanicRestorers};
+    use crate::term::TermState;
+
+    fn fresh() -> Arc<Mutex<TermState>> {
+        Arc::new(Mutex::new(TermState::new()))
+    }
+
+    /// The kitty flag of every state the hook would restore, as a stand-in for
+    /// "which terminal, with which modes".
+    fn restored(restorers: &PanicRestorers) -> Vec<bool> {
+        let mut kitty = Vec::new();
+        restorers.restore_all(|saved| kitty.push(saved.kitty()));
+        kitty.sort_unstable();
+        kitty
+    }
+
+    #[test]
+    fn the_hook_restores_each_live_state_as_it_is_when_the_panic_strikes() {
+        let restorers = PanicRestorers::new();
+        let (first, second) = (fresh(), fresh());
+        restorers.add(&first);
+        restorers.add(&second);
+        first.lock().expect("state").set_kitty(true);
+        assert_eq!(
+            restored(&restorers),
+            [false, true],
+            "every pass is restored once, with the modes it holds now"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_state_drops_exactly_that_state_and_every_reference_to_it() {
+        let restorers = PanicRestorers::new();
+        let (first, second) = (fresh(), fresh());
+        restorers.add(&first);
+        restorers.add(&second);
+        second.lock().expect("state").set_kitty(true);
+
+        restorers.remove(&first);
+        assert_eq!(restored(&restorers), [true], "only the second pass is live");
+        assert_eq!(
+            Arc::strong_count(&first),
+            1,
+            "the list keeps nothing it was told to forget"
+        );
+
+        restorers.remove(&first);
+        restorers.remove(&second);
+        assert!(restored(&restorers).is_empty());
+        assert_eq!(Arc::strong_count(&second), 1);
+    }
+
+    /// A panic that unwinds a pass drops its guard on a panicking thread, where
+    /// `take_hook` and `set_hook` panic and a panic inside a destructor during
+    /// unwinding aborts the process. The drop must leave the hook alone, let the
+    /// original panic reach the joiner, and keep nothing of the pass.
+    #[test]
+    fn a_pass_unwound_by_a_panic_drops_its_guard_without_touching_the_hook() {
+        let state = fresh();
+        let pass = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let _guard = PanicHookGuard::install(state);
+                panic!("the pass panicked");
+            })
+        };
+        let payload = pass.join().expect_err("the panic reaches the joiner");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("the pass panicked")
+        );
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "the unwound pass left its terminal nowhere in the hook's reach"
+        );
+    }
+
+    /// Passes alive together end in any order. A hook swapped in and out per pass
+    /// leaves the first pass's hook installed, holding its terminal, when the
+    /// first pass ends first.
+    #[test]
+    fn overlapping_passes_ending_in_start_order_leave_no_terminal_behind() {
+        let (first, second) = (fresh(), fresh());
+        let outer = PanicHookGuard::install(Arc::clone(&first));
+        let inner = PanicHookGuard::install(Arc::clone(&second));
+        drop(outer);
+        drop(inner);
+        assert_eq!(Arc::strong_count(&first), 1);
+        assert_eq!(Arc::strong_count(&second), 1);
     }
 }
 
