@@ -134,6 +134,7 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
         version: PROTOCOL_VERSION,
         token: None,
         cancel: &cancel,
+        call_cancel: None,
         deadline: &deadline,
     };
     let (response, (headers, sent_body)) = tokio::join!(
@@ -174,6 +175,7 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
             response,
             super::RESPONSE_MAX,
             &CancellationToken::new(),
+            None,
             &deadline,
         )
         .await
@@ -227,6 +229,7 @@ async fn consumes_request_scoped_sse_incrementally_and_extends_on_progress() {
                 request_id: 9,
                 original_id: 4,
                 version: PROTOCOL_VERSION,
+                call_cancel: None,
                 token: None,
                 cancel: &cancel,
                 deadline: &mut deadline,
@@ -705,6 +708,7 @@ mod unauthorized_recovery {
                     services: services.as_ref(),
                     who: &who,
                     cancel: &cancel,
+                    call_cancel: None,
                 };
                 transport
                     .exchange(1, &ids, "{\"name\":\"echo\"}", &[], None, &call)
@@ -1058,6 +1062,7 @@ fn notify_call<'a>(
         services: cx.services.as_ref(),
         who: &cx.caller,
         cancel,
+        call_cancel: None,
     }
 }
 

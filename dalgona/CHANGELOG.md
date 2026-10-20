@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Stop waiting on an MCP tool call when its turn is cancelled. The client
+  tells the server the request is abandoned and the cancelled turn ends at
+  once instead of holding until the call deadline.
 - Cancel and join the blocking render worker when history compaction times
   out before reporting the timeout.
 - Cooperatively cancel dropped history runs at checkpoints so workers stop

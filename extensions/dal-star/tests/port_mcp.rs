@@ -18,6 +18,7 @@ use dal_star::{LoadRoots, PluginSystem, PluginsConfig, load};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -29,6 +30,8 @@ enum FixtureReply {
     List,
     Success,
     Error,
+    /// Answers `tools/call` with the exact `params` the request carried.
+    Echo,
 }
 
 struct FixtureMcp {
@@ -53,6 +56,7 @@ impl McpClient for FixtureMcp {
         &'a self,
         _who: &'a Caller,
         request: McpRequest,
+        _cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<McpResponse, ServiceError>> {
         let addr = self.addr;
         Box::pin(async move {
@@ -200,10 +204,33 @@ async fn serve_fixture(listener: TcpListener, reply: FixtureReply) -> std::io::R
         (FixtureReply::Success, "tools/call") => {
             "{\"content\":[{\"type\":\"text\",\"text\":\"fixture reply\",\"futureContentField\":true}],\"isError\":false,\"futureResultField\":\"ignored\"}".to_owned()
         }
+        (FixtureReply::Echo, "tools/call") => {
+            let params = request
+                .get("params")
+                .map(sonic_rs::to_string)
+                .transpose()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+                .unwrap_or_default();
+            let text = sonic_rs::to_string(&params)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            format!("{{\"content\":[{{\"type\":\"text\",\"text\":{text}}}],\"isError\":false}}")
+        }
         (FixtureReply::Error, "tools/call") => {
             "{\"content\":[{\"type\":\"text\",\"text\":\"fixture failure\",\"futureContentField\":true}],\"isError\":true,\"futureResultField\":\"ignored\"}".to_owned()
         }
-        (_, _) => "{\"error\":{\"code\":-32601,\"message\":\"unexpected method\",\"futureErrorField\":true}}".to_owned(),
+        (_, _) => {
+            // A server that does not serve the method answers with a
+            // JSON-RPC error object beside, not inside, `result`.
+            let response = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32601,\"message\":\"unexpected method\",\"futureErrorField\":true}},\"futureTopField\":true}}"
+            );
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            return socket.write_all(http.as_bytes()).await;
+        }
     };
     let response =
         format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result},\"futureTopField\":true}}");
@@ -358,26 +385,67 @@ async fn mcp_port_lists_server_and_tool_from_local_fixture() -> TestResult<()> {
     )
     .await?;
     assert!(!outcome.is_error, "{outcome:?}");
+    // The header line comes from the plugin's own configuration, the tool
+    // line from the server's reply; nothing else may be in the text.
+    let (header, tools) = outcome
+        .text
+        .split_once('\n')
+        .ok_or_else(|| format!("no tool line after the header: {outcome:?}"))?;
+    let port = header
+        .strip_prefix("local  http://127.0.0.1:")
+        .ok_or_else(|| format!("unexpected header: {header:?}"))?;
     assert!(
-        outcome.text.contains("local  http://127.0.0.1:"),
-        "{outcome:?}"
+        !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()),
+        "the header must carry the configured server address: {header:?}"
     );
-    assert!(outcome.text.contains("echo: Echo"), "{outcome:?}");
+    assert_eq!(tools, "echo: Echo");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_port_calls_local_fixture_with_tolerant_reply_fields() -> TestResult<()> {
-    let outcome = run_tool(
-        FixtureReply::Success,
-        "mcp__mcp_call",
-        r#"{"server":"local","tool":"echo","arguments_json":"{\"message\":\"hello\"}"}"#,
-        true,
-    )
-    .await?;
+async fn mcp_port_forwards_the_tool_name_and_arguments_object_verbatim() -> TestResult<()> {
+    let arguments = r#"{"message":"he said \"hi\"","n":9007199254740991,"neg":-9007199254740991,"flag":true,"none":null,"nested":{"list":[1,2.5,"x"],"empty":{}},"uni":"h\u00e9llo"}"#;
+    let args = format!(
+        r#"{{"server":"local","tool":"echo","arguments_json":{}}}"#,
+        sonic_rs::to_string(arguments)?
+    );
+    let outcome = run_tool(FixtureReply::Echo, "mcp__mcp_call", &args, true).await?;
     assert!(!outcome.is_error, "{outcome:?}");
-    assert!(outcome.text.contains("fixture reply"), "{outcome:?}");
+    // The fixture answers with the JSON-RPC params it received, so the text
+    // is exactly what crossed the plugin, the host service, and the client.
+    // Object member order is not part of JSON equality, so both sides are
+    // compared in a canonical member order.
+    let sent: Value = sonic_rs::from_str(&outcome.text)?;
+    let expected: Value =
+        sonic_rs::from_str(&format!(r#"{{"name":"echo","arguments":{arguments}}}"#))?;
+    assert_eq!(
+        canonical(&sent),
+        canonical(&expected),
+        "received {}",
+        outcome.text
+    );
     Ok(())
+}
+
+/// Renders `value` with every object's members in key order.
+fn canonical(value: &Value) -> String {
+    if let Some(object) = value.as_object() {
+        let mut members: Vec<(String, String)> = object
+            .iter()
+            .map(|(key, member)| (key.to_owned(), canonical(member)))
+            .collect();
+        members.sort();
+        let members: Vec<String> = members
+            .into_iter()
+            .map(|(key, member)| format!("{key:?}:{member}"))
+            .collect();
+        return format!("{{{}}}", members.join(","));
+    }
+    if let Some(array) = value.as_array() {
+        let items: Vec<String> = array.iter().map(canonical).collect();
+        return format!("[{}]", items.join(","));
+    }
+    value.to_string()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -390,8 +458,27 @@ async fn mcp_port_propagates_mcp_error_result() -> TestResult<()> {
     )
     .await?;
     assert!(outcome.is_error, "{outcome:?}");
-    assert!(outcome.text.contains("mcp_error"), "{outcome:?}");
-    assert!(outcome.text.contains("fixture failure"), "{outcome:?}");
+    // The plugin tags the server's `isError` text with its own failure code.
+    assert_eq!(outcome.text.as_ref(), "mcp_error: fixture failure");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_port_reports_a_protocol_error_apart_from_a_tool_error() -> TestResult<()> {
+    // The list-only fixture answers `tools/call` with a JSON-RPC error object,
+    // which is a transport failure and never an `isError` tool result.
+    let outcome = run_tool(
+        FixtureReply::List,
+        "mcp__mcp_call",
+        r#"{"server":"local","tool":"echo","arguments_json":"{}"}"#,
+        true,
+    )
+    .await?;
+    assert!(outcome.is_error, "{outcome:?}");
+    assert_eq!(
+        outcome.text.as_ref(),
+        "mcp.call: failed: mcp protocol error -32601: unexpected method"
+    );
     Ok(())
 }
 

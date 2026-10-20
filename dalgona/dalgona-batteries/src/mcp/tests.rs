@@ -5,17 +5,19 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 #[cfg(unix)]
 use crate::mcp::STDERR_RING;
+#[cfg(unix)]
+use crate::mcp::stdio::{ProcessEnvironment, StdioTransport};
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError,
+    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, TransportError,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
-    tools::{decode_tool_page, fold_tool_name},
+    tools::{Key, decode_tool_page, fold_tool_name},
 };
 #[cfg(unix)]
 use dal_agent::ext::{ArgError, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
@@ -26,8 +28,8 @@ use dal_agent::{
 #[cfg(unix)]
 use dal_core::ext::McpLaunch;
 use dal_core::{
-    Answer, ClientId, Command, Config, ConfigProduct, Expect, JournalPart, Output, PageReq, Part,
-    Question, RawJson, Reply, ServiceSet, SessionId, UpdateKind, Workspace,
+    Answer, CancelScope, ClientId, Command, Config, ConfigProduct, Expect, JournalPart, Output,
+    PageReq, Part, Question, RawJson, Reply, ServiceSet, SessionId, TurnId, UpdateKind, Workspace,
     ext::{McpBlock, McpEndpoint, McpServerDecl, Name, SkillRecord},
 };
 #[cfg(unix)]
@@ -37,9 +39,10 @@ use sonic_rs::JsonValueTrait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{Notify, oneshot},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 const SKILL: &str = "weather";
 const SERVER: &str = "fixture";
@@ -865,6 +868,7 @@ enum HttpScenario {
         rounds: usize,
         form: Form,
     },
+    HangingCall,
 }
 
 /// The form an input-required reply asks the user to fill.
@@ -960,7 +964,9 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
     match request.method.as_str() {
         "server/discover" => match scenario {
             HttpScenario::PaginatedCache => rpc_error(id, -32601, "unsupported method"),
-            HttpScenario::PageCap | HttpScenario::InputRequired { .. } => rpc_result(id, "{}"),
+            HttpScenario::PageCap
+            | HttpScenario::InputRequired { .. }
+            | HttpScenario::HangingCall => rpc_result(id, "{}"),
         },
         "initialize" | "notifications/initialized" => rpc_result(id, "{}"),
         "tools/list" => match scenario {
@@ -988,6 +994,10 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
             HttpScenario::InputRequired { .. } => rpc_result(
                 id,
                 r#"{"tools":[{"name":"lookup","description":"lookup","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}],"nextCursor":null,"ttlMs":600000}"#,
+            ),
+            HttpScenario::HangingCall => rpc_result(
+                id,
+                r#"{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}],"nextCursor":null,"ttlMs":600000}"#,
             ),
         },
         "tools/call" => {
@@ -2370,4 +2380,412 @@ mod property {
             })
             .expect("list purity holds");
     }
+}
+
+async fn submit_prompt(fixture: &HostedFixture) -> TurnId {
+    let reply = fixture
+        .agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "exercise the MCP server".into(),
+            }],
+        })
+        .await
+        .expect("scripted prompt");
+    let Reply::Accepted { turn, .. } = reply else {
+        panic!("prompt: {reply:?}");
+    };
+    turn
+}
+
+struct RecordingHttp {
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+    calls_seen: Arc<Notify>,
+    server: JoinHandle<()>,
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the recording MCP server must accept requests while the test drives the client"
+)]
+async fn start_recording_http(
+    scenario: HttpScenario,
+    hang_calls: bool,
+) -> (McpServerDecl, Url, RecordingHttp) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind recording MCP server");
+    let address = listener.local_addr().expect("recording address");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let calls_seen = Arc::new(Notify::new());
+    let server = tokio::spawn({
+        let requests = Arc::clone(&requests);
+        let calls_seen = Arc::clone(&calls_seen);
+        async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept MCP request");
+                let request = read_http_request(&mut socket).await;
+                let hang = hang_calls && request.method == "tools/call";
+                let reply = if hang {
+                    None
+                } else {
+                    Some(http_reply(scenario, &request))
+                };
+                if request.method == "tools/call" {
+                    calls_seen.notify_one();
+                }
+                requests.lock().expect("record MCP request").push(request);
+                if let Some(reply) = reply {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        reply.len(),
+                        reply
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write MCP response");
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    });
+    (
+        McpServerDecl::Http {
+            endpoint: McpEndpoint::parse(&format!("https://{address}"))
+                .expect("valid public declaration identity"),
+        },
+        Url::parse(&format!("http://{address}")).expect("internal recording transport URL"),
+        RecordingHttp {
+            requests,
+            calls_seen,
+            server,
+        },
+    )
+}
+
+fn recorded_calls(requests: &[HttpRequest]) -> usize {
+    requests
+        .iter()
+        .filter(|request| request.method == "tools/call")
+        .count()
+}
+
+#[tokio::test]
+async fn cancelled_http_call_sends_no_second_tool_call_after_ask_withdrawal() {
+    let (declaration, url, recording) = start_recording_http(
+        HttpScenario::InputRequired {
+            rounds: 1,
+            form: Form::Text,
+        },
+        false,
+    )
+    .await;
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let lookup = fold_tool_name(SKILL, SERVER, "lookup");
+    let mut fixture = HostedFixture::with_transport(
+        declaration,
+        vec![
+            scripted_tool_step("entry-mrtr-cancel", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("lookup-mrtr-cancel", &lookup, r#"{"query":"x"}"#),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+        Some(url),
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let turn = submit_prompt(&fixture).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = fixture.agent.view(PageReq::default()).expect("host view");
+            let mut ask_open = false;
+            for request in &view.open {
+                match &request.question {
+                    Question::Grant { .. } | Question::Approval { .. } => {
+                        fixture
+                            .agent
+                            .answer(request.id, Answer::ApproveForSession)
+                            .await
+                            .expect("approve the grant");
+                    }
+                    Question::Select { .. } | Question::Text { .. } => {
+                        ask_open = true;
+                    }
+                    _ => {}
+                }
+            }
+            if ask_open {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the elicitation question opens");
+    fixture
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the elicitation turn");
+    fixture.turn_ended().await;
+    let results = fixture.tool_results(&lookup);
+    assert_eq!(results.len(), 1, "the withdrawn call ends in one result");
+    assert!(
+        results[0].0,
+        "a cancelled MRTR call reports an error: {results:?}"
+    );
+    let calls = {
+        let requests = recording.requests.lock().expect("recorded requests");
+        recorded_calls(&requests[..])
+    };
+    assert_eq!(calls, 1, "no retry follows a cancelled elicitation");
+    recording.server.abort();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_http_call_stops_waiting_for_a_silent_server() {
+    let (declaration, url, recording) = start_recording_http(HttpScenario::HangingCall, true).await;
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let mut fixture = HostedFixture::with_transport(
+        declaration,
+        vec![
+            scripted_tool_step("entry-hang-cancel", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-hang-cancel", &echo, r#"{"message":"hello"}"#),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+        Some(url),
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let turn = submit_prompt(&fixture).await;
+    tokio::time::timeout(Duration::from_secs(10), recording.calls_seen.notified())
+        .await
+        .expect("the silent server receives tools/call");
+    fixture
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the held HTTP turn");
+    fixture.turn_ended().await;
+    let results = fixture.tool_results(&echo);
+    assert_eq!(results.len(), 1, "the held HTTP call ends in one result");
+    assert!(
+        results[0].0,
+        "a cancelled HTTP call reports an error: {results:?}"
+    );
+    let calls = {
+        let requests = recording.requests.lock().expect("recorded requests");
+        recorded_calls(&requests[..])
+    };
+    assert_eq!(calls, 1, "a cancelled HTTP call is never retried");
+    recording.server.abort();
+    fixture.shutdown().await;
+}
+
+#[cfg(unix)]
+const GATED_STDIO_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf 'list\n' >> "$MCP_LOG_FILE"
+      while [ ! -f "$MCP_GATE_FILE" ]; do sleep 0.02; done
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{}}}],"ttlMs":1}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      printf 'call\n' >> "$MCP_LOG_FILE"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"gated-ok"}],"isError":false}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+fn gated_stdio_decl(log: &Path, gate: &Path) -> McpServerDecl {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "MCP_LOG_FILE".into(),
+        log.to_string_lossy().into_owned().into_boxed_str(),
+    );
+    env.insert(
+        "MCP_GATE_FILE".into(),
+        gate.to_string_lossy().into_owned().into_boxed_str(),
+    );
+    McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            GATED_STDIO_SCRIPT.into(),
+        ])
+        .expect("fixture launch"),
+        env,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_call_before_send_writes_no_tool_call() {
+    let root = temp_path("gated-cancel");
+    fs::create_dir_all(&root).expect("evidence directory");
+    let log = root.join("server.log");
+    let gate = root.join("gate");
+    fs::write(&gate, b"open").expect("the list gate starts open");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let mut fixture = HostedFixture::new(
+        gated_stdio_decl(&log, &gate),
+        vec![
+            scripted_tool_step("entry-gated", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-gated", &echo, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-after", &echo, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert_eq!(fixture.tool_results(&entry).len(), 1);
+    let listed = fs::read_to_string(&log)
+        .expect("server log")
+        .lines()
+        .filter(|line| *line == "list")
+        .count();
+    fs::remove_file(&gate).expect("close the list gate");
+    let turn = submit_prompt(&fixture).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            fixture.answer_pending().await;
+            let contents = fs::read_to_string(&log).unwrap_or_default();
+            if contents.lines().filter(|line| *line == "list").count() > listed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the gated tools/list reaches the server");
+    fixture
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the gated turn");
+    fs::write(&gate, b"open").expect("reopen the list gate");
+    fixture.turn_ended().await;
+    let contents = fs::read_to_string(&log).expect("server log");
+    assert!(
+        contents.lines().filter(|line| *line == "list").count() >= 2,
+        "the re-list ran while the turn was cancelled: {contents:?}"
+    );
+    assert!(
+        !contents.lines().any(|line| line == "call"),
+        "a cancelled call wrote tools/call: {contents:?}"
+    );
+    let results = fixture.tool_results(&echo);
+    assert_eq!(results.len(), 1, "the cancelled call ends in one result");
+    assert!(
+        results[0].0,
+        "a cancelled call reports an error: {results:?}"
+    );
+    let status = fixture.status().await;
+    assert!(
+        status.contains("ready"),
+        "the instance stays ready after a cancelled call: {status}"
+    );
+    submit_prompt(&fixture).await;
+    fixture.turn_ended().await;
+    assert!(
+        fixture
+            .tool_results(&echo)
+            .iter()
+            .any(|(error, text)| !error && text.contains("gated-ok")),
+        "the server answers the next turn after a cancelled call"
+    );
+    fixture.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_stdio_send_leaves_no_pending_slot() {
+    let key = Key {
+        session: SessionId::new_v7(),
+        skill: SKILL.into(),
+        server: SERVER.into(),
+    };
+    let decl = McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while IFS= read -r line; do :; done".into(),
+        ])
+        .expect("fixture launch"),
+        env: BTreeMap::new(),
+    };
+    let transport = StdioTransport::start(
+        key,
+        &decl,
+        &ProcessEnvironment::default(),
+        &Budgets::default(),
+    )
+    .await
+    .expect("fixture transport starts");
+    let body = RawJson::parse(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#)
+        .expect("request body");
+    let fired = CancellationToken::new();
+    fired.cancel();
+    let err = transport
+        .send(1, &body, &fired)
+        .await
+        .expect_err("a cancelled send fails");
+    assert!(
+        matches!(err, TransportError::Cancelled),
+        "a cancelled send reports cancellation"
+    );
+    assert_eq!(
+        transport.pending_len().await,
+        0,
+        "a cancelled send leaves no pending slot"
+    );
+    let live = CancellationToken::new();
+    transport
+        .send(2, &body, &live)
+        .await
+        .expect("a live send queues");
+    assert_eq!(
+        transport.pending_len().await,
+        1,
+        "a queued send holds its pending slot"
+    );
+    transport.finish(2).await;
+    assert_eq!(
+        transport.pending_len().await,
+        0,
+        "finishing a send releases its pending slot"
+    );
+    transport
+        .shutdown(Duration::from_secs(1))
+        .await
+        .expect("fixture transport shuts down");
 }

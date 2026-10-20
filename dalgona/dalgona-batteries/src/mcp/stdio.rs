@@ -32,6 +32,8 @@ const EVENT_CAPACITY: usize = 8;
 
 const POST_KILL_WAIT: Duration = Duration::from_secs(1);
 
+const CANCEL_NOTICE_GRACE: Duration = Duration::from_secs(1);
+
 /// The process environment allowlist captured through the host's env service.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessEnvironment {
@@ -184,12 +186,16 @@ impl StdioTransport {
             Ok(())
         };
         let write_result = tokio::select! {
+            biased;
             () = cancel.cancelled() => Err(TransportError::Cancelled),
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
             result = async { write.await.map_err(TransportError::Mcp) } => result,
         };
         if let Err(error) = write_result {
             self.pending.lock().await.remove(&id);
+            if cancel.is_cancelled() || self.cancel.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
             return Err(error);
         }
         Ok(receiver)
@@ -198,6 +204,11 @@ impl StdioTransport {
     /// Removes a completed or cancelled request from the response table.
     pub(crate) async fn finish(&self, id: u64) {
         self.pending.lock().await.remove(&id);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
     }
 
     /// Returns the bounded stderr excerpt retained for crash diagnostics.
@@ -272,6 +283,7 @@ impl StdioTransport {
             })
         };
         tokio::select! {
+            biased;
             () = cancel.cancelled() => Err(TransportError::Cancelled),
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
             result = write => result,
@@ -284,7 +296,7 @@ impl StdioTransport {
             r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{{"requestId":{id}}}}}"#
         );
         if let Ok(body) = RawJson::parse(&body) {
-            let _ = self.notify(&body, cancel).await;
+            let _ = timeout(CANCEL_NOTICE_GRACE, self.notify(&body, cancel)).await;
         }
     }
 }
