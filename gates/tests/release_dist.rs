@@ -418,24 +418,86 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Runs the real `dist plan` for one announcement tag and returns its exit
+/// success with the parsed JSON stdout: the plan on success, the diagnostic
+/// on failure.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate runs the real cargo-dist plan against announcement tags"
+)]
+fn plan_for_tag(workspace: &Path, tag: &str) -> Result<(bool, sonic_rs::Value), Box<dyn Error>> {
+    let output = Command::new("dist")
+        .args(["plan", "--output-format=json"])
+        .arg(format!("--tag={tag}"))
+        .current_dir(workspace)
+        .output()?;
+    Ok((
+        output.status.success(),
+        sonic_rs::from_slice(&output.stdout)?,
+    ))
+}
+
+/// The version one patch release past `version`; the gate fixes its
+/// mismatched tag one step from the workspace version, not at a far-off value.
+fn next_patch(version: &str) -> Result<String, Box<dyn Error>> {
+    let mut parts = version.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(io::Error::other(format!("{version} is not a plain major.minor.patch")).into());
+    };
+    Ok(format!("{major}.{minor}.{}", patch.parse::<u64>()? + 1))
+}
+
+/// The announcement-tag boundary, attacked from both sides for each product:
+/// the tag naming the workspace version plans, the tag one patch past it is
+/// refused with a diagnostic naming the product, the claimed version, and the
+/// real version. Runs the real `dist plan` rather than reading a recorded
+/// diagnostic, so the gate sees `dist-workspace.toml` and the manifests.
 #[test]
 fn release_tag_version_mismatch() -> Result<(), Box<dyn Error>> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dist-tag-mismatch.txt");
-    let diagnostic = fs::read_to_string(path)?;
-    assert!(
-        diagnostic.contains("claims we're releasing dalgon 9.9.9"),
-        "the recorded tag diagnostic must name the mismatch: {diagnostic}"
-    );
-    let package = cargo_package(&support::repo_root(), "dalgon")?;
-    assert_ne!(
-        package.version, "9.9.9",
-        "the recorded mismatch tag must differ from the workspace version"
-    );
-    assert!(
-        diagnostic.contains(&package.version),
-        "the recorded diagnostic must name the workspace version {}: {diagnostic}",
-        package.version
-    );
+    if !dist_ready()? {
+        return Err(
+            io::Error::other("cargo-dist is required for release_tag_version_mismatch").into(),
+        );
+    }
+    let workspace = support::repo_root();
+    for product in ["dalgon", "dalgona"] {
+        let package = cargo_package(&workspace, product)?;
+        let matching = format!("{product}-v{}", package.version);
+        let (planned, plan) = plan_for_tag(&workspace, &matching)?;
+        assert!(
+            planned,
+            "{matching} names the workspace version and must plan: {plan:?}"
+        );
+        assert_eq!(
+            plan.get("announcement_tag")
+                .and_then(sonic_rs::Value::as_str),
+            Some(matching.as_str())
+        );
+
+        let bumped = next_patch(&package.version)?;
+        let mismatched = format!("{product}-v{bumped}");
+        let (refused, diagnostic) = plan_for_tag(&workspace, &mismatched)?;
+        assert!(
+            !refused,
+            "{mismatched} is past the workspace version and must be refused"
+        );
+        let message = diagnostic
+            .get("diagnostic")
+            .and_then(|diagnostic| diagnostic.get("message"))
+            .and_then(sonic_rs::Value::as_str)
+            .ok_or_else(|| format!("no diagnostic message for {mismatched}: {diagnostic:?}"))?;
+        assert!(
+            message.contains(&format!("claims we're releasing {product} {bumped}")),
+            "the diagnostic must name the product and claimed version: {message}"
+        );
+        assert!(
+            message.contains(&format!("that package is version {}", package.version)),
+            "the diagnostic must name the workspace version {}: {message}",
+            package.version
+        );
+    }
     Ok(())
 }
 

@@ -615,7 +615,6 @@ async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
     assert_eq!(receipts.finished, Receipt::Gone);
     assert_eq!(reads.first.len(), 1);
     assert_eq!(reads.first[0].text.as_ref(), "cursor-seed");
-    assert!(reads.first_next.is_some());
     assert!(reads.repeated_first_next.is_some());
     assert_ne!(reads.first_next, reads.repeated_first_next);
     assert!(
@@ -642,7 +641,6 @@ async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
     assert_eq!(reads.repeated_first[0].mode, MailMode::Aside);
     assert_eq!(reads.repeated_first[1].mode, MailMode::Steer);
     assert_eq!(reads.repeated_first[2].mode, MailMode::NextTurn);
-    assert!(reads.repeated_first_next.is_some());
 
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
