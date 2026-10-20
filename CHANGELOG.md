@@ -1,17 +1,175 @@
 # Changelog
 
 ## Unreleased
+- Refuse a piped API key that holds a line break or other control character.
+  `login PROVIDER --api-key` forgave only the key's trailing line ending, so
+  a multi-line input was saved as one key, reported as saved, and then failed
+  at the first request with "failed to parse header value", an error that
+  never names the key. It now exits 1 before storing anything and does not
+  echo the input.
+- Breaking Rust API: `McpClient::call` takes a `CancellationToken` as its
+  third argument. It is the call's own cancellation, a child of the caller's
+  turn token while that turn is live. Implementors stop waiting, tell the
+  server the request is abandoned, and return `ServiceError::Cancelled` when
+  it fires. A client that ignored it held a cancelled turn open until its own
+  call deadline.
 - Send stored text blobs in requests. A turn whose context held a text blob,
   such as a long pasted letter, failed with "blob ... was not read from the
   session store before the request"; the request builder now reads text
-  blobs back as inline text, as it already did for images. An absent blob or
-  a blob that is not valid UTF-8 fails the turn before any request is sent and
-  names the blob.
-- Open judge and other identity-named requests on the route the catalog
-  resolves. A `provider/model` string that no registered model owns used to
+  blobs of any `text/*` media type back as inline text, as it already did
+  for images. A blob that is absent, unreadable, damaged, recorded with a
+  different length, or not valid UTF-8 fails the turn before any request is
+  sent and names the blob.
+- Bound the session store's blob read. A damaged or planted blob file
+  larger than the 64 MiB blob limit was read whole before its digest was
+  checked; it is now refused with the existing too-large error before any
+  allocation.
+- Route identity-named requests, such as the open judge's, through the
+  catalog. A `provider/model` string that no registered model owns used to
   reach the HTTP provider as a synthetic route and fail with "an HTTP provider
   needs a concrete API model route", so history consolidation failed for every
   configured judge. A request that already names an API route keeps it.
+- Keep a partial line when a wire read is cancelled. The serve loops drop a
+  pending read whenever another event wins, and the bytes the read had taken
+  were lost with it, which split the next frame. Closing a line transport now
+  finishes the peer's stream after in-flight writes settle, even while other
+  writer handles are alive.
+- Stop printing the working directory in `EnvSnapshot`'s `Debug` output, as
+  its documentation states.
+- Fix a panic that unwinds the terminal client. It no longer aborts the process
+  with "panic in a destructor during cleanup": the client used to swap the
+  process panic hook back while the panicking thread unwound, and the standard
+  library refuses that. The hook now goes in once for the process and always
+  hands the panic to the hook that was there before it, after the terminal
+  modes are restored. Each pass only registers its terminal state, so passes
+  alive together in one process cannot overwrite each other's hook or leave a
+  stale one holding a finished pass's terminal.
+- Restore a reopened session's settings in its view. `restore_fold` rebuilt the
+  leaf path and the context size from the replayed fold but kept the settings
+  the host seeded, so a journaled `Model`, `Thinking`, `Approval`, or `Mode`
+  record and the session name replayed into the fold without reaching
+  `View.settings`, `SessionInfo.name`, or the approval a child session copies.
+  `Session::settings_view` is now public and is the one projection behind every
+  settings update and the restored view. `SettingsView.model` stays the route
+  the session itself selected: a session that only follows the configured
+  default shows `None` before and after a reopen, and after a live change of
+  another setting, which used to publish the default as if it were selected.
+  A selected route shows with its provider even when it equals the default.
+  Journals written by an earlier build read as before, including a `model`
+  record without a provider.
+- API model routes name their provider. `ModelRoute::Api` gains an optional
+  `provider`. It is left out of JSON, journal `model` records, and
+  `[model_route]` when absent, so every existing record, command, and file
+  reads and writes exactly as before. A route that names its provider resolves
+  that provider's row and nothing else: not through a same-family provider
+  that lists the same native id, and not through a registered synthetic model
+  that spells the same id. When that provider is not configured, or serves
+  another API family, `dal_provider::resolve_route` returns the typed
+  `ResolveError::UnknownProvider` or `ProviderFamilyMismatch`; the turn then
+  fails with that error's text (`model <provider>/<model> did not resolve:
+  ...`) and no other provider is tried. The
+  route survives `SetModel`, the journal, session views, reopen, fork, the
+  next request, saved defaults, and restart. Routes that dal resolves itself
+  (`/model PROVIDER/MODEL`, the pickers, `Host::models`, `default_route`, and
+  the default model) now name their provider; `/model` and the mode lines
+  print it instead of a family label. A route without a provider (an older
+  record, a hand-built command, an id typed into the router) keeps the
+  previous resolution: the bare id resolves first, and when it is unknown
+  or ambiguous between same-family providers the route retries under the
+  catalog's single configured owner for that family, including a lone
+  custom provider and never guessing among several; with several Chat or
+  Responses owners the route retries under the canonical `openai` provider
+  when that row is configured, serves the route's family, and resolves the
+  id (the provider named by the `openai-chat/` and `openai-responses/`
+  references); every other case keeps the bare lookup error. Context
+  measurements still carry over between a route without a provider and the
+  same model with one. Rust callers: add `provider: None` to
+  `ModelRoute::Api { .. }` literals and `..` to patterns; `ResolveError` and
+  `EncodeError` gain variants; `ModelRoute` gains `provider`, `with_provider`,
+  and `same_model`; `dal_agent::ext::command::CatalogView` gains a
+  `providers` field, so a literal needs it (a command reads each configured
+  provider's API family there); `dal_provider::Catalog` gains `providers()`.
+- `models/list` rows add a typed `route` and an optional `reference`
+  (`provider/model` for an API row whose provider is known) beside the
+  unchanged `id`, `provider`, `name`, and `contextWindow`; `auth/status` is
+  unchanged. A remote picker selects a row by its `route` for the session
+  only, because a remote host never saves a default, and scopes it by
+  `provider/model`. A row from a server that predates the members keeps its
+  old selection by name, is not scoped, and the list is never refused for
+  lacking them. The protocol version stays 1.
+- A default saved from a provider-carrying route writes `provider` in
+  `[model_route]`; the legacy `model` string never carries it, and a route
+  without a provider writes the same bytes as before. A dalgon from before this
+  change cannot load a `dal.toml` whose `[model_route]` has `provider`: its
+  table decoder rejects the unknown member, and one rejected setting makes the
+  whole file fail to load, so that version refuses to start and names the
+  config error until you delete the `provider` line. Do not share one
+  `dal.toml` between this version and an earlier one after saving a provider
+  default.
+- Model rows carry the catalog provider that resolved them (`ModelInfo.provider`,
+  absent in older payloads and read as empty). Synthetic rows report their
+  model-id namespace. Provider-qualified model scoping can now use the row's
+  own provider instead of rebuilding it from a display label.
+- Publish the committed model scope with every settings update. A change to
+  thinking, mode, approval, or name no longer reads as "scope unset" to a
+  client that adopts the update as sent; an explicit clear stays an empty list.
+- Add `Host::delete_session`: it refuses a session that is live in the host,
+  leaves a tree whose lock another process holds untouched, and fails with
+  not-found for an unknown id.
+- Session listings carry `messageCount`: the number of entries on the
+  session's visible leaf path, folded from the journal and cached in
+  `info.json` beside it. It is omitted when the journal cannot be read, and a
+  cache written before it existed is rescanned by a listing instead of read as
+  zero (a name or id lookup, which never shows the count, still trusts it). The
+  resume picker shows that count and says "messages unreadable" for a row it
+  could not measure, where it used to print "0 messages" for every row.
+- The resume picker opens the chosen session in that session's own workspace,
+  and opens it before leaving the current one. A session that cannot open
+  (held by another process, gone, or missing from the listing) changes
+  nothing: the screen, the draft, and a running turn stay as they were, and
+  the reason appears on the live screen. A turn is cancelled only once the
+  replacement session is open. A live sub-session of the current session is
+  refused the same way, before anything is cancelled or closed, because
+  closing the current session would end it: `Host::open_replacing` makes that
+  check for a caller that opens the successor first and closes after.
+- `/resume NAME` and a direct resume find a session beyond the 200 rows a
+  listing returns. `Host::find_session` resolves a full id, an exact name, or
+  an id prefix across the host's workspaces with the store's own resolution
+  and names the workspace the session lives in.
+- An armed delete in the resume picker belongs to that picker opening: Ctrl+C,
+  Esc, a move, a filter edit, or a paste drops it, and the `press d again`
+  prompt is drawn from the picker holding the arming, so it is on screen
+  exactly while that arming lasts and the next `/resume` needs a fresh
+  first `d`. A delete whose listing refresh fails no longer leaves the
+  deleted row on screen, and the resume picker shows its `d delete` hint.
+- The quit confirmation answers to `y`, `Y`, `n`, and `N` again, with or
+  without a reported Shift, and `n`, Esc, and Enter on the default focus close
+  it keeping the draft. Uppercase `Y`, `A`, `N`, and `V` answer approval and
+  confirm questions on terminals that do not report Shift.
+- Suspending with Ctrl+Z and closing the external editor repaint the live
+  block in full, so what the shell or the editor left on screen is cleared.
+  After a resume from an ephemeral start, the exit line offers the resume
+  token instead of saying nothing was saved.
+- On Linux and Android, Ctrl+Z normally stops the process before the
+  interface re-enters any terminal mode when the stop signal is unblocked
+  with its default disposition in a non-orphaned foreground group. This
+  is the normal case, not a guarantee. Other systems keep the previous
+  best-effort
+  behavior, where the stop can still arrive after a repaint.
+- Remote terminals now learn the first model selection at once: the status row
+  updates as soon as the selection is made, instead of only after a later
+  refresh.
+- The terminal status row prints `provider/model` for provider-qualified
+  model routes. Long labels still truncate to fit the available width.
+  All other routes print as before.
+- The scoped-model picker lists a committed scope id the model list no longer
+  names as its own checked row, so it stays until unchecked and unchecking
+  every row clears the scope.
+- `/mode`, `/thinking`, `/model`, and `/name` report what happened to the
+  command. A command the host rejects before changing the session says it did
+  not change anything, and a failed save says why it did not persist; neither
+  prints "Saved as the default." or the resume hint. A rejected prompt from a
+  skill or review command now reads `rejected: …` instead of `save failed: …`.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
   absent when the starter supplied none), it survives settlement and the job
@@ -88,7 +246,7 @@
 - Settle cancelled scope handles while child startup is still pending.
   Dropping the scope aborts its owned startup tasks.
 - Fix remote API-key sign-in reporting cancellation after the key was stored.
-  Submitted sign-ins now await the server’s result.
+  Submitted sign-ins now await the server's result.
 - Persist turn-ID reservations before acknowledging prompts, follow-ups, and wake
   allocations. Cancelled queued turns no longer leave invalid journal gaps or
   reuse identities after restart. Queued text remains ephemeral.
@@ -296,11 +454,11 @@
 - Persist sidecars per extension with the documented file-name rule.
 - Fix terminal typing during startup: keys written while the capability probe runs now reach the composer as they are typed, instead of appearing only after the probe window ends.
 - Fix the terminal status context slot: from 70% of the context window it reads `ctx {n}% · rising` and from 90% `ctx {n}% · high`, with the word carrying a warning or error role.
-- Fix the idle hint: kitty-keyboard terminals show `shift+enter newline`, other terminals keep `ctrl+j newline`, and entries fold by priority as the row narrows — navigation keys first, then help, then newline, then interrupt, then send — while state cues such as `following stopped` and `waiting for you` never fold away.
+- Fix the idle hint: kitty-keyboard terminals show `shift+enter newline`, other terminals keep `ctrl+j newline`, and entries fold by priority as the row narrows (navigation keys first, then help, then newline, then interrupt, then send) while state cues such as `following stopped` and `waiting for you` never fold away.
 - Fix the working spinner: it now animates through braille frames while a turn runs; under `DAL_NO_MOTION` it stays frozen on its first frame.
 - Fix the End key: in the composer it moves the caret to the line end again; in the fullscreen viewport and the transcript overlay it jumps to the latest entry, and the keyboard help lists it as `Jump to latest`.
 - Fix `--connect` sessions: the status line hides the git branch, because a remote host's workspace path does not name a directory on this machine.
-- Fix the terminal against its design contract: replies now render bold text, inline code, dashed lists, task boxes, and fenced code behind a rule; the status line shows the git branch after the path, the running job count, and the `{in}/{out}` token form at 60 to 79 columns; the composer edits at the caret with Left, Right, Home, End, Delete, word, kill, yank, undo, and history keys, wraps long drafts, and places the terminal caret; a cancelled tool call no longer leaves a `working` row; and a quit with an unsent draft shows the `[y] Discard the draft and quit   [n] Keep editing` question. The session now tells clients when a background job starts and settles.
+- Fix the terminal against its design contract: replies now render bold text, inline code, dashed lists, task boxes, and fenced code behind a rule; the status line shows the git branch after the path, the running job count, and the `{in}/{out}` token form at 60 to 79 columns; the composer edits at the caret with Left, Right, Home, End, Delete, word, kill, yank, undo, and history keys, wraps long drafts, and places the terminal caret; a cancelled tool call no longer leaves a `working` row; and a quit with an unsent draft asks `[y] Discard the draft and quit` or `[n] Keep editing`, with focus on `Keep editing`. The session now tells clients when a background job starts and settles.
 - Keep text from `before_turn` hooks in a separate reminder entry after the user message. The model reads it as user text, compaction counts it, and the terminal draws no row for it. Named rule reminders also enter model context.
 - Add `elapsed_ms` to tool results: a tool result entry and the `tool_settled` update now carry the milliseconds the tool ran, measured on a monotonic clock and without the time spent waiting for an approval answer. It is absent for a call that never ran and for sessions written before this change.
 - Fix starting a child session that cannot open: the agents service now returns the cause, such as a child name already used in the workspace, instead of a bare cancelled reply. Two children started at the same time with the same name can no longer both claim it.
@@ -351,6 +509,22 @@
 - Fix Anthropic replay from older sessions: signed thinking blocks without a recorded prefix are dropped unless they are needed to continue an active tool call.
 - Fix Claude login when the preferred callback port is busy: login now uses a free loopback port and sends that port in the redirect address, instead of falling back to pasting the code.
 - Fix terminal presentation: the queued and steering counts now come from the host's turn state, multiline question titles keep each line, wrapped transcript rows keep their links, and file paths in settled rows are clickable OSC 8 links.
+- Fix terminal completion cycling. Tab moves through the matches starting from the first match, Shift+Tab moves back starting from the last, and a single match accepts at once.
+- Fix stale completions after the draft changes. Recalling an earlier prompt and a successful return from the external editor drop the old matches so the next Tab completes the text on screen. Cancelling the editor keeps the draft as it was.
+- Fix selection lists at small heights. A selection list keeps its title, the focused choice, and its actions on screen instead of hiding the focused row or spilling past the space it has.
+- Fix the escape key after idle. A lone Esc waits a brief window so Alt key chords that arrive in pieces still decode instead of splitting.
+- Fix terminal cancellation reporting. A refused cancellation request reports
+  its own error while that turn is still running, and a transport error while
+  waiting reports that error, instead of finishing as if nothing failed. When
+  the authoritative view shows the turn already finished, quit and resume
+  complete normally with no cancellation line. A lost replay while waiting, a
+  closed subscription, or no confirmation before the wait runs out reports that
+  the cancellation could not be confirmed and asks to resume the session to
+  check its state. Resuming after such a failure closes both the old session
+  and the opened replacement. A turn whose own end reports cancelled still
+  prints the inline cancellation line; any other end prints no line, and
+  fullscreen never prints the inline line. On quit, an earlier terminal error
+  still wins over a later failure to print the cancellation line.
 - Initial release.
 - Add extension status consumers. A registered status kind now publishes an `ext_status` update (`busy` or `quiet`, with optional text) only when it changes; `Agent::ext_status`, `Agent::poll_status`, `Agent::is_quiet`, and `Host::is_quiet` read it. The terminal shows busy extensions above the status line when the layout has room, ACP sends a `status` notice, A2A adds `dal.status` metadata, and the router sends nothing. `dalgon --json` writes its line only after every status kind is quiet; print mode waits 3 seconds and exits 1 with `dalgon: extension status is not quiet` if a kind stays busy.
 - Breaking: change the plugin API to Plugin and Eval v1. A plugin now publishes one `plugin` value built after `load("@dal/v1", "dal")`. Tools take an `input` schema, handlers are `run(ctx, args)`, each tool, hook, and model lists its operations in `uses`, and the plugin requests host services through `inject`. This replaces `dal.tool(name = ...)`, `dal.prompt_section`, and `run(args, ctx)`. To update a plugin, follow `dal://plugins`.

@@ -2,7 +2,7 @@
 
 dal and dalgona provide syntax-aware symbol search and structural block editing over supported programming languages.
 Symbol intelligence relies on Tree-sitter parsers to extract semantic definitions and syntactic blocks directly from source code.
-No language server protocol daemon runs; symbol operations are bounded, deterministic parse passes over current file bytes.
+No language server protocol daemon runs. Symbol operations are bounded, deterministic parse passes over current file bytes.
 
 ## Configuration
 
@@ -41,7 +41,7 @@ Files lacking parser extractors report:
 
 The `search` tool accepts `mode: "symbol"` with a `pattern` string.
 The query pipeline matches definitions from fresh parses of current file bytes.
-Trigram literals from the final segment filter candidate files, followed by fresh syntax walks.
+Trigram literals from the final segment filter candidate files. Fresh syntax walks follow.
 
 ### Pattern grammar
 
@@ -68,7 +68,7 @@ Invalid patterns return specific errors:
 - Maximum candidate files parsed: 500 files per query.
 - Each file parse has a 250 ms wall-clock budget. A query can parse multiple files.
 - Single match reveal limit: at most 2000 lines and 50 KiB (51,200 bytes).
-- Text files up to 16 MiB are parsed; binary and UTF-16 files are skipped.
+- dal parses text files up to 16 MiB. It skips binary and UTF-16 files.
 
 ### Output forms
 
@@ -106,11 +106,11 @@ Structural editing enables edits anchored to definition boundaries or syntax blo
 ### Patch by symbol
 
 The `patch` tool accepts `symbol` change objects:
-- `symbol`: Definition name matching search mode symbol output (e.g., `Engine::run` or `run[2]`).
+- `symbol`: Definition name matching search mode symbol output (for example, `Engine::run` or `run[2]`).
 - `tag`: Optional 8-character hexadecimal tag (`tag8("def:" ++ definition_raw_bytes)`). When supplied, patch verifies that the definition has not changed since it was read.
 - `at`: Insertion position relative to definition: `"replace"` (default), `"before"`, or `"after"`.
 - `new`: Replacement or inserted text. Passing `new: ""` with `at: "replace"` deletes the definition.
-- `old`: When replacing text within a definition without replacing the whole block, provide `symbol`, `old`, and `new`. `old` must occur exactly once inside the definition; no `tag` is needed.
+- `old`: When replacing text within a definition without replacing the whole block, provide `symbol`, `old`, and `new`. `old` must occur exactly once inside the definition. You do not need a `tag`.
 
 Symbol patch errors:
 - `patch: changes[<i>]: tag <T> does not match <name> now (tag <U>). The file changed since you read it; read it again.`
@@ -132,3 +132,8 @@ In the `hashline` edit style, the `N*` operator references the outermost named s
 Block syntax errors:
 - `patch: no syntactic block begins at line <n> of <p>.`
 - `patch: line <n>: block ops (N*) need search_symbols = true in dal.toml.`
+
+## Next
+
+- [Tools, modes, and approval](tools.md): run `search` mode `symbol` and choose a `patch` edit style.
+- [Settings in dal.toml](config.md): set `search_symbols`.

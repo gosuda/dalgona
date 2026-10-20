@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Compile and run the orchestration constants truth-table tests. The test
+  module was never declared, so none of its tests ever ran. The aliases check
+  is now a source scan that fails on any twin literal of an owner constant,
+  and a new test holds the monitor clamps the page states to the ranges the
+  config enforces. Other new attack tests pin exact edges for the web,
+  history record, review, eval pack, run repeats, collapse, control-leak,
+  goal objective, and rule-set limits.
 - Run the released-artifact gates (`dalgona-release-10`, `-11`, `-12`) only
   when `DALGONA_RELEASED_ARTIFACTS` is set. They install the published crate
   and the tag's release assets, so a plain `cargo test` before a release no

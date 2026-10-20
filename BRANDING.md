@@ -5,11 +5,11 @@ Product behavior lives in `CONCEPTS.md` and `DESIGN.md`.
 
 ## Names
 
-- `dal` (달, "moon"): the minimalistic core — the agent engine and the terminal
+- `dal` (달, "moon"): the minimalistic core, the agent engine and the terminal
   interface. Motif: the moon.
 - `dalgona` (달고나, the Korean sugar candy): the opinionated batteries-included
   harness around `dal`.
-- `dalcom`: reserved for the desktop sibling — the codex-desktop /
+- `dalcom`: reserved for the desktop sibling, the codex-desktop /
   DeepSeekHarness-Desktop equivalent (github.com/dataelement/dsh-desktop). Not
   part of the dal/dalgona workspace; claims no crate, binary, or env prefix yet.
 - Relationship: dal is the moon; dalgona is what you build on it.

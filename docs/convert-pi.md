@@ -2,11 +2,11 @@
 
 ## Before you start
 
-A pi extension is TypeScript that pi loads with jiti; a dal plugin is Starlark that dal evaluates at load. Both run with your permissions; neither is a sandbox. A port is a redesign more often than a translation. Read the `plugins` page first: it defines every construct named below.
+A pi extension is TypeScript that pi loads with jiti. A dal plugin is Starlark that dal evaluates at load. Both run with your permissions. Neither is a sandbox. A port is a redesign more often than a translation. Read [Plugins](plugins.md) first. It defines every construct named below.
 
 ## Get the source
 
-From npm, `npm pack <package>` prints a file name, then `tar -xzf <file>.tgz` unpacks it into `./package`. From git, `git clone <url> package`. Pi's own examples live in `packages/coding-agent/examples/extensions/` of the pi repository.
+From npm, run `npm pack <package>`. It prints a file name. Then run `tar -xzf <file>.tgz`. It unpacks the file into `./package`. From git, run `git clone <url> package`. Pi's own examples are in `packages/coding-agent/examples/extensions/` of the pi repository.
 
 ## Take inventory
 
@@ -106,15 +106,15 @@ If the purpose of the extension is in the not-port table, do not port it.
 d="${XDG_DATA_HOME:-$HOME/.local/share}/dal/plugins/<name>"; mkdir -p "$d"
 ```
 
-On Windows the data root follows the `install` page.
+On Windows the data root follows [Install dal and dalgona](install.md).
 
 ## Start from the nearest example
 
-A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`; an HTTP fetch, `fetch`; turn steering, `steer`; review rules, `review-rules`; file search and read, `locate`; session hooks with state, `session-log`; one environment variable, `env-read`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
+Pick the example that is nearest to your extension. For a tool with state, use `todo`. For child sessions, use `subagent`. For questions to the user, use `ask`. For an MCP call, use `mcp`. For a hook, use `permission-gate`. For skills only, use `skill-pack`. For the smallest shape, use `hello`. For an HTTP fetch, use `fetch`. For turn steering, use `steer`. For review rules, use `review-rules`. For file search and read, use `locate`. For session hooks with state, use `session-log`. For one environment variable, use `env-read`. The page `dal://examples/<name>` holds every file. From the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
 
 ## Translate
 
-Translate one registration at a time with the map. The worked pair: pi `examples/extensions/todo.ts:105-297` beside the `todo` handler of `examples/plugins/todo/plugin.star`.
+Translate one registration at a time with the map. The worked pair is pi `examples/extensions/todo.ts:105-297` beside the `todo` handler of `examples/plugins/todo/plugin.star`.
 
 ## Turn it on
 
@@ -128,16 +128,21 @@ Run dal. A load error stops startup and names `path:line:col`. Then run one prin
 
 ## Change and reload
 
-Edit, then type `/reload`. Success prints counts, for example `Reloaded 2 plugins: 3 tools. New turns use them. A running turn keeps the plugins it started with.` Failure prints `reload failed: <rendered error>` on one line and `the previous plugin set stays live` on the next. With no plugins configured it prints `No plugins to reload: the plugins key in dal.toml is empty.`
+Edit the plugin. Then type `/reload`. Success prints counts, for example `Reloaded 2 plugins: 3 tools. New turns use them. A running turn keeps the plugins it started with.` Failure prints `reload failed: <rendered error>` on one line and `the previous plugin set stays live` on the next. With no plugins configured, it prints `No plugins to reload: the plugins key in dal.toml is empty.`
 
 ## Check it in dalgona
 
-Copy the directory to the dalgona data root, add the name to dalgona's config, and run `dalgona`. A plugin that loads in dalgon loads in dalgona.
+Copy the directory to the dalgona data root. Add the name to dalgona's config. Run `dalgona`. A plugin that loads in dalgon loads in dalgona.
 
 ## Write README.md
 
-Write `README.md` in the plugin directory with sections `# <name>`, `Ported from`, `What it shows`, `What differs from pi`, `Install`, `Settings`, at most 60 lines. When you translate pi code, keep pi's MIT notice; `dal://examples` holds the text.
+Write `README.md` in the plugin directory. Use these sections: `# <name>`, `Ported from`, `What it shows`, `What differs from pi`, `Install`, `Settings`. Use at most 60 lines. When you translate pi code, keep pi's MIT notice. `dal://examples` holds the text.
 
 ## Let dal port it
 
 Type: `Port the pi extension in ./package to a dal plugin named <name>. Read dal://convert-pi and follow its steps. Write the plugin under the dal data directory, and tell me what did not port.` The model writes into the data root, so the approval ladder asks first. The `port-pi-extension` skill of `skill-pack` routes the model here.
+
+## Next
+
+- [Example plugins for dal](examples.md): copy the ported example nearest to your extension.
+- [Plugins](plugins.md): look up each construct in the plugin reference.
