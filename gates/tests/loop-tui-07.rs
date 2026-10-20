@@ -24,7 +24,8 @@ use std::{error::Error, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
-    Command, Config, ConfigProduct, Expect, PageReq, Part, Reply, TurnState, Workspace,
+    Command, Config, ConfigProduct, EntryId, EntryKind, Expect, PageReq, Part, Reply, TurnState,
+    View, Workspace,
 };
 use support::{TestDir, scripted_session};
 
@@ -72,14 +73,14 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
             }],
         })
         .await?;
-    assert!(matches!(first, Reply::Accepted { .. }));
-    wait_for_idle(&harness.agent).await?;
-    let final_view = harness.agent.view(PageReq::default())?;
-    let final_entry = final_view.entries.items.last().unwrap();
-    assert!(matches!(
-        &final_entry.kind,
-        dal_core::EntryKind::Assistant { .. }
-    ));
+    let Reply::Accepted {
+        message_id: first_message,
+        ..
+    } = first
+    else {
+        return Err(format!("the first prompt was not accepted: {first:?}").into());
+    };
+    let final_view = wait_for_reply(&harness.agent, first_message).await?;
 
     let (generation, sequence) = loop {
         let delivery = tokio::time::timeout(Duration::from_secs(20), lagging.next())
@@ -105,7 +106,13 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
             }],
         })
         .await?;
-    assert!(matches!(second, Reply::Accepted { .. }));
+    let Reply::Accepted {
+        message_id: second_message,
+        ..
+    } = second
+    else {
+        return Err(format!("the second prompt was not accepted: {second:?}").into());
+    };
     let delivery = tokio::time::timeout(Duration::from_secs(10), recovered.next())
         .await?
         .expect("the reattached subscriber receives the first post-view update");
@@ -113,7 +120,7 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
         return Err("fresh subscription unexpectedly required another resync".into());
     };
     assert_eq!(update.seq.get(), rebuilt.seq.get() + 1);
-    wait_for_idle(&harness.agent).await?;
+    wait_for_reply(&harness.agent, second_message).await?;
 
     #[cfg(unix)]
     tokio::task::spawn_blocking(move || verify_real_tui_rebuild(&fixture)).await??;
@@ -121,20 +128,34 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
     Ok(())
 }
 
-async fn wait_for_idle(agent: &dal_agent::Agent) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if matches!(
-                agent.view(PageReq::default()).map(|view| view.turn)?,
-                TurnState::Idle
-            ) {
-                return Ok::<(), dal_agent::AgentError>(());
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+/// Waits until `message` is on the branch, an assistant entry is the newest
+/// entry, and the turn is idle; returns that view.
+async fn wait_for_reply(
+    agent: &dal_agent::Agent,
+    message: EntryId,
+) -> Result<View, Box<dyn Error + Send + Sync>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = agent.view(PageReq::default())?;
+        let replied = view.entries.items.iter().any(|entry| entry.id == message)
+            && view
+                .entries
+                .items
+                .last()
+                .is_some_and(|entry| matches!(entry.kind, EntryKind::Assistant { .. }));
+        if replied && matches!(view.turn, TurnState::Idle) {
+            return Ok(view);
         }
-    })
-    .await??;
-    Ok(())
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "the prompt never got its reply: turn {:?}, {} entries",
+                view.turn,
+                view.entries.items.len()
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 fn replay_fixture() -> String {
