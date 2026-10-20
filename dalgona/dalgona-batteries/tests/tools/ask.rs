@@ -598,15 +598,25 @@ async fn two_answers_then_a_dismissal_list_the_last_two_headers() -> TestResult 
     Ok(())
 }
 
+/// An immediate `None` is the merged no-answer for a dismissal, a timeout, or
+/// a missing controller. The tool must settle it on its first poll, so it never
+/// parks on an approval deadline, an answer channel, or a timer. One poll with
+/// a no-op waker makes that a property of the control flow: elapsed time under
+/// a loaded runner proves nothing either way.
 #[tokio::test]
-async fn an_immediate_none_answers_in_under_fifty_milliseconds() -> TestResult {
-    let started = std::time::Instant::now();
+async fn an_immediate_none_returns_without_waiting_for_an_answer() -> TestResult {
     let controller = Host::answering([]);
-    assert_eq!(ask_tool(&controller, &one("text", "")).await?, NO_ANSWER);
+    let args = one("text", "");
+    let mut tool = std::pin::pin!(ask_tool(&controller, &args));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(text) = Future::poll(tool.as_mut(), &mut context) else {
+        return Err("an immediate None must settle on its first poll".into());
+    };
+    assert_eq!(text?, NO_ANSWER);
+    assert_eq!(controller.asked().len(), 1, "the question is raised once");
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(50),
-        "{:?}",
-        started.elapsed()
+        locked(&controller.notices).is_empty(),
+        "an immediate None carries no malformed-answer notice"
     );
     Ok(())
 }
@@ -674,54 +684,55 @@ mod composer {
 }
 
 #[tokio::test]
-async fn the_composer_round_trips_through_an_independent_parser() -> TestResult {
+async fn the_composed_result_parses_back_to_exactly_what_the_controller_answered() -> TestResult {
     use composer::Outcome;
 
-    let cases: Vec<(String, Vec<&str>, Vec<Outcome>)> = vec![
-        (
-            "Pick: Alpha".to_owned(),
-            vec!["Pick"],
-            vec![Outcome::Answered {
-                header: "Pick".to_owned(),
-                answer: "Alpha".to_owned(),
-            }],
-        ),
-        (
-            "One: a\nUnanswered: Two, Three".to_owned(),
-            vec!["One", "Two", "Three"],
-            vec![
-                Outcome::Answered {
-                    header: "One".to_owned(),
-                    answer: "a".to_owned(),
-                },
-                Outcome::Unanswered {
-                    headers: vec!["Two".to_owned(), "Three".to_owned()],
-                },
-            ],
-        ),
-        (
-            NO_ANSWER.to_owned(),
-            vec!["One"],
-            vec![Outcome::AllUnanswered],
-        ),
-        (
-            "One: line one\nline two\nTwo: b".to_owned(),
-            vec!["One", "Two"],
-            vec![
-                Outcome::Answered {
-                    header: "One".to_owned(),
-                    answer: "line one\nline two".to_owned(),
-                },
-                Outcome::Answered {
-                    header: "Two".to_owned(),
-                    answer: "b".to_owned(),
-                },
-            ],
-        ),
-    ];
-    for (text, headers, expected) in cases {
-        assert_eq!(composer::parse(&text, &headers), expected, "{text}");
-    }
+    let headers = ["One", "Two", "Three"];
+    let answered = |header: &str, answer: &str| Outcome::Answered {
+        header: header.to_owned(),
+        answer: answer.to_owned(),
+    };
+
+    let controller = Host::answering([
+        Reply::Value(r#""a""#),
+        Reply::Value(r#"{"text":"line one\nline two"}"#),
+        Reply::Dismissed,
+    ]);
+    let text = ask_tool(&controller, &three_questions()).await?;
+    assert_eq!(
+        composer::parse(&text, &headers),
+        vec![
+            answered("One", "a"),
+            answered("Two", "line one\nline two"),
+            Outcome::Unanswered {
+                headers: vec!["Three".to_owned()],
+            },
+        ],
+        "{text}"
+    );
+
+    let all = Host::answering([
+        Reply::Value(r#""a""#),
+        Reply::Value(r#""b""#),
+        Reply::Value(r#""c""#),
+    ]);
+    let text = ask_tool(&all, &three_questions()).await?;
+    assert_eq!(
+        composer::parse(&text, &headers),
+        vec![
+            answered("One", "a"),
+            answered("Two", "b"),
+            answered("Three", "c"),
+        ],
+        "{text}"
+    );
+
+    let none = Host::answering([Reply::Dismissed]);
+    let text = ask_tool(&none, &three_questions()).await?;
+    assert_eq!(
+        composer::parse(&text, &headers),
+        vec![Outcome::AllUnanswered]
+    );
     Ok(())
 }
 
