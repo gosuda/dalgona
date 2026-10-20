@@ -442,6 +442,70 @@ mod tests {
     }
 
     #[test]
+    fn semantic_paths_preserve_literal_names_and_branch_slashes() {
+        for (path, branch, expected) in [
+            ("/", None, "/"),
+            ("/srv/work/repo", None, "repo"),
+            ("/srv/work/my repo", None, "my repo"),
+            ("/srv/work/repo ( archive)", None, "repo ( archive)"),
+            ("/srv/work/repo (main)", None, "repo (main)"),
+            ("/srv/work/repo (archive)/src", None, "src"),
+            ("/srv/work/repo/", None, "repo"),
+            (
+                "/srv/work/repo",
+                Some("feature/topic"),
+                "repo (feature/topic)",
+            ),
+            (
+                "/srv/work/repo ( archive)",
+                Some("feature/topic"),
+                "repo ( archive) (feature/topic)",
+            ),
+            ("/", Some("main"), "/ (main)"),
+        ] {
+            assert_eq!(
+                super::decorate_path(super::path_basename(path), branch),
+                expected
+            );
+            let data = StatusData {
+                path: Some(path),
+                branch,
+                ..StatusData::default()
+            };
+            for mode in [WidthMode::Narrow, WidthMode::Cjk] {
+                for columns in [40, 41, 59] {
+                    let line = render(data, columns, mode);
+                    let fitted = crate::width::take_cells(expected, 24, mode);
+                    assert!(line.starts_with(&fitted), "{path:?} {branch:?}: {line:?}");
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+                let full = super::decorate_path(path, branch);
+                for columns in [60, 79, 80, 119, 120] {
+                    let line = render(data, columns, mode);
+                    assert!(line.starts_with(&crate::width::take_cells(&full, 24, mode)));
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+                for columns in [19, 20, 39] {
+                    assert_eq!(render(data, columns, mode), String::new());
+                }
+                for columns in [40, 41, 59] {
+                    let line = render(
+                        StatusData {
+                            state: Some("working"),
+                            model: Some("m"),
+                            ..data
+                        },
+                        columns,
+                        mode,
+                    );
+                    assert!(line.starts_with("working"));
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bands_keep_status_state_and_drop_whole_right_slots() {
         let data = StatusData {
             state: Some("working"),
