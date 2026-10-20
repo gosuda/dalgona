@@ -11,6 +11,8 @@
 //! with `default write failed`, never with the journal wording, so the
 //! command boundary maps it to `Failed` with the source intact.
 
+use std::sync::Arc;
+
 use super::{DefaultAuthority, HostShared};
 use dal_core::{
     ApprovalMode, Command, Config, ConfigError, ConfigProduct, Mode, ModelRoute, Save,
@@ -67,8 +69,10 @@ pub(crate) enum DefaultWriteError {
     /// rewrite the server file, even on loopback.
     #[error("remote sessions do not persist defaults")]
     Gated,
-    /// The bounded file IO did not finish in time; the file is untouched
-    /// unless a racing writer already replaced it (last-write-wins).
+    /// The bounded file IO did not finish in time. The gated write keeps
+    /// running on the blocking pool and may still land, so the file and
+    /// snapshot can change after this error; a later write serializes
+    /// behind it.
     #[error("default write failed: timed out after 30s")]
     Timeout,
     /// The file could not be read, parsed, validated, or replaced; the
@@ -102,6 +106,11 @@ fn config_product(name: &str) -> ConfigProduct {
 /// (so a file failure cannot mutate live memory), reload-validates the
 /// rendered document, publishes it atomically as owner-only, and only then
 /// swaps the live snapshot so subsequently opened sessions seed from it.
+/// The whole cycle runs on the blocking pool under the writer gate, so a
+/// lapse reports [`DefaultWriteError::Timeout`] without stalling an async
+/// executor while the gated write still finishes in the background. The
+/// gate parks its waiters on the blocking pool, bounded by the host actor's
+/// one-command-per-session serialization.
 ///
 /// # Errors
 /// Returns [`DefaultWriteError::Gated`] without touching the file when this
@@ -109,39 +118,50 @@ fn config_product(name: &str) -> ConfigProduct {
 /// lapses, or [`DefaultWriteError::Write`] with the detail when the file
 /// cannot be read, parsed, validated, or replaced.
 pub(crate) async fn persist_default(
-    shared: &HostShared,
+    shared: &Arc<HostShared>,
     update: &DefaultUpdate,
 ) -> Result<(), DefaultWriteError> {
     let DefaultAuthority::Local { path } = &shared.default_authority else {
         return Err(DefaultWriteError::Gated);
     };
     let path = path.clone();
-    // Copy the live snapshot under a short read lock; the lock is released
-    // before any await below, and the copy moves into the bounded write.
+    let update = update.clone();
+    let shared = shared.clone();
+    // The whole read-edit-write cycle runs on the blocking pool: the file
+    // syncs and rename below never block an async executor, and the timeout
+    // wraps a real await point, so a slow device cannot stall the runtime.
+    // A lapsed write keeps its gate until the file work ends, so a later
+    // writer never races a stale temp file onto the fresh one. Concurrent
+    // writers queue as tasks whose `blocking_lock` parks at most one
+    // blocking-pool thread each; the host actor serializes session commands,
+    // so in practice at most one parked thread exists per in-flight default
+    // write, and the park ends when the gate holder's file work ends.
+    let write = tokio::task::spawn_blocking(move || {
+        let _guard = shared.default_write.blocking_lock();
+        write_update(&shared, &path, &update)
+    });
+    match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+        Ok(outcome) => outcome.map_err(|error| DefaultWriteError::Write {
+            message: format!("default write task failed: {error}").into(),
+        })?,
+        Err(_) => Err(DefaultWriteError::Timeout),
+    }
+}
+
+/// Reads, edits, validates, publishes, and commits one default update.
+/// Runs on the blocking pool inside the gate held by [`persist_default`];
+/// every call here blocks the calling thread, never an async executor.
+fn write_update(
+    shared: &HostShared,
+    path: &std::path::Path,
+    update: &DefaultUpdate,
+) -> Result<(), DefaultWriteError> {
     let live = shared
         .defaults
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let guard = shared.default_write.lock().await;
-    let outcome =
-        tokio::time::timeout(WRITE_TIMEOUT, write_update(shared, live, &path, update)).await;
-    drop(guard);
-    match outcome {
-        Err(_) => Err(DefaultWriteError::Timeout),
-        Ok(outcome) => outcome,
-    }
-}
-
-/// Reads, edits, validates, publishes, and commits one default update.
-/// The `default_write` mutex is held by the caller across this call.
-async fn write_update(
-    shared: &HostShared,
-    live: Config,
-    path: &std::path::Path,
-    update: &DefaultUpdate,
-) -> Result<(), DefaultWriteError> {
-    let user_toml = match tokio::fs::read_to_string(path).await {
+    let user_toml = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -732,6 +752,17 @@ mod tests {
                 reloaded.mode(),
                 Mode::EvalFirst,
                 "neither write lost the other"
+            );
+            let later = open(&host, &rig, "later").await;
+            let later_view = later.view(PageReq::default()).expect("view");
+            assert_eq!(
+                later_view.settings.thinking, target,
+                "the live snapshot keeps the thinking default the concurrent mode write landed"
+            );
+            assert_eq!(
+                later_view.settings.mode,
+                Mode::EvalFirst,
+                "the live snapshot keeps the mode default the concurrent thinking write landed"
             );
             let _ = host.shutdown(CLOSE).await;
         }
