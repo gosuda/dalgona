@@ -529,7 +529,7 @@ impl Config {
             ask_clamp: None,
             aliases: std::collections::BTreeMap::new(),
             serve: ServeConfig {
-                bind: Box::<str>::from("127.0.0.1"),
+                bind: Box::<str>::from(crate::config::types::SERVE_DEFAULT_BIND),
                 port: 7437,
                 token_file: data_root.join("serve.token"),
                 approval: ApprovalMode::Ask,

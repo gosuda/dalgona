@@ -100,6 +100,9 @@ pub struct ModeProjection {
     pub non_eval_only: bool,
 }
 
+/// Loopback address the endpoint binds when `serve.bind` is unset.
+pub const SERVE_DEFAULT_BIND: &str = "127.0.0.1";
+
 /// Configuration for serving the local control endpoint.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

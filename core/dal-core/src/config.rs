@@ -32,5 +32,5 @@ mod values;
 
 pub use types::{
     ApprovalMode, Config, ConfigOverrides, ConfigProduct, JudgeMode, Mode, ModeProjection,
-    PROMPT_DIAGRAMS, RulesConfig, Screen, ServeConfig, TuiConfig,
+    PROMPT_DIAGRAMS, RulesConfig, SERVE_DEFAULT_BIND, Screen, ServeConfig, TuiConfig,
 };
