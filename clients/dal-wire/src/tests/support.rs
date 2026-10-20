@@ -63,6 +63,61 @@ pub(super) async fn rig_with(steps: &[String], extra: &str) -> Rig {
     rig_with_extensions(steps, extra, Vec::new()).await
 }
 
+/// Starts a Host with the default model `model`, the captured environment
+/// `extra_vars`, and user TOML appends `extra`.
+pub(super) async fn rig_with_env(
+    steps: &[String],
+    model: &str,
+    extra: &str,
+    extra_vars: &[(&str, &str)],
+) -> Rig {
+    let dir = tempfile::tempdir().expect("temporary root");
+    let data = dir.path().join("data");
+    let workspace = dir.path().join("w");
+    std::fs::create_dir_all(&data).expect("data root");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fixture = data.join("script.jsonl");
+    std::fs::write(&fixture, steps.join("\n")).expect("script fixture");
+    let user = format!(
+        "model = \"{model}\"\n{extra}\n[providers.scripted]\nfixture = \"{}\"\n",
+        fixture.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, &data, "", Some(&user)).expect("test config loads");
+    let gate = Arc::new(Semaphore::new(0));
+    let no_reload: Arc<dyn dal_ext::commands::PluginReload> = Arc::new(NoReload);
+    let extensions = vec![
+        dal_ext::commands::extension(&no_reload).expect("commands extension"),
+        dal_ext::docs::extension().expect("docs extension"),
+        tools_extension(&gate),
+    ];
+    let product = Product {
+        name: "dal",
+        data_root: data,
+        defaults: "",
+        extensions,
+        bundled: Vec::new(),
+    };
+    let mut vars = BTreeMap::new();
+    for (name, value) in extra_vars {
+        vars.insert(OsString::from(*name), OsString::from(*value));
+    }
+    let env = Env {
+        vars,
+        cwd: workspace.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env)
+        .await
+        .expect("host starts");
+    Rig {
+        dir,
+        host,
+        workspace,
+        gate,
+    }
+}
+
 /// Starts a Host with `more` extensions registered after the standard set.
 pub(super) async fn rig_with_extensions(
     steps: &[String],
