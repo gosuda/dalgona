@@ -389,6 +389,12 @@ pub mod ids {
     pub const NARROW_ROWS: &str = "dalgon needs at least 8 rows";
     /// Minimum terminal width notice.
     pub const NARROW_COLS: &str = "dalgon needs at least 12 columns";
+    /// Minimum usable height in rows; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_ROWS: u16 = 8;
+    /// Minimum usable width in columns; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_COLS: u16 = 12;
     /// Plugin notice prefix.
     pub const NOTICE_PLUGIN: &str = "note: {text}";
     /// Large paste notice.

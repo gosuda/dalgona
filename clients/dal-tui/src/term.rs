@@ -55,7 +55,12 @@ pub trait TermIo: Send {
     /// # Errors
     /// Returns the terminal I/O error when the read fails.
     fn read(&self, timeout: Duration) -> io::Result<Vec<u8>>;
-    /// Raises `SIGTSTP` on POSIX; does nothing on Windows.
+    /// Requests a `SIGTSTP` stop on POSIX; does nothing on Windows.
+    ///
+    /// The caller restores the terminal first and re-enters its modes after
+    /// this returns. Linux and Android prefer the raising thread; a default,
+    /// unblocked SIGTSTP stops a non-orphaned foreground group before return.
+    /// Other POSIX systems signal the process; the stop may still be pending.
     fn raise_tstp(&self);
     /// Returns the process-edge shutdown status, when a signal requested exit.
     fn shutdown_code(&self) -> Option<u8> {
@@ -150,6 +155,12 @@ impl TermState {
     /// Records grapheme-width terminal mode.
     pub fn set_grapheme(&mut self, enabled: bool) {
         self.grapheme = enabled;
+    }
+
+    /// Reports whether grapheme-width mode is active.
+    #[must_use]
+    pub const fn grapheme(&self) -> bool {
+        self.grapheme
     }
 
     /// Records alternate-screen ownership.
@@ -470,10 +481,11 @@ impl TermIo for CrosstermTermIo {
     fn raise_tstp(&self) {
         #[cfg(unix)]
         {
-            let _ = rustix::process::kill_process(
-                rustix::process::getpid(),
-                rustix::process::Signal::TSTP,
-            );
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let target = rustix::thread::gettid();
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let target = rustix::process::getpid();
+            let _ = rustix::process::kill_process(target, rustix::process::Signal::TSTP);
         }
     }
 }

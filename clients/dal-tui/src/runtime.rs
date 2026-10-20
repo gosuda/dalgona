@@ -103,6 +103,8 @@ struct Session {
     cancel_deadline: Option<std::time::Instant>,
     /// The one `Run` command still executing off this thread.
     inflight: Option<InflightRun>,
+    /// Set when Ctrl+Z asked the loop to park the terminal and raise SIGTSTP.
+    suspend: bool,
     /// The blob read worker serving the open expand view, for structured
     /// cancellation and a clean join at teardown.
     blob_load: Option<BlobReadWork>,
@@ -857,8 +859,9 @@ where
         } else {
             decoder.feed(&bytes, now)
         };
+        let (term_width, term_height) = io.size().unwrap_or((80, 24));
         for event in events {
-            apply_event(
+            apply_event_at(
                 &mut surfaces.session,
                 &mut surfaces.dialog,
                 &surfaces.transcript,
@@ -868,6 +871,8 @@ where
                 event,
                 probe.kitty_keyboard,
                 opts.screen,
+                term_width,
+                term_height,
             );
         }
         surfaces.flush_answers(opts, agent);
@@ -880,12 +885,22 @@ where
         }
         surfaces.poll_signin(opts, io, &mut model_source);
         poll_model_retry(&mut surfaces.session, &mut model_source);
+        if surfaces.session.suspend {
+            surfaces.session.suspend = false;
+            suspend_and_continue(io, state, opts, &theme, &mut painter, &mut surfaces)?;
+        }
         surfaces.write_copies(io);
         surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
-        surfaces.dialog.tick(Instant::now());
+        // The arming clock runs only while the dialog can be painted: a
+        // floored frame shows no dialog, so no key may arm off an unseen
+        // question. Skipping the tick keeps a floored dialog in `Shown`
+        // until resize re-arms it through the normal delay.
+        if !crate::render::below_floor(term_width, term_height) {
+            surfaces.dialog.tick(Instant::now());
+        }
         if surfaces.request_quit() {
             break;
         }
@@ -901,6 +916,14 @@ where
         }
     }
 
+    // The caret rests hidden at the block top while the composer is empty;
+    // the exit line continues from the caret, so move it below the block
+    // first or the line overwrites a block row (a notice, the composer).
+    if opts.screen == crate::Screen::Inline
+        && let Err(error) = painter.rest_below_block(io)
+    {
+        return Err(error);
+    }
     Ok(surfaces.finish(opts))
 }
 
@@ -1818,7 +1841,8 @@ fn probe_terminal(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
                 &mut surfaces.session,
                 &mut surfaces.dialog,
@@ -1828,6 +1852,8 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &parser.finish(),
                 opts.screen,
+                probe_width,
+                probe_height,
             );
             break;
         }
@@ -1848,7 +1874,8 @@ fn probe_terminal(
             probe.background_luminance = next.background_luminance;
         }
         if !keys.is_empty() {
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
                 &mut surfaces.session,
                 &mut surfaces.dialog,
@@ -1858,13 +1885,16 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &keys,
                 opts.screen,
+                probe_width,
+                probe_height,
             );
             // A key event requests an immediate frame that bypasses the batch.
             surfaces.paint(io, state, painter, opts, palette)?;
         }
         if probe.da1 {
             let held = parser.finish();
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
                 &mut surfaces.session,
                 &mut surfaces.dialog,
@@ -1874,6 +1904,8 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &held,
                 opts.screen,
+                probe_width,
+                probe_height,
             );
             break;
         }
@@ -1881,9 +1913,10 @@ fn probe_terminal(
     Ok(probe)
 }
 
-/// Decodes terminal bytes into key events and applies them to the session.
-/// Probe-window bytes predate the kitty switch, so they decode as legacy.
-fn apply_type_ahead(
+/// Decodes terminal bytes into key events and applies them at the current
+/// terminal size, so startup type-ahead below the usable floor fails closed
+/// exactly like main-loop input: only Ctrl+C is admitted.
+fn apply_type_ahead_at(
     decoder: &mut KeyDecoder,
     session: &mut Session,
     dialog: &mut DialogUi,
@@ -1893,13 +1926,16 @@ fn apply_type_ahead(
     diagrams: crate::diagram::DiagramSettings,
     bytes: &[u8],
     screen: crate::Screen,
+    width: u16,
+    height: u16,
 ) {
     if bytes.is_empty() {
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
-        apply_event(
-            session, dialog, transcript, live, entries, diagrams, event, false, screen,
+        apply_event_at(
+            session, dialog, transcript, live, entries, diagrams, event, false, screen, width,
+            height,
         );
     }
 }
@@ -2105,7 +2141,14 @@ fn apply_viewport_action(
     true
 }
 
-fn apply_event(
+/// Applies one input event at the current terminal size. While the surface
+/// is below the usable floor the frame shows only the narrow warning plus
+/// status, so admission fails closed: every key but Ctrl+C (and every paste)
+/// is dropped before any dialog, picker, sign-in, help, overlay, expand,
+/// search, or composer state can change. Ctrl+C still reaches
+/// `interrupt_or_dismiss` so a floored loop stays interruptible; resize back
+/// to a usable size re-arms every surface with its state intact.
+fn apply_event_at(
     session: &mut Session,
     dialog: &mut DialogUi,
     transcript: &Transcript,
@@ -2115,8 +2158,22 @@ fn apply_event(
     event: InputEvent,
     kitty: bool,
     screen: crate::Screen,
+    width: u16,
+    height: u16,
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    if crate::render::below_floor(width, height) {
+        let interrupt = matches!(
+            &event,
+            InputEvent::Key(key)
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers == KeyModifiers::CONTROL
+        );
+        if !interrupt {
+            return;
+        }
+    }
 
     let InputEvent::Key(key) = event else {
         if let InputEvent::Paste(bytes) = event {
@@ -2267,6 +2324,10 @@ fn apply_composer_action(
             }
         }
         Some(Action::Help) => session.help = Some(HelpUi::default()),
+        // Ctrl+Z parks the terminal through the same restore the exit path
+        // uses, then raises SIGTSTP; the loop's resume path re-enters the
+        // recorded modes and repaints. Windows leaves the key unbound.
+        Some(Action::Suspend) => session.suspend = true,
         Some(Action::ExpandCollapse) => {
             let opened = entries.iter().rev().find_map(|entry| {
                 crate::render::expanded_card(entry, diagrams).map(|card| {
@@ -2394,6 +2455,90 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
     }
 }
 
+/// Suspends the process on POSIX:
+/// writes the recorded restore bytes, leaves raw mode, and raises SIGTSTP
+/// through the terminal seam. `raise_tstp` is a no-op on Windows, so the
+/// key stays inert there instead of parking the terminal permanently. On
+/// return (SIGCONT) raw mode re-enters, the same modes push again in the
+/// same order, and the repaint that follows rewrites the live block at the
+/// measured caret row.
+fn suspend_and_continue(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    theme: &ResolvedTheme,
+    painter: &mut Painter,
+    surfaces: &mut Surfaces,
+) -> Result<(), TuiError> {
+    let saved = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let restore = crate::term::restore_bytes(&saved);
+    io.write(&restore)
+        .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
+    io.disable_raw();
+    io.raise_tstp();
+    reenter_modes(io, state, opts, &saved)
+        .map_err(|message| crate::term::terminal_error(&message))?;
+    // Repaint in place: the restore left the screen outside the painter's
+    // damage model, so this frame rewrites the whole live block. A diff paint
+    // that finds every row unchanged would write nothing and leave whatever
+    // the shell printed on screen (and, fullscreen, the blank alternate
+    // screen the re-entry just made), so the repaint drops the baseline first.
+    repaint_live_region(io, state, opts, theme, painter, surfaces)
+}
+
+/// Ctrl+L and the return from a suspend: clear the live region by repainting
+/// it in full. The live block holds only transient rows, so a whole-block
+/// repaint is cheap, and it also repairs any rows a bidi payload mangled or a
+/// foreign process left behind.
+fn repaint_live_region(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    theme: &ResolvedTheme,
+    painter: &mut Painter,
+    surfaces: &mut Surfaces,
+) -> Result<(), TuiError> {
+    painter.invalidate();
+    surfaces.paint(io, state, painter, opts, theme)
+}
+
+/// Re-enters raw mode and pushes every recorded terminal mode again, in
+/// the startup order, after the terminal was restored for a child process.
+fn reenter_modes(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    saved: &TermState,
+) -> Result<(), String> {
+    io.enable_raw()
+        .map_err(|error| format!("cannot re-enter raw mode: {error}"))?;
+    {
+        let mut modes = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        modes.set_raw(true);
+        modes.set_paste(true);
+    }
+    io.write(b"\x1b[?2004h")
+        .map_err(|error| format!("cannot re-enter bracketed paste: {error}"))?;
+    if opts.screen == crate::Screen::Fullscreen {
+        io.write(b"\x1b[?1049h\x1b[?25l")
+            .map_err(|error| format!("cannot re-enter the alternate screen: {error}"))?;
+    }
+    if saved.kitty() {
+        io.write(b"\x1b[>1u")
+            .map_err(|error| format!("cannot re-enter kitty keyboard: {error}"))?;
+    }
+    if saved.grapheme() {
+        io.write(b"\x1b[?2027h")
+            .map_err(|error| format!("cannot re-enter grapheme mode: {error}"))?;
+    }
+    Ok(())
+}
+
 /// `r` in the failed model picker requests one retry through the real model
 /// source at the next tick; in any other picker it stays a filter character.
 fn apply_model_retry_key(session: &mut Session) {
@@ -2440,7 +2585,7 @@ where
 mod tests {
     use std::num::NonZeroU64;
 
-    use super::{ExitDialog, Session, apply_event, poll_model_retry};
+    use super::{Session, apply_event_at, poll_model_retry};
 
     /// A resolution that names `core` and the default deny answer: the shape
     /// every deadline resolution has, so no cause can be read off it.
@@ -2493,7 +2638,7 @@ mod tests {
     fn apply_key(session: &mut Session, key: crate::keys::Key) {
         use crate::keys::InputEvent;
 
-        apply_event(
+        apply_event_at(
             session,
             &mut crate::dialog::DialogUi::default(),
             &crate::transcript::Transcript::default(),
@@ -2503,6 +2648,8 @@ mod tests {
             InputEvent::Key(key),
             false,
             crate::Screen::Inline,
+            80,
+            24,
         );
     }
 
@@ -2687,7 +2834,10 @@ mod tests {
             ..Session::default()
         };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
-        assert_eq!(session.dialog, Some(ExitDialog::DiscardDraft));
+        assert!(
+            session.dialog.is_some(),
+            "a non-empty draft asks before quitting"
+        );
         assert!(!session.quit);
         session.answer_dialog('n');
         assert_eq!(session.dialog, None);
@@ -2809,7 +2959,7 @@ mod tests {
         ] {
             apply_key(&mut session, key);
         }
-        apply_event(
+        apply_event_at(
             &mut session,
             &mut crate::dialog::DialogUi::default(),
             &crate::transcript::Transcript::default(),
@@ -2819,6 +2969,8 @@ mod tests {
             InputEvent::Paste(b"ignored paste".to_vec()),
             false,
             crate::Screen::Inline,
+            80,
+            24,
         );
         assert!(
             session.help.is_some(),
@@ -3065,7 +3217,7 @@ mod tests {
     mod fullscreen_selection {
         use std::num::NonZeroU64;
 
-        use super::{Session, apply_event};
+        use super::{Session, apply_event_at};
         use crate::dialog::DialogUi;
         use crate::keys::{InputEvent, Key};
         use crate::transcript::Transcript;
@@ -3086,7 +3238,7 @@ mod tests {
             transcript: &Transcript,
             key: Key,
         ) {
-            apply_event(
+            apply_event_at(
                 session,
                 dialog,
                 transcript,
@@ -3096,6 +3248,8 @@ mod tests {
                 InputEvent::Key(key),
                 false,
                 crate::Screen::Fullscreen,
+                80,
+                24,
             );
         }
 
@@ -3164,7 +3318,7 @@ mod tests {
             let transcript = transcript();
             let mut dialog = DialogUi::default();
             for code in [KeyCode::Up, KeyCode::Left, KeyCode::Down, KeyCode::Right] {
-                apply_event(
+                apply_event_at(
                     &mut session,
                     &mut dialog,
                     &transcript,
@@ -3174,6 +3328,8 @@ mod tests {
                     InputEvent::Key(shift(code)),
                     false,
                     crate::Screen::Inline,
+                    80,
+                    24,
                 );
             }
             assert!(
@@ -3185,7 +3341,7 @@ mod tests {
                 "",
                 "no stray text reaches the composer"
             );
-            apply_event(
+            apply_event_at(
                 &mut session,
                 &mut dialog,
                 &transcript,
@@ -3195,6 +3351,8 @@ mod tests {
                 InputEvent::Key(control_c()),
                 false,
                 crate::Screen::Inline,
+                80,
+                24,
             );
             assert_eq!(session.pending_copies, []);
             assert!(matches!(
@@ -3272,6 +3430,177 @@ mod tests {
                 "the picker closed instead of copying"
             );
         }
+    }
+
+    #[test]
+    fn floored_surface_drops_blind_keys_until_resized_back() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        fn char_key(c: char) -> Key {
+            Key::new(KeyCode::Char(c), KeyModifiers::NONE)
+        }
+
+        fn approval(id: dal_core::RequestId) -> dal_core::Request {
+            dal_core::Request {
+                id,
+                turn: None,
+                owner: dal_core::Owner::Core,
+                question: dal_core::Question::Approval {
+                    tool: "exec".into(),
+                    preview: dal_core::Preview {
+                        title: "command".into(),
+                        body: "echo hi".into(),
+                        digest: None,
+                    },
+                    grant: None,
+                    call: None,
+                },
+                timeout: std::time::Duration::from_secs(30),
+                default: dal_core::Answer::Decline,
+            }
+        }
+
+        fn apply_at(
+            session: &mut Session,
+            dialog: &mut DialogUi,
+            event: InputEvent,
+            width: u16,
+            height: u16,
+        ) {
+            super::apply_event_at(
+                session,
+                dialog,
+                &crate::transcript::Transcript::default(),
+                &mut crate::live::Live::default(),
+                &[],
+                crate::diagram::DiagramSettings::default(),
+                event,
+                false,
+                crate::Screen::Inline,
+                width,
+                height,
+            );
+        }
+
+        assert!(crate::render::below_floor(20, 5));
+        assert!(!crate::render::below_floor(80, 24));
+
+        let mut session = Session::default();
+        let mut dialog = DialogUi::default();
+        let id = dal_core::RequestId::new_v7();
+        dialog.opened(approval(id));
+        let start = std::time::Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + crate::dialog::ARM_DELAY);
+        assert!(dialog.armed());
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            20,
+            5,
+        );
+        assert!(
+            session.pending_answers.is_empty(),
+            "a blind `y` below the floor must not approve"
+        );
+        assert!(dialog.is_open(), "the unseen question stays open");
+        assert!(
+            !dialog.awaiting_resolution(),
+            "no answer may latch while floored"
+        );
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            80,
+            24,
+        );
+        assert_eq!(session.pending_answers.len(), 1);
+        assert!(
+            matches!(
+                &session.pending_answers[0],
+                (answered, dal_core::Answer::Approve) if *answered == id
+            ),
+            "resize back re-arms the still-open approval: {:?}",
+            session.pending_answers
+        );
+
+        let mut picker_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut no_dialog = DialogUi::default();
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            20,
+            5,
+        );
+        assert!(
+            picker_session.pending_commands.is_empty(),
+            "picker Enter below the floor must not activate"
+        );
+        assert!(
+            picker_session.picker.is_some(),
+            "the unseen picker stays open"
+        );
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            80,
+            24,
+        );
+
+        let mut type_session = Session::default();
+        let mut type_dialog = DialogUi::default();
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Key(char_key('x')),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "composer typing below the floor must not mutate the draft"
+        );
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Paste(b"x".to_vec()),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "paste below the floor must not reach the composer"
+        );
+
+        let mut interrupt_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut interrupt_dialog = DialogUi::default();
+        apply_at(
+            &mut interrupt_session,
+            &mut interrupt_dialog,
+            InputEvent::Key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            20,
+            5,
+        );
+        assert!(
+            interrupt_session.picker.is_none(),
+            "Ctrl+C stays the interrupt path while floored"
+        );
     }
 }
 

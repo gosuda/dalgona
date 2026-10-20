@@ -442,6 +442,14 @@ impl Host {
     /// parking the tail on the awaiting session's task owner, which its
     /// own close and the host shutdown always drain.
     pub(crate) async fn teardown_taken(state: &HostState, entry: SessionEntry, id: SessionId) {
+        // Wait for the last ended turn's driver confirmation before the
+        // session-end observers sweep per-turn state: turn-end hooks journal
+        // their records from the driver's turn-end observation, and tearing
+        // down first drops those records (a turn-end hook races the close).
+        // Bounded well under one hook chain; driver-gone closes resolve on
+        // the actor shutdown instead.
+        const SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+        let _ = tokio::time::timeout(SETTLE_WAIT, entry.handle.settled()).await;
         let generation = state.shared.generation.borrow().clone();
         let event = SessionEnd {
             session: id,

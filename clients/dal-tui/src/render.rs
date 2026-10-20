@@ -140,6 +140,14 @@ impl RenderRow {
     }
 }
 
+/// True while the surface is below the usable floor: the frame shows only
+/// the narrow warning plus status and input admission must fail closed.
+/// Mirrors the `RegionBudget::floor` thresholds (`h < 8` or `w < 12`) so
+/// rendering and admission share one predicate.
+pub(crate) fn below_floor(width: u16, height: u16) -> bool {
+    height < crate::copy::ids::MIN_ROWS || width < crate::copy::ids::MIN_COLS
+}
+
 /// Renders the bottom stack in inline mode or the whole screen in fullscreen mode.
 pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<RenderRow> {
     let w = usize::from(width);
@@ -166,13 +174,10 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         })
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
-    let floor = if h < 8 {
-        Some(crate::copy::ids::NARROW_ROWS)
-    } else if w < 12 {
-        Some(crate::copy::ids::NARROW_COLS)
-    } else {
-        None
-    };
+    let floor = (height < crate::copy::ids::MIN_ROWS)
+        .then_some(crate::copy::ids::NARROW_ROWS)
+        .or((width < crate::copy::ids::MIN_COLS).then_some(crate::copy::ids::NARROW_COLS));
+    debug_assert_eq!(floor.is_some(), below_floor(width, height));
     if let Some(warning) = floor {
         return resolve_colors(
             vec![

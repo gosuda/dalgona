@@ -53,6 +53,8 @@ type FixtureResult = Result<String, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = r#"{"type":"usage","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":340,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":0.0123}}"#;
 const WAIT: Duration = Duration::from_secs(15);
+const SLICE: Duration = Duration::from_millis(5);
+const CARET_QUERY: &[u8] = b"\x1b[6n";
 
 /// One scripted provider step that streams `deltas` and ends the turn.
 fn text_step(deltas: &[&str]) -> FixtureResult {
@@ -87,6 +89,7 @@ struct Screen {
     term: PtyProcess,
     vt: VtRecorder,
     fed: usize,
+    scanned: usize,
 }
 
 impl Screen {
@@ -114,16 +117,36 @@ impl Screen {
             term,
             vt: VtRecorder::new(columns, rows),
             fed: 0,
+            scanned: 0,
         };
         screen.until(|text| text.contains(dal_tui::copy::ids::COMPOSER_PLACEHOLDER))?;
         Ok(screen)
     }
 
+    /// Feeds the screen for `millis` and answers each caret-position request.
     fn pump(&mut self, millis: u64) -> TestResult {
-        self.term.collect_for(Duration::from_millis(millis))?;
-        let output = self.term.output();
-        self.vt.feed(&output[self.fed..]);
-        self.fed = output.len();
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        loop {
+            self.term.collect_for(SLICE)?;
+            let output = self.term.output();
+            self.vt.feed(&output[self.fed..]);
+            self.fed = output.len();
+            self.answer_caret_queries()?;
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    }
+
+    fn answer_caret_queries(&mut self) -> TestResult {
+        let from = self.scanned.saturating_sub(CARET_QUERY.len() - 1);
+        let asked = pty::occurrences(&self.term.output()[from..self.fed], CARET_QUERY);
+        self.scanned = self.fed;
+        for _ in 0..asked {
+            let (column, row) = self.vt.cursor();
+            let answer = format!("\x1b[{};{}R\x1b[0n", row + 1, column + 1);
+            self.term.write(answer.as_bytes())?;
+        }
         Ok(())
     }
 

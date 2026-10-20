@@ -24,7 +24,7 @@ layout-rs = "=0.1.3"
 base64.workspace = true
 blake3.workspace = true
 process-wrap = { workspace = true, features = ["std"] }
-rustix = { workspace = true, features = ["event", "stdio"] }
+rustix = { workspace = true, features = ["event", "stdio", "thread"] }
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
