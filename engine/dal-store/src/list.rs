@@ -10,8 +10,8 @@ use std::{
 };
 
 use dal_core::{
-    BlobId, Entry, EntryKind, JournalPart, ListQuery, Page, Record, Seq, SessionId, SessionInfo,
-    Workspace,
+    BlobId, Entry, EntryId, EntryKind, JournalPart, ListQuery, Page, Record, Seq, SessionId,
+    SessionInfo, Workspace,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,17 @@ const CACHE_VERSION: u8 = 1;
 const DEFAULT_LIST_LIMIT: u32 = 200;
 const DAMAGED_PREVIEW: &str = "(damaged session file)";
 const MAX_PREVIEW_BYTES: usize = 4_096;
+
+/// What a reader needs the on-disk info cache to hold. A cache written before
+/// `message_count` existed holds every identity fact but not the count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheNeed {
+    /// Id, name, preview, and archive state: lookups and uniqueness checks,
+    /// which must not parse every journal just because the count is absent.
+    Identity,
+    /// Everything `Identity` reads plus the leaf-path count: listings.
+    WithCount,
+}
 
 /// Store-instance metadata cache and read-only session lookup.
 #[derive(Default)]
@@ -47,6 +58,7 @@ struct Facts {
     created_at: Option<jiff::Timestamp>,
     archived: Option<bool>,
     last_seq: Option<Seq>,
+    message_count: Option<u64>,
 }
 
 /// The deliberately small on-disk cache. Keep declaration order in sync with the format.
@@ -61,6 +73,11 @@ struct InfoFile {
     created_at: jiff::Timestamp,
     archived: bool,
     journal_bytes: u64,
+    /// Entries on the visible leaf path. Absent in a cache written before the
+    /// count existed; such a cache reads as a miss and the journal is
+    /// rescanned, so a missing member never reads as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_count: Option<u64>,
 }
 
 struct Millis<'a>(&'a jiff::Timestamp);
@@ -228,7 +245,7 @@ impl Listing {
         workspace: &Workspace,
     ) -> Result<Option<SessionId>, StoreError> {
         for candidate in &Self::read_candidates_strict(workspace_dir)? {
-            let session = self.read_candidate(candidate, workspace)?;
+            let session = self.read_candidate_identity(candidate, workspace)?;
             if session.info.archived == Some(false) {
                 return Ok(Some(session.info.id));
             }
@@ -250,6 +267,78 @@ impl Listing {
         journal_bytes: u64,
         journal_mtime: SystemTime,
     ) -> Result<SessionInfo, StoreError> {
+        self.read_info_needing(
+            session_dir,
+            id,
+            workspace,
+            (journal_bytes, journal_mtime),
+            CacheNeed::WithCount,
+        )
+    }
+
+    /// Reads the identity facts of one session for lookups, trusting a cache
+    /// that predates the message count. The count of the returned row is
+    /// whatever the cache held, so `message_count` may be `None`: callers that
+    /// show the count use [`Self::read_info`].
+    ///
+    /// # Errors
+    /// Returns a path-bearing I/O error when the journal or cache cannot be inspected.
+    pub(crate) fn read_identity(
+        &self,
+        session_dir: &Path,
+        id: SessionId,
+        workspace: &Workspace,
+        journal_bytes: u64,
+        journal_mtime: SystemTime,
+    ) -> Result<SessionInfo, StoreError> {
+        self.read_info_needing(
+            session_dir,
+            id,
+            workspace,
+            (journal_bytes, journal_mtime),
+            CacheNeed::Identity,
+        )
+    }
+
+    /// Reads one session by id, from its own directory: the stat, then the
+    /// full listing facts. The workspace is the store's own, so a session that
+    /// lives elsewhere is simply absent here.
+    ///
+    /// # Errors
+    /// Returns `StoreError::NotFound` when the session has no regular journal
+    /// file, and a path-bearing I/O error when it cannot be inspected.
+    pub(crate) fn read_session(
+        &self,
+        session_dir: &Path,
+        id: SessionId,
+        workspace: &Workspace,
+    ) -> Result<SessionInfo, StoreError> {
+        let journal = session_dir.join("journal.jsonl");
+        let metadata = match fs::metadata(&journal) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Err(StoreError::NotFound { path: journal }),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound { path: journal });
+            }
+            Err(source) => return Err(util::io_err(&journal, source)),
+        };
+        let mtime = modified(&journal, &metadata)?;
+        self.read_info(session_dir, id, workspace, metadata.len(), mtime)
+    }
+
+    /// The one reader behind [`Self::read_info`] and [`Self::read_identity`].
+    ///
+    /// Facts from a cache that lacks the count are complete for an identity
+    /// reader only, so they are returned but not remembered in memory: a later
+    /// listing must not read them back as a count of "unknown".
+    fn read_info_needing(
+        &self,
+        session_dir: &Path,
+        id: SessionId,
+        workspace: &Workspace,
+        (journal_bytes, journal_mtime): (u64, SystemTime),
+        need: CacheNeed,
+    ) -> Result<SessionInfo, StoreError> {
         let journal_path = session_dir.join("journal.jsonl");
         if let Some(facts) = self.cached(&journal_path, journal_bytes, journal_mtime)
             && facts.id == id
@@ -258,20 +347,34 @@ impl Listing {
             return to_session_info(facts, journal_mtime);
         }
 
-        let facts = match read_cache(&session_dir.join("info.json"), id, workspace, journal_bytes) {
-            Some(info) => Facts {
-                id,
-                workspace: workspace.clone(),
-                name: info.name,
-                preview: info.preview,
-                created_at: Some(info.created_at),
-                archived: Some(info.archived),
-                // The durable cache has no update sequence; only the active session knows it.
-                last_seq: None,
-            },
-            None => scan_journal(&journal_path, id, workspace),
+        let cached = read_cache(
+            &session_dir.join("info.json"),
+            id,
+            workspace,
+            journal_bytes,
+            need,
+        );
+        let (facts, complete) = match cached {
+            Some(info) => {
+                let complete = info.message_count.is_some();
+                let facts = Facts {
+                    id,
+                    workspace: workspace.clone(),
+                    name: info.name,
+                    preview: info.preview,
+                    created_at: Some(info.created_at),
+                    archived: Some(info.archived),
+                    // The durable cache has no update sequence; only the active session knows it.
+                    last_seq: None,
+                    message_count: info.message_count,
+                };
+                (facts, complete)
+            }
+            None => (scan_journal(&journal_path, id, workspace), true),
         };
-        self.remember(&journal_path, journal_bytes, journal_mtime, facts.clone());
+        if complete {
+            self.remember(&journal_path, journal_bytes, journal_mtime, facts.clone());
+        }
         to_session_info(facts, journal_mtime)
     }
 
@@ -351,6 +454,7 @@ impl Listing {
             created_at,
             archived,
             journal_bytes,
+            message_count: info.message_count,
         };
         let bytes = sonic_rs::to_string(&cache)
             .map_err(|error| StoreError::Invalid {
@@ -367,6 +471,7 @@ impl Listing {
             created_at: Some(created_at),
             archived: Some(archived),
             last_seq: info.last_seq,
+            message_count: info.message_count,
         };
         self.remember(&journal_path, journal_bytes, journal_mtime, facts);
         Ok(())
@@ -390,7 +495,7 @@ impl Listing {
         };
         let normalized = util::normalize_name(name)?;
         for candidate in &Self::read_candidates_strict(workspace_dir)? {
-            let session = self.read_candidate(candidate, workspace)?;
+            let session = self.read_candidate_identity(candidate, workspace)?;
             if Some(session.info.id) != except
                 && session.info.name.as_deref() == Some(normalized.as_ref())
             {
@@ -440,10 +545,11 @@ impl Listing {
     ) -> Result<Vec<Listed>, StoreError> {
         Self::read_candidates_strict(workspace_dir)?
             .iter()
-            .map(|candidate| self.read_candidate(candidate, workspace))
+            .map(|candidate| self.read_candidate_identity(candidate, workspace))
             .collect()
     }
 
+    /// Reads one candidate for a listing row, count included.
     fn read_candidate(
         &self,
         candidate: &Candidate,
@@ -456,12 +562,33 @@ impl Listing {
             candidate.journal_bytes,
             candidate.journal_mtime,
         )?;
-        Ok(Listed {
+        Ok(Self::listed(candidate, info))
+    }
+
+    /// Reads one candidate for a lookup or check, which never shows the
+    /// count and so must not rescan a journal for it.
+    fn read_candidate_identity(
+        &self,
+        candidate: &Candidate,
+        workspace: &Workspace,
+    ) -> Result<Listed, StoreError> {
+        let info = self.read_identity(
+            &candidate.directory,
+            candidate.id,
+            workspace,
+            candidate.journal_bytes,
+            candidate.journal_mtime,
+        )?;
+        Ok(Self::listed(candidate, info))
+    }
+
+    fn listed(candidate: &Candidate, info: SessionInfo) -> Listed {
+        Listed {
             info,
             mtime_ms: candidate.mtime_ms,
             // The candidate keeps its copy for the sort key; the row owns its own.
             id_text: candidate.id_text.clone(),
-        })
+        }
     }
 
     /// Scans the workspace, keeping the strict per-entry contract for lookups:
@@ -623,6 +750,7 @@ fn to_session_info(facts: Facts, mtime: SystemTime) -> Result<SessionInfo, Store
         created_at: facts.created_at,
         archived: facts.archived,
         last_seq: facts.last_seq,
+        message_count: facts.message_count,
     })
 }
 fn modified(path: &Path, metadata: &fs::Metadata) -> Result<SystemTime, StoreError> {
@@ -642,6 +770,7 @@ fn read_cache(
     id: SessionId,
     workspace: &Workspace,
     journal_bytes: u64,
+    need: CacheNeed,
 ) -> Option<InfoFile> {
     let bytes = crate::private::open_private_file(path)
         .and_then(|mut file| {
@@ -655,8 +784,9 @@ fn read_cache(
     (info.v == CACHE_VERSION
         && info.id == id
         && info.workspace.as_ref() == expected_workspace.as_str()
-        && info.journal_bytes == journal_bytes)
-        .then_some(info)
+        && info.journal_bytes == journal_bytes
+        && (need == CacheNeed::Identity || info.message_count.is_some()))
+    .then_some(info)
 }
 
 /// Fold of the listing facts shared by the file scan and the in-memory open path.
@@ -664,6 +794,10 @@ struct FactFold {
     facts: Option<Facts>,
     first_user_seen: bool,
     header_matches: bool,
+    /// Entries from the root to each entry seen so far.
+    depth: HashMap<EntryId, u64>,
+    /// The current leaf: the last entry appended, or where a leaf record moved it.
+    leaf: Option<EntryId>,
 }
 
 impl FactFold {
@@ -672,6 +806,44 @@ impl FactFold {
             facts: None,
             first_user_seen: false,
             header_matches: false,
+            depth: HashMap::new(),
+            leaf: None,
+        }
+    }
+
+    /// Follows the leaf exactly as replay does: an appended entry becomes the
+    /// leaf and a leaf record moves it, so the leaf's depth is the length of
+    /// the visible path.
+    fn track_leaf(&mut self, record: &Record) {
+        match record {
+            Record::User(entry)
+            | Record::Assistant(entry)
+            | Record::ToolResult(entry)
+            | Record::Reminder(entry)
+            | Record::Model(entry)
+            | Record::Thinking(entry)
+            | Record::Approval(entry)
+            | Record::Mode(entry)
+            | Record::Compaction(entry)
+            | Record::BranchSummary(entry) => {
+                let above = entry
+                    .parent
+                    .and_then(|parent| self.depth.get(&parent).copied())
+                    .unwrap_or(0);
+                self.depth.insert(entry.id, above.saturating_add(1));
+                self.leaf = Some(entry.id);
+            }
+            Record::Leaf { to, .. } => self.leaf = *to,
+            _ => {}
+        }
+    }
+
+    /// The visible path length: zero before any entry, `None` when the leaf
+    /// names an entry the scan never saw (a journal replay would refuse).
+    fn message_count(&self) -> Option<u64> {
+        match self.leaf {
+            None => Some(0),
+            Some(leaf) => self.depth.get(&leaf).copied(),
         }
     }
 
@@ -682,6 +854,7 @@ impl FactFold {
         workspace: &Workspace,
         journal_path: &Path,
     ) {
+        self.track_leaf(record);
         match record {
             Record::Session(header) => {
                 if header.id != id || header.workspace != *workspace {
@@ -696,6 +869,7 @@ impl FactFold {
                     created_at: Some(header.at),
                     archived: Some(false),
                     last_seq: None,
+                    message_count: None,
                 });
             }
             Record::Name { name, .. } => {
@@ -722,8 +896,12 @@ impl FactFold {
     }
 
     fn finish(self, id: SessionId, workspace: &Workspace) -> Facts {
+        let message_count = self.message_count();
         match self.facts {
-            Some(facts) if self.header_matches => facts,
+            Some(mut facts) if self.header_matches => {
+                facts.message_count = message_count;
+                facts
+            }
             _ => damaged_facts(id, workspace),
         }
     }
@@ -794,6 +972,7 @@ fn damaged_facts(id: SessionId, workspace: &Workspace) -> Facts {
         created_at: None,
         archived: None,
         last_seq: None,
+        message_count: None,
     }
 }
 
@@ -1035,6 +1214,7 @@ mod tests {
             created_at: jiff::Timestamp::UNIX_EPOCH,
             archived: false,
             journal_bytes: size.saturating_sub(1),
+            message_count: None,
         };
         let encoded_cache = sonic_rs::to_string(&cache).expect("encode cache");
         assert!(encoded_cache.contains("\"created_at\":\"1970-01-01T00:00:00.000Z\""));

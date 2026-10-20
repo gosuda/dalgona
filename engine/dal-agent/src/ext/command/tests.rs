@@ -344,6 +344,7 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
             created_at: None,
             archived: None,
             last_seq: None,
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {

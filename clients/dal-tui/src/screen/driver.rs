@@ -1269,6 +1269,7 @@ mod tests {
                     created_at: Some(dal_core::Timestamp::UNIX_EPOCH),
                     archived: Some(false),
                     last_seq: Some(dal_core::Seq::new(NonZeroU64::MIN)),
+                    message_count: None,
                 },
                 turn: dal_core::TurnState::Idle,
                 entries: dal_core::Page {

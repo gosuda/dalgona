@@ -75,6 +75,7 @@ fn idle_view() -> View {
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {

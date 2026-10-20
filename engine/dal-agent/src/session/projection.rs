@@ -234,6 +234,7 @@ impl Projection {
                 created_at: args.created_at,
                 archived: args.archived,
                 last_seq: self.last_seq,
+                message_count: None,
             },
             turn: self.turn,
             entries: Page {

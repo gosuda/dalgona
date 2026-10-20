@@ -111,9 +111,23 @@ pub(crate) enum PickerAction {
     ScopeModel(Box<str>),
     /// Load the row's stored text into the composer as the draft.
     SetDraft(Box<str>),
+    /// Resume the stored session. Handled by the runtime's resume-target path
+    /// through public host ownership, never by guessing.
+    ResumeSession(ResumeTarget),
     /// Activate nothing: the failed model picker keeps its instruction row
     /// selectable without running a command or dismissing the failure state.
     Noop,
+}
+
+/// A stored session the terminal can reopen: its identity and the workspace
+/// the host's listing reported for it, so the reopen resolves the session
+/// where it lives, not in the workspace of the session being left.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResumeTarget {
+    /// The session to reopen.
+    pub(crate) id: dal_core::SessionId,
+    /// The workspace the listing named for it.
+    pub(crate) workspace: dal_core::Workspace,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +154,11 @@ pub(crate) struct PickerUi {
     /// query never loses a check.
     multi: bool,
     checked: std::collections::BTreeSet<usize>,
+    /// The resume row whose delete the user armed with a first `d`. It lives
+    /// and dies with this picker: closing the picker, opening a new one, or
+    /// any move or filter edit drops it, so a delete is only ever confirmed
+    /// by a second `d` on the same row in the same, unchanged opening.
+    armed_delete: Option<dal_core::SessionId>,
 }
 
 impl PickerUi {
@@ -155,9 +174,37 @@ impl PickerUi {
             load_failed: false,
             multi: false,
             checked: std::collections::BTreeSet::new(),
+            armed_delete: None,
         };
         picker.refilter();
         picker
+    }
+
+    /// The resume row whose delete is armed, if any.
+    pub(crate) fn armed_delete(&self) -> Option<dal_core::SessionId> {
+        self.armed_delete
+    }
+
+    /// Arms the delete of one resume row; the next `d` on that same row
+    /// confirms it.
+    pub(crate) fn arm_delete(&mut self, id: dal_core::SessionId) {
+        self.armed_delete = Some(id);
+    }
+
+    /// Drops an armed delete: the confirmation is spent or abandoned.
+    pub(crate) fn disarm_delete(&mut self) {
+        self.armed_delete = None;
+    }
+
+    /// Removes the resume row of one session and drops any armed delete. Used
+    /// after a delete whose fresh listing could not be read, so the removed
+    /// session is never offered again while the rest of the picker stays.
+    pub(crate) fn remove_resume_row(&mut self, id: dal_core::SessionId) {
+        self.options.retain(|option| {
+            !matches!(&option.action, PickerAction::ResumeSession(target) if target.id == id)
+        });
+        self.armed_delete = None;
+        self.refilter();
     }
 
     /// Marks the picker multi-select: space toggles the focused row, Enter
@@ -198,6 +245,7 @@ impl PickerUi {
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
+        self.armed_delete = None;
         let count = self.visible_len();
         if count == 0 {
             return;
@@ -210,11 +258,13 @@ impl PickerUi {
     }
 
     pub(crate) fn add_filter_char(&mut self, character: char) {
+        self.armed_delete = None;
         self.filter.push(character);
         self.refilter();
     }
 
     pub(crate) fn remove_filter_char(&mut self) {
+        self.armed_delete = None;
         crate::composer::pop_grapheme(&mut self.filter);
         self.refilter();
     }
@@ -224,6 +274,7 @@ impl PickerUi {
     /// sign-in input), refiltering once, and never activates a row or
     /// submits.
     pub(crate) fn paste(&mut self, text: &str) {
+        self.armed_delete = None;
         self.filter.extend(text.chars().filter(|c| !c.is_control()));
         self.refilter();
     }
@@ -322,6 +373,18 @@ impl PickerUi {
 
     pub(crate) fn is_selected(&self, index: usize) -> bool {
         self.selected == index
+    }
+
+    /// Focused visible position, for resume-picker delete needs.
+    pub(crate) fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    /// Whether this picker holds resume rows (delete armed only here).
+    pub(crate) fn is_resume_picker(&self) -> bool {
+        self.options
+            .iter()
+            .any(|option| matches!(option.action, PickerAction::ResumeSession(_)))
     }
 
     pub(crate) fn visible_len(&self) -> usize {
@@ -513,6 +576,39 @@ pub(crate) fn scoped_models_picker(
     picker
 }
 
+/// One resume row: `target` resumes through public host ownership,
+/// `label` is the rendered `RESUME_ROW` text.
+pub(crate) struct SessionRow {
+    /// The session to resume and the workspace it lives in.
+    pub(crate) target: ResumeTarget,
+    /// Rendered row label.
+    pub(crate) label: String,
+}
+
+/// The `/resume` picker: every session is a row whose activation resumes
+/// that session through the runtime resume-target path. Filter narrows by
+/// label; `d` on this picker deletes with explicit confirmation.
+pub(crate) fn resume_picker(rows: Vec<SessionRow>, filter: &str) -> PickerUi {
+    let options = rows
+        .into_iter()
+        .map(|row| PickerOption {
+            label: row.label,
+            action: PickerAction::ResumeSession(row.target),
+        })
+        .collect();
+    PickerUi::new(ids::RESUME_TITLE, filter, options)
+}
+
+/// Returns the focused resume-picker session, when the picker holds a
+/// resume row under the cursor.
+pub(crate) fn focused_resume_session(picker: &PickerUi) -> Option<dal_core::SessionId> {
+    let option = picker.visible_option(picker.selected_index())?;
+    match &option.action {
+        PickerAction::ResumeSession(target) => Some(target.id),
+        _ => None,
+    }
+}
+
 /// The prompt-history picker: every past user message is a row whose
 /// activation loads the message text into the composer as the draft.
 pub(crate) fn history_picker(entries: &[EntryView], filter: &str) -> PickerUi {
@@ -563,9 +659,18 @@ pub(crate) fn model_picker_failed(filter: &str) -> PickerUi {
     picker
 }
 
-/// Renders one resume row.
+/// Renders one resume row. `messages` is the count the host's listing
+/// reported; `None` means the host could not read the journal, which the row
+/// says outright instead of showing a count nobody measured.
 #[must_use]
-pub fn resume_row(name: &str, when: &str, messages: u64, dir: &str) -> String {
+pub fn resume_row(name: &str, when: &str, messages: Option<u64>, dir: &str) -> String {
+    let Some(messages) = messages else {
+        return crate::copy::render(
+            ids::RESUME_ROW_UNREADABLE,
+            &[("name", name), ("when", when), ("dir", dir)],
+            1,
+        );
+    };
     crate::copy::render(
         ids::RESUME_ROW,
         &[
@@ -618,7 +723,29 @@ mod tests {
         );
         assert_eq!(offer.notice(Some("luna_reserve")), None);
         assert_eq!(offer.notice(None), None);
-        assert!(resume_row("fix", "today", 1, "/w").contains("/w"));
+        assert!(resume_row("fix", "today", Some(1), "/w").contains("/w"));
+    }
+
+    /// A resume row prints the count the host's listing measured, and a row
+    /// whose journal could not be read says so instead of showing a zero.
+    #[test]
+    fn resume_rows_show_the_listed_count_or_say_it_is_unreadable() {
+        assert_eq!(
+            resume_row("fix", "today", Some(3), "/w"),
+            "fix · today · 3 messages · /w"
+        );
+        assert_eq!(
+            resume_row("fix", "today", Some(1), "/w"),
+            "fix · today · 1 message · /w"
+        );
+        assert_eq!(
+            resume_row("fix", "today", Some(0), "/w"),
+            "fix · today · 0 messages · /w",
+            "a measured zero is a real zero"
+        );
+        let unreadable = resume_row("fix", "today", None, "/w");
+        assert_eq!(unreadable, "fix · today · messages unreadable · /w");
+        assert!(!unreadable.contains("0 message"));
     }
 
     /// A committed scope id the model list does not name stays selected as a

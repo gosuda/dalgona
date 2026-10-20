@@ -291,6 +291,7 @@ fn thread_started_matches_pinned_schema() {
         created_at: None,
         archived: None,
         last_seq: None,
+        message_count: None,
     };
     let idle = sonic_rs::json!({"type": "idle"});
     let thread = thread_value(&info, true, &idle, &[]);

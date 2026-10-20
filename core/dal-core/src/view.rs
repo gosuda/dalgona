@@ -65,6 +65,14 @@ pub struct SessionInfo {
     /// The last journal sequence, when known by the active session.
     #[serde(default)]
     pub last_seq: Option<Seq>,
+    /// The number of entries on the session's visible leaf path: every entry
+    /// from the root to the current leaf, of any kind, which is the length of
+    /// the path [`SessionSummary::message_count`] and a live view report.
+    /// `None` when the producer could not read it (a damaged journal, or an
+    /// older producer); the member is then absent on the wire, so listings
+    /// without it keep their exact old encoding and old payloads parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
 }
 
 /// One row of a session listing: identity plus picker counts.
@@ -413,10 +421,51 @@ mod tests {
             created_at: Some(jiff::Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         };
         let encoded = sonic_rs::to_string(&session)?;
         let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
         assert_eq!(decoded, session);
+        Ok(())
+    }
+
+    /// `message_count` is additive: a listing that could not read it omits the
+    /// member (the exact old encoding), a payload from a producer that predates
+    /// it decodes as unknown, and a measured count round-trips, zero included.
+    #[test]
+    fn session_info_message_count_is_additive_on_the_wire() -> TestResult {
+        let base = SessionInfo {
+            id: SessionId::new_v7(),
+            name: None,
+            preview: "".into(),
+            workspace: Workspace::new(std::env::temp_dir())?,
+            updated_at: jiff::Timestamp::UNIX_EPOCH,
+            created_at: None,
+            archived: None,
+            last_seq: None,
+            message_count: None,
+        };
+        let unknown = sonic_rs::to_string(&base)?;
+        assert!(
+            !unknown.contains("messageCount"),
+            "an unreadable count is omitted, not zero: {unknown}"
+        );
+        let decoded: SessionInfo = sonic_rs::from_str(&unknown)?;
+        assert_eq!(decoded.message_count, None, "an old payload is unknown");
+
+        for count in [0_u64, 7] {
+            let measured = SessionInfo {
+                message_count: Some(count),
+                ..base.clone()
+            };
+            let encoded = sonic_rs::to_string(&measured)?;
+            assert!(
+                encoded.contains(&format!("\"messageCount\":{count}")),
+                "{encoded}"
+            );
+            let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
+            assert_eq!(decoded, measured);
+        }
         Ok(())
     }
 
@@ -450,6 +499,7 @@ mod tests {
             created_at: Some(jiff::Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::new(4).expect("4 is nonzero"))),
+            message_count: None,
         };
         let view = View {
             r#gen: Gen::new(NonZeroU64::new(2).expect("2 is nonzero")),
@@ -530,6 +580,7 @@ mod tests {
             created_at: None,
             archived: None,
             last_seq: None,
+            message_count: None,
         };
         let encoded = sonic_rs::to_string(&session)?;
         assert!(encoded.contains("\"createdAt\":null"));

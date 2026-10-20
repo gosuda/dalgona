@@ -269,6 +269,23 @@ impl Store {
             .list(&self.workspace_dir(), &self.inner.workspace, &query)
     }
 
+    /// Reads one session's listing row by id, with no listing page or cap.
+    ///
+    /// The row is the one [`Store::list`] reports for the session (identity,
+    /// preview, archive state, and the leaf-path message count), read from its
+    /// own directory in this store's workspace, so the cost is one stat plus
+    /// the cached facts or one journal scan.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NotFound`] when the session has no regular journal
+    /// file in this workspace, or a path-bearing I/O error.
+    pub fn info(&self, id: SessionId) -> Result<SessionInfo, StoreError> {
+        let paths = self.paths(id);
+        self.inner
+            .listing
+            .read_session(paths.directory(), id, &self.inner.workspace)
+    }
+
     /// Resolves a name or identifier in `workspace`.
     ///
     /// The argument workspace canonicalizes the same way [`Store::new`] does,

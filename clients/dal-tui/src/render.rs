@@ -193,13 +193,14 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     let assistant_len = assistant.len();
     let activity = activity_rows(&input, assistant);
     let notices = input.live.notices();
+    let armed_delete = armed_delete_line(input.picker);
     let overlay = overlay_height(&input, w, mode);
     let laid = composer_layout(&input, w, mode);
     let budget = RegionBudget::allocate(
         width,
         height,
         RegionRequest {
-            notices: notices.len(),
+            notices: notices.len() + usize::from(armed_delete.is_some()),
             activity: usize::MAX,
             composer: laid.rows.len(),
             hint: true,
@@ -214,7 +215,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         overlay.is_some(),
     );
     let mut bottom = Vec::with_capacity(budget.cap);
-    let notice_rows = notice_rows(notices, budget.notices, w, mode);
+    let notice_rows = notice_rows(notices, armed_delete.as_deref(), budget.notices, w, mode);
     if input.screen == Screen::Inline {
         // The inline live block opens with its notices.
         bottom.extend(notice_rows.iter().cloned());
@@ -350,19 +351,32 @@ fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<u
     }
 }
 
+fn armed_delete_line(picker: Option<&PickerUi>) -> Option<String> {
+    let id = picker?.armed_delete()?;
+    Some(crate::copy::render(
+        crate::copy::ids::RESUME_ARMED,
+        &[("id", &id.to_string())],
+        1,
+    ))
+}
+
 /// The newest `count` notices as clipped rows, each in the role its
 /// severity chose at push time so error notices keep their error role.
 fn notice_rows(
     notices: &[crate::live::NoticeRow],
+    armed_delete: Option<&str>,
     count: usize,
     w: usize,
     mode: WidthMode,
 ) -> Vec<RenderRow> {
+    let armed = armed_delete.map(|text| RenderRow::new(escape(text), Role::Error));
     let recorded = notices
         .iter()
         .rev()
         .map(|notice| RenderRow::new(escape(&notice.text), notice.role));
-    let mut rows: Vec<RenderRow> = recorded
+    let mut rows: Vec<RenderRow> = armed
+        .into_iter()
+        .chain(recorded)
         .take(count)
         .map(|row| row.clipped(w, mode))
         .collect();
@@ -485,6 +499,10 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
     let hint = RenderRow::new(
         if picker.is_settings() {
             crate::copy::ids::SETTINGS_HINT
+        } else if picker.is_resume_picker() {
+            // The resume picker is the only one with a delete key, so it is
+            // the only one whose hint names it.
+            crate::copy::ids::RESUME_HINT
         } else {
             crate::copy::ids::PICKER_HINT
         },
@@ -2409,6 +2427,7 @@ mod tests {
                 created_at: Some(Timestamp::UNIX_EPOCH),
                 archived: Some(false),
                 last_seq: Some(Seq::new(NonZeroU64::MIN)),
+                message_count: None,
             },
             turn: dal_core::TurnState::Idle,
             entries: dal_core::Page {
@@ -2770,6 +2789,43 @@ mod tests {
             },
         ]);
         assert_eq!(merged.spans.len(), 1, "same-role cells share one span");
+    }
+
+    /// The resume picker is the one picker with a delete key, so its hint row
+    /// names it; every other picker keeps the common hint.
+    #[test]
+    fn the_resume_picker_shows_the_delete_hint() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi, ResumeTarget, SessionRow};
+
+        let workspace = dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let resume = crate::picker::resume_picker(
+            vec![SessionRow {
+                target: ResumeTarget {
+                    id: dal_core::SessionId::new_v7(),
+                    workspace,
+                },
+                label: "fix · today · 3 messages · /w".to_owned(),
+            }],
+            "",
+        );
+        let hint = |picker: &PickerUi| {
+            super::picker_overlay_rows(picker, 12)
+                .last()
+                .map(|row| row.text.clone())
+                .expect("a picker paints at least its hint row")
+        };
+        assert_eq!(hint(&resume), crate::copy::ids::RESUME_HINT);
+        assert!(hint(&resume).contains("d delete"));
+
+        let plain = PickerUi::new(
+            "Pick",
+            "",
+            vec![PickerOption {
+                label: "opt".to_owned(),
+                action: PickerAction::Noop,
+            }],
+        );
+        assert_eq!(hint(&plain), crate::copy::ids::PICKER_HINT);
     }
 
     #[test]

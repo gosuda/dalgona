@@ -383,7 +383,7 @@ impl CommandHost for DriverHost {
                 })
             })
             .map(|info| {
-                let message_count = counts.get(&info.id).copied().unwrap_or(0);
+                let message_count = live_or_stored_count(&counts, &info);
                 SessionSummary {
                     id: info.id,
                     name: info.name.clone(),
@@ -436,20 +436,20 @@ impl CommandHost for DriverHost {
             .iter()
             .find(|info| info.id.to_string().starts_with(query))
         {
-            return Ok(summarize_row(
-                info,
-                counts.get(&info.id).copied().unwrap_or(0),
-            ));
+            return Ok(summarize_row(info, live_or_stored_count(&counts, info)));
         }
         if let Some(info) = rows.iter().find(|info| {
             info.name
                 .as_ref()
                 .is_some_and(|name| name.as_ref() == query)
         }) {
-            return Ok(summarize_row(
-                info,
-                counts.get(&info.id).copied().unwrap_or(0),
-            ));
+            return Ok(summarize_row(info, live_or_stored_count(&counts, info)));
+        }
+        // The listing above is capped per workspace, so a session far down it
+        // is not among `rows`. The store's own resolution has no cap; a
+        // reference it cannot settle (no match, or ambiguous) is a miss.
+        if let Ok(info) = host.find_session(query) {
+            return Ok(summarize_row(&info, live_or_stored_count(&counts, &info)));
         }
         Err(ResolveMiss::NotFound {
             query: query.into(),
@@ -694,6 +694,17 @@ fn live_counts(host: &Arc<HostState>) -> HashMap<SessionId, u64> {
             (*id, count)
         })
         .collect()
+}
+
+/// The leaf-path length a listing row reports: the live session's own count
+/// when it is open here, else the count the store folded from its journal,
+/// else zero for a row whose journal could not be read.
+fn live_or_stored_count(counts: &HashMap<SessionId, u64>, info: &dal_core::SessionInfo) -> u64 {
+    counts
+        .get(&info.id)
+        .copied()
+        .or(info.message_count)
+        .unwrap_or(0)
 }
 
 /// Maps one store row to its command summary.

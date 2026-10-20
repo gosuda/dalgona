@@ -8,7 +8,7 @@ use dal_agent::SessionRef;
 use dal_agent::login::{Method, SecretString};
 use dal_core::{
     Answer, BlobId, CancelScope, Chooser, ClientId, Command, Expect, FrontAction, Output, PageReq,
-    Reply, RequestId, ResolutionCause, Stop, TurnId, TurnState, UpdateKind,
+    Reply, RequestId, ResolutionCause, SessionId, Stop, TurnId, TurnState, UpdateKind,
 };
 
 use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
@@ -100,6 +100,16 @@ struct Session {
     /// The candidate the ring most recently accepted; the next Tab steps
     /// from here and wraps in both directions.
     popup_index: usize,
+    /// Identity of the live session this terminal owns, for active-delete
+    /// refusal. Seeded at attach; `None` only in unit harnesses that never
+    /// attach.
+    own: Option<dal_core::SessionId>,
+    /// Resume target armed by the resume picker or `/resume`. The live loop
+    /// opens it through public host ownership on its next pass, with this
+    /// session still open: arming never sets `quit`, so the running turn is
+    /// not cancelled and the screen is not torn down unless the open
+    /// succeeds. The armed delete confirmation lives in the resume picker.
+    resume_target: Option<ResumeRequest>,
     picker: Option<PickerUi>,
     /// The F1 key-table overlay, while it owns the composer and hint rows.
     help: Option<HelpUi>,
@@ -142,12 +152,24 @@ enum FrontRequest {
     /// Start the expand view's blob reads on a worker: the `Weak` sink dies
     /// with the view, so closing the card cancels every remaining read.
     LoadBlobs(Weak<Mutex<HashMap<BlobId, BlobRead>>>),
+    /// Delete one session tree through public host ownership after explicit
+    /// two-step confirmation. The loop executes it after the input pass so
+    /// the picker can disarm on any intervening key.
+    DeleteSession(SessionId),
 }
 
-struct CommandContext<H, M> {
+struct CommandContext<H> {
     specs: std::sync::Arc<[dal_core::CommandSpec]>,
-    model_source: M,
     host: H,
+}
+
+/// A session the terminal was asked to reopen. The resume picker knows the
+/// row's workspace; `/resume NAME` resolves an identity only, so for it the
+/// workspace is looked up by id through the host before the open.
+#[derive(Clone, Debug)]
+struct ResumeRequest {
+    id: dal_core::SessionId,
+    workspace: Option<dal_core::Workspace>,
 }
 
 impl Session {
@@ -380,6 +402,17 @@ impl Session {
                 self.front.push(FrontRequest::Logout(provider));
                 Vec::new()
             }
+            Reply::Front(FrontAction::Resume { session }) => {
+                if Some(session.id) == self.own {
+                    vec!["This is the current session.".to_owned()]
+                } else {
+                    self.resume_target = Some(ResumeRequest {
+                        id: session.id,
+                        workspace: None,
+                    });
+                    Vec::new()
+                }
+            }
             Reply::Front(action) => vec![crate::width::escape(&format!("{action:?}"))],
             Reply::Started(job) => vec![format!("Job {job} started.")],
             // A queued reply needs no row: the live block shows the queue.
@@ -582,75 +615,200 @@ where
         crate::theme::resolve_name(name)?;
     }
 
-    let agent = opts
+    let mut model_source = model_source;
+    let mut save_diagrams = save_diagrams;
+    // Resume loop. A resume is attempted INSIDE the live loop (`run_loop`):
+    // the replacement session is opened while this one is still open and
+    // untouched, with its Surfaces, Painter and pump alive. A target that
+    // cannot open (held by another process, gone, or one of this session's
+    // own live sub-sessions, which closing this session would end) is
+    // reported on the live screen and nothing else changes: the draft, the
+    // history already printed, the running turn. Only an opened replacement
+    // ends the pass, and only then is the old session's turn cancelled and
+    // the session closed, after the terminal is restored. Only the final
+    // pass writes the exit line, so a resume reopens silently and the user
+    // sees one saved line. Delete never loops: it rebuilds the picker in
+    // place.
+    let mut agent = opts
         .rt
         .block_on(host.open(opts.session.clone(), ClientId::new("dal-tui")))?;
-    let session_id = agent.session();
-    let attach = || {
-        let view = opts.rt.block_on(agent.view(snapshot_page()))?;
-        let subscription = opts
-            .rt
-            .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
-        let commands = opts.rt.block_on(host.commands())?;
-        let pump = Pump::spawn(&opts.rt, subscription);
-        let state = Arc::new(Mutex::new(TermState::new()));
-        let hook = PanicHookGuard::install(Arc::clone(&state));
-        io.enable_raw()
-            .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
-        state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_raw(true);
-        Ok::<_, TuiError>((view, commands, pump, state, hook))
+    let mut ephemeral = matches!(opts.session, SessionRef::Ephemeral { .. });
+    let final_exit = loop {
+        let session_id = agent.session();
+        let (view, commands, mut pump, state, hook) = match attach_session(opts, io, host, &agent) {
+            Ok(attached) => attached,
+            Err(error) => {
+                let _ = opts.rt.block_on(host.close(session_id));
+                return Err(error);
+            }
+        };
+
+        let outcome = run_loop(
+            io,
+            opts,
+            &state,
+            &agent,
+            &mut pump,
+            CommandContext {
+                specs: commands,
+                host: host.clone(),
+            },
+            &mut model_source,
+            &mut save_diagrams,
+            view,
+            ephemeral,
+        );
+        restore(
+            &state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        drop(hook);
+        let running = outcome
+            .as_ref()
+            .ok()
+            .and_then(|(_, turn, _, _)| *turn)
+            .or_else(|| {
+                opts.rt
+                    .block_on(agent.view(snapshot_page()))
+                    .ok()
+                    .and_then(|view| match view.turn {
+                        TurnState::Running { turn } => Some(turn),
+                        _ => None,
+                    })
+            });
+        if let Ok((_, _, _, Some(next))) = outcome {
+            if let Err(error) = cancel_active(opts, &agent, io, &mut pump, running) {
+                drop(pump);
+                let _ = opts.rt.block_on(host.close(session_id));
+                let _ = opts.rt.block_on(host.close(next.session()));
+                return Err(error);
+            }
+            drop(pump);
+            if let Err(error) = opts.rt.block_on(host.close(session_id)) {
+                let _ = opts.rt.block_on(host.close(next.session()));
+                return Err(error);
+            }
+            agent = next;
+            // The session now open is a stored one, whatever the first was.
+            ephemeral = false;
+            continue;
+        }
+        let cancelled = cancel_active(opts, &agent, io, &mut pump, running);
+        drop(pump);
+        let close = opts.rt.block_on(host.close(session_id));
+        let (exit, _, rows, _) = outcome?;
+        cancelled?;
+        close?;
+        write_exit(io, opts, session_id, &exit, rows)?;
+        break exit;
     };
-    let (view, commands, mut pump, state, hook) = match attach() {
-        Ok(attached) => attached,
-        Err(error) => {
-            let _ = opts.rt.block_on(host.close(session_id));
-            return Err(error);
+    Ok(final_exit)
+}
+
+/// Everything one terminal pass owns once its session is attached: the
+/// opening view, the command table, the delivery pump, the terminal-state
+/// record, and the registration that lets the panic hook restore the terminal.
+type Attached<S> = (
+    dal_core::View,
+    std::sync::Arc<[dal_core::CommandSpec]>,
+    Pump<S>,
+    Arc<Mutex<TermState>>,
+    PanicHookGuard,
+);
+
+/// Reads the opening view, subscribes, and puts the terminal in raw mode for
+/// one pass over `agent`.
+fn attach_session<H: TuiHost>(
+    opts: &TuiOptions,
+    io: &dyn TermIo,
+    host: &H,
+    agent: &H::Agent,
+) -> Result<Attached<<H::Agent as TuiAgent>::Subscription>, TuiError> {
+    let view = opts.rt.block_on(agent.view(snapshot_page()))?;
+    let subscription = opts
+        .rt
+        .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
+    let commands = opts.rt.block_on(host.commands())?;
+    let pump = Pump::spawn(&opts.rt, subscription);
+    let state = Arc::new(Mutex::new(TermState::new()));
+    let hook = PanicHookGuard::install(Arc::clone(&state));
+    io.enable_raw()
+        .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .set_raw(true);
+    Ok((view, commands, pump, state, hook))
+}
+
+/// Lists the host's sessions as resume-picker rows, in the order the host
+/// returns them. Each row carries the session's own workspace, so activating
+/// it reopens the session where it lives, and the message count the listing
+/// measured (the length of the session's visible leaf path); a row whose
+/// journal could not be read has no count and says so.
+fn resume_rows<H: TuiHost>(
+    opts: &TuiOptions,
+    host: &H,
+) -> Result<Vec<crate::picker::SessionRow>, TuiError> {
+    let page = opts.rt.block_on(host.sessions(dal_core::ListQuery {
+        limit: Some(200),
+        cursor: None,
+        search: None,
+    }))?;
+    Ok(page
+        .items
+        .into_iter()
+        .map(|info| {
+            let name = info.name.as_deref().unwrap_or("(unnamed)");
+            let when = info.updated_at.to_string();
+            let dir = info.workspace.as_path().display().to_string();
+            let label = crate::picker::resume_row(name, &when, info.message_count, &dir);
+            crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: info.id,
+                    workspace: info.workspace,
+                },
+                label,
+            }
+        })
+        .collect())
+}
+
+/// Opens the session a resume request names, in the workspace it lives in.
+/// The resume picker supplies the row's workspace. `/resume NAME` resolves an
+/// identity only, so its workspace comes from the host's own uncapped
+/// lookup by that id; a session the host cannot find is refused, never
+/// opened in a guessed workspace. `leaving` is the session this terminal owns
+/// and closes next; the target then opens as its successor, so the host
+/// refuses a target that closing `leaving` would end (one of its own live
+/// sub-sessions) before anything is cancelled or closed. With no owned
+/// session (`None`) nothing is closed afterwards and the target opens plainly.
+fn open_resume_target<H: TuiHost>(
+    opts: &TuiOptions,
+    host: &H,
+    leaving: Option<dal_core::SessionId>,
+    request: &ResumeRequest,
+) -> Result<H::Agent, TuiError> {
+    let workspace = match &request.workspace {
+        Some(workspace) => workspace.clone(),
+        None => {
+            opts.rt
+                .block_on(host.find_session(&request.id.to_string()))?
+                .workspace
         }
     };
-
-    let outcome = run_loop(
-        io,
-        opts,
-        &state,
-        &agent,
-        &mut pump,
-        CommandContext {
-            specs: commands,
-            model_source,
-            host: host.clone(),
-        },
-        save_diagrams,
-        view,
-    );
-    restore(
-        &state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    drop(hook);
-    let running = outcome
-        .as_ref()
-        .ok()
-        .and_then(|(_, turn, _)| *turn)
-        .or_else(|| {
-            opts.rt
-                .block_on(agent.view(snapshot_page()))
-                .ok()
-                .and_then(|view| match view.turn {
-                    TurnState::Running { turn } | TurnState::Settling { turn } => Some(turn),
-                    _ => None,
-                })
-        });
-    cancel_active(opts, &agent, io, &mut pump, running)?;
-    drop(pump);
-    let close = opts.rt.block_on(host.close(session_id));
-    let (exit, _, rows) = outcome?;
-    close?;
-    write_exit(io, opts, session_id, &exit, rows)?;
-    Ok(exit)
+    let target = SessionRef::Resume {
+        key: request.id.to_string().into(),
+        workspace,
+    };
+    let client = ClientId::new("dal-tui");
+    match leaving {
+        Some(leaving) => opts
+            .rt
+            .block_on(host.open_replacing(leaving, target, client)),
+        None => opts.rt.block_on(host.open(target, client)),
+    }
 }
 
 /// Cancels a turn that outlived the loop, then reports it on inline screens.
@@ -666,26 +824,31 @@ fn cancel_active<A: TuiAgent>(
     pump: &mut Pump<A::Subscription>,
     running: Option<TurnId>,
 ) -> Result<(), TuiError> {
-    if let Some(turn) = running
-        && opts
-            .rt
-            .block_on(agent.submit(Command::Cancel {
-                scope: CancelScope::Turn(turn),
-            }))
-            .is_ok()
+    let Some(turn) = running else {
+        return Ok(());
+    };
+    if let Err(error) = opts.rt.block_on(agent.submit(Command::Cancel {
+        scope: CancelScope::Turn(turn),
+    })) {
+        return match opts.rt.block_on(agent.view(snapshot_page())) {
+            Ok(view)
+                if !matches!(view.turn, TurnState::Running { turn: active } if active == turn) =>
+            {
+                Ok(())
+            }
+            _ => Err(error),
+        };
+    }
+    if matches!(
+        wait_for_cancelled(pump, turn, Duration::from_secs(3))?,
+        Stop::Cancelled
+    ) && !matches!(opts.screen, crate::Screen::Fullscreen)
     {
-        let cancelled = wait_for_cancelled(pump, turn, Duration::from_secs(3));
-        if cancelled && !matches!(opts.screen, crate::Screen::Fullscreen) {
-            io.write(
-                format!(
-                    "\x1b[{};1H\x1b[2K{}\x1b[0m\r\n",
-                    1,
-                    crate::copy::ids::TURN_CANCELLED
-                )
-                .as_bytes(),
-            )
+        let mut line = Vec::from([0x0d, 0x0a]);
+        line.extend_from_slice(crate::copy::ids::TURN_CANCELLED.as_bytes());
+        line.extend_from_slice(b"\x1b[0m");
+        io.write(&line)
             .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
-        }
     }
     Ok(())
 }
@@ -856,6 +1019,7 @@ fn boot<A: TuiAgent>(
                 _ => None,
             },
             commands: specs,
+            own: Some(agent.session()),
             ..Session::default()
         },
         dialog: DialogUi::default(),
@@ -928,27 +1092,14 @@ fn boot<A: TuiAgent>(
     Ok((surfaces, painter, theme, probe, decoder))
 }
 
-fn run_loop<A, H, M, S>(
+/// Turns on the interface modes a pass runs under, in the startup order:
+/// bracketed paste, the alternate screen when fullscreen, then the one
+/// startup probe whose replies the loop reads.
+fn enter_interface_modes(
     io: &dyn TermIo,
     opts: &TuiOptions,
     state: &Arc<Mutex<TermState>>,
-    agent: &A,
-    pump: &mut Pump<A::Subscription>,
-    commands: CommandContext<H, M>,
-    mut save_diagrams: S,
-    view: dal_core::View,
-) -> Result<(TuiExit, Option<TurnId>, Vec<String>), TuiError>
-where
-    A: TuiAgent,
-    H: TuiHost,
-    M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
-    S: FnMut(bool) -> Result<(), TuiError>,
-{
-    let CommandContext {
-        specs,
-        mut model_source,
-        host,
-    } = commands;
+) -> Result<(), TuiError> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -964,11 +1115,34 @@ where
             .set_fullscreen(true);
     }
     io.write(&startup_probe(opts.images || opts.diagrams))
-        .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
+        .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))
+}
+
+fn run_loop<A, H, M, S>(
+    io: &dyn TermIo,
+    opts: &TuiOptions,
+    state: &Arc<Mutex<TermState>>,
+    agent: &A,
+    pump: &mut Pump<A::Subscription>,
+    commands: CommandContext<H>,
+    model_source: &mut M,
+    save_diagrams: &mut S,
+    view: dal_core::View,
+    ephemeral: bool,
+) -> Result<(TuiExit, Option<TurnId>, Vec<String>, Option<H::Agent>), TuiError>
+where
+    A: TuiAgent,
+    H: TuiHost,
+    M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    S: FnMut(bool) -> Result<(), TuiError>,
+{
+    let CommandContext { specs, host } = commands;
+    enter_interface_modes(io, opts, state)?;
 
     let (mut surfaces, mut painter, theme, probe, mut decoder) =
         boot(io, opts, state, agent, specs, view)?;
     let mut resolution_poll = Instant::now();
+    let mut resumed = None;
     loop {
         if io.shutdown_code().is_some() {
             break;
@@ -1007,15 +1181,15 @@ where
             );
         }
         surfaces.flush_answers(opts, agent);
-        surfaces.submit_commands(opts, agent, &mut model_source)?;
+        surfaces.submit_commands(opts, agent, &host, model_source)?;
         surfaces.run_front(opts, &host, agent);
         // A closed expand view drops its sink; the read worker then has no
         // reason to exist and its guard is released here.
         if surfaces.live.expanded().is_none() {
             surfaces.session.blob_load = None;
         }
-        surfaces.poll_signin(opts, io, &mut model_source);
-        poll_model_retry(&mut surfaces.session, &mut model_source);
+        surfaces.poll_signin(opts, io, model_source);
+        poll_model_retry(&mut surfaces.session, model_source);
         if surfaces.session.external_edit {
             surfaces.session.external_edit = false;
             run_external_editor(opts, io, state, &mut surfaces);
@@ -1031,7 +1205,7 @@ where
             repaint_live_region(io, state, opts, &theme, &mut painter, &mut surfaces)?;
         }
         surfaces.write_copies(io);
-        surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
+        surfaces.apply_diagram_updates(opts, &mut painter, &probe, save_diagrams);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
@@ -1042,7 +1216,8 @@ where
         if !crate::render::below_floor(term_width, term_height) {
             surfaces.dialog.tick(Instant::now());
         }
-        if surfaces.request_quit() {
+        resumed = surfaces.open_armed_resume(opts, &host);
+        if resumed.is_some() || surfaces.request_quit() {
             break;
         }
         surfaces.live.spin(now);
@@ -1063,16 +1238,22 @@ where
     if opts.screen == crate::Screen::Inline
         && let Err(error) = painter.rest_below_block(io)
     {
+        // An opened replacement is owned by nobody yet: close it here rather
+        // than leave a live session no terminal will ever show.
+        if let Some(next) = &resumed {
+            let _ = opts.rt.block_on(host.close(next.session()));
+        }
         return Err(error);
     }
-    Ok(surfaces.finish(opts))
+    let (exit, running, rows) = surfaces.finish(ephemeral);
+    Ok((exit, running, rows, resumed))
 }
 
 fn wait_for_cancelled<S: TuiSubscription>(
     pump: &mut Pump<S>,
     turn: TurnId,
     budget: Duration,
-) -> bool {
+) -> Result<Stop, TuiError> {
     let deadline = Instant::now() + budget;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match pump
@@ -1083,15 +1264,26 @@ fn wait_for_cancelled<S: TuiSubscription>(
                 if let UpdateKind::TurnEnded { turn: ended, stop } = &update.kind
                     && *ended == turn
                 {
-                    return *stop == Stop::Cancelled;
+                    return Ok(*stop);
                 }
             }
-            Ok(Ok(TuiDelivery::Resync(_)) | Err(_))
-            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            Ok(Ok(TuiDelivery::Resync(_))) => {
+                return Err(TuiError::Terminal(
+                    "Could not confirm turn cancellation: the session lost replay while waiting for confirmation.\nResume the session to check its state.".to_owned(),
+                ));
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(TuiError::Terminal(
+                    "Could not confirm turn cancellation: the subscription closed while waiting for confirmation.\nResume the session to check its state.".to_owned(),
+                ));
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
-    false
+    Err(TuiError::Terminal(
+        "Could not confirm turn cancellation: the turn gave no confirmation before the wait ran out.\nResume the session to check its state.".to_owned(),
+    ))
 }
 
 /// Deliveries the pump holds ahead of the 50 ms drain before it stops
@@ -1481,18 +1673,20 @@ impl Surfaces {
     /// show and answer, so waiting inline for its reply would keep the
     /// question off screen until it timed out. Later commands wait behind it;
     /// `Cancel` never waits.
-    fn submit_commands<A, M>(
+    fn submit_commands<A, H, M>(
         &mut self,
         opts: &TuiOptions,
         agent: &A,
+        host: &H,
         model_source: &mut M,
     ) -> Result<(), TuiError>
     where
         A: TuiAgent,
+        H: TuiHost,
         M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     {
         if let Some(settled) = self.session.settled_run() {
-            self.fold_submit_reply(opts, agent, model_source, settled)?;
+            self.fold_submit_reply(opts, agent, host, model_source, settled)?;
         }
         for command in std::mem::take(&mut self.session.pending_commands) {
             if let Command::Cancel { .. } = command {
@@ -1512,22 +1706,24 @@ impl Surfaces {
                 continue;
             }
             let submit_reply = opts.rt.block_on(agent.submit(command));
-            self.fold_submit_reply(opts, agent, model_source, submit_reply)?;
+            self.fold_submit_reply(opts, agent, host, model_source, submit_reply)?;
         }
         Ok(())
     }
 
     /// Folds one host reply into a picker, transcript rows, or the session
     /// reply path.
-    fn fold_submit_reply<A, M>(
+    fn fold_submit_reply<A, H, M>(
         &mut self,
         opts: &TuiOptions,
         agent: &A,
+        host: &H,
         model_source: &mut M,
         submit_reply: Result<Reply, TuiError>,
     ) -> Result<(), TuiError>
     where
         A: TuiAgent,
+        H: TuiHost,
         M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     {
         let submit_reply = match submit_reply {
@@ -1569,6 +1765,7 @@ impl Surfaces {
                     Chooser::ScopedModels => {
                         self.scoped_models_choice(opts, agent, &filter, model_source)
                     }
+                    Chooser::Session => self.session_choice(opts, host, &filter),
                     _ => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
@@ -1664,6 +1861,32 @@ impl Surfaces {
         Some(crate::picker::scoped_models_picker(rows, active, filter))
     }
 
+    /// Builds the resume picker from the public host listing. Rows render
+    /// through the existing `RESUME_ROW` deck entry; activation arms the
+    /// open that the live loop attempts with this session still open. A
+    /// failing listing keeps the failure visible instead of opening an empty
+    /// picker.
+    fn session_choice<H>(
+        &mut self,
+        opts: &TuiOptions,
+        host: &H,
+        filter: &str,
+    ) -> Option<crate::picker::PickerUi>
+    where
+        H: TuiHost,
+    {
+        match resume_rows(opts, host) {
+            Ok(rows) => Some(crate::picker::resume_picker(rows, filter)),
+            Err(error) => {
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!("note: cannot list sessions: {error}"),
+                );
+                None
+            }
+        }
+    }
+
     /// Runs the host- and agent-backed requests the input pass queued.
     fn run_front<H: TuiHost, A: TuiAgent>(&mut self, opts: &TuiOptions, host: &H, agent: &A) {
         for request in std::mem::take(&mut self.session.front) {
@@ -1681,6 +1904,7 @@ impl Surfaces {
                 FrontRequest::LogoutPicker(filter) => self.logout_picker(opts, host, &filter),
                 FrontRequest::Logout(provider) => self.logout(opts, host, Some(&provider)),
                 FrontRequest::LogoutAll => self.logout(opts, host, None),
+                FrontRequest::DeleteSession(id) => self.delete_session(opts, host, agent, id),
                 FrontRequest::LoadBlobs(sink) => {
                     self.session.blob_load = Some(start_blob_load(&opts.rt, agent, &sink));
                 }
@@ -1732,6 +1956,80 @@ impl Surfaces {
                 self.print_rows(&signin::logout_rows(provider, &removed, saved.as_deref()));
             }
             Err(error) => self.print_rows(&signin::failure_rows(&error)),
+        }
+    }
+
+    /// Deletes one session tree after explicit confirmation. Refuses the
+    /// live session and locked/owned trees without touching data; on success
+    /// the resume picker rebuilds from a fresh listing so the removed row is
+    /// gone (and keeps its other rows without it when that listing fails),
+    /// otherwise the picker stays open on the failure notice.
+    fn delete_session<H, A>(&mut self, opts: &TuiOptions, host: &H, agent: &A, id: SessionId)
+    where
+        H: TuiHost,
+        A: TuiAgent,
+    {
+        if Some(id) == self.session.own || id == agent.session() {
+            self.live.notice_as(
+                crate::theme::Role::Error,
+                "note: cannot delete the current session",
+            );
+            return;
+        }
+        match opts.rt.block_on(host.delete_session(id)) {
+            Ok(()) => {
+                self.live.notice_as(
+                    crate::theme::Role::Text,
+                    format!("note: deleted session {id}"),
+                );
+                self.session.picker = self.refresh_resume_picker(opts, host, id);
+            }
+            Err(error) => {
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!("note: cannot delete session {id}: {error}"),
+                );
+            }
+        }
+    }
+
+    /// Rebuilds the open resume picker from a fresh host listing after
+    /// `deleted` was removed, keeping the current filter. Returns `None` when
+    /// no picker is open. When the listing cannot be read the failure notice
+    /// is shown and the picker keeps its rows minus the deleted session, so a
+    /// row that no longer exists is never offered.
+    fn refresh_resume_picker<H>(
+        &mut self,
+        opts: &TuiOptions,
+        host: &H,
+        deleted: SessionId,
+    ) -> Option<PickerUi>
+    where
+        H: TuiHost,
+    {
+        let filter = self.session.picker.as_ref()?.filter().to_owned();
+        if !self
+            .session
+            .picker
+            .as_ref()
+            .is_some_and(PickerUi::is_resume_picker)
+        {
+            return self.session.picker.take();
+        }
+        match resume_rows(opts, host) {
+            Ok(rows) => Some(crate::picker::resume_picker(rows, &filter)),
+            Err(error) => {
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!("note: cannot list sessions: {error}"),
+                );
+                // The listing could not be re-read, so keep the rows the user
+                // already has, minus the session just deleted: its row must
+                // never be offered again.
+                let mut picker = self.session.picker.take()?;
+                picker.remove_resume_row(deleted);
+                Some(picker)
+            }
         }
     }
 
@@ -1872,6 +2170,29 @@ impl Surfaces {
         }
     }
 
+    /// Opens the session the resume picker or `/resume` armed, while this one
+    /// stays open and untouched. An opened replacement is returned and ends
+    /// the pass; a target that cannot open is reported as an error notice and
+    /// the session carries on exactly as it was, running turn included. The
+    /// target opens as the successor of the session this terminal owns, so a
+    /// live child of it is refused by the host before anything is opened.
+    fn open_armed_resume<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H) -> Option<H::Agent> {
+        let request = self.session.resume_target.take()?;
+        match open_resume_target(opts, host, self.session.own, &request) {
+            Ok(next) => Some(next),
+            Err(error) => {
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!(
+                        "note: cannot open session {}: {error}. This session stays open.",
+                        request.id
+                    ),
+                );
+                None
+            }
+        }
+    }
+
     /// Turns a quit request into a turn cancellation when a turn is live;
     /// returns true when the loop should exit.
     fn request_quit(&mut self) -> bool {
@@ -1892,14 +2213,17 @@ impl Surfaces {
     }
 
     /// Folds the loop state into the exit triple the caller restores from.
-    fn finish(self, opts: &TuiOptions) -> (TuiExit, Option<TurnId>, Vec<String>) {
+    /// `ephemeral` is whether the session this pass ran was ephemeral: the
+    /// caller knows it, because a resume replaces the session the options
+    /// named with a stored one.
+    fn finish(self, ephemeral: bool) -> (TuiExit, Option<TurnId>, Vec<String>) {
         let count = u64::try_from(self.view.entries.items.len()).unwrap_or(u64::MAX);
         let rows = self.transcript.rows().to_vec();
         let exit = TuiExit {
             session: Some(self.view.session.id),
             name: self.view.session.name,
             messages: count,
-            ephemeral: matches!(opts.session, SessionRef::Ephemeral { .. }),
+            ephemeral,
         };
         (exit, self.session.active_turn, rows)
     }
@@ -2406,7 +2730,7 @@ fn apply_event_at(
         return;
     }
     if session.picker.is_some() {
-        apply_picker_key(session, key);
+        apply_picker_key(session, live, key);
         return;
     }
     if session.help.is_some() {
@@ -2592,14 +2916,15 @@ fn apply_composer_action(
 
 /// Picker keys: Esc dismisses, Enter activates the focused option, and
 /// characters edit the filter. While the filter is empty the `j`/`k` move
-/// keys and Space take their documented filter-free meanings: move, and
-/// toggle a multi picker row. On a non-empty filter every unmodified
+/// keys, `d` (resume picker only), and Space take their documented
+/// filter-free meanings: move, delete the focused row after confirmation,
+/// and toggle a multi picker row. On a non-empty filter every unmodified
 /// character, Space included, stays filter text; Ctrl+Space (0x00) toggles
 /// from either state. PageUp/PageDown/Home/End and the Ctrl+P/N/B/F chords
 /// resolve through the key table in both states, so bound picker keys never
 /// go runtime-dead. `resolve_in` is mode-agnostic, so the kitty argument is
 /// inert.
-fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
+fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Key) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     let Some(picker) = session.picker.as_mut() else {
@@ -2610,6 +2935,13 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
     // filter-text arm; a non-empty filter sends every unmodified character
     // to the query, and Ctrl+Space (0x00) toggles from either state.
     let filter_empty = picker.filter().is_empty();
+    let is_delete_key = key.code == KeyCode::Char('d')
+        && key.modifiers == KeyModifiers::NONE
+        && filter_empty
+        && picker.is_resume_picker();
+    if !is_delete_key {
+        picker.disarm_delete();
+    }
     if apply_picker_table_action(picker, key, table_action, filter_empty) {
         return;
     }
@@ -2636,6 +2968,20 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                     session.update_popup();
                     session.picker = None;
                 }
+                Some(PickerAction::ResumeSession(target)) => {
+                    if Some(target.id) == session.own {
+                        live.notice_as(
+                            crate::theme::Role::Error,
+                            "note: this is the current session",
+                        );
+                    } else {
+                        session.resume_target = Some(ResumeRequest {
+                            id: target.id,
+                            workspace: Some(target.workspace),
+                        });
+                    }
+                    session.picker = None;
+                }
                 Some(PickerAction::SetDiagrams { enabled, save }) => {
                     session.pending_diagram_settings.push((enabled, save));
                 }
@@ -2660,6 +3006,9 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
         }
         (KeyCode::Char('k'), KeyModifiers::NONE) if filter_empty => {
             picker.move_selection(false);
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) if filter_empty => {
+            apply_picker_delete_key(session, live);
         }
         (KeyCode::Char(character), KeyModifiers::NONE)
         | (KeyCode::Char(character), KeyModifiers::SHIFT) => {
@@ -2743,6 +3092,33 @@ fn apply_picker_table_action(
         _ => return false,
     }
     true
+}
+
+/// `d` on an empty filter, resume picker only (DESIGN delete-row contract);
+/// every other picker lets `d` rejoin the filter. The first press arms an
+/// explicit confirmation, the second press on the same row queues the host
+/// delete, and the active session is refused without touching the tree.
+fn apply_picker_delete_key(session: &mut Session, live: &mut Live) {
+    let Some(picker) = session.picker.as_mut() else {
+        return;
+    };
+    let Some(focused) = crate::picker::focused_resume_session(picker) else {
+        picker.add_filter_char('d');
+        return;
+    };
+    if Some(focused) == session.own {
+        live.notice_as(
+            crate::theme::Role::Error,
+            "note: cannot delete the current session",
+        );
+        return;
+    }
+    if picker.armed_delete() == Some(focused) {
+        session.front.push(FrontRequest::DeleteSession(focused));
+        picker.disarm_delete();
+    } else {
+        picker.arm_delete(focused);
+    }
 }
 
 /// Suspends the process on POSIX:
@@ -3561,6 +3937,186 @@ mod tests {
         apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(session.composer.text(), "/model   ");
     }
+
+    #[test]
+    fn resume_picker_d_arms_confirms_and_refuses_the_live_session() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        use super::FrontRequest;
+
+        let live = dal_core::SessionId::new_v7();
+        let other = dal_core::SessionId::new_v7();
+        let home = dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let other_home = dal_core::Workspace::new(std::env::temp_dir().join("other"))
+            .expect("absolute workspace");
+        let rows = vec![
+            crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: live,
+                    workspace: home,
+                },
+                label: "live".to_owned(),
+            },
+            crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: other,
+                    workspace: other_home,
+                },
+                label: "other".to_owned(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::resume_picker(rows, "")),
+            own: Some(live),
+            ..Session::default()
+        };
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        let armed = |session: &Session| {
+            session
+                .picker
+                .as_ref()
+                .and_then(crate::picker::PickerUi::armed_delete)
+        };
+        assert!(armed(&session).is_none(), "live row never arms");
+        assert!(session.front.is_empty(), "live row never queues a delete");
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::NONE));
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(armed(&session), Some(other), "first d arms");
+        assert!(session.front.is_empty(), "first d never deletes");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(
+                session.front.as_slice(),
+                [FrontRequest::DeleteSession(id)] if *id == other
+            ),
+            "second d queues the host delete"
+        );
+        assert!(armed(&session).is_none(), "the confirmation is spent");
+        apply_key(&mut session, Key::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(session.picker.is_none(), "esc dismisses");
+    }
+
+    fn resume_rows_for(ids: &[dal_core::SessionId]) -> Vec<crate::picker::SessionRow> {
+        let home = dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        ids.iter()
+            .map(|id| crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: *id,
+                    workspace: home.clone(),
+                },
+                label: format!("row {id}"),
+            })
+            .collect()
+    }
+
+    /// An armed delete belongs to the picker opening that armed it. Ctrl+C
+    /// closes the picker and takes the arming with it, so the same row in the
+    /// next `/resume` needs a fresh first `d`: one press arms, none deletes.
+    #[test]
+    fn an_armed_delete_does_not_survive_ctrl_c_into_the_next_picker() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let own = dal_core::SessionId::new_v7();
+        let target = dal_core::SessionId::new_v7();
+        let ids = [target, own];
+        let open = || Session {
+            picker: Some(crate::picker::resume_picker(resume_rows_for(&ids), "")),
+            own: Some(own),
+            ..Session::default()
+        };
+        let mut session = open();
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session
+                .picker
+                .as_ref()
+                .and_then(crate::picker::PickerUi::armed_delete),
+            Some(target),
+            "the first d arms the focused row"
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(session.picker.is_none(), "Ctrl+C closes the picker");
+
+        // The next opening starts on the same row, unarmed.
+        session.picker = Some(crate::picker::resume_picker(resume_rows_for(&ids), ""));
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(
+            session.front.is_empty(),
+            "one d in a fresh picker never deletes: {:?}",
+            session.front.len()
+        );
+        assert_eq!(
+            session
+                .picker
+                .as_ref()
+                .and_then(crate::picker::PickerUi::armed_delete),
+            Some(target),
+            "it only arms"
+        );
+    }
+
+    /// Moving the focus or editing the filter abandons an armed delete, so a
+    /// second `d` confirms only the row the first one named, unchanged.
+    #[test]
+    fn a_move_or_a_filter_edit_abandons_an_armed_delete() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let own = dal_core::SessionId::new_v7();
+        let first = dal_core::SessionId::new_v7();
+        let second = dal_core::SessionId::new_v7();
+        let ids = [first, second, own];
+        let mut session = Session {
+            picker: Some(crate::picker::resume_picker(resume_rows_for(&ids), "")),
+            own: Some(own),
+            ..Session::default()
+        };
+        let armed = |session: &Session| {
+            session
+                .picker
+                .as_ref()
+                .and_then(crate::picker::PickerUi::armed_delete)
+        };
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(armed(&session), Some(first));
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(armed(&session), None, "a focus move abandons it");
+        apply_key(&mut session, Key::new(KeyCode::Up, KeyModifiers::NONE));
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(armed(&session), Some(first));
+        if let Some(picker) = session.picker.as_mut() {
+            picker.paste("row");
+        }
+        assert_eq!(armed(&session), None, "a paste abandons it");
+        assert!(session.front.is_empty(), "nothing was ever deleted");
+    }
+
     /// A committed id the model list no longer names is a visible, checked row.
     /// Unchecking another row leaves it committed; unchecking it too submits
     /// the empty list that clears the scope.
@@ -3599,6 +4155,62 @@ mod tests {
             ),
             "unchecking the missing id clears the scope"
         );
+    }
+
+    /// Enter on a resume row arms the reopen with the row's own workspace and
+    /// quits the loop; the row of the live session never arms it.
+    #[test]
+    fn resume_picker_enter_arms_the_row_with_its_workspace() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let live = dal_core::SessionId::new_v7();
+        let other = dal_core::SessionId::new_v7();
+        let home = dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let other_home = dal_core::Workspace::new(std::env::temp_dir().join("other"))
+            .expect("absolute workspace");
+        let rows = vec![
+            crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: live,
+                    workspace: home,
+                },
+                label: "live".to_owned(),
+            },
+            crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: other,
+                    workspace: other_home.clone(),
+                },
+                label: "other".to_owned(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::resume_picker(rows, "")),
+            own: Some(live),
+            ..Session::default()
+        };
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(session.resume_target.is_none(), "the live row never arms");
+        assert!(!session.quit);
+        let rows = vec![crate::picker::SessionRow {
+            target: crate::picker::ResumeTarget {
+                id: other,
+                workspace: other_home.clone(),
+            },
+            label: "other".to_owned(),
+        }];
+        session.picker = Some(crate::picker::resume_picker(rows, ""));
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            !session.quit,
+            "the picked row arms the open, it does not quit the loop"
+        );
+        assert!(matches!(
+            &session.resume_target,
+            Some(super::ResumeRequest { id, workspace: Some(workspace) })
+                if *id == other && *workspace == other_home
+        ));
     }
 
     #[test]
@@ -4555,42 +5167,32 @@ mod exit_line_tests {
         String::from_utf8(bytes).expect("exit line is UTF-8")
     }
 
-    /// Returns the `-r` argument the exit line offers: the text between the
-    /// `-r` flag and the end of the offer. Assertions see the resume argument,
-    /// never the surrounding sentence.
-    fn resume_arg(name: Option<&str>) -> String {
-        const FLAG: &str = " -r ";
-        const TAIL: &str = " to resume";
-        let line = exit_output(name);
-        let start = line.rfind(FLAG).expect("exit line offers -r") + FLAG.len();
-        let rest = &line[start..];
-        let end = rest.find(TAIL).expect("offer ends after the argument");
-        rest[..end].to_owned()
-    }
-
-    /// A bare name resumes as itself.
+    /// A named session resumes by the token `/name` prints for the same name:
+    /// bare, double-quoted for spaces and apostrophes, or the session id.
     #[test]
-    fn exit_line_offers_a_bare_name_itself() {
-        assert_eq!(resume_arg(Some("demo")), "demo");
+    fn exit_line_resume_hint_is_the_resume_token() {
+        for (name, hint) in [
+            ("demo", "demo"),
+            ("my-session_1.x", "my-session_1.x"),
+            ("my session", "\"my session\""),
+            ("o'brien", "\"o'brien\""),
+            ("a $b", SESSION),
+            ("demo$(calc)", SESSION),
+            ("foo\"; calc #", SESSION),
+        ] {
+            let line = format!(
+                "\r\ndal: session \"{name}\" saved · 1 message · run dal -r {hint} to resume\r\n"
+            );
+            assert_eq!(exit_output(Some(name)), line, "name {name:?}");
+        }
     }
 
-    /// A name with a space resumes as one double-quoted argument.
-    #[test]
-    fn exit_line_quotes_a_spaced_name_into_one_argument() {
-        assert_eq!(resume_arg(Some("my session")), "\"my session\"");
-    }
-
-    /// A name the shell would expand resumes by session id instead.
-    #[test]
-    fn exit_line_offers_the_session_id_for_an_unsafe_name() {
-        assert_eq!(resume_arg(Some("a $b")), SESSION);
-        assert_eq!(resume_arg(Some("demo$(calc)")), SESSION);
-    }
-
-    /// An unnamed session resumes by session id.
     #[test]
     fn exit_line_of_an_unnamed_session_resumes_by_id() {
-        assert_eq!(resume_arg(None), SESSION);
+        let line = format!(
+            "\r\ndal: session \"{SESSION}\" saved · 1 message · run dal -r {SESSION} to resume\r\n"
+        );
+        assert_eq!(exit_output(None), line);
     }
 }
 
@@ -5243,6 +5845,391 @@ mod loop_tests {
         }
     }
 
+    /// Records every open and serves a fixed session listing, so the resume
+    /// open can be checked without a terminal. `listing` is what the capped
+    /// `sessions` call returns; `known` is what the uncapped `find_session`
+    /// can resolve, which may hold sessions the listing cut off.
+    #[derive(Clone)]
+    struct ResumeHost {
+        agent: FakeAgent,
+        listing: Vec<SessionInfo>,
+        known: Vec<SessionInfo>,
+        opened: Arc<Mutex<Vec<SessionRef>>>,
+        open_fails: bool,
+        listing_fails: bool,
+    }
+
+    impl TuiHost for ResumeHost {
+        type Agent = FakeAgent;
+
+        fn open(
+            &self,
+            session: SessionRef,
+            _client: ClientId,
+        ) -> impl Future<Output = Result<FakeAgent, TuiError>> {
+            self.opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(session);
+            std::future::ready(if self.open_fails {
+                Err(TuiError::Terminal("the session is open elsewhere".into()))
+            } else {
+                Ok(self.agent.clone())
+            })
+        }
+
+        fn commands(&self) -> impl Future<Output = Result<Arc<[CommandSpec]>, TuiError>> {
+            std::future::ready(Ok(Arc::from(Vec::new())))
+        }
+
+        fn close(&self, _id: SessionId) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn login(
+            &self,
+            _provider: &str,
+            _method: Method,
+            _io: LoginIo,
+        ) -> impl Future<Output = Result<LoginOutcome, TuiError>> {
+            std::future::ready(Err(TuiError::Terminal(
+                "the resume host has no providers".into(),
+            )))
+        }
+
+        fn logout(
+            &self,
+            _provider: Option<&str>,
+        ) -> impl Future<Output = Result<Vec<Box<str>>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn stored_credentials(
+            &self,
+        ) -> impl Future<Output = Result<Vec<StoredCredential>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn sessions(
+            &self,
+            _query: dal_core::ListQuery,
+        ) -> impl Future<Output = Result<dal_core::Page<SessionInfo, Box<str>>, TuiError>> {
+            std::future::ready(if self.listing_fails {
+                Err(TuiError::Terminal("the listing is unreadable".into()))
+            } else {
+                Ok(dal_core::Page {
+                    items: self.listing.clone(),
+                    next_before: None,
+                })
+            })
+        }
+
+        fn find_session(
+            &self,
+            reference: &str,
+        ) -> impl Future<Output = Result<SessionInfo, TuiError>> {
+            std::future::ready(
+                self.known
+                    .iter()
+                    .find(|info| info.id.to_string() == reference)
+                    .cloned()
+                    .ok_or_else(|| {
+                        TuiError::Terminal(format!("no session matches \"{reference}\""))
+                    }),
+            )
+        }
+    }
+
+    fn listed_session(id: SessionId, workspace: &Workspace) -> SessionInfo {
+        SessionInfo {
+            id,
+            name: None,
+            preview: "".into(),
+            workspace: workspace.clone(),
+            updated_at: dal_core::Timestamp::UNIX_EPOCH,
+            created_at: Some(dal_core::Timestamp::UNIX_EPOCH),
+            archived: Some(false),
+            last_seq: None,
+            message_count: Some(4),
+        }
+    }
+
+    fn resume_host(listing: Vec<SessionInfo>) -> ResumeHost {
+        ResumeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+            known: listing.clone(),
+            listing,
+            opened: Arc::new(Mutex::new(Vec::new())),
+            open_fails: false,
+            listing_fails: false,
+        }
+    }
+
+    /// A host whose every open fails, as a session another process holds does.
+    fn refusing_resume_host() -> ResumeHost {
+        ResumeHost {
+            open_fails: true,
+            ..resume_host(Vec::new())
+        }
+    }
+
+    fn opened_refs(host: &ResumeHost) -> Vec<SessionRef> {
+        host.opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The picker names the row's own workspace, and the reopen resolves the
+    /// session there, not in the workspace of the session being left.
+    #[test]
+    fn resume_opens_the_picked_session_in_its_own_workspace() {
+        let rig = Rig::new();
+        let id = SessionId::new_v7();
+        let elsewhere = Workspace::new(std::env::temp_dir().join("elsewhere")).expect("absolute");
+        let host = resume_host(Vec::new());
+        let request = super::ResumeRequest {
+            id,
+            workspace: Some(elsewhere.clone()),
+        };
+        assert!(super::open_resume_target(&rig.opts, &host, None, &request).is_ok());
+        let opened = opened_refs(&host);
+        assert!(
+            matches!(
+                opened.as_slice(),
+                [SessionRef::Resume { key, workspace }]
+                    if **key == *id.to_string() && *workspace == elsewhere
+            ),
+            "the open carries the row's workspace: {opened:?}"
+        );
+    }
+
+    /// `/resume NAME` resolves an identity only: its workspace comes from the
+    /// host's own lookup by that id.
+    #[test]
+    fn resume_by_name_looks_the_workspace_up_by_id() {
+        let rig = Rig::new();
+        let id = SessionId::new_v7();
+        let listed = Workspace::new(std::env::temp_dir().join("listed")).expect("absolute");
+        let host = resume_host(vec![listed_session(id, &listed)]);
+        let request = super::ResumeRequest {
+            id,
+            workspace: None,
+        };
+        assert!(super::open_resume_target(&rig.opts, &host, None, &request).is_ok());
+        assert!(matches!(
+            opened_refs(&host).as_slice(),
+            [SessionRef::Resume { workspace, .. }] if *workspace == listed
+        ));
+    }
+
+    /// A session far down the listing is outside the capped `sessions` page
+    /// but not outside the host's uncapped lookup, so a direct resume still
+    /// finds its workspace.
+    #[test]
+    fn resume_by_name_finds_a_session_beyond_the_listing_cap() {
+        let rig = Rig::new();
+        let id = SessionId::new_v7();
+        let far = Workspace::new(std::env::temp_dir().join("far")).expect("absolute");
+        let host = ResumeHost {
+            known: vec![listed_session(id, &far)],
+            ..resume_host(Vec::new())
+        };
+        assert!(host.listing.is_empty(), "the capped listing never names it");
+        let request = super::ResumeRequest {
+            id,
+            workspace: None,
+        };
+        assert!(super::open_resume_target(&rig.opts, &host, None, &request).is_ok());
+        assert!(matches!(
+            opened_refs(&host).as_slice(),
+            [SessionRef::Resume { workspace, .. }] if *workspace == far
+        ));
+    }
+
+    /// A session the host cannot find is refused without any open: the
+    /// terminal never opens it in a guessed workspace.
+    #[test]
+    fn resume_of_an_unknown_session_is_refused_without_an_open() {
+        let rig = Rig::new();
+        let host = resume_host(Vec::new());
+        let request = super::ResumeRequest {
+            id: SessionId::new_v7(),
+            workspace: None,
+        };
+        assert!(super::open_resume_target(&rig.opts, &host, None, &request).is_err());
+        assert!(opened_refs(&host).is_empty(), "nothing was opened");
+    }
+
+    /// A target that cannot open returns its error to the caller, which keeps
+    /// the current session open (the outer loop closes it only after a
+    /// replacement opened).
+    #[test]
+    fn a_resume_target_that_cannot_open_reports_the_error() {
+        let rig = Rig::new();
+        let host = refusing_resume_host();
+        let request = super::ResumeRequest {
+            id: SessionId::new_v7(),
+            workspace: Some(Workspace::new(std::env::temp_dir()).expect("absolute")),
+        };
+        let error = super::open_resume_target(&rig.opts, &host, None, &request)
+            .err()
+            .expect("an open that fails is an error");
+        assert!(error.to_string().contains("open elsewhere"));
+        assert_eq!(opened_refs(&host).len(), 1, "one open was attempted");
+    }
+
+    /// The exit facts name the session the pass actually ran: a terminal that
+    /// started ephemeral and resumed a stored session reports a stored one,
+    /// whatever the startup options said.
+    #[test]
+    fn finish_reports_the_ephemeral_state_the_caller_names() {
+        let ephemeral = Rig::new().surfaces.finish(true).0;
+        assert!(ephemeral.ephemeral, "an ephemeral pass says so");
+        let stored = Rig::new().surfaces.finish(false).0;
+        assert!(
+            !stored.ephemeral,
+            "a pass that resumed a stored session is not ephemeral, even when the options name an ephemeral start"
+        );
+    }
+
+    fn resume_summary(id: SessionId) -> dal_core::SessionSummary {
+        dal_core::SessionSummary {
+            id,
+            name: Some("other".into()),
+            message_count: 3,
+            updated_at: dal_core::Timestamp::UNIX_EPOCH,
+        }
+    }
+
+    /// Arming a resume (`/resume NAME`) never asks to quit, so the running
+    /// turn is not cancelled: nothing is torn down until the replacement is
+    /// open.
+    #[test]
+    fn arming_a_resume_does_not_cancel_the_running_turn() {
+        let mut rig = Rig::new();
+        let turn = dal_core::TurnId::new(NonZeroU64::MIN);
+        rig.surfaces.session.active_turn = Some(turn);
+        let target = SessionId::new_v7();
+        let rows = rig
+            .surfaces
+            .session
+            .accept_reply(Reply::Front(dal_core::FrontAction::Resume {
+                session: resume_summary(target),
+            }));
+        assert!(rows.is_empty());
+        assert!(!rig.surfaces.session.quit, "arming a resume never quits");
+        assert!(
+            !rig.surfaces.request_quit(),
+            "no quit request, so no cancellation is queued"
+        );
+        assert!(
+            rig.surfaces.session.pending_commands.is_empty(),
+            "no Cancel was queued for the running turn"
+        );
+        assert_eq!(rig.surfaces.session.active_turn, Some(turn));
+        assert!(rig.surfaces.session.resume_target.is_some());
+    }
+
+    /// A target that cannot open is reported inside the live screen and
+    /// nothing else moves: the session stays open, the draft stays in the
+    /// composer, the running turn is untouched, and no quit is requested. The
+    /// Surfaces the user is looking at are the same ones that carry on.
+    #[test]
+    fn a_failed_resume_stays_inside_the_live_screen() {
+        let mut rig = Rig::new();
+        let turn = dal_core::TurnId::new(NonZeroU64::MIN);
+        rig.surfaces.session.active_turn = Some(turn);
+        rig.surfaces.session.composer.set("half-written reply");
+        rig.surfaces.session.resume_target = Some(super::ResumeRequest {
+            id: SessionId::new_v7(),
+            workspace: Some(Workspace::new(std::env::temp_dir()).expect("absolute")),
+        });
+        let host = refusing_resume_host();
+        let next = rig.surfaces.open_armed_resume(&rig.opts, &host);
+        assert!(next.is_none(), "an unopened target ends nothing");
+        assert!(
+            rig.surfaces.session.resume_target.is_none(),
+            "the request is spent"
+        );
+        assert!(!rig.surfaces.session.quit);
+        assert_eq!(rig.surfaces.session.active_turn, Some(turn));
+        assert_eq!(rig.surfaces.session.composer.text(), "half-written reply");
+        let notices = rig.surfaces.live.notices();
+        assert!(
+            notices
+                .iter()
+                .any(|row| row.role == crate::theme::Role::Error
+                    && row.text.contains("cannot open session")
+                    && row.text.contains("This session stays open")),
+            "the reason is on screen: {:?}",
+            notices
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// An opened target is handed back to end the pass; no notice is shown.
+    #[test]
+    fn an_opened_resume_target_ends_the_pass() {
+        let mut rig = Rig::new();
+        rig.surfaces.session.resume_target = Some(super::ResumeRequest {
+            id: SessionId::new_v7(),
+            workspace: Some(Workspace::new(std::env::temp_dir()).expect("absolute")),
+        });
+        let host = resume_host(Vec::new());
+        assert!(rig.surfaces.open_armed_resume(&rig.opts, &host).is_some());
+        assert!(rig.surfaces.session.resume_target.is_none());
+        assert!(rig.surfaces.live.notices().is_empty());
+    }
+
+    /// When the listing cannot be re-read after a delete, the picker keeps its
+    /// other rows but never offers the deleted session again.
+    #[test]
+    fn a_failed_refresh_after_a_delete_drops_the_deleted_row() {
+        let mut rig = Rig::new();
+        let gone = SessionId::new_v7();
+        let kept = SessionId::new_v7();
+        let home = Workspace::new(std::env::temp_dir()).expect("absolute");
+        let row = |id| crate::picker::SessionRow {
+            target: crate::picker::ResumeTarget {
+                id,
+                workspace: home.clone(),
+            },
+            label: format!("row {id}"),
+        };
+        rig.surfaces.session.picker =
+            Some(crate::picker::resume_picker(vec![row(gone), row(kept)], ""));
+        let host = ResumeHost {
+            listing_fails: true,
+            ..resume_host(Vec::new())
+        };
+        let picker = rig
+            .surfaces
+            .refresh_resume_picker(&rig.opts, &host, gone)
+            .expect("the picker stays open on the rows it has");
+        assert_eq!(picker.visible_len(), 1, "only the other session remains");
+        assert!(
+            picker.visible_option(0).is_some_and(|option| matches!(
+                &option.action,
+                crate::picker::PickerAction::ResumeSession(target) if target.id == kept
+            )),
+            "the remaining row is the kept session"
+        );
+        assert!(
+            rig.surfaces
+                .live
+                .notices()
+                .iter()
+                .any(|row| row.text.contains("cannot list sessions")),
+            "the listing failure is shown"
+        );
+    }
+
     fn idle_view() -> View {
         View {
             r#gen: Gen::new(NonZeroU64::MIN),
@@ -5257,6 +6244,7 @@ mod loop_tests {
                 created_at: Some(dal_core::Timestamp::UNIX_EPOCH),
                 archived: Some(false),
                 last_seq: Some(Seq::new(NonZeroU64::MIN)),
+                message_count: None,
             },
             turn: TurnState::Idle,
             entries: Page {
@@ -5357,7 +6345,7 @@ mod loop_tests {
             Some("demo"),
             "the exit line reads the session copy, so it must track renames"
         );
-        let (exit, _, _) = surfaces.finish(&opts);
+        let (exit, _, _) = surfaces.finish(false);
         assert_eq!(exit.name.as_deref(), Some("demo"));
         let id = exit.session.expect("persisted session");
         assert_eq!(
@@ -5461,26 +6449,7 @@ mod loop_tests {
                 run_entered,
             },
         };
-        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
-        let opts = TuiOptions {
-            session: SessionRef::Ephemeral { workspace },
-            screen: Screen::Inline,
-            theme_request: ThemeRequest::Palette,
-            default_model: None,
-            images: false,
-            diagrams: false,
-            motion: false,
-            editor: "vi".into(),
-            color: ColorMode::Never,
-            binary: "dalgon",
-            env: EnvFacts {
-                stdin_tty: true,
-                term: Some("xterm-256color".to_owned()),
-                width_mode: WidthMode::Narrow,
-                ..EnvFacts::default()
-            },
-            rt: runtime.handle().clone(),
-        };
+        let opts = options(runtime.handle().clone());
         let terminal = ScriptedTerminal {
             chunks: Mutex::new(script.into()),
         };
@@ -6022,6 +6991,12 @@ mod loop_tests {
     #[test]
     fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
         let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
         let agent = ScopeAgent {
             scope: Some(vec!["openai/gpt-6".into()]),
             view_fails: false,
@@ -6031,6 +7006,7 @@ mod loop_tests {
             .fold_submit_reply(
                 &rig.opts,
                 &agent,
+                &host,
                 &mut models,
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
@@ -6079,11 +7055,18 @@ mod loop_tests {
     #[test]
     fn new_session_reply_is_an_error_notice() {
         let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
         let mut models = || Ok(Vec::new());
         rig.surfaces
             .fold_submit_reply(
                 &rig.opts,
                 &rig.agent,
+                &host,
                 &mut models,
                 Ok(Reply::Front(dal_core::FrontAction::NewSession)),
             )
@@ -6093,6 +7076,226 @@ mod loop_tests {
         assert_eq!(notices[0].role, crate::theme::Role::Error);
         assert!(notices[0].text.starts_with("note: /new"), "{notices:?}");
         assert!(rig.rows().is_empty(), "the refusal is not a transcript row");
+    }
+
+    /// The plain text of every row one frame paints over the rig's surfaces,
+    /// on a terminal big enough that no notice or picker row is budgeted away.
+    fn frame_texts(rig: &Rig) -> Vec<String> {
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .expect("the palette theme loads");
+        let surfaces = &rig.surfaces;
+        let input = crate::render::FrameInput {
+            view: &surfaces.view,
+            screen: rig.opts.screen,
+            composer: surfaces.session.composer.text(),
+            cursor: surfaces.session.composer.cursor(),
+            exit_draft: None,
+            branch: None,
+            popup: &surfaces.session.popup,
+            live: &surfaces.live,
+            dialog: &surfaces.dialog,
+            picker: surfaces.session.picker.as_ref(),
+            help: surfaces.session.help.as_ref(),
+            signin: surfaces.session.signin.as_ref(),
+            transcript: &surfaces.transcript,
+            viewport: &surfaces.session.viewport,
+            opts: &rig.opts,
+            kitty_keyboard: false,
+            theme: &theme,
+            diagram_settings: surfaces.diagram_settings,
+            diagram_cache: &surfaces.diagram_cache,
+        };
+        crate::render::frame_rows(input, 120, 30)
+            .into_iter()
+            .map(|row| row.text)
+            .collect()
+    }
+
+    fn shows(rig: &Rig, text: &str) -> bool {
+        frame_texts(rig).iter().any(|row| row.contains(text))
+    }
+
+    /// One key through the production input path, on the rig's own session
+    /// and live region.
+    fn press(rig: &mut Rig, key: crate::keys::Key) {
+        super::apply_event_at(
+            &mut rig.surfaces.session,
+            &mut crate::dialog::DialogUi::default(),
+            &rig.surfaces.transcript,
+            &mut rig.surfaces.live,
+            &[],
+            crate::diagram::DiagramSettings::default(),
+            crate::keys::InputEvent::Key(key),
+            false,
+            Screen::Inline,
+            80,
+            24,
+        );
+    }
+
+    /// A resume picker over `ids`, first row focused.
+    fn resume_picker_over(ids: &[SessionId]) -> crate::picker::PickerUi {
+        let home = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let rows = ids
+            .iter()
+            .map(|id| crate::picker::SessionRow {
+                target: crate::picker::ResumeTarget {
+                    id: *id,
+                    workspace: home.clone(),
+                },
+                label: format!("row {id}"),
+            })
+            .collect();
+        crate::picker::resume_picker(rows, "")
+    }
+
+    /// The line the copy deck says an armed delete of `id` shows.
+    fn armed_line(id: SessionId) -> String {
+        crate::copy::render(
+            crate::copy::ids::RESUME_ARMED,
+            &[("id", &id.to_string())],
+            1,
+        )
+    }
+
+    fn armed_row(rig: &Rig) -> Option<SessionId> {
+        let picker = rig.surfaces.session.picker.as_ref();
+        picker.and_then(crate::picker::PickerUi::armed_delete)
+    }
+
+    /// An armed resume-row delete is the picker's state and the frame draws
+    /// it from there: on screen while the picker holds it, gone the moment any
+    /// path ends it. Arming never writes the notices that outlive a picker,
+    /// and every notice that was there stays.
+    #[test]
+    fn an_armed_delete_shows_while_the_picker_holds_it_and_never_after() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let own = SessionId::new_v7();
+        let target = SessionId::new_v7();
+        let line = armed_line(target);
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+
+        for how in ["ctrl+c", "esc", "move", "filter", "paste", "confirm"] {
+            let mut rig = Rig::new();
+            rig.surfaces.live.notice("kept notice");
+            rig.surfaces.session.picker = Some(resume_picker_over(&[target, own]));
+            rig.surfaces.session.own = Some(own);
+
+            press(&mut rig, plain(KeyCode::Char('d')));
+            assert_eq!(
+                armed_row(&rig),
+                Some(target),
+                "{how}: the first d arms the focused row"
+            );
+            assert!(shows(&rig, &line), "{how}: the arming is on screen");
+
+            match how {
+                "ctrl+c" => press(
+                    &mut rig,
+                    Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                ),
+                "esc" => press(&mut rig, plain(KeyCode::Esc)),
+                "move" => press(&mut rig, plain(KeyCode::Down)),
+                "filter" => press(&mut rig, plain(KeyCode::Char('x'))),
+                "confirm" => press(&mut rig, plain(KeyCode::Char('d'))),
+                _ => super::apply_paste(
+                    &mut rig.surfaces.session,
+                    &mut crate::dialog::DialogUi::default(),
+                    &rig.surfaces.live,
+                    b"row",
+                ),
+            }
+
+            assert_eq!(armed_row(&rig), None, "{how}: the arming is over");
+            assert!(!shows(&rig, &line), "{how}: nothing of it stays on screen");
+            assert!(
+                shows(&rig, "kept notice"),
+                "{how}: the other notice still shows"
+            );
+            let queued = matches!(
+                rig.surfaces.session.front.as_slice(),
+                [super::FrontRequest::DeleteSession(id)] if *id == target
+            );
+            assert_eq!(
+                queued,
+                how == "confirm",
+                "{how}: only the second d queues the delete"
+            );
+        }
+    }
+
+    /// A picker that is replaced rather than closed takes its arming with
+    /// it: a late chooser reply opens a fresh picker and a sign-in start
+    /// drops the picker, and neither leaves the old arming on screen.
+    #[test]
+    fn a_replaced_picker_leaves_no_arming_on_screen() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let own = SessionId::new_v7();
+        let target = SessionId::new_v7();
+        let line = armed_line(target);
+
+        for how in ["late chooser reply", "sign-in start"] {
+            let mut rig = Rig::new();
+            let host = FakeHost {
+                agent: FakeAgent {
+                    log: Log::default(),
+                    run_entered: Arc::new(AtomicBool::new(false)),
+                },
+            };
+            let mut models = || Ok(Vec::new());
+            rig.surfaces.live.notice("kept notice");
+            rig.surfaces.session.picker = Some(resume_picker_over(&[target, own]));
+            rig.surfaces.session.own = Some(own);
+            press(&mut rig, Key::new(KeyCode::Char('d'), KeyModifiers::NONE));
+            assert!(
+                shows(&rig, &line),
+                "{how}: armed and on screen before the replacement"
+            );
+
+            if how == "late chooser reply" {
+                rig.surfaces
+                    .fold_submit_reply(
+                        &rig.opts,
+                        &rig.agent,
+                        &host,
+                        &mut models,
+                        Ok(Reply::Choose {
+                            chooser: dal_core::Chooser::Settings,
+                            filter: "".into(),
+                        }),
+                    )
+                    .expect("the chooser reply folds");
+                assert!(
+                    rig.surfaces.session.picker.is_some(),
+                    "{how}: a fresh picker opens"
+                );
+            } else {
+                rig.surfaces.begin_login(&rig.opts, &host, "nonexistent");
+                assert!(
+                    rig.surfaces.session.picker.is_none(),
+                    "{how}: the picker is gone"
+                );
+            }
+
+            assert_eq!(armed_row(&rig), None, "{how}: the replacement is not armed");
+            assert!(
+                !shows(&rig, &line),
+                "{how}: nothing of the old arming stays on screen"
+            );
+            assert!(
+                shows(&rig, "kept notice"),
+                "{how}: the earlier notice still shows"
+            );
+        }
     }
 
     /// Exercises the production `Surfaces` methods that emit error notices —
@@ -6135,6 +7338,7 @@ mod loop_tests {
             .fold_submit_reply(
                 &rig.opts,
                 &rig.agent,
+                &host,
                 &mut models,
                 Err(TuiError::Agent(closed)),
             )
@@ -6240,5 +7444,362 @@ mod loop_tests {
             crate::copy::ids::COPY_FAILED
         );
         assert_eq!(io.writes.load(Ordering::SeqCst), 2);
+    }
+
+    /// A real host over a temporary store, started on `handle`'s runtime: no
+    /// fake sits between the terminal and the session table.
+    fn real_host(
+        handle: &tokio::runtime::Handle,
+        root: &std::path::Path,
+    ) -> (dal_agent::Host, Workspace) {
+        let data = root.join("data");
+        let directory = root.join("workspace");
+        std::fs::create_dir_all(&data).expect("data directory");
+        std::fs::create_dir_all(&directory).expect("workspace directory");
+        let workspace = Workspace::new(directory.clone()).expect("workspace");
+        let config = dal_core::Config::load(dal_core::ConfigProduct::Dalgon, &data, "", Some(""))
+            .expect("configuration");
+        let host = handle
+            .block_on(dal_agent::Host::start(
+                dal_agent::Product {
+                    name: "dal",
+                    data_root: data,
+                    defaults: "",
+                    extensions: Vec::new(),
+                    bundled: Vec::new(),
+                },
+                config,
+                dal_agent::Env {
+                    vars: std::collections::BTreeMap::new(),
+                    cwd: directory,
+                    sandbox_helper: None,
+                },
+            ))
+            .expect("host");
+        (host, workspace)
+    }
+
+    /// The boundary on a real host with no fake in the path. The session on
+    /// screen owns a live child; resuming that child is refused on the live
+    /// screen, the draft and the running turn stay as they were, the request
+    /// is spent, and both sessions are still live. A live session outside the
+    /// owned subtree still opens and survives the close of the session left
+    /// behind, while that session's child ends with it.
+    #[test]
+    fn a_live_child_of_the_owned_session_is_refused_by_a_real_host() {
+        let temp = tempfile::tempdir().expect("temporary store");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle().clone();
+        let (host, workspace) = real_host(&handle, temp.path());
+        let client = ClientId::new("tui-resume");
+        let open = |session: SessionRef| {
+            handle
+                .block_on(host.open(session, client.clone()))
+                .expect("session opens")
+        };
+        let new_session = || SessionRef::New {
+            workspace: workspace.clone(),
+            name: None,
+        };
+        let root = open(new_session());
+        let child = open(SessionRef::Child {
+            parent: root.session(),
+            call: dal_core::CallId::new("child"),
+            workspace: workspace.clone(),
+            name: None,
+        });
+        let other = open(new_session());
+        let live = |agent: &dal_agent::Agent| handle.block_on(agent.poll_status()).is_ok();
+
+        let opts = options(handle.clone());
+        let mut rig = Rig::new();
+        let turn = dal_core::TurnId::new(NonZeroU64::MIN);
+        rig.surfaces.session.own = Some(root.session());
+        rig.surfaces.session.active_turn = Some(turn);
+        rig.surfaces.session.composer.set("half-written reply");
+        rig.surfaces.session.resume_target = Some(super::ResumeRequest {
+            id: child.session(),
+            workspace: Some(workspace.clone()),
+        });
+
+        let next = rig.surfaces.open_armed_resume(&opts, &host);
+
+        assert!(
+            next.is_none(),
+            "a live child of the owned session never opens"
+        );
+        assert!(
+            rig.surfaces.session.resume_target.is_none(),
+            "the request is spent"
+        );
+        assert!(!rig.surfaces.session.quit);
+        assert_eq!(rig.surfaces.session.active_turn, Some(turn));
+        assert_eq!(rig.surfaces.session.composer.text(), "half-written reply");
+        let notices = rig.surfaces.live.notices();
+        assert!(
+            notices
+                .iter()
+                .any(|row| row.role == crate::theme::Role::Error
+                    && row.text.contains("cannot open session")
+                    && row.text.contains("This session stays open")),
+            "the reason is on screen: {:?}",
+            notices
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(live(&root), "the session on screen stays live");
+        assert!(live(&child), "the refused child stays live");
+
+        rig.surfaces.session.resume_target = Some(super::ResumeRequest {
+            id: other.session(),
+            workspace: Some(workspace.clone()),
+        });
+        let successor = rig
+            .surfaces
+            .open_armed_resume(&opts, &host)
+            .expect("a live session outside the owned subtree opens");
+        assert_eq!(successor.session(), other.session());
+        handle
+            .block_on(host.close(root.session()))
+            .expect("the outer loop closes the session it left");
+        assert!(live(&successor), "the successor outlives the close");
+        assert!(!live(&child), "the child ended with its owner");
+    }
+
+    /// Records every terminal write plus raw-mode transitions, so the
+    /// external-editor tests prove the restore/re-enter ordering from bytes
+    /// instead of trusting the code under test.
+    struct ModeProbe {
+        writes: Mutex<Vec<Vec<u8>>>,
+        raw_enables: std::sync::atomic::AtomicUsize,
+        raw_disables: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModeProbe {
+        fn new() -> Self {
+            Self {
+                writes: Mutex::new(Vec::new()),
+                raw_enables: std::sync::atomic::AtomicUsize::new(0),
+                raw_disables: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn written(&self) -> Vec<u8> {
+            self.writes.lock().expect("writes").concat()
+        }
+
+        /// Whether `reenter_modes` ran: raw mode re-entered and the
+        /// bracketed-paste re-entry bytes pushed again.
+        fn modes_reentered(&self) -> bool {
+            self.raw_enables.load(Ordering::SeqCst) >= 1
+                && contains(&self.written(), b"\x1b[?2004h")
+        }
+
+        /// Whether the restore bytes (paste off) precede the re-entry bytes
+        /// (paste on): the child ran while the terminal was restored, and the
+        /// modes came back after. A cooked-mode leak fails this.
+        fn restored_before_reentered(&self) -> bool {
+            let bytes = self.written();
+            match (
+                index_of(&bytes, b"\x1b[?2004l"),
+                index_of(&bytes, b"\x1b[?2004h"),
+            ) {
+                (Some(off), Some(on)) => off < on,
+                _ => false,
+            }
+        }
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        index_of(haystack, needle).is_some()
+    }
+
+    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    impl TermIo for ModeProbe {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            self.raw_enables.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn disable_raw(&self) {
+            self.raw_disables.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            Ok((80, 24))
+        }
+
+        fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+            self.writes.lock().expect("writes").push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn read(&self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn raise_tstp(&self) {}
+    }
+
+    /// A nonzero editor exit cancels the edit: the draft and caret stay
+    /// untouched and no notice appears, while the terminal modes still
+    /// re-enter. Fails if the temp file is applied on the cancel path, if a
+    /// notice is raised for a plain cancel, or if the cancel path returns
+    /// before `reenter_modes` and parks the interface in cooked mode.
+    #[test]
+    fn external_editor_nonzero_exit_keeps_the_draft_and_reenters_modes() {
+        let mut rig = Rig::new();
+        rig.opts.editor = "false".into();
+        rig.surfaces.session.composer.set("keep me");
+        rig.surfaces.session.composer.move_left();
+        rig.surfaces.session.composer.move_left();
+        let caret = rig.surfaces.session.composer.cursor();
+        assert!(caret < "keep me".len(), "the caret starts mid-draft");
+
+        let io = ModeProbe::new();
+        let state = Arc::new(Mutex::new(crate::term::TermState::new()));
+        super::run_external_editor(&rig.opts, &io, &state, &mut rig.surfaces);
+
+        assert_eq!(
+            rig.surfaces.session.composer.text(),
+            "keep me",
+            "a cancelled edit must not touch the draft"
+        );
+        assert_eq!(
+            rig.surfaces.session.composer.cursor(),
+            caret,
+            "a cancelled edit must not move the caret"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "a cancel is silent: {:?}",
+            rig.surfaces
+                .live
+                .notices()
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            io.restored_before_reentered(),
+            "the terminal restores before the child and re-enters after"
+        );
+        assert!(io.modes_reentered(), "raw mode and paste re-enter");
+    }
+
+    /// A zero-exit editor replaces the draft with the file contents, moves
+    /// the caret to the end, checkpoints undo, and refreshes the completion
+    /// ring. Fails if the old draft survives a successful edit, if the caret
+    /// stays mid-line, if undo cannot restore the pre-edit draft, or if the
+    /// stale completion ring outlives the replaced draft.
+    #[test]
+    fn external_editor_success_replaces_the_draft_and_moves_the_caret_to_the_end() {
+        let dir = tempfile::tempdir().expect("editor scratch");
+        let script = dir.path().join("dal-test-editor");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'edited by the editor' > \"$1\"\n",
+        )
+        .expect("editor script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("executable editor");
+        }
+        let mut rig = Rig::new();
+        rig.opts.editor = script.to_string_lossy().into_owned().into_boxed_str();
+        rig.surfaces.session.composer.set("original draft");
+        rig.surfaces.session.popup_base = Some("original draft".into());
+        rig.surfaces.session.popup_last = "original draft".into();
+
+        let io = ModeProbe::new();
+        let state = Arc::new(Mutex::new(crate::term::TermState::new()));
+        super::run_external_editor(&rig.opts, &io, &state, &mut rig.surfaces);
+
+        assert_eq!(
+            rig.surfaces.session.composer.text(),
+            "edited by the editor",
+            "a successful edit replaces the draft with the file contents"
+        );
+        assert_eq!(
+            rig.surfaces.session.composer.cursor(),
+            "edited by the editor".len(),
+            "the caret follows the replaced draft to its end"
+        );
+        assert!(
+            rig.surfaces.session.popup_base.is_none(),
+            "the completion ring restarts from the replaced draft"
+        );
+        rig.surfaces.session.composer.undo();
+        assert_eq!(
+            rig.surfaces.session.composer.text(),
+            "original draft",
+            "the edit checkpoints, so undo restores the pre-edit draft"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "a successful edit raises no notice"
+        );
+        assert!(io.modes_reentered(), "raw mode and paste re-enter");
+    }
+
+    /// An unspawnable editor still re-enters the terminal modes (no
+    /// cooked-mode leak), keeps the draft and caret, and surfaces an error
+    /// notice. Fails if the spawn-failure path returns before
+    /// `reenter_modes`, or if the failure is swallowed silently. Needs no
+    /// seam refactor: a bogus editor path makes the real spawn fail.
+    #[test]
+    fn external_editor_missing_binary_keeps_the_draft_reenters_modes_and_notices() {
+        let mut rig = Rig::new();
+        rig.opts.editor = "/nonexistent-dal-tui-editor-binary".into();
+        rig.surfaces.session.composer.set("keep me");
+        let caret = rig.surfaces.session.composer.cursor();
+
+        let io = ModeProbe::new();
+        let state = Arc::new(Mutex::new(crate::term::TermState::new()));
+        super::run_external_editor(&rig.opts, &io, &state, &mut rig.surfaces);
+
+        assert_eq!(
+            rig.surfaces.session.composer.text(),
+            "keep me",
+            "a failed spawn must not touch the draft"
+        );
+        assert_eq!(
+            rig.surfaces.session.composer.cursor(),
+            caret,
+            "a failed spawn must not move the caret"
+        );
+        assert!(
+            io.restored_before_reentered(),
+            "even a missing editor re-enters the modes: no cooked-mode leak"
+        );
+        assert!(io.modes_reentered(), "raw mode and paste re-enter");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(
+            notices.len(),
+            1,
+            "the failure surfaces one notice: {notices:?}"
+        );
+        assert!(
+            notices[0].text.contains("cannot start the editor"),
+            "the notice names the cause: {}",
+            notices[0].text
+        );
+        assert_eq!(
+            notices[0].role,
+            crate::theme::Role::Error,
+            "a spawn failure is an error, not a dim note"
+        );
     }
 }

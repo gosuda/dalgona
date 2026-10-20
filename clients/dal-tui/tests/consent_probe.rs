@@ -186,6 +186,7 @@ fn settled_frame_carries_an_open_consent_request() {
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {

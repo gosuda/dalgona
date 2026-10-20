@@ -379,18 +379,100 @@ impl Host {
     ///
     /// Returns an error when resolving, replaying, or spawning the session fails.
     pub async fn open(&self, session: SessionRef, by: ClientId) -> Result<Agent, HostError> {
+        self.open_leaving(None, session, by).await
+    }
+
+    /// Opens the session that takes over from `leaving`, which the caller
+    /// closes once the returned agent is attached.
+    ///
+    /// Behaves exactly like [`Host::open`], except that it refuses a target
+    /// resolving to a live session the close of `leaving` would end.
+    /// [`Host::close`] tears down the whole subtree it owns, so a successor
+    /// bound to one of those actors would already be an ended session when
+    /// the caller attached to it, and a caller that opens first and closes
+    /// after loses nothing; ownership is never changed to avoid the refusal.
+    /// A live ancestor of `leaving`, a live session outside its subtree, and
+    /// a session that is not live all open as `open` opens them. A
+    /// `SessionRef::Child` whose resolved parent is `leaving` or owned by it
+    /// is refused the same way, since the new session would land in the
+    /// subtree the close tears down.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::Config`] when the target is `leaving`, resolves
+    /// to a live session it owns, or would spawn under either of those, and
+    /// otherwise the errors of [`Host::open`].
+    pub async fn open_replacing(
+        &self,
+        leaving: SessionId,
+        session: SessionRef,
+        by: ClientId,
+    ) -> Result<Agent, HostError> {
+        self.open_leaving(Some(leaving), session, by).await
+    }
+
+    /// The one open path: `leaving` is the session the caller will close
+    /// after attaching, when there is one. Only a target that is live in the
+    /// table can share fate with `leaving`, so both live-binding branches
+    /// check the id they resolved; a target that is not live spawns under its
+    /// resolved parent, which is refused first when it is `leaving` or owned
+    /// by it.
+    async fn open_leaving(
+        &self,
+        leaving: Option<SessionId>,
+        session: SessionRef,
+        by: ClientId,
+    ) -> Result<Agent, HostError> {
         if let SessionRef::Resume { key, .. } = &session
             && let Ok(id) = SessionId::parse(key)
             && let Some(entry) = self.entry_of(id)
         {
+            self.refuse_ended_by(leaving, id)?;
             return Ok(Self::bind(&entry, id, by));
         }
         let resolved = self.resolve_ref(&session)?;
         if let Some(entry) = self.entry_of(resolved.id) {
+            self.refuse_ended_by(leaving, resolved.id)?;
             return Ok(Self::bind(&entry, resolved.id, by));
+        }
+        if let Some(parent) = resolved.parent {
+            self.refuse_ended_by(leaving, parent)?;
         }
         let name_claim = self.claim_name(&resolved)?;
         self.spawn_session(resolved, by, None, name_claim).await
+    }
+
+    /// Refuses a live `target` that closing `leaving` would end.
+    fn refuse_ended_by(
+        &self,
+        leaving: Option<SessionId>,
+        target: SessionId,
+    ) -> Result<(), HostError> {
+        let Some(leaving) = leaving else {
+            return Ok(());
+        };
+        if target == leaving {
+            return Err(HostError::Config {
+                message: format!("session {target} is the session being left").into(),
+            });
+        }
+        let owned = {
+            let sessions = self
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Self::owned_by(&sessions, leaving, target)
+        };
+        if owned {
+            return Err(HostError::Config {
+                message: format!(
+                    "session {target} runs under session {leaving} and would end with it"
+                )
+                .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Flushes one session, stops its actor, removes it from the table,
@@ -656,8 +738,7 @@ impl Host {
             rows.extend(page.items.into_iter().map(|info| (info.id, info)));
         }
         for (id, entry) in self.entries() {
-            rows.entry(id)
-                .or_insert_with(|| entry.shared.snapshot(snapshot_args(&entry)).session);
+            rows.entry(id).or_insert_with(|| live_row(&entry));
         }
         let limit = query.limit.unwrap_or(u32::MAX);
         let mut items: Vec<SessionInfo> = rows.into_values().collect();
@@ -666,6 +747,73 @@ impl Host {
         Ok(Page {
             items,
             next_before: None,
+        })
+    }
+
+    /// Resolves one session reference across the host's known workspaces with
+    /// no listing cap, and returns its listing row.
+    ///
+    /// `reference` is a full id, an exact name, or an id prefix, resolved by
+    /// each workspace store exactly as `--resume` resolves it
+    /// ([`Store::resolve`]); a full id also finds a session that is live in
+    /// this host without a journal on disk (an ephemeral one). The row's
+    /// workspace is the workspace the session lives in, so a caller reopens it
+    /// there instead of guessing one. The workspaces searched are the ones
+    /// [`Host::sessions`] lists from, so a session that listing shows is one
+    /// this finds, however far down the listing it sits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::NotFound`] when no known workspace holds a match,
+    /// and the store error for an empty or ambiguous reference or an
+    /// unreadable workspace.
+    pub fn find_session(&self, reference: &str) -> Result<SessionInfo, HostError> {
+        let reference = reference.trim();
+        let exact = SessionId::parse(reference).ok();
+        if let Some(entry) = exact.and_then(|id| self.entry_of(id)) {
+            return Ok(live_row(&entry));
+        }
+        for workspace in self.workspaces() {
+            let store = self.store_for(&workspace);
+            if let Some(id) = resolve_in(&store, &workspace, reference, exact)? {
+                return store.info(id).map_err(HostError::from);
+            }
+        }
+        Err(HostError::NotFound {
+            message: format!("no session matches \"{reference}\".").into(),
+        })
+    }
+
+    /// Deletes one session tree through the store's own ownership rules.
+    ///
+    /// A session that is live in this host's table is refused without
+    /// touching its tree. For every other id each known workspace store
+    /// attempts [`Store::delete`], whose session lock is the second refusal:
+    /// a tree another process (or a closing actor) still holds fails as
+    /// [`HostError::SessionBusy`]. The workspaces are the ones
+    /// [`Host::sessions`] lists from, so a row the host listed is a row it
+    /// can delete; no fallback workspace is invented for an unknown id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::Config`] when the session is live here,
+    /// [`HostError::SessionBusy`] when its lock is held, [`HostError::NotFound`]
+    /// when no known workspace holds it, and the store error otherwise.
+    pub fn delete_session(&self, id: SessionId) -> Result<(), HostError> {
+        if self.table_ids().contains(&id) {
+            return Err(HostError::Config {
+                message: format!("session {id} is active; switch away before deleting it.").into(),
+            });
+        }
+        for workspace in self.workspaces() {
+            match self.store_for(&workspace).delete(id) {
+                Ok(()) => return Ok(()),
+                Err(dal_store::StoreError::NotFound { .. }) => {}
+                Err(error) => return Err(HostError::from(error)),
+            }
+        }
+        Err(HostError::NotFound {
+            message: format!("unknown session {id}.").into(),
         })
     }
 
@@ -1292,6 +1440,25 @@ impl Host {
         })
     }
 
+    /// Whether `id` is a live session owned by `owner`, directly or through
+    /// other live sessions: the relation `descendants_of` lists for a
+    /// teardown, read from the member's side as a walk up its parent links,
+    /// which are acyclic.
+    fn owned_by(
+        sessions: &HashMap<SessionId, SessionEntry>,
+        owner: SessionId,
+        id: SessionId,
+    ) -> bool {
+        let mut cursor = sessions.get(&id).and_then(|entry| entry.parent);
+        while let Some(parent) = cursor {
+            if parent == owner {
+                return true;
+            }
+            cursor = sessions.get(&parent).and_then(|entry| entry.parent);
+        }
+        false
+    }
+
     /// Whether every ancestor from `parent` to its root is still a live
     /// table entry. Parent links are acyclic: a child entry is created
     /// strictly after its parent's.
@@ -1693,6 +1860,34 @@ fn journal_product(name: &str) -> dal_core::Product {
         dal_core::Product::Dalgona
     } else {
         dal_core::Product::Dal
+    }
+}
+
+/// The listing row of a session that is live in this host. A live session
+/// with no stored row (an ephemeral one) counts its own leaf path, the same
+/// length the store folds for a stored row.
+fn live_row(entry: &SessionPorts) -> SessionInfo {
+    let mut session = entry.shared.snapshot(snapshot_args(entry)).session;
+    session.message_count = u64::try_from(entry.shared.leaf_entries().len()).ok();
+    session
+}
+
+/// Resolves `reference` in one workspace store: a full id by its journal file
+/// (no workspace read), anything else through the store's own resolution.
+/// `Ok(None)` means this workspace holds no match.
+fn resolve_in(
+    store: &Store,
+    workspace: &Workspace,
+    reference: &str,
+    exact: Option<SessionId>,
+) -> Result<Option<SessionId>, HostError> {
+    if let Some(id) = exact {
+        return Ok(store.session_file(id).is_file().then_some(id));
+    }
+    match store.resolve(workspace, reference) {
+        Ok(id) => Ok(Some(id)),
+        Err(dal_store::StoreError::NoMatch { .. }) => Ok(None),
+        Err(error) => Err(HostError::from(error)),
     }
 }
 
