@@ -348,15 +348,24 @@ fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<u
     }
 }
 
-/// The newest `count` notices as clipped dim rows.
-fn notice_rows(notices: &[String], count: usize, w: usize, mode: WidthMode) -> Vec<RenderRow> {
-    notices
+/// The newest `count` notices as clipped rows, each in the role its
+/// severity chose at push time so error notices keep their error role.
+fn notice_rows(
+    notices: &[crate::live::NoticeRow],
+    count: usize,
+    w: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let recorded = notices
         .iter()
         .rev()
+        .map(|notice| RenderRow::new(escape(&notice.text), notice.role));
+    let mut rows: Vec<RenderRow> = recorded
         .take(count)
-        .rev()
-        .map(|row| RenderRow::new(escape(row), Role::Dim).clipped(w, mode))
-        .collect()
+        .map(|row| row.clipped(w, mode))
+        .collect();
+    rows.reverse();
+    rows
 }
 
 /// Wraps the draft inside the 2-cell prompt gutter and finds the caret.

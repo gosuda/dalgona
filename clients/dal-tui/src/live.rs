@@ -36,13 +36,24 @@ pub struct Live {
     assistant_open: bool,
     tool_cards: HashMap<String, ToolCard>,
     tool_order: Vec<String>,
-    notices: Vec<String>,
+    notices: Vec<NoticeRow>,
     ext_busy: BTreeMap<Box<str>, ExtStatus>,
     jobs: HashSet<dal_core::JobId>,
     /// The card the expand view holds open, with its scroll offset.
     expand: Option<ExpandedView>,
     spinner_frame: usize,
     spinner_last: Option<Instant>,
+}
+
+/// One live-block notice: text plus the role its severity chose at push
+/// time, so an error notice paints in the error role instead of flattening
+/// into dim text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeRow {
+    /// The rendered notice text, including any `note:` prefix.
+    pub text: String,
+    /// The semantic role the row paints in.
+    pub role: crate::theme::Role,
 }
 
 /// One card the user expanded with the newest-card action.
@@ -265,25 +276,32 @@ impl Live {
                 }
             }
             UpdateKind::Notice(notice) => {
-                self.notices.push(format!("note: {}", notice.text));
-                if self.notices.len() > 3 {
-                    self.notices.remove(0);
-                }
+                // The kind names the event, not a severity — only the kinds
+                // that end in "failed" are failures ("turn.failed",
+                // "compact.manual_failed"); anything else, including the
+                // overloaded "compaction_ended", stays dim. Local producers
+                // name a severity directly through `notice_as`.
+                let kind = notice.kind.as_ref();
+                let role = if kind.ends_with(".failed") || kind.ends_with("_failed") {
+                    crate::theme::Role::Error
+                } else {
+                    crate::theme::Role::Dim
+                };
+                self.push_notice(role, format!("note: {}", notice.text));
                 true
             }
             UpdateKind::RuleFired { rule, .. } => {
-                self.notices.push(format!("rule {rule} fired."));
-                if self.notices.len() > 3 {
-                    self.notices.remove(0);
-                }
+                self.push_notice(crate::theme::Role::Dim, format!("rule {rule} fired."));
                 true
             }
             UpdateKind::TurnEnded { stop, .. } => {
                 if *stop == Stop::Cancelled {
-                    self.notices
-                        .push(crate::copy::ids::TURN_CANCELLED.to_owned());
+                    self.push_notice(
+                        crate::theme::Role::Dim,
+                        crate::copy::ids::TURN_CANCELLED.to_owned(),
+                    );
                 } else if let Some(line) = turn_end_line(*stop) {
-                    self.notices.push(line);
+                    self.push_notice(crate::theme::Role::Dim, line);
                 }
                 self.assistant_open = false;
                 self.tool_cards.clear();
@@ -448,13 +466,24 @@ impl Live {
 
     /// Borrows notices in arrival order for the live block.
     #[must_use]
-    pub fn notices(&self) -> &[String] {
+    pub fn notices(&self) -> &[NoticeRow] {
         &self.notices
     }
 
     /// Adds a local command or transport notice, subject to the same three-row cap.
     pub fn notice(&mut self, message: impl Into<String>) {
-        self.notices.push(message.into());
+        self.notice_as(crate::theme::Role::Dim, message);
+    }
+
+    /// Adds a notice in a chosen role, for producers whose outcome has a
+    /// severity: errors keep the error role instead of dimming away.
+    pub fn notice_as(&mut self, role: crate::theme::Role, message: impl Into<String>) {
+        self.push_notice(role, message.into());
+    }
+
+    /// Pushes one notice row, keeping at most the newest three.
+    fn push_notice(&mut self, role: crate::theme::Role, text: String) {
+        self.notices.push(NoticeRow { text, role });
         if self.notices.len() > 3 {
             self.notices.remove(0);
         }
@@ -888,7 +917,7 @@ mod tests {
         assert!(
             live.notices()
                 .iter()
-                .any(|notice| notice == crate::copy::ids::TURN_CANCELLED),
+                .any(|notice| notice.text == crate::copy::ids::TURN_CANCELLED),
             "releasing cards keeps the turn-end notice"
         );
 
@@ -897,6 +926,45 @@ mod tests {
         assert_eq!(live.tracked_tools(), (1, 1));
         assert!(live.apply_update(&turn_ended(6, dal_core::Stop::Failed)));
         assert_eq!(live.tracked_tools(), (0, 0));
+    }
+
+    #[test]
+    fn notice_rows_keep_the_severity_their_kind_or_producer_chose() {
+        use crate::theme::Role;
+        use dal_core::{Notice, TurnId};
+
+        let mut live = Live::default();
+        let notice = |seq: u64, kind: &str| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap()),
+            kind: UpdateKind::Notice(Notice {
+                turn: Some(TurnId::new(std::num::NonZeroU64::MIN)),
+                kind: kind.into(),
+                text: "went wrong".into(),
+            }),
+        };
+        assert!(live.apply_update(&notice(1, "turn.failed")));
+        assert!(live.apply_update(&notice(2, "compact.manual_failed")));
+        assert!(live.apply_update(&notice(3, "compaction_ended")));
+        let roles: Vec<Role> = live.notices().iter().map(|row| row.role).collect();
+        assert_eq!(
+            roles,
+            [Role::Error, Role::Error, Role::Dim],
+            "failure kinds keep the error role, a plain event stays dim: {:?}",
+            live.notices()
+        );
+        assert!(
+            live.notices()
+                .iter()
+                .all(|row| row.text.starts_with("note: ")),
+            "the upstream notice keeps its note prefix"
+        );
+
+        // A producer can name a severity directly through `notice_as`.
+        live.notice_as(Role::Error, "note: write failed");
+        assert_eq!(live.notices().last().map(|row| row.role), Some(Role::Error));
+        live.notice("local note");
+        assert_eq!(live.notices().last().map(|row| row.role), Some(Role::Dim));
     }
 
     #[test]

@@ -1218,7 +1218,11 @@ impl Surfaces {
     fn flush_answers<A: TuiAgent>(&mut self, opts: &TuiOptions, agent: &A) {
         for (id, answer) in std::mem::take(&mut self.session.pending_answers) {
             if let Err(error) = opts.rt.block_on(agent.answer(id, answer)) {
-                self.live.notice(format!("note: {error}"));
+                // A losing answer or a dead host surfaces as an error with
+                // the deck's notice prefix; `request.lost` text is the
+                // host's own message, never a silent drop.
+                self.live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}"));
             }
         }
     }
@@ -1404,9 +1408,10 @@ impl Surfaces {
             if let Command::Run { .. } = command {
                 match start_run(&opts.rt, agent, command) {
                     Ok(settled) => self.session.inflight = Some(settled),
-                    Err(error) => self
-                        .live
-                        .notice(format!("note: cannot start the command: {error}")),
+                    Err(error) => self.live.notice_as(
+                        crate::theme::Role::Error,
+                        format!("note: cannot start the command: {error}"),
+                    ),
                 }
                 continue;
             }
@@ -1432,7 +1437,10 @@ impl Surfaces {
         let submit_reply = match submit_reply {
             Ok(submit_reply) => submit_reply,
             Err(error) => {
-                self.live.notice(error.to_string());
+                // Command and prompt failures keep the notice prefix and the
+                // error role so the row reads as a failure, never dim text.
+                self.live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}"));
                 return Ok(());
             }
         };
@@ -1472,6 +1480,16 @@ impl Surfaces {
                     }
                 };
                 self.session.picker = picker;
+                Vec::new()
+            }
+            // `/new` needs a session this terminal cannot open in place; the
+            // refusal is a failure, so it carries the error role and `note:`
+            // prefix like every other command failure.
+            Reply::Front(FrontAction::NewSession) => {
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    "note: /new opens a fresh session outside this terminal; use /quit then reopen",
+                );
                 Vec::new()
             }
             other => self.session.accept_reply(other),
@@ -1520,16 +1538,20 @@ impl Surfaces {
         let models = match model_source() {
             Ok(models) => models,
             Err(error) => {
-                self.live
-                    .notice(format!("note: cannot list models for the scope picker: {error}"));
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!("note: cannot list models for the scope picker: {error}"),
+                );
                 return None;
             }
         };
         let fresh = match opts.rt.block_on(agent.view(snapshot_page())) {
             Ok(fresh) => fresh,
             Err(error) => {
-                self.live
-                    .notice(format!("note: cannot read the current model scope: {error}"));
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!("note: cannot read the current model scope: {error}"),
+                );
                 return None;
             }
         };
@@ -1577,10 +1599,13 @@ impl Surfaces {
             Some(Method::ApiKey) => Some(SignIn::key_prompt(provider)),
             Some(method) => Some(SignIn::flow(host, &opts.rt, provider, method, None)),
             None => {
-                self.live.notice(format!(
-                    "Unknown provider \"{}\".",
-                    crate::width::escape(provider)
-                ));
+                self.live.notice_as(
+                    crate::theme::Role::Error,
+                    format!(
+                        "note: unknown provider \"{}\".",
+                        crate::width::escape(provider)
+                    ),
+                );
                 None
             }
         };
@@ -1661,18 +1686,23 @@ impl Surfaces {
 
         for text in std::mem::take(&mut self.session.pending_copies) {
             let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-            let notice = match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
+            match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
                 Ok(()) => {
                     let count = text.chars().count();
-                    crate::copy::render(
+                    let notice = crate::copy::render(
                         crate::copy::ids::COPY_DONE,
                         &[("n", &count.to_string())],
                         u64::try_from(count).unwrap_or(u64::MAX),
-                    )
+                    );
+                    self.live.notice(notice);
                 }
-                Err(_) => crate::copy::ids::COPY_FAILED.to_owned(),
-            };
-            self.live.notice(notice);
+                Err(_) => {
+                    // A refused clipboard write is a failure the user asked
+                    // for, so it carries the error role, not dim text.
+                    self.live
+                        .notice_as(crate::theme::Role::Error, crate::copy::ids::COPY_FAILED);
+                }
+            }
         }
     }
 
@@ -1698,7 +1728,9 @@ impl Surfaces {
             if save == dal_core::command::Save::SessionAndDefault {
                 match save_diagrams(enabled) {
                     Ok(()) => self.live.notice("diagram setting saved to dal.toml"),
-                    Err(error) => self.live.notice(error.to_string()),
+                    Err(error) => self
+                        .live
+                        .notice_as(crate::theme::Role::Error, format!("note: {error}")),
                 }
             } else {
                 self.live.notice(if enabled {
@@ -5042,4 +5074,383 @@ mod loop_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingAnswerAgent;
+
+    impl TuiAgent for FailingAnswerAgent {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(Ok(idle_view()))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Err(TuiError::Agent(
+                dal_agent::AgentError::AlreadyResolved {
+                    id,
+                    by: ClientId::new("rpc-1"),
+                },
+            )))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    /// A session whose `view` reports one fixed committed scope, or fails.
+    /// The surfaces under test keep a view that says "no scope", so a picker
+    /// checked from this agent's answer proves the seed is a fresh read.
+    #[derive(Clone)]
+    struct ScopeAgent {
+        scope: Option<Vec<Box<str>>>,
+        view_fails: bool,
+    }
+
+    impl TuiAgent for ScopeAgent {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(if self.view_fails {
+                Err(TuiError::Terminal("the view is unavailable".to_owned()))
+            } else {
+                let mut view = idle_view();
+                view.settings.scoped_models = self.scope.clone();
+                Ok(view)
+            })
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    /// Two scope-eligible catalog rows, in display order.
+    fn scope_catalog() -> Vec<crate::picker::ModelOption> {
+        ["openai/gpt-6", "anthropic/opus-4"]
+            .into_iter()
+            .map(|id| crate::picker::ModelOption {
+                label: id.to_owned(),
+                command: Command::SetModel {
+                    model: dal_core::ModelRoute::Synthetic { id: id.into() },
+                    save: dal_core::command::Save::SessionAndDefault,
+                },
+                scoped_id: Some(id.into()),
+            })
+            .collect()
+    }
+
+    /// The scoped-models picker checks the committed scope the agent reports
+    /// right now. The terminal keeps no scope copy: its own view stays at
+    /// "no scope" throughout, an unmatched committed id survives submit, and
+    /// `None` and an explicit `Some([])` both open with nothing checked.
+    #[test]
+    fn scoped_picker_seeds_from_a_fresh_agent_view() {
+        let mut rig = Rig::new();
+        assert_eq!(rig.surfaces.view.settings.scoped_models, None);
+
+        let agent = ScopeAgent {
+            scope: Some(vec!["anthropic/opus-4".into(), "anthropic/vanished".into()]),
+            view_fails: false,
+        };
+        let mut models = || Ok(scope_catalog());
+        let mut picker = rig
+            .surfaces
+            .scoped_models_choice(&rig.opts, &agent, "", &mut models)
+            .expect("a readable scope opens the picker");
+        assert!(!picker.is_checked(0), "openai/gpt-6 is outside the scope");
+        assert!(picker.is_checked(1), "anthropic/opus-4 is inside the scope");
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(crate::picker::PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids
+                    .iter()
+                    .map(|id| id.as_ref())
+                    .eq(["anthropic/opus-4", "anthropic/vanished"])
+        ));
+        assert_eq!(
+            rig.surfaces.view.settings.scoped_models, None,
+            "the terminal never stores a scope of its own"
+        );
+
+        for scope in [None, Some(Vec::new())] {
+            let agent = ScopeAgent {
+                scope,
+                view_fails: false,
+            };
+            let picker = rig
+                .surfaces
+                .scoped_models_choice(&rig.opts, &agent, "", &mut models)
+                .expect("an empty scope still opens the picker");
+            assert!(!picker.is_checked(0), "no scope checks nothing");
+            assert!(!picker.is_checked(1), "no scope checks nothing");
+        }
+    }
+
+    /// `/scoped-models` reaches the same fresh read through the reply fold:
+    /// the chooser reply opens a picker already checked from the agent view.
+    #[test]
+    fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
+        let mut rig = Rig::new();
+        let agent = ScopeAgent {
+            scope: Some(vec!["openai/gpt-6".into()]),
+            view_fails: false,
+        };
+        let mut models = || Ok(scope_catalog());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &agent,
+                &mut models,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("the scoped picker opens");
+        assert!(picker.is_checked(0), "the committed id arrives checked");
+        assert!(!picker.is_checked(1));
+    }
+
+    /// A failed view read never degrades to an empty scope: submitting that
+    /// guess would clear the real restriction. The failure shows as an error
+    /// notice and no picker opens.
+    #[test]
+    fn scoped_picker_refuses_to_guess_when_the_view_read_fails() {
+        let mut rig = Rig::new();
+        let agent = ScopeAgent {
+            scope: Some(vec!["openai/gpt-6".into()]),
+            view_fails: true,
+        };
+        let mut models = || Ok(scope_catalog());
+        let picker = rig
+            .surfaces
+            .scoped_models_choice(&rig.opts, &agent, "", &mut models);
+        assert!(picker.is_none(), "an unreadable scope opens no picker");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].role, crate::theme::Role::Error);
+        assert!(
+            notices[0]
+                .text
+                .starts_with("note: cannot read the current model scope"),
+            "{notices:?}"
+        );
+    }
+
+    /// `/new` cannot open a session in place: the refusal is an error notice
+    /// with the `note:` prefix, never a plain transcript row.
+    #[test]
+    fn new_session_reply_is_an_error_notice() {
+        let mut rig = Rig::new();
+        let mut models = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &mut models,
+                Ok(Reply::Front(dal_core::FrontAction::NewSession)),
+            )
+            .expect("the /new refusal folds into a notice");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].role, crate::theme::Role::Error);
+        assert!(notices[0].text.starts_with("note: /new"), "{notices:?}");
+        assert!(rig.rows().is_empty(), "the refusal is not a transcript row");
+    }
+
+    /// Exercises the production `Surfaces` methods that emit error notices —
+    /// `flush_answers`, `fold_submit_reply`, `begin_login`, and
+    /// `apply_diagram_updates` — and asserts `Role::Error` plus the `note:`
+    /// prefix on each, while informational diagram toggles stay `Role::Dim`.
+    #[test]
+    fn runtime_error_paths_emit_error_role_notices_with_the_note_prefix() {
+        use crate::theme::Role;
+
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut models = || Ok(Vec::new());
+        // The contract is the role and the word prefix; the rest of each
+        // text is the failing error's own message, which this crate neither
+        // owns nor pins.
+        let is_error_note = |row: &crate::live::NoticeRow| {
+            row.role == Role::Error && row.text.starts_with("note: ")
+        };
+
+        let lost_id = RequestId::new_v7();
+        rig.surfaces
+            .session
+            .pending_answers
+            .push((lost_id, Answer::Approve));
+        rig.surfaces.flush_answers(&rig.opts, &FailingAnswerAgent);
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(is_error_note(&notices[0]), "{notices:?}");
+
+        let closed = dal_agent::AgentError::SessionClosed {
+            id: SessionId::new_v7(),
+        };
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &mut models,
+                Err(TuiError::Agent(closed)),
+            )
+            .expect("submit error folds into a notice");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(is_error_note(&notices[1]), "{notices:?}");
+
+        rig.surfaces.begin_login(&rig.opts, &host, "nonexistent");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        assert!(is_error_note(&notices[2]), "{notices:?}");
+        assert!(
+            notices[2].text.contains("nonexistent"),
+            "the notice names the provider it refused: {notices:?}"
+        );
+
+        let mut painter = crate::screen::driver::Painter::default();
+        let probe = crate::term::Probe::default();
+        let mut fail_save =
+            |_enabled: bool| Err(TuiError::Terminal("disk is read-only".to_owned()));
+        rig.surfaces.session.pending_diagram_settings = vec![
+            (true, dal_core::command::Save::SessionOnly),
+            (true, dal_core::command::Save::SessionAndDefault),
+        ];
+        rig.surfaces
+            .apply_diagram_updates(&rig.opts, &mut painter, &probe, &mut fail_save);
+        let tail = rig.surfaces.live.notices();
+        let last = tail.last().expect("failed save pushed a notice");
+        assert!(is_error_note(last), "{tail:?}");
+        assert!(
+            last.text.contains("disk is read-only"),
+            "the notice carries the cause of the failed save: {tail:?}"
+        );
+        // The row cap keeps the newest three: the refused login, the
+        // session-only toggle, and the failed save. Only the toggle is
+        // informational.
+        let roles: Vec<Role> = tail.iter().map(|row| row.role).collect();
+        assert_eq!(
+            roles,
+            [Role::Error, Role::Dim, Role::Error],
+            "the session-only diagram toggle stays informational: {tail:?}"
+        );
+    }
+
+    /// A refused OSC 52 clipboard write is a failure the user asked for: the
+    /// `COPY_FAILED` row carries `Role::Error`; a successful copy stays `Dim`.
+    #[test]
+    fn a_refused_clipboard_write_is_an_error_notice() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct Flaky {
+            fail_after: usize,
+            writes: AtomicUsize,
+        }
+
+        impl TermIo for Flaky {
+            fn enable_raw(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn disable_raw(&self) {}
+            fn size(&self) -> std::io::Result<(u16, u16)> {
+                Ok((80, 24))
+            }
+            fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+                let index = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+                if index > self.fail_after {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "the terminal refused the selection",
+                    ));
+                }
+                Ok(())
+            }
+            fn read(&self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+            fn raise_tstp(&self) {}
+        }
+
+        let mut rig = Rig::new();
+        rig.surfaces.session.pending_copies = vec!["first".into(), "second".into()];
+        let io = Flaky {
+            fail_after: 1,
+            writes: AtomicUsize::new(0),
+        };
+        rig.surfaces.write_copies(&io);
+
+        let roles: Vec<crate::theme::Role> = rig
+            .surfaces
+            .live
+            .notices()
+            .iter()
+            .map(|row| row.role)
+            .collect();
+        assert_eq!(
+            roles,
+            [crate::theme::Role::Dim, crate::theme::Role::Error],
+            "a successful copy stays dim; a refused clipboard write is an error: {roles:?}"
+        );
+        assert_eq!(
+            rig.surfaces.live.notices()[1].text,
+            crate::copy::ids::COPY_FAILED
+        );
+        assert_eq!(io.writes.load(Ordering::SeqCst), 2);
+    }
 }
