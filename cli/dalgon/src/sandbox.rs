@@ -15,11 +15,11 @@ const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operatio
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 const WINDOWS_ERROR: &str =
-    "sandbox = \"on\" is not supported on this platform. Set sandbox = \"off\" in dal.toml.";
+    "sandbox = true is not supported on this platform. Set sandbox = false in dal.toml.";
 const MALFORMED_ARGS: &str = "dalgon sandbox: malformed launcher arguments";
 
 /// Builds the `sandbox` extension: an observe-only session-start hook that
-/// publishes the canonical writable-roots notice when `sandbox = "on"`. The
+/// publishes the canonical writable-roots notice when `sandbox = true`. The
 /// launcher itself lives in the session backend, so removing this extension
 /// never changes what commands may write.
 ///
@@ -150,7 +150,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
             let abi = linux_abi();
             if abi < 3 {
                 write_error(&format!(
-                    "dalgon sandbox: sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {abi}."
+                    "dalgon sandbox: sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {abi}."
                 ));
                 return ExitCode::from(126);
             }

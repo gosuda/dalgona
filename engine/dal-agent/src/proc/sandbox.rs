@@ -24,7 +24,7 @@ use crate::error::ToolError;
 /// Setup inputs; every path decision stays inside this module so callers
 /// pass values instead of reconstructing the session layout with joins.
 pub(crate) struct SandboxInputs<'a> {
-    /// Whether `sandbox = "on"` was configured.
+    /// Whether `sandbox = true` was configured.
     pub sandbox_on: bool,
     /// The canonical session workspace root.
     pub workspace_root: &'a Path,
@@ -157,7 +157,7 @@ pub(crate) fn session_launcher(
     }
     let home = platform_home(vars).ok_or_else(|| {
         SandboxSetupError::new(
-            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in dal.toml.",
+            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = false in dal.toml.",
         )
     })?;
     let cache = platform_cache(vars, &home);
@@ -242,7 +242,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
             std::fs::canonicalize(&expanded).map_err(|source| cannot_open(raw, &source))?;
         if home.starts_with(&canonical) {
             return Err(SandboxSetupError::new(format!(
-                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = \"off\" in dal.toml.",
+                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = false in dal.toml.",
                 canonical.display(),
                 home.display(),
             )));
@@ -253,7 +253,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
                 || protected.starts_with(&canonical)
             {
                 return Err(SandboxSetupError::new(format!(
-                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = \"off\" in dal.toml.",
+                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = false in dal.toml.",
                     canonical.display(),
                     protected.display(),
                 )));
@@ -293,7 +293,7 @@ fn cannot_open(path: &str, source: &std::io::Error) -> SandboxSetupError {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn abi_error(number: impl Display) -> SandboxSetupError {
     SandboxSetupError::new(format!(
-        "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
+        "sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
     ))
 }
 
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = \"off\" in dal.toml.",
+                "sandbox: the writable path {} contains the home directory {}, so the sandbox would protect nothing. Start dalgon in a project directory, or set sandbox = false in dal.toml.",
                 home_root.display(),
                 home_root.display(),
             ),
@@ -903,7 +903,7 @@ mod tests {
         let error = resolve_launcher(&stale).expect_err("abi 1 fails closed");
         assert_eq!(
             error.to_string(),
-            "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI 1.",
+            "sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI 1.",
         );
     }
 
