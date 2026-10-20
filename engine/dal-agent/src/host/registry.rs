@@ -478,13 +478,33 @@ impl Host {
     /// Flushes one session, stops its actor, removes it from the table,
     /// and closes every live session-owned descendant first.
     ///
+    /// The teardown runs on a host-owned task from the moment the entry
+    /// leaves the table, so dropping the returned future, as a shutdown's
+    /// close grace does, never abandons it: the drop only stops the wait
+    /// and hurries the teardown past its settlement and end-hook waits,
+    /// and cancellation, driver abort, actor shutdown, and the removal
+    /// publication still run. Host shutdown drains these tails.
+    ///
     /// # Errors
     ///
-    /// Returns an error when `id` is not open or its actor cannot be shut down.
+    /// Returns an error when `id` is not open or the host's runtime stops
+    /// before the teardown finishes.
     pub async fn close(&self, id: SessionId) -> Result<(), HostError> {
         let entry = self.take_entry(id)?;
-        Self::teardown_subtree(&self.state, entry, id).await;
-        Ok(())
+        let state = Arc::clone(&self.state);
+        let hurry = CancellationToken::new();
+        let hurry_on_drop = hurry.clone().drop_guard();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        self.state.session_teardowns.spawn_cleanup(
+            &tokio::runtime::Handle::current(),
+            async move {
+                Self::teardown_subtree_hurried(&state, entry, id, &hurry).await;
+                let _ = done_tx.send(());
+            },
+        );
+        let done = done_rx.await;
+        hurry_on_drop.disarm();
+        done.map_err(|_| HostError::Closed)
     }
 
     /// Tears down one already-removed session together with every live
@@ -499,6 +519,18 @@ impl Host {
     /// id. Each descendant is fully torn down before its parent's
     /// teardown starts, so no end hook can wait on a live owner.
     pub(crate) async fn teardown_subtree(state: &HostState, entry: SessionEntry, id: SessionId) {
+        Self::teardown_subtree_hurried(state, entry, id, &CancellationToken::new()).await;
+    }
+
+    /// The subtree teardown of [`Self::teardown_subtree`] whose settlement
+    /// and end-hook waits end as soon as `hurry` fires; the cancellation,
+    /// driver abort, and actor shutdown of every member always run.
+    async fn teardown_subtree_hurried(
+        state: &HostState,
+        entry: SessionEntry,
+        id: SessionId,
+        hurry: &CancellationToken,
+    ) {
         for child in Self::descendants_of(&state.sessions, id) {
             let child_entry = state
                 .sessions
@@ -508,9 +540,9 @@ impl Host {
             let Some(child_entry) = child_entry else {
                 continue;
             };
-            Self::teardown_taken(state, child_entry, child).await;
+            Self::teardown_taken(state, child_entry, child, hurry).await;
         }
-        Self::teardown_taken(state, entry, id).await;
+        Self::teardown_taken(state, entry, id, hurry).await;
     }
 
     /// Tears down one session whose table entry is already removed: end
@@ -519,11 +551,19 @@ impl Host {
     /// The removal happened before this runs, so the parent-scoped child
     /// list and child admission observe the reclaim before any teardown
     /// step; the publication last keeps subscriber evidence ordered after
-    /// the teardown it reports. An abandoned child await reuses this path
-    /// through its await owner's drop and the shared subtree teardown,
-    /// parking the tail on the awaiting session's task owner, which its
-    /// own close and the host shutdown always drain.
-    pub(crate) async fn teardown_taken(state: &HostState, entry: SessionEntry, id: SessionId) {
+    /// the teardown it reports. Only the settlement wait and the end-hook
+    /// wait yield to `hurry`: everything after them is unconditional, and
+    /// the caller runs this on a task its own cancellation cannot reach.
+    /// An abandoned child await reuses this path through its await owner's
+    /// drop and the shared subtree teardown, parking the tail on the
+    /// awaiting session's task owner, which its own close and the host
+    /// shutdown always drain.
+    async fn teardown_taken(
+        state: &HostState,
+        entry: SessionEntry,
+        id: SessionId,
+        hurry: &CancellationToken,
+    ) {
         // Wait for the last ended turn's driver confirmation before the
         // session-end observers sweep per-turn state: turn-end hooks journal
         // their records from the driver's turn-end observation, and tearing
@@ -531,7 +571,11 @@ impl Host {
         // Bounded well under one hook chain; driver-gone closes resolve on
         // the actor shutdown instead.
         const SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-        let _ = tokio::time::timeout(SETTLE_WAIT, entry.handle.settled()).await;
+        tokio::select! {
+            biased;
+            () = hurry.cancelled() => {}
+            _ = tokio::time::timeout(SETTLE_WAIT, entry.handle.settled()) => {}
+        }
         let generation = state.shared.generation.borrow().clone();
         let event = SessionEnd {
             session: id,
@@ -563,7 +607,11 @@ impl Host {
             .await;
             let _ = done_tx.send(());
         });
-        let _ = done_rx.await;
+        tokio::select! {
+            biased;
+            () = hurry.cancelled() => {}
+            _ = done_rx => {}
+        }
         // Classification first: the opening and running turn resolve
         // through the inbox before the session token or the abort wakes
         // holders into withdrawing as the wrong cause.
@@ -630,7 +678,7 @@ impl Host {
             None => false,
         };
         self.stop_attached().await;
-        let opening_tasks = self.state.opening_tasks.clone();
+        let session_teardowns = self.state.session_teardowns.clone();
         let ids: Vec<SessionId> = self.table_ids();
         let task_owners: Vec<_> = self
             .state
@@ -644,19 +692,21 @@ impl Host {
             let this = self.clone();
             let _ = timeout(close_grace, this.close(*id)).await;
         }
-        // Every snapshot id that left the table was closed here, directly
-        // or as a descendant swept by its owner's close; ids are unique,
-        // so a swept member cannot double-report.
+        // A close dropped at its grace left its hurried teardown on the
+        // host-owned owner; draining it first means every snapshot id that
+        // left the table has run its whole teardown, directly or as a
+        // descendant swept by its owner's close. Ids are unique, so a swept
+        // member cannot double-report.
+        session_teardowns.stop().await;
         let live: HashSet<SessionId> = self.table_ids().into_iter().collect();
         let sessions_closed = ids.iter().filter(|id| !live.contains(id)).count();
-        opening_tasks.stop().await;
         // Provider shutdown joins its internally bounded refresh tasks. Do not
         // wrap this await in `close_grace`: dropping that waiter would detach
         // a credential write that can still commit after host shutdown.
         self.state.shared.providers.shutdown().await;
         let tasks_remaining = task_owners.iter().fold(0_usize, |total, tasks| {
             total.saturating_add(tasks.tracked())
-        }) + opening_tasks.tracked();
+        }) + session_teardowns.tracked();
         ShutdownReport {
             sessions_closed,
             status_quiet,
@@ -1608,7 +1658,7 @@ impl Host {
             let _ = wired.task.await;
             return Err(error);
         }
-        let owner_tasks = self.state.opening_tasks.clone();
+        let owner_tasks = self.state.session_teardowns.clone();
         let mut opening = OpeningCleanup::new(
             Arc::clone(&self.state),
             resolved.id,
@@ -1904,6 +1954,9 @@ fn snapshot_args(entry: &SessionPorts) -> crate::session::projection::SnapshotAr
         page: PageReq::default(),
     }
 }
+
+#[cfg(test)]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {
