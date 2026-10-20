@@ -14,6 +14,13 @@ use super::*;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+const WIRE_SESSION: &str = "01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f";
+const WIRE_PEER: &str = "01927f40-0000-7000-8000-000000000001";
+
+fn wire_session(text: &str) -> SessionId {
+    SessionId::parse(text).expect("fixture session id parses")
+}
+
 fn rule_record(patterns: Vec<Box<str>>, repeat_gap: Option<u16>) -> RuleRecord {
     RuleRecord {
         name: Name("rule".into()),
@@ -495,21 +502,49 @@ fn fetch_request_and_response_round_trip_with_bounded_read() -> TestResult {
 }
 
 #[test]
-fn mcp_request_and_response_round_trip() -> TestResult {
+fn mcp_wire_is_camel_case_and_rejects_missing_or_mistyped_members() -> TestResult {
     let request = McpRequest {
-        session: SessionId::new_v7(),
+        session: wire_session(WIRE_SESSION),
         server: "filesystem".into(),
         tool: "read".into(),
-        arguments: RawJson::parse(r#"{"path":"/tmp/x"}"#)?,
+        arguments: RawJson::parse(r#"{ "path" : "/tmp/x" }"#)?,
     };
-    let encoded = sonic_rs::to_string(&request)?;
-    assert_eq!(sonic_rs::from_str::<McpRequest>(&encoded)?, request);
+    let wire = format!(
+        r#"{{"session":"{WIRE_SESSION}","server":"filesystem","tool":"read","arguments":{{ "path" : "/tmp/x" }}}}"#
+    );
+    assert_eq!(sonic_rs::to_string(&request)?, wire);
+    assert_eq!(sonic_rs::from_str::<McpRequest>(&wire)?, request);
+    for bad in [
+        r#"{"server":"s","tool":"t","arguments":{}}"#,
+        r#"{"session":"nope","server":"s","tool":"t","arguments":{}}"#,
+        &format!(r#"{{"session":"{WIRE_SESSION}","tool":"t","arguments":{{}}}}"#),
+        &format!(r#"{{"session":"{WIRE_SESSION}","server":"s","tool":"t"}}"#),
+        &format!(r#"{{"session":"{WIRE_SESSION}","server":"s","tool":9,"arguments":{{}}}}"#),
+    ] {
+        assert!(
+            sonic_rs::from_str::<McpRequest>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
+
     let response = McpResponse {
         text: "done".into(),
-        is_error: false,
+        is_error: true,
     };
-    let encoded = sonic_rs::to_string(&response)?;
-    assert_eq!(sonic_rs::from_str::<McpResponse>(&encoded)?, response);
+    let wire = r#"{"text":"done","isError":true}"#;
+    assert_eq!(sonic_rs::to_string(&response)?, wire);
+    assert_eq!(sonic_rs::from_str::<McpResponse>(wire)?, response);
+    for bad in [
+        r#"{"text":"done","is_error":true}"#,
+        r#"{"text":"done"}"#,
+        r#"{"text":"done","isError":"yes"}"#,
+        r#"{"text":7,"isError":false}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<McpResponse>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
     Ok(())
 }
 
@@ -532,50 +567,83 @@ fn tool_call_event_carries_final_class() -> TestResult {
 }
 
 #[test]
-fn mailbox_values_keep_mode_and_cursor() -> TestResult {
-    let from = SessionId::new_v7();
-    let to = SessionId::new_v7();
-    let cursor = EntryId::new(NonZeroU64::MIN);
-    for mode in [MailMode::Aside, MailMode::Steer, MailMode::NextTurn] {
+fn mailbox_wire_pins_mode_spellings_and_reply_cursor() -> TestResult {
+    let from = wire_session(WIRE_SESSION);
+    let to = wire_session(WIRE_PEER);
+    let cursor = EntryId::new(NonZeroU64::new(41).expect("nonzero cursor"));
+    for (mode, spelling) in [
+        (MailMode::Aside, "aside"),
+        (MailMode::Steer, "steer"),
+        (MailMode::NextTurn, "next_turn"),
+    ] {
         let mail = Mail {
             from,
             to,
             mode,
-            text: "continue from this point".into(),
+            text: "go".into(),
             reply_to: Some(cursor),
         };
-        let encoded = sonic_rs::to_string(&mail)?;
-        assert_eq!(sonic_rs::from_str::<Mail>(&encoded)?, mail);
+        let wire = format!(
+            r#"{{"from":"{WIRE_SESSION}","to":"{WIRE_PEER}","mode":"{spelling}","text":"go","replyTo":41}}"#
+        );
+        assert_eq!(sonic_rs::to_string(&mail)?, wire);
+        assert_eq!(sonic_rs::from_str::<Mail>(&wire)?, mail);
 
         let send = AgentsOp::Send {
             to,
-            text: "continue from this point".into(),
+            text: "go".into(),
             mode,
             reply_to: Some(cursor),
         };
-        let encoded = sonic_rs::to_string(&send)?;
-        assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, send);
+        let wire = format!(
+            r#"{{"type":"send","to":"{WIRE_PEER}","text":"go","mode":"{spelling}","replyTo":41}}"#
+        );
+        assert_eq!(sonic_rs::to_string(&send)?, wire);
+        assert_eq!(sonic_rs::from_str::<AgentsOp>(&wire)?, send);
     }
 
-    let recv = AgentsOp::Recv {
-        after: Some(cursor),
-        timeout: None,
+    let unanswered = Mail {
+        from,
+        to,
+        mode: MailMode::Aside,
+        text: "go".into(),
+        reply_to: None,
     };
-    let encoded = sonic_rs::to_string(&recv)?;
-    assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, recv);
-    let reply = AgentsReply::Received {
-        mail: vec![Mail {
-            from,
-            to,
-            mode: MailMode::NextTurn,
-            text: "next turn".into(),
-            reply_to: None,
-        }],
-        next: Some(cursor),
-    };
-    let encoded = sonic_rs::to_string(&reply)?;
-    assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
+    let wire = format!(
+        r#"{{"from":"{WIRE_SESSION}","to":"{WIRE_PEER}","mode":"aside","text":"go","replyTo":null}}"#
+    );
+    assert_eq!(sonic_rs::to_string(&unanswered)?, wire);
+    assert_eq!(sonic_rs::from_str::<Mail>(&wire)?, unanswered);
 
+    for bad in ["next-turn", "NextTurn", "nextTurn", "interrupt", ""] {
+        assert!(
+            sonic_rs::from_str::<MailMode>(&format!("\"{bad}\"")).is_err(),
+            "accepted mode {bad:?}"
+        );
+    }
+
+    // The reply cursor is a nonzero u64: 0 and the value past u64::MAX are
+    // refused, u64::MAX and 1 are kept exactly.
+    let mail_with = |cursor: &str| {
+        format!(
+            r#"{{"from":"{WIRE_SESSION}","to":"{WIRE_PEER}","mode":"aside","text":"go","replyTo":{cursor}}}"#
+        )
+    };
+    for (cursor, kept) in [("1", Some(1_u64)), ("18446744073709551615", Some(u64::MAX))] {
+        let mail = sonic_rs::from_str::<Mail>(&mail_with(cursor))?;
+        assert_eq!(mail.reply_to.map(EntryId::get), kept, "{cursor}");
+    }
+    for cursor in ["0", "-1", "18446744073709551616", "\"41\"", "1.5"] {
+        assert!(
+            sonic_rs::from_str::<Mail>(&mail_with(cursor)).is_err(),
+            "accepted replyTo {cursor}"
+        );
+    }
+    // The snake spelling is not an alias: the cursor stays unset.
+    let snake = format!(
+        r#"{{"from":"{WIRE_SESSION}","to":"{WIRE_PEER}","mode":"aside","text":"go","reply_to":41}}"#
+    );
+    assert_eq!(sonic_rs::from_str::<Mail>(&snake)?.reply_to, None);
     Ok(())
 }
 
@@ -618,15 +686,100 @@ fn a_refused_start_round_trips_with_its_typed_reason_and_text() -> TestResult {
 }
 
 #[test]
-fn child_prompt_operation_round_trips_interrupt_deadline() -> TestResult {
-    let prompt = AgentsOp::Prompt {
-        id: SessionId::new_v7(),
-        text: "Call report with the work you completed.".into(),
-        interrupt: Some(Duration::from_secs(60)),
-        max_steps: std::num::NonZeroU32::new(1),
+fn agents_op_wire_is_internally_tagged_camel_case_and_rejects_a_zero_step_budget() -> TestResult {
+    let id = wire_session(WIRE_SESSION);
+    let cursor = EntryId::new(NonZeroU64::new(41).expect("nonzero cursor"));
+    let ops = [
+        (
+            AgentsOp::Prompt {
+                id,
+                text: "go".into(),
+                interrupt: Some(Duration::from_secs(60)),
+                max_steps: std::num::NonZeroU32::new(1),
+            },
+            format!(
+                r#"{{"type":"prompt","id":"{WIRE_SESSION}","text":"go","interrupt":{{"secs":60,"nanos":0}},"maxSteps":1}}"#
+            ),
+        ),
+        (
+            AgentsOp::Prompt {
+                id,
+                text: "go".into(),
+                interrupt: None,
+                max_steps: None,
+            },
+            format!(
+                r#"{{"type":"prompt","id":"{WIRE_SESSION}","text":"go","interrupt":null,"maxSteps":null}}"#
+            ),
+        ),
+        (
+            AgentsOp::Await { id, timeout: None },
+            format!(r#"{{"type":"await","id":"{WIRE_SESSION}","timeout":null}}"#),
+        ),
+        (
+            AgentsOp::Cancel { id },
+            format!(r#"{{"type":"cancel","id":"{WIRE_SESSION}"}}"#),
+        ),
+        (AgentsOp::List, r#"{"type":"list"}"#.to_owned()),
+        (
+            AgentsOp::Recv {
+                after: Some(cursor),
+                timeout: Some(Duration::from_secs(2)),
+            },
+            r#"{"type":"recv","after":41,"timeout":{"secs":2,"nanos":0}}"#.to_owned(),
+        ),
+        (
+            AgentsOp::Broadcast {
+                text: "go".into(),
+                mode: MailMode::Steer,
+            },
+            r#"{"type":"broadcast","text":"go","mode":"steer"}"#.to_owned(),
+        ),
+    ];
+    for (op, wire) in ops {
+        assert_eq!(sonic_rs::to_string(&op)?, wire);
+        assert_eq!(sonic_rs::from_str::<AgentsOp>(&wire)?, op, "{wire}");
+    }
+
+    // The per-turn step budget is a nonzero u32: 0 would read as "no rounds
+    // at all" and is refused at the wire, not coerced to unbounded.
+    let prompt_with = |steps: &str| {
+        format!(
+            r#"{{"type":"prompt","id":"{WIRE_SESSION}","text":"go","interrupt":null,"maxSteps":{steps}}}"#
+        )
     };
-    let encoded = sonic_rs::to_string(&prompt)?;
-    assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, prompt);
+    for (steps, kept) in [("1", 1_u32), ("4294967295", u32::MAX)] {
+        let AgentsOp::Prompt { max_steps, .. } = sonic_rs::from_str(&prompt_with(steps))? else {
+            return Err("expected a prompt".into());
+        };
+        assert_eq!(max_steps.map(std::num::NonZeroU32::get), Some(kept));
+    }
+    for steps in ["0", "-1", "4294967296", "\"3\"", "1.5"] {
+        assert!(
+            sonic_rs::from_str::<AgentsOp>(&prompt_with(steps)).is_err(),
+            "accepted maxSteps {steps}"
+        );
+    }
+    // The snake spelling is not an alias: the budget stays unbounded.
+    let snake = format!(
+        r#"{{"type":"prompt","id":"{WIRE_SESSION}","text":"go","interrupt":null,"max_steps":3}}"#
+    );
+    let AgentsOp::Prompt { max_steps, .. } = sonic_rs::from_str(&snake)? else {
+        return Err("expected a prompt".into());
+    };
+    assert_eq!(max_steps, None);
+    for bad in [
+        r#"{"type":"pause"}"#,
+        r#"{"id":"x"}"#,
+        r#"{"type":"await"}"#,
+        r#"{"type":"cancel","id":"nope"}"#,
+        r#"{"type":"cancel","type":"list"}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<AgentsOp>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
     Ok(())
 }
 
@@ -708,11 +861,112 @@ fn hook_verdicts_cannot_represent_an_untyped_result() -> TestResult {
 }
 
 #[test]
-fn stream_fire_budget_and_gate_seed_round_trip() -> TestResult {
-    for action in [
-        StreamFireAction::Interrupt,
-        StreamFireAction::Reminder,
-        StreamFireAction::Report,
+fn hook_verdict_wire_is_externally_tagged_by_event_and_refuses_observer_verdicts() -> TestResult {
+    let verdicts = [
+        (
+            HookVerdict::Input(InputVerdict::Continue),
+            r#"{"input":{"type":"continue"}}"#,
+        ),
+        (
+            HookVerdict::Input(InputVerdict::Handled),
+            r#"{"input":{"type":"handled"}}"#,
+        ),
+        (
+            HookVerdict::Input(InputVerdict::Transform(vec![Part::Text {
+                text: "x".into(),
+            }])),
+            r#"{"input":{"type":"transform","value":[{"type":"text","text":"x"}]}}"#,
+        ),
+        (
+            HookVerdict::BeforeTurn(Some("note".into())),
+            r#"{"before_turn":"note"}"#,
+        ),
+        (HookVerdict::BeforeTurn(None), r#"{"before_turn":null}"#),
+        (
+            HookVerdict::BeforeRequest(None),
+            r#"{"before_request":null}"#,
+        ),
+        (
+            HookVerdict::ToolCall(ToolCallVerdict::Allow),
+            r#"{"tool_call":{"type":"allow"}}"#,
+        ),
+        (
+            HookVerdict::ToolCall(ToolCallVerdict::Block {
+                reason: "denied".into(),
+            }),
+            r#"{"tool_call":{"type":"block","reason":"denied"}}"#,
+        ),
+        (
+            HookVerdict::ToolCall(ToolCallVerdict::Rewrite {
+                args: RawJson::parse(r#"{ "b": 2 }"#)?,
+            }),
+            r#"{"tool_call":{"type":"rewrite","args":{ "b": 2 }}}"#,
+        ),
+    ];
+    for (verdict, wire) in verdicts {
+        assert_eq!(sonic_rs::to_string(&verdict)?, wire);
+        assert_eq!(sonic_rs::from_str::<HookVerdict>(wire)?, verdict, "{wire}");
+    }
+    // Observer events return nothing: no spelling of theirs decodes, and a
+    // guarding verdict's tag never accepts another verdict's payload.
+    for bad in [
+        r#"{"session_start":null}"#,
+        r#"{"session_end":null}"#,
+        r#"{"tool_result":{"type":"allow"}}"#,
+        r#"{"turn_end":null}"#,
+        r#"{"settled":null}"#,
+        r#"{"output_stream":{"type":"continue"}}"#,
+        r#"{"input":{"type":"allow"}}"#,
+        r#"{"tool_call":{"type":"continue"}}"#,
+        r#"{"tool_call":{"type":"block"}}"#,
+        r#"{"tool_call":{"type":"rewrite"}}"#,
+        r#"{"input":{"type":"transform"}}"#,
+        r#"{"input":{"type":"continue"},"tool_call":{"type":"allow"}}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<HookVerdict>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
+
+    let stream = [
+        (StreamVerdict::Continue, r#"{"type":"continue"}"#),
+        (
+            StreamVerdict::Interrupt {
+                rule: "guard".into(),
+                inject: "remember the boundary".into(),
+            },
+            r#"{"type":"interrupt","rule":"guard","inject":"remember the boundary"}"#,
+        ),
+    ];
+    for (verdict, wire) in stream {
+        assert_eq!(sonic_rs::to_string(&verdict)?, wire);
+        assert_eq!(
+            sonic_rs::from_str::<StreamVerdict>(wire)?,
+            verdict,
+            "{wire}"
+        );
+    }
+    for bad in [
+        r#"{"type":"Continue"}"#,
+        r#"{"type":"interrupt","rule":"guard"}"#,
+        r#"{"type":"interrupt","inject":"x"}"#,
+        r#"{"type":"abort"}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<StreamVerdict>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_fire_budget_and_gate_seed_wire_is_pinned() -> TestResult {
+    for (action, spelling) in [
+        (StreamFireAction::Interrupt, "interrupt"),
+        (StreamFireAction::Reminder, "reminder"),
+        (StreamFireAction::Report, "report"),
     ] {
         let fire = StreamFire {
             index: 2,
@@ -721,13 +975,49 @@ fn stream_fire_budget_and_gate_seed_round_trip() -> TestResult {
             text: Some("remember the boundary".into()),
             judged: true,
         };
-        let encoded = sonic_rs::to_string(&fire)?;
-        assert_eq!(sonic_rs::from_str::<StreamFire>(&encoded)?, fire);
+        let wire = format!(
+            r#"{{"index":2,"rule":"No.Sleep","action":"{spelling}","text":"remember the boundary","judged":true}}"#
+        );
+        assert_eq!(sonic_rs::to_string(&fire)?, wire);
+        assert_eq!(sonic_rs::from_str::<StreamFire>(&wire)?, fire);
     }
+    let report = StreamFire {
+        index: 0,
+        rule: "r".into(),
+        action: StreamFireAction::Report,
+        text: None,
+        judged: false,
+    };
+    let wire = r#"{"index":0,"rule":"r","action":"report","text":null,"judged":false}"#;
+    assert_eq!(sonic_rs::to_string(&report)?, wire);
+    assert_eq!(sonic_rs::from_str::<StreamFire>(wire)?, report);
+    for bad in ["Interrupt", "INTERRUPT", "reminders", "log", ""] {
+        assert!(
+            sonic_rs::from_str::<StreamFireAction>(&format!("\"{bad}\"")).is_err(),
+            "accepted action {bad:?}"
+        );
+    }
+    assert!(
+        sonic_rs::from_str::<StreamFire>(
+            r#"{"index":-1,"rule":"r","action":"report","text":null,"judged":false}"#
+        )
+        .is_err(),
+        "a negative stable index is refused"
+    );
 
-    for budget in [WatchBudget::Interrupts, WatchBudget::RemindersOnly] {
-        let encoded = sonic_rs::to_string(&budget)?;
-        assert_eq!(sonic_rs::from_str::<WatchBudget>(&encoded)?, budget);
+    for (budget, spelling) in [
+        (WatchBudget::Interrupts, "interrupts"),
+        (WatchBudget::RemindersOnly, "reminders_only"),
+    ] {
+        let wire = format!("\"{spelling}\"");
+        assert_eq!(sonic_rs::to_string(&budget)?, wire);
+        assert_eq!(sonic_rs::from_str::<WatchBudget>(&wire)?, budget);
+    }
+    for bad in ["reminders-only", "RemindersOnly", "interrupt", ""] {
+        assert!(
+            sonic_rs::from_str::<WatchBudget>(&format!("\"{bad}\"")).is_err(),
+            "accepted budget {bad:?}"
+        );
     }
 
     let seed = GateSeed {
@@ -735,8 +1025,98 @@ fn stream_fire_budget_and_gate_seed_round_trip() -> TestResult {
         turn: TurnId::new(NonZeroU64::new(7).expect("nonzero turn")),
         entry: EntryId::new(NonZeroU64::new(9).expect("nonzero entry")),
     };
-    let encoded = sonic_rs::to_string(&seed)?;
-    assert_eq!(sonic_rs::from_str::<GateSeed>(&encoded)?, seed);
+    let wire = r#"{"rule":"No.Sleep","turn":7,"entry":9}"#;
+    assert_eq!(sonic_rs::to_string(&seed)?, wire);
+    assert_eq!(sonic_rs::from_str::<GateSeed>(wire)?, seed);
+    // A zero turn or entry id names nothing: both are refused.
+    for bad in [
+        r#"{"rule":"r","turn":0,"entry":9}"#,
+        r#"{"rule":"r","turn":7,"entry":0}"#,
+        r#"{"rule":"r","turn":7}"#,
+        r#"{"turn":7,"entry":9}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<GateSeed>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn agents_reply_wire_is_adjacently_tagged_with_camel_case_fields() -> TestResult {
+    let id = wire_session(WIRE_SESSION);
+    let peer = wire_session(WIRE_PEER);
+    let cursor = EntryId::new(NonZeroU64::new(41).expect("nonzero cursor"));
+    let replies = [
+        (
+            AgentsReply::Started { id },
+            format!(r#"{{"type":"started","value":{{"id":"{WIRE_SESSION}"}}}}"#),
+        ),
+        (
+            AgentsReply::Pending { id },
+            format!(r#"{{"type":"pending","value":{{"id":"{WIRE_SESSION}"}}}}"#),
+        ),
+        (
+            AgentsReply::Await {
+                report: AgentReport {
+                    stop: Stop::EndTurn,
+                    text: "review complete".into(),
+                    session: id,
+                    entry: cursor,
+                },
+            },
+            format!(
+                r#"{{"type":"await","value":{{"report":{{"stop":"end_turn","text":"review complete","session":"{WIRE_SESSION}","entry":41}}}}}}"#
+            ),
+        ),
+        (
+            AgentsReply::Listed(vec![AgentInfo {
+                id,
+                name: "reviewer".into(),
+                state: AgentState::Running,
+            }]),
+            format!(
+                r#"{{"type":"listed","value":[{{"id":"{WIRE_SESSION}","name":"reviewer","state":{{"type":"running"}}}}]}}"#
+            ),
+        ),
+        (
+            AgentsReply::Delivered(Receipt::Woken),
+            r#"{"type":"delivered","value":"woken"}"#.to_owned(),
+        ),
+        (
+            AgentsReply::Received {
+                mail: vec![Mail {
+                    from: id,
+                    to: peer,
+                    mode: MailMode::NextTurn,
+                    text: "next turn".into(),
+                    reply_to: None,
+                }],
+                next: Some(cursor),
+            },
+            format!(
+                r#"{{"type":"received","value":{{"mail":[{{"from":"{WIRE_SESSION}","to":"{WIRE_PEER}","mode":"next_turn","text":"next turn","replyTo":null}}],"next":41}}}}"#
+            ),
+        ),
+    ];
+    for (reply, wire) in replies {
+        assert_eq!(sonic_rs::to_string(&reply)?, wire);
+        assert_eq!(sonic_rs::from_str::<AgentsReply>(&wire)?, reply, "{wire}");
+    }
+    for bad in [
+        r#"{"type":"started"}"#,
+        r#"{"type":"started","value":{}}"#,
+        r#"{"type":"delivered","value":"sent"}"#,
+        r#"{"type":"await","value":{"report":{"stop":"end_turn","text":"t","session":"nope","entry":1}}}"#,
+        r#"{"type":"await","value":{"report":{"stop":"done","text":"t","entry":1}}}"#,
+        r#"{"type":"future","value":{}}"#,
+    ] {
+        assert!(
+            sonic_rs::from_str::<AgentsReply>(bad).is_err(),
+            "accepted {bad}"
+        );
+    }
     Ok(())
 }
 

@@ -380,3 +380,48 @@ fn journal_rejects_future_versions_and_missing_versions() {
         Err(dal_core::DecodeError::MissingVersion)
     ));
 }
+
+#[test]
+fn inferred_owner_wire_spellings_are_pinned_and_foreign_spellings_are_refused() {
+    let inferred = |who: Owner| Record::Inferred {
+        at: at(),
+        who,
+        purpose: dal_core::InferredPurpose::Synthetic { id: "m".into() },
+        usage: test_usage(),
+    };
+    let core = String::from_utf8(encode(&inferred(Owner::Core)).expect("core owner encodes"))
+        .expect("journal line is utf-8");
+    assert!(core.contains(r#""who":"core""#), "{core}");
+    let web = String::from_utf8(
+        encode(&inferred(Owner::Extension {
+            name: "web".into(),
+            origin: "bundled".into(),
+        }))
+        .expect("extension owner encodes"),
+    )
+    .expect("journal line is utf-8");
+    assert!(
+        web.contains(r#""who":{"extension":{"name":"web","origin":"bundled"}}"#),
+        "{web}"
+    );
+    for foreign in [
+        r#""extension""#,
+        r#""Core""#,
+        r#""""#,
+        r#"{"core":null}"#,
+        r#"{"extension":{"name":"web"}}"#,
+        r#"{"extension":{"origin":"bundled"}}"#,
+        r#"{"extension":"web"}"#,
+        "null",
+        "1",
+    ] {
+        let line = core.replace(r#""who":"core""#, &format!(r#""who":{foreign}"#));
+        assert!(
+            matches!(
+                decode(line.as_bytes()),
+                Err(dal_core::DecodeError::Invalid { .. })
+            ),
+            "accepted owner {foreign}"
+        );
+    }
+}
