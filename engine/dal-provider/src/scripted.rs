@@ -887,19 +887,21 @@ mod message_replay_tests {
     #[test]
     fn replay_fixture_roundtrips_a_typed_refusal() {
         let turn = TURN.replace(
-            r#""capture":{"status":"captured","payload":{"cursor_history":[1,2]}}""#,
-            r#""capture":{"status":"refused","reason":"user_record_not_found"}""#,
+            r#""capture":{"status":"captured","payload":{"cursor_history":[1,2]}}"#,
+            r#""capture":{"status":"refused","reason":"user_record_not_found"}"#,
         );
+        assert_ne!(turn, TURN, "the refusal swap must change the fixture");
         let script = Script::from_replay(turn.as_bytes()).expect("refusal fixture decodes");
         let mut stream = script.open().expect("script opens");
         let items = block_on(drain(&mut stream));
         assert_eq!(items.len(), 5);
-        match capture_of(items[2].as_ref().expect("capture delivers")) {
-            ReplayCapture::Refused { reason } => {
-                assert_eq!(*reason, dal_core::ReplayRefusal::UserRecordNotFound);
-            }
-            other @ ReplayCapture::Captured { .. } => panic!("expected a refusal, got {other:?}"),
-        }
+        assert_eq!(
+            capture_of(items[2].as_ref().expect("capture delivers")),
+            &ReplayCapture::Refused {
+                reason: dal_core::ReplayRefusal::UserRecordNotFound,
+            },
+            "the delivered capture must be the typed refusal, not a payload"
+        );
     }
 
     #[test]
