@@ -294,6 +294,140 @@ mod tests {
         assert_eq!(warnings, "");
     }
 
+    /// The refusal text for `[plugin.web]` overrides, or `None` when they decode.
+    fn web_refusal(body: &str) -> Option<String> {
+        let mut warnings = Vec::new();
+        Sections::decode_with(&config(&format!("[plugin.web]\n{body}\n")), &mut warnings)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    #[test]
+    fn the_embedded_defaults_decode_to_the_documented_web_limits() {
+        let (sections, warnings) = decode("");
+        let web = sections.web;
+        assert!(web.enabled);
+        assert_eq!(web.provider, "brave");
+        assert_eq!(web.api_key_env, "BRAVE_API_KEY");
+        assert_eq!(web.search_depth, None);
+        assert_eq!(web.timeout_secs, 30);
+        assert_eq!(web.max_redirects, 10);
+        assert_eq!(web.max_body_bytes, 2_097_152);
+        assert_eq!(web.max_markdown_bytes, 131_072);
+        assert_eq!(warnings, "");
+    }
+
+    /// Attacks one limit from both sides: every `accepted` value decodes, every
+    /// `refused` value fails with exactly `message`.
+    fn assert_web_edge(key: &str, accepted: [i64; 3], refused: [i64; 2], message: &str) {
+        for value in accepted {
+            assert_eq!(
+                web_refusal(&format!("{key} = {value}")),
+                None,
+                "{key} = {value}"
+            );
+        }
+        for value in refused {
+            assert_eq!(
+                web_refusal(&format!("{key} = {value}")).as_deref(),
+                Some(format!("invalid [plugin.web] config: {message}").as_str()),
+                "{key} = {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_timeout_accepts_one_and_three_hundred_and_refuses_zero_and_one_past() {
+        assert_web_edge(
+            "timeout_secs",
+            [1, 2, 300],
+            [0, 301],
+            "timeout_secs must be 1 to 300",
+        );
+    }
+
+    #[test]
+    fn web_redirects_accept_zero_and_twenty_and_refuse_one_past() {
+        assert_web_edge(
+            "max_redirects",
+            [0, 1, 20],
+            [21, 22],
+            "max_redirects must be 0 to 20",
+        );
+    }
+
+    #[test]
+    fn web_body_ceiling_accepts_1024_and_refuses_1023() {
+        assert_web_edge(
+            "max_body_bytes",
+            [1024, 1025, 2_097_152],
+            [1023, 0],
+            "max_body_bytes must be at least 1024",
+        );
+    }
+
+    #[test]
+    fn web_markdown_ceiling_accepts_one_and_refuses_zero() {
+        assert_web_edge(
+            "max_markdown_bytes",
+            [1, 2, 131_072],
+            [0, 0],
+            "max_markdown_bytes must be at least 1",
+        );
+    }
+
+    #[test]
+    fn a_web_limit_that_is_negative_wrapped_or_mistyped_is_refused_not_coerced() {
+        for body in [
+            "timeout_secs = -1",
+            "max_redirects = -1",
+            "max_body_bytes = -1",
+            "max_markdown_bytes = -1",
+            "timeout_secs = 4294967297",
+            "max_redirects = 4294967296",
+            "timeout_secs = \"30\"",
+            "timeout_secs = 30.5",
+            "max_body_bytes = true",
+        ] {
+            let message = web_refusal(body).unwrap_or_default();
+            assert!(
+                message.starts_with("invalid [plugin.web] config: "),
+                "{body}: {message:?}"
+            );
+            assert!(
+                !message.contains("must be"),
+                "{body} must fail in the decoder, not slip into a range check: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_provider_and_depth_outside_the_closed_sets_are_refused() {
+        for (body, message) in [
+            (
+                "provider = \"Brave\"",
+                "unknown provider \"Brave\"; the providers are \"brave\" and \"tavily\"",
+            ),
+            (
+                "provider = \"\"",
+                "unknown provider \"\"; the providers are \"brave\" and \"tavily\"",
+            ),
+            (
+                "search_depth = \"Advanced\"",
+                "search_depth must be \"basic\" or \"advanced\"",
+            ),
+            ("api_key_env = \"\"", "api_key_env must not be empty"),
+        ] {
+            assert_eq!(
+                web_refusal(body).as_deref(),
+                Some(format!("invalid [plugin.web] config: {message}").as_str()),
+                "{body}"
+            );
+        }
+        assert_eq!(web_refusal("search_depth = \"advanced\""), None);
+        assert_eq!(web_refusal("provider = \"tavily\""), None);
+    }
+
     #[test]
     fn a_failing_neighbour_section_still_aborts_startup_without_a_history_warning() {
         let mut warnings = Vec::new();

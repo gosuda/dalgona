@@ -163,6 +163,11 @@ mod tests {
             version.split('.').count() >= 2,
             "oracle version is not dotted: {version}"
         );
+        assert_eq!(
+            version,
+            support::dalgona_version()?,
+            "the manifest scrape must agree with cargo metadata"
+        );
         Ok(())
     }
 }

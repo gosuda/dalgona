@@ -656,6 +656,33 @@ fn selection_errors_name_the_problem() {
     assert_eq!(options().check(&loaded), Ok(()));
 }
 
+#[test]
+fn run_repeats_accept_one_through_ten_and_refuse_either_side() {
+    let loaded = pack(TWO_CASES);
+    for repeats in [1, 2, 9, 10] {
+        let accepted = Options {
+            repeats: Some(repeats),
+            ..options()
+        };
+        assert_eq!(accepted.check(&loaded), Ok(()), "--repeats {repeats}");
+    }
+    for repeats in [0, 11, 12, u32::MAX] {
+        let refused = Options {
+            repeats: Some(repeats),
+            ..options()
+        };
+        assert_eq!(
+            refused.check(&loaded),
+            Err(PlanError::Repeats),
+            "--repeats {repeats}"
+        );
+    }
+    assert_eq!(
+        PlanError::Repeats.to_string(),
+        "--repeats must be an integer from 1 to 10"
+    );
+}
+
 #[tokio::test]
 async fn arms_run_in_order_with_repeats_innermost() {
     let source = "def good(r, w):\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = good, repeats = 2)])\n";

@@ -455,15 +455,9 @@ mod tests {
     fn accepts_the_web_config_defaults() {
         let config = test_config();
         assert!(config.validate().is_ok());
-        assert!(config.enabled);
-        assert_eq!(config.provider, "brave");
-        assert_eq!(config.api_key_env, "BRAVE_API_KEY");
-        assert!(config.search_depth.is_none());
+        assert_eq!(config.provider(), Some(super::Provider::Brave));
+        assert_eq!(config.api_key_env_name(), "BRAVE_API_KEY");
         assert_eq!(super::search_depth(&config), "basic");
-        assert_eq!(config.timeout_secs, 30);
-        assert_eq!(config.max_redirects, 10);
-        assert_eq!(config.max_body_bytes, 2_097_152);
-        assert_eq!(config.max_markdown_bytes, 131_072);
     }
 
     #[test]

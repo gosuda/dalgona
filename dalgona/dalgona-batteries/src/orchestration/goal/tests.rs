@@ -218,6 +218,55 @@ fn create_goal_reports_exact_texts() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+const TOO_LONG_4001: &str = "create_goal: the objective has 4001 characters; the limit is 4000. Put the full objective in a file and name the file in the objective.";
+
+#[test]
+fn the_create_goal_tool_holds_4000_characters_and_refuses_4001() -> Result<(), Box<dyn Error>> {
+    let now = ts("2026-09-25T10:15:30.123Z")?;
+    let ctx = scope("s1");
+    for unit in ["x", "\u{754c}"] {
+        let fits = create_goal(&mut empty_sidecar("s1"), &ctx, &unit.repeat(4000), now)?;
+        assert!(fits.starts_with("goal g1: active"), "{unit:?}: {fits}");
+        assert_eq!(
+            create_goal(&mut empty_sidecar("s1"), &ctx, &unit.repeat(4001), now)
+                .unwrap_err()
+                .to_string(),
+            TOO_LONG_4001,
+            "{unit:?}: the cap counts characters, not bytes"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_goal_command_holds_4000_characters_and_refuses_4001() -> Result<(), Box<dyn Error>> {
+    let now = ts("2026-09-25T10:15:30.123Z")?;
+    let ctx = scope("s1");
+    for unit in ["x", "\u{754c}"] {
+        let mut sidecar = empty_sidecar("s1");
+        let fits = apply_goal_command(
+            &mut sidecar,
+            &ctx,
+            &parse_goal_command(&unit.repeat(4000)),
+            now,
+        );
+        assert!(fits.starts_with("goal g1: active"), "{unit:?}: {fits}");
+        let mut sidecar = empty_sidecar("s1");
+        assert_eq!(
+            apply_goal_command(
+                &mut sidecar,
+                &ctx,
+                &parse_goal_command(&unit.repeat(4001)),
+                now
+            ),
+            TOO_LONG_4001,
+            "{unit:?}"
+        );
+        assert!(sidecar.goal.is_none(), "a refused objective stores no goal");
+    }
+    Ok(())
+}
+
 fn assert_update_audit_errors(
     sidecar: &mut GoalSidecar,
     ctx: &GoalScope<'_>,

@@ -18,7 +18,79 @@ fn section(source: &str) -> Result<toml::Value, Box<dyn Error>> {
 
 #[test]
 fn omitted_section_enables_all_features() -> TestResult {
-    assert_eq!(JudgedConfig::from_config(None)?, JudgedConfig::default());
+    let all_on = JudgedConfig {
+        thinking: true,
+        ranking: true,
+        ask_anchor: true,
+        claim_check: true,
+        dedup: true,
+    };
+    assert_eq!(JudgedConfig::from_config(None)?, all_on);
+    assert_eq!(JudgedConfig::default(), all_on);
+    let empty = toml::Value::Table(toml::map::Map::default());
+    assert_eq!(JudgedConfig::from_config(Some(&empty))?, all_on);
+    Ok(())
+}
+
+fn assert_suggestions(cases: &[(&str, &str)]) -> TestResult {
+    for (key, suggestion) in cases {
+        let section = section(&format!("{key} = true\n"))?;
+        let Err(error) = JudgedConfig::from_config(Some(&section)) else {
+            return Err("an unknown key must be rejected".into());
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("judged: [plugin.judged] has an unknown key \"{key}\".{suggestion}"),
+            "{key}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unknown_key_suggestions_stop_at_edit_distance_two() -> TestResult {
+    assert_suggestions(&[
+        ("thinkingz", " Did you mean \"thinking\"?"),
+        ("thinkingzz", " Did you mean \"thinking\"?"),
+        ("thinkingzzz", ""),
+        ("thinkixg", " Did you mean \"thinking\"?"),
+        ("thinkxyg", " Did you mean \"thinking\"?"),
+        ("thinkxyz", ""),
+        ("dedupzz", " Did you mean \"dedup\"?"),
+        ("dedupzzz", ""),
+        ("claim_checkzz", " Did you mean \"claim_check\"?"),
+        ("claim_checkzzz", ""),
+    ])
+}
+
+#[test]
+fn unknown_key_suggestions_ignore_ascii_case() -> TestResult {
+    assert_suggestions(&[
+        ("THINKING", " Did you mean \"thinking\"?"),
+        ("Dedup_", " Did you mean \"dedup\"?"),
+        ("RANKING", " Did you mean \"ranking\"?"),
+    ])
+}
+
+#[test]
+fn degenerate_unknown_keys_are_refused_without_a_suggestion_or_a_panic() -> TestResult {
+    let long = "k".repeat(4096);
+    for key in [
+        "\"\"",
+        long.as_str(),
+        "\"\u{20ac}\u{20ac}\u{20ac}\u{20ac}\"",
+    ] {
+        let section = section(&format!("{key} = true\n"))?;
+        let Err(error) = JudgedConfig::from_config(Some(&section)) else {
+            return Err("an unknown key must be rejected".into());
+        };
+        let text = error.to_string();
+        assert!(
+            text.starts_with("judged: [plugin.judged] has an unknown key \""),
+            "{text}"
+        );
+        assert!(!text.contains("Did you mean"), "{text}");
+    }
     Ok(())
 }
 
