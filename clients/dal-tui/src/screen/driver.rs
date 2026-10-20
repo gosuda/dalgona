@@ -41,11 +41,7 @@ pub(crate) struct Painter {
     epoch: u64,
     sync: bool,
     initialized: bool,
-    overlay: bool,
-    /// The main-screen frame parked while the transcript overlay owns the
-    /// alternate screen. The main buffer is never touched meanwhile, so
-    /// leaving the overlay diffs against it and repaints only what changed.
-    main: Option<MainFrame>,
+    overlay: OverlayState,
     /// Terminal cell (row, column), 1-based, where the caret was last placed.
     cursor: Option<(usize, usize)>,
     #[expect(
@@ -121,6 +117,13 @@ struct MainFrame {
     epoch: u64,
 }
 
+#[derive(Default)]
+enum OverlayState {
+    #[default]
+    Closed,
+    Open(Option<MainFrame>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ImageKey {
     digest: [u8; 32],
@@ -176,7 +179,10 @@ impl Painter {
     /// moves while the transcript overlay owns the alternate screen or before
     /// the first frame.
     pub(crate) fn rest_below_block(&self, io: &dyn TermIo) -> Result<(), TuiError> {
-        if self.overlay || !self.initialized || self.previous.is_empty() {
+        if matches!(self.overlay, OverlayState::Open(_))
+            || !self.initialized
+            || self.previous.is_empty()
+        {
             return Ok(());
         }
         let size = io.size().unwrap_or(self.size);
@@ -239,7 +245,8 @@ impl Painter {
         }
         let committed_len = input.transcript.rows().len();
         let mut bytes = Vec::new();
-        if overlay != self.overlay {
+        let surface_is_overlay = matches!(self.overlay, OverlayState::Open(_));
+        if overlay != surface_is_overlay {
             if overlay {
                 (size, epoch, placement) = self.enter_overlay(&mut bytes, size, epoch, placement);
             } else {
@@ -383,7 +390,7 @@ impl Painter {
         // target (also on an overlay-entry frame, before ?1049h), the block
         // was painted, and something signaled a resize.
         if screen == Screen::Inline
-            && !self.overlay
+            && matches!(self.overlay, OverlayState::Closed)
             && self.initialized
             && (self.size != size || self.epoch != epoch)
         {
@@ -431,15 +438,15 @@ impl Painter {
             bytes.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
         }
         bytes.extend_from_slice(b"\x1b[?1049h\x1b[?25l");
-        self.main = Some(MainFrame {
+        let main = MainFrame {
             previous: std::mem::take(&mut self.previous),
             size: self.size,
             initialized: self.initialized,
             anchor: self.anchor,
             epoch: self.epoch,
-        });
+        };
+        self.overlay = OverlayState::Open(Some(main));
         self.initialized = false;
-        self.overlay = true;
         (size, epoch, placement)
     }
 
@@ -460,7 +467,11 @@ impl Painter {
                 "dalgon: cannot write the interface: {error}\nCheck that the terminal is still connected."
             ))
         })?;
-        if let Some(main) = self.main.take() {
+        let main = match &mut self.overlay {
+            OverlayState::Open(parked) => parked.take(),
+            OverlayState::Closed => None,
+        };
+        if let Some(main) = main {
             self.previous = main.previous;
             self.size = main.size;
             self.initialized = main.initialized;
@@ -478,7 +489,7 @@ impl Painter {
                 placement: Placement::Hold,
                 ..
             } => {
-                self.overlay = false;
+                self.overlay = OverlayState::Closed;
                 if self.size == size && self.epoch == epoch {
                     let top = u16::try_from(self.anchor.max(1)).unwrap_or(u16::MAX);
                     return Ok(Some((size, epoch, Placement::Located(top))));
@@ -503,7 +514,7 @@ impl Painter {
                 ..
             } => {}
         }
-        self.overlay = false;
+        self.overlay = OverlayState::Closed;
         Ok(Some((size, epoch, placement)))
     }
 
