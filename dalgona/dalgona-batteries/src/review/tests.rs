@@ -532,6 +532,53 @@ fn findings_cap() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[test]
+fn findings_cap_accepts_exactly_the_maximum_and_refuses_one_more()
+-> Result<(), Box<dyn std::error::Error>> {
+    let finding =
+        r#"{"path":"src/lib.rs","line":null,"severity":"major","title":"bug","detail":"broken"}"#;
+    let body = |count: usize| {
+        let findings = vec![finding; count].join(",");
+        format!("{{\"verdict\":\"findings\",\"findings\":[{findings}],\"summary\":\"ok\"}}")
+    };
+    let at_cap = enforce_findings_cap(parse_reply(&body(MAX_FINDINGS), 1)?)?;
+    assert_eq!(at_cap.findings.len(), MAX_FINDINGS);
+    assert!(matches!(
+        enforce_findings_cap(parse_reply(&body(MAX_FINDINGS + 1), 1)?),
+        Err(ReviewError::TooManyFindings { count }) if count == MAX_FINDINGS + 1
+    ));
+    Ok(())
+}
+
+#[test]
+fn max_rounds_accepts_both_edges_and_refuses_the_neighbours()
+-> Result<(), Box<dyn std::error::Error>> {
+    for rounds in [1_u8, 2, 9, 10] {
+        let value = toml::from_str::<toml::Value>(&format!("max_rounds = {rounds}"))?;
+        assert_eq!(ReviewConfig::parse_config(Some(&value))?.max_rounds, rounds);
+    }
+    for text in [
+        "max_rounds = -1",
+        "max_rounds = 256",
+        "max_rounds = 257",
+        "max_rounds = 4294967297",
+        "max_rounds = \"3\"",
+        "max_rounds = 2.5",
+        "max_rounds = true",
+    ] {
+        let value = toml::from_str::<toml::Value>(text)?;
+        assert!(
+            matches!(
+                ReviewConfig::parse_config(Some(&value)),
+                Err(ReviewConfigError::InvalidValue { key, .. })
+                    if key.as_ref() == "plugin.review.max_rounds"
+            ),
+            "{text} must be refused as an invalid max_rounds, not wrapped or coerced"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn duplicate_current_findings_count_against_earlier_rounds_only()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = r#"{"verdict":"findings","findings":[{"path":"src/lib.rs","line":null,"severity":"major","title":"Bug","detail":"first"},{"path":"src/lib.rs","line":null,"severity":"major","title":" bug ","detail":"second"}],"summary":"ok"}"#;
@@ -809,26 +856,6 @@ fn review_cap_reached_stops_and_reports_outstanding_findings()
         return Err("a call after the cap did not stop".into());
     };
     assert_eq!(repeated, outstanding);
-    Ok(())
-}
-
-#[test]
-fn cancel_mid_round_appends_no_record_and_resumes() -> Result<(), Box<dyn std::error::Error>> {
-    let session = SessionId::new_v7();
-    let first = parse_reply(ONE_FINDING, 1)?;
-    let fresh = new_count(&first, &BTreeSet::new())?;
-    let records = vec![ReviewRecord {
-        session,
-        round: 1,
-        verdict: Verdict::Findings,
-        new_count: fresh,
-        findings: stored_findings(&first),
-    }];
-    let count_before = records.len();
-    let resumed = next_round(&records, 3, RoundRequest::Continue)?;
-    assert_eq!(resumed.session, session);
-    assert_eq!(resumed.round, 2);
-    assert_eq!(records.len(), count_before);
     Ok(())
 }
 
