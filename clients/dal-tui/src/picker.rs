@@ -109,6 +109,8 @@ pub(crate) enum PickerAction {
     /// matches. Entering the row alone scopes that one model; in a
     /// multi-select the checked rows win instead.
     ScopeModel(Box<str>),
+    /// Load the row's stored text into the composer as the draft.
+    SetDraft(Box<str>),
     /// Activate nothing: the failed model picker keeps its instruction row
     /// selectable without running a command or dismissing the failure state.
     Noop,
@@ -509,6 +511,39 @@ pub(crate) fn scoped_models_picker(
     let mut picker = PickerUi::new(ids::SCOPED_MODELS_TITLE, filter, options);
     picker.with_multi(checked);
     picker
+}
+
+/// The prompt-history picker: every past user message is a row whose
+/// activation loads the message text into the composer as the draft.
+pub(crate) fn history_picker(entries: &[EntryView], filter: &str) -> PickerUi {
+    let options = entries
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            let EntryKind::User { parts } = &entry.kind else {
+                return None;
+            };
+            let text = parts
+                .iter()
+                .filter_map(|part| match part {
+                    JournalPart::Text { text } => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let preview = text.lines().next().unwrap_or("");
+            Some(PickerOption {
+                label: crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow)
+                    .to_string(),
+                action: PickerAction::SetDraft(text.into()),
+            })
+        })
+        .collect();
+    PickerUi::new(ids::HISTORY_PICKER_TITLE, filter, options)
 }
 
 /// The model picker's failure surface: the failure copy is the title, the
@@ -966,4 +1001,56 @@ mod picker_tests {
         assert!(!picker.is_checked(0));
     }
 
+    /// The history picker loads a past user message as the draft text and
+    /// ignores non-user and textless entries.
+    #[test]
+    fn history_picker_loads_the_message_as_a_draft() {
+        let entries = vec![
+            dal_core::EntryView {
+                id: dal_core::EntryId::new(NonZeroU64::MIN),
+                parent: None,
+                kind: dal_core::EntryKind::User {
+                    parts: vec![
+                        dal_core::JournalPart::Text {
+                            text: "first\nline".into(),
+                        },
+                        dal_core::JournalPart::Text {
+                            text: "second".into(),
+                        },
+                    ],
+                },
+            },
+            dal_core::EntryView {
+                id: dal_core::EntryId::new(NonZeroU64::new(2).unwrap_or(NonZeroU64::MIN)),
+                parent: None,
+                kind: dal_core::EntryKind::Model {
+                    route: dal_core::ModelRoute::Harness {
+                        id: "dalgon/normal".into(),
+                    },
+                },
+            },
+        ];
+        let mut picker = super::history_picker(&entries, "");
+        assert_eq!(picker.visible_len(), 1);
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::SetDraft(text)) if text.as_ref() == "first\nline\nsecond"
+        ));
+    }
+
+    /// Paste drops control characters beyond newlines — an embedded escape
+    /// or NUL can never smuggle a filter state.
+    #[test]
+    fn paste_drops_every_control_character() {
+        let mut picker = PickerUi::new(
+            "Pick",
+            "",
+            vec![PickerOption {
+                label: "abc".to_owned(),
+                action: PickerAction::Noop,
+            }],
+        );
+        picker.paste("a\u{1b}\u{0}bc\t");
+        assert_eq!(picker.filter(), "abc");
+    }
 }

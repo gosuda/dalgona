@@ -2530,6 +2530,22 @@ fn apply_composer_action(
             session.viewport.clear_selection();
             session.composer.move_down();
         }
+        // Ctrl+Up / Ctrl+Down walk the submitted prompts at the boundary,
+        // the same entries Up/Down walk, without moving the caret mid-draft.
+        Some(Action::PrevPrompt) => {
+            session.viewport.clear_selection();
+            session.composer.history_prev();
+        }
+        Some(Action::NextPrompt) => {
+            session.viewport.clear_selection();
+            session.composer.history_next();
+        }
+        // Ctrl+R searches prompt history: the picker lists every submitted
+        // user message, and Enter loads the row into the composer draft.
+        Some(Action::HistorySearch) => {
+            session.viewport.clear_selection();
+            session.picker = Some(crate::picker::history_picker(entries, ""));
+        }
         None if key.code == KeyCode::Backspace => {
             session.viewport.clear_selection();
             session.composer.backspace();
@@ -2567,6 +2583,12 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                 }
                 Some(PickerAction::ConfirmLogoutAll) => {
                     session.signin = Some(SignIn::confirm_all());
+                    session.picker = None;
+                }
+                Some(PickerAction::SetDraft(text)) => {
+                    // History recall: the row's message becomes the draft.
+                    session.composer.set(&text);
+                    session.update_popup();
                     session.picker = None;
                 }
                 Some(PickerAction::SetDiagrams { enabled, save }) => {
@@ -2920,6 +2942,118 @@ mod tests {
         assert!(session.candidates.is_empty());
         apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(session.composer.text(), "plain text  ");
+    }
+
+    #[test]
+    fn history_picker_enter_loads_the_message_into_the_draft() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let entries = vec![dal_core::EntryView {
+            id: dal_core::EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: dal_core::EntryKind::User {
+                parts: vec![dal_core::JournalPart::Text {
+                    text: "fix the parser".into(),
+                }],
+            },
+        }];
+        let mut session = Session {
+            picker: Some(crate::picker::history_picker(&entries, "")),
+            ..Session::default()
+        };
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "fix the parser");
+        assert!(session.picker.is_none());
+        // The completion ring state reset, so a later Tab starts fresh.
+        assert_eq!(session.popup_base, None);
+        assert_eq!(session.popup_index, 0);
+    }
+
+    #[test]
+    fn recalling_a_prompt_drops_the_completions_of_the_draft_it_replaced() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let commands: Vec<dal_core::CommandSpec> = ["model", "mode"]
+            .into_iter()
+            .map(|name| dal_core::CommandSpec {
+                name: dal_core::CommandName::parse(name).unwrap(),
+                summary: format!("{name} summary").into(),
+                args_hint: None,
+            })
+            .collect();
+        let entries = vec![dal_core::EntryView {
+            id: dal_core::EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: dal_core::EntryKind::User {
+                parts: vec![dal_core::JournalPart::Text {
+                    text: "fix the parser".into(),
+                }],
+            },
+        }];
+        let mut session = Session {
+            commands: commands.into(),
+            ..Session::default()
+        };
+        session.composer.set("/m");
+        session.update_popup();
+        assert_eq!(session.candidates.len(), 2);
+        session.picker = Some(crate::picker::history_picker(&entries, ""));
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "fix the parser");
+        // The recalled prompt completes nothing, so Tab is plain text again
+        // instead of replacing the prompt with a command of the old draft.
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "fix the parser  ");
+    }
+
+    #[test]
+    fn control_up_down_recall_prompts_and_control_r_opens_history() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut session = Session::default();
+        session.composer.set("first");
+        session.submit_line("first");
+        session.composer.set("second");
+        session.submit_line("second");
+
+        apply_key(&mut session, Key::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "second");
+        apply_key(&mut session, Key::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "first");
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "second");
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(
+            session.composer.text(),
+            "",
+            "past the newest, the draft returns"
+        );
+
+        // An unsent draft, typed rather than submitted: submitting empties
+        // the composer.
+        session.composer.set("typed draft");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            session.composer.text(),
+            "typed draft",
+            "the draft survives the search"
+        );
+        // The picker renders no rows without journal entries, but the
+        // surface opens; Enter on a row loads it back into the draft.
+        assert!(session.picker.is_some(), "Ctrl+R opens the history picker");
+        apply_key(&mut session, Key::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(session.picker.is_none(), "Esc dismisses the history search");
+        assert_eq!(
+            session.composer.text(),
+            "typed draft",
+            "a dismissed search leaves the draft alone"
+        );
     }
 
     #[test]

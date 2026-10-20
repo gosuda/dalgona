@@ -292,6 +292,8 @@ pub mod ids {
         "Pick the models /model lists · space checks · enter applies";
     /// Scoped-model row for a committed id the current model list does not name.
     pub const SCOPED_UNAVAILABLE_ROW: &str = "{id} · not in the current model list";
+    /// Prompt-history picker title.
+    pub const HISTORY_PICKER_TITLE: &str = "Pick a past prompt · enter loads it as the draft";
     /// Empty picker notice.
     pub const PICKER_EMPTY: &str = "No choices are available.";
     /// Unsupported picker notice.
@@ -551,6 +553,7 @@ pub const DECK: &[(&str, &str)] = &[
         "picker.scopedModels.unavailableRow",
         ids::SCOPED_UNAVAILABLE_ROW,
     ),
+    ("picker.history.title", ids::HISTORY_PICKER_TITLE),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
     ("picker.login.title", ids::LOGIN_PICKER_TITLE),
