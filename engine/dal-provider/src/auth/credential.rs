@@ -162,8 +162,7 @@ impl fmt::Debug for EnvSnapshot {
         names.sort_unstable();
         f.debug_struct("EnvSnapshot")
             .field("names", &names)
-            .field("cwd", &self.cwd)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
