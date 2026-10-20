@@ -540,6 +540,11 @@ pub const DECK: &[(&str, &str)] = &[
     ("tree.leaf", ids::TREE_LEAF),
     ("picker.fork.title", ids::FORK_PICKER_TITLE),
     ("picker.hint", ids::PICKER_HINT),
+    ("picker.scopedModels.title", ids::SCOPED_MODELS_TITLE),
+    (
+        "picker.scopedModels.unavailableRow",
+        ids::SCOPED_UNAVAILABLE_ROW,
+    ),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
     ("picker.login.title", ids::LOGIN_PICKER_TITLE),

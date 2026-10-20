@@ -322,6 +322,17 @@ fn tui_error(error: TuiError) -> ExitCode {
     }
 }
 
+/// Maps the rows of a remote `models/list` to picker options.
+///
+/// A row whose server publishes a typed route selects by that route and
+/// nothing else: the picker submits `SetModel` of the route exactly as the
+/// local picker does, and the route's configured provider is the scope
+/// identity. A row from a server that predates typed routes keeps its
+/// original `/model <reference>` selection and has no scope identity: its
+/// `provider` is only a family label, which cannot name a configured
+/// provider. Rows that spell one label (an API model and a synthetic model
+/// both named `openrouter/free`) stay separate rows and are told apart by
+/// their route kind.
 fn remote_model_options(
     models: Vec<dal_wire::remote::RemoteModel>,
 ) -> Vec<dal_tui::picker::ModelOption> {
@@ -1022,6 +1033,70 @@ key_env = "OPENAI_API_KEY"
                 )
             }
 
+            async fn assert_options_select_exact_routes(host: &RemoteHost) -> Vec<ModelOption> {
+                let models = host.models().await.expect("the model list decodes");
+                let options = remote_model_options(models.clone());
+                assert_eq!(options.len(), 10, "one option per listed model");
+                // The label is the row's name and its reference; every
+                // label of this list is distinct, so none takes a kind
+                // suffix.
+                for (model, option) in models.iter().zip(&options) {
+                    let reference = model.reference.as_deref().expect("a named row");
+                    assert_eq!(option.label, format!("{} · {reference}", model.name));
+                }
+                let labels: BTreeSet<&str> =
+                    options.iter().map(|option| option.label.as_str()).collect();
+                assert_eq!(labels.len(), options.len(), "{labels:?}");
+                // Each option selects its typed route, provider
+                // included, and scopes API rows by `provider/native`.
+                let wanted = [
+                    (
+                        api(Family::Responses, "gpt-4o", "openai"),
+                        "openai/gpt-4o",
+                        Some("openai/gpt-4o"),
+                    ),
+                    (
+                        api(Family::Responses, "gpt-4o", "openrouter"),
+                        "openrouter/gpt-4o",
+                        Some("openrouter/gpt-4o"),
+                    ),
+                    (
+                        api(Family::Chat, "gpt-4o", "acme-proxy"),
+                        "acme-proxy/gpt-4o",
+                        Some("acme-proxy/gpt-4o"),
+                    ),
+                    (
+                        api(Family::Responses, "openrouter/free", "openrouter"),
+                        "openrouter/openrouter/free",
+                        Some("openrouter/openrouter/free"),
+                    ),
+                    (
+                        api(Family::Responses, "free", "openrouter"),
+                        "openrouter/free",
+                        Some("openrouter/free"),
+                    ),
+                    (synthetic_route("acme/fast"), "acme/fast", None),
+                    (synthetic_route("openrouter/free"), "openrouter/free", None),
+                ];
+                for (route, reference, scoped) in wanted {
+                    let option = option_for(&options, &route);
+                    assert!(
+                        option.label.ends_with(&format!(" · {reference}")),
+                        "{} names {reference}",
+                        option.label
+                    );
+                    assert_eq!(option.scoped_id.as_deref(), scoped, "{route:?}");
+                    assert_eq!(
+                        option.command,
+                        Command::SetModel {
+                            model: route.clone(),
+                            save: Save::SessionOnly,
+                        }
+                    );
+                }
+                options
+            }
+
             #[tokio::test]
             async fn every_remote_selection_succeeds_on_a_serve_host_that_refuses_defaults() {
                 // A `dalgon serve` host never writes defaults. A picker option
@@ -1125,66 +1200,7 @@ key_env = "OPENAI_API_KEY"
                 let initial = std::fs::read_to_string(&config).expect("initial config");
                 fixture
                     .served(|host| async move {
-                        let models = host.models().await.expect("the model list decodes");
-                        let options = remote_model_options(models.clone());
-                        assert_eq!(options.len(), 10, "one option per listed model");
-                        // The label is the row's name and its reference; every
-                        // label of this list is distinct, so none takes a kind
-                        // suffix.
-                        for (model, option) in models.iter().zip(&options) {
-                            let reference = model.reference.as_deref().expect("a named row");
-                            assert_eq!(option.label, format!("{} · {reference}", model.name));
-                        }
-                        let labels: BTreeSet<&str> =
-                            options.iter().map(|option| option.label.as_str()).collect();
-                        assert_eq!(labels.len(), options.len(), "{labels:?}");
-                        // Each option selects its typed route, provider
-                        // included, and scopes API rows by `provider/native`.
-                        let wanted = [
-                            (
-                                api(Family::Responses, "gpt-4o", "openai"),
-                                "openai/gpt-4o",
-                                Some("openai/gpt-4o"),
-                            ),
-                            (
-                                api(Family::Responses, "gpt-4o", "openrouter"),
-                                "openrouter/gpt-4o",
-                                Some("openrouter/gpt-4o"),
-                            ),
-                            (
-                                api(Family::Chat, "gpt-4o", "acme-proxy"),
-                                "acme-proxy/gpt-4o",
-                                Some("acme-proxy/gpt-4o"),
-                            ),
-                            (
-                                api(Family::Responses, "openrouter/free", "openrouter"),
-                                "openrouter/openrouter/free",
-                                Some("openrouter/openrouter/free"),
-                            ),
-                            (
-                                api(Family::Responses, "free", "openrouter"),
-                                "openrouter/free",
-                                Some("openrouter/free"),
-                            ),
-                            (synthetic_route("acme/fast"), "acme/fast", None),
-                            (synthetic_route("openrouter/free"), "openrouter/free", None),
-                        ];
-                        for (route, reference, scoped) in wanted {
-                            let option = option_for(&options, &route);
-                            assert!(
-                                option.label.ends_with(&format!(" · {reference}")),
-                                "{} names {reference}",
-                                option.label
-                            );
-                            assert_eq!(option.scoped_id.as_deref(), scoped, "{route:?}");
-                            assert_eq!(
-                                option.command,
-                                Command::SetModel {
-                                    model: route.clone(),
-                                    save: Save::SessionOnly,
-                                }
-                            );
-                        }
+                        let options = assert_options_select_exact_routes(&host).await;
                         // Submitting the options of both same-family rows, and
                         // returning to the first, sets the session model to
                         // each exact route: nothing rebinds to a twin.

@@ -1382,6 +1382,9 @@ impl Surfaces {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
                         None
                     }
+                    Chooser::ScopedModels => {
+                        self.scoped_models_choice(opts, agent, &filter, model_source)
+                    }
                     _ => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
@@ -1409,6 +1412,58 @@ impl Surfaces {
         self.session.command_seq = self.session.command_seq.saturating_add(1);
         self.transcript
             .commit(&format!("command-{}", self.session.command_seq), &rows);
+    }
+
+    /// Builds the scoped-models picker from live catalog rows and the
+    /// committed scope the agent reports right now. The terminal keeps no
+    /// scope of its own: every open reads `settings.scoped_models` from a
+    /// fresh `Agent::view`, where `None` (never committed) and `Some([])`
+    /// (explicitly cleared) both mean no scope. Only scope-eligible rows
+    /// (`scoped_id: Some`) become rows; synthetic, harness, and legacy rows
+    /// are excluded so the gate can match every offered id. Active scope
+    /// strings compare verbatim; an active id the list does not name shows as
+    /// its own checked row, so it stays until unchecked and can be removed.
+    /// A failing model source or view read shows
+    /// the failure and opens no picker: an unknown scope is never guessed
+    /// as empty, because submitting it would clear the real restriction.
+    fn scoped_models_choice<A, M>(
+        &mut self,
+        opts: &TuiOptions,
+        agent: &A,
+        filter: &str,
+        model_source: &mut M,
+    ) -> Option<crate::picker::PickerUi>
+    where
+        A: TuiAgent,
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        let models = match model_source() {
+            Ok(models) => models,
+            Err(error) => {
+                self.live
+                    .notice(format!("note: cannot list models for the scope picker: {error}"));
+                return None;
+            }
+        };
+        let fresh = match opts.rt.block_on(agent.view(snapshot_page())) {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.live
+                    .notice(format!("note: cannot read the current model scope: {error}"));
+                return None;
+            }
+        };
+        let rows = models
+            .into_iter()
+            .filter_map(|model| {
+                model.scoped_id.map(|id| crate::picker::ScopedModelRow {
+                    id,
+                    label: model.label,
+                })
+            })
+            .collect::<Vec<_>>();
+        let active: &[Box<str>] = fresh.settings.scoped_models.as_deref().unwrap_or(&[]);
+        Some(crate::picker::scoped_models_picker(rows, active, filter))
     }
 
     /// Runs the host- and agent-backed requests the input pass queued.
@@ -2314,6 +2369,20 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
         KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
             apply_model_retry_key(session);
         }
+        KeyCode::Char(' ')
+            if key.modifiers == KeyModifiers::NONE
+                && session
+                    .picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.filter().is_empty()) =>
+        {
+            if let Some(picker) = &mut session.picker {
+                // picker.rs owns the contract: toggle_selected is a no-op on a
+                // single picker, so unmodified Space never joins the filter on
+                // an empty query and never invents a check where none exists.
+                picker.toggle_selected();
+            }
+        }
         KeyCode::Char(character)
             if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
         {
@@ -2535,6 +2604,46 @@ mod tests {
         );
         assert!(session.picker.is_none());
         assert_eq!(session.pending_commands.len(), 1);
+    }
+
+    /// A committed id the model list no longer names is a visible, checked row.
+    /// Unchecking another row leaves it committed; unchecking it too submits
+    /// the empty list that clears the scope.
+    #[test]
+    fn scoped_picker_keeps_a_missing_committed_id_until_it_is_unchecked() {
+        let rows = vec![crate::picker::ScopedModelRow {
+            id: "openai/gpt-6".into(),
+            label: "GPT 6".into(),
+        }];
+        let mut picker = crate::picker::scoped_models_picker(
+            rows,
+            &["openai/gpt-6".into(), "anthropic/vanished".into()],
+            "",
+        );
+        assert!(picker.is_checked(0));
+        assert!(picker.is_checked(1), "the missing id is a checked row");
+        picker.toggle_selected();
+        let action = picker.activate_selected().expect("multi submits");
+        match action {
+            crate::picker::PickerAction::Command(dal_core::Command::SetScopedModels(ids)) => {
+                assert!(
+                    ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished"]),
+                    "the untouched missing id is still committed, got {ids:?}"
+                );
+            }
+            other => panic!("expected SetScopedModels, got {other:?}"),
+        }
+        picker.move_selection(true);
+        picker.toggle_selected();
+        let action = picker.activate_selected().expect("multi submits");
+        assert!(
+            matches!(
+                action,
+                crate::picker::PickerAction::Command(dal_core::Command::SetScopedModels(ids))
+                    if ids.is_empty()
+            ),
+            "unchecking the missing id clears the scope"
+        );
     }
 
     #[test]

@@ -311,13 +311,13 @@ async fn apply_route(
     {
         Ok(()) => None,
         Err(SaveError::Rejected { message }) => {
-            let current = old.as_ref().map(ModelRoute::id).unwrap_or("no model");
+            let current = old.as_ref().map_or("no model", ModelRoute::id);
             return Ok(Reply::Done(Output::Text(
                 format!("Model: {current}. Not changed to {provider}/{id}: {message}.").into(),
             )));
         }
         Err(SaveError::SessionClosed { id }) => {
-            let current = old.as_ref().map(ModelRoute::id).unwrap_or("no model");
+            let current = old.as_ref().map_or("no model", ModelRoute::id);
             return Ok(Reply::Done(Output::Text(
                 format!("Model: {current}. Not changed: session {id} is closed.").into(),
             )));

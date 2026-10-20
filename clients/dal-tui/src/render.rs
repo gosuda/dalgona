@@ -471,9 +471,21 @@ fn picker_overlay_rows(picker: &PickerUi) -> Vec<RenderRow> {
         for index in range {
             if let Some(option) = picker.visible_option(index) {
                 let selected = picker.is_selected(index);
+                // Multi-select rows carry the check marker the request dialogs
+                // use ([x]/[ ]); single-select rows keep the plain gutter.
+                let check = picker
+                    .is_multi()
+                    .then(|| {
+                        if picker.is_checked(index) {
+                            "[x] "
+                        } else {
+                            "[ ] "
+                        }
+                    })
+                    .unwrap_or_default();
                 rows.push(RenderRow::new(
                     format!(
-                        "{} {}",
+                        "{} {check}{}",
                         if selected { ">" } else { " " },
                         escape(&option.label)
                     ),
@@ -2456,5 +2468,59 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         live.close_expand();
+    }
+
+    #[test]
+    fn a_multi_picker_paints_check_markers_and_the_same_focus() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..3)
+            .map(|n| PickerOption {
+                label: format!("opt-{n}"),
+                action: PickerAction::Noop,
+            })
+            .collect();
+        let mut picker = PickerUi::new("Pick", "", options);
+        picker.with_multi([0]);
+        let rows = super::picker_overlay_rows(&picker);
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with("> [x] ")),
+            "the focused checked row carries focus plus the checked marker: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .filter(|text| text.starts_with("  [ ] "))
+                .count()
+                == 2,
+            "unchecked multi rows paint the empty marker: {texts:?}"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| !row.selected.is_empty())
+                .all(|row| row.selected == vec![0..row.text.len()]),
+            "reverse video still covers the whole focused row"
+        );
+
+        // A single picker keeps the unmarked gutter.
+        let single = PickerUi::new(
+            "Pick",
+            "",
+            (0..2)
+                .map(|n| PickerOption {
+                    label: format!("opt-{n}"),
+                    action: PickerAction::Noop,
+                })
+                .collect(),
+        );
+        let single_rows = super::picker_overlay_rows(&single);
+        let texts: Vec<&str> = single_rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("[ ]") || text.contains("[x]")),
+            "no check markers on a single picker: {texts:?}"
+        );
     }
 }
