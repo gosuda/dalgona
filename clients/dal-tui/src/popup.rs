@@ -143,6 +143,45 @@ pub fn complete_draft(commands: &[CommandSpec], draft: &str) -> DraftCompletion 
     }
 }
 
+/// Steps the candidate pointer to the next position (wrapping to the
+/// first) and reports the draft that candidate would leave.
+///
+/// The returned draft is `accept(base, candidate)` where `base` is the
+/// draft before cycling began, so repeated Tab presses cycle through the
+/// same ring rather than re-accepting. An empty candidate list keeps
+/// `index` and `base` unchanged.
+#[must_use]
+pub fn cycle_next(base: &str, candidates: &[Candidate], index: usize) -> (usize, String) {
+    step(base, candidates, index, |index, count| (index + 1) % count)
+}
+
+/// Steps the candidate pointer to the previous position (wrapping to the
+/// last) for Shift+Tab; the mirror of [`cycle_next`].
+#[must_use]
+pub fn cycle_prev(base: &str, candidates: &[Candidate], index: usize) -> (usize, String) {
+    step(base, candidates, index, |index, count| {
+        (index + count - 1) % count
+    })
+}
+
+/// The shared ring step behind [`cycle_next`] and [`cycle_prev`]. `index`
+/// is clamped to the list before stepping: the candidate list is rebuilt
+/// after every keystroke, so a stale position can never index past the
+/// fresh ring. `next` receives the clamped position and the ring size.
+fn step(
+    base: &str,
+    candidates: &[Candidate],
+    index: usize,
+    next: impl Fn(usize, usize) -> usize,
+) -> (usize, String) {
+    let count = candidates.len();
+    if count == 0 {
+        return (index, base.to_owned());
+    }
+    let next = next(index.min(count - 1), count);
+    (next, accept(base, &candidates[next]))
+}
+
 /// The draft after accepting `candidate`.
 ///
 /// A command replaces the whole draft; a skill replaces only the `$` token
@@ -164,6 +203,7 @@ mod tests {
 
     use super::{
         DraftCompletion, Lane, accept, complete_commands, complete_draft, complete_skills,
+        cycle_next, cycle_prev,
     };
 
     fn specs(names: &[&str]) -> Vec<CommandSpec> {
@@ -356,5 +396,29 @@ mod tests {
             "/skill:review also $find-files "
         );
         assert_eq!(pick("/mod"), "/model ");
+    }
+
+    /// Cycling steps through the ring from the base draft: next wraps past
+    /// the end, previous wraps past the start, and every step accepts one
+    /// candidate into the untouched base.
+    #[test]
+    fn cycling_wraps_the_ring_from_the_base_draft() {
+        let commands = with_skills();
+        let DraftCompletion::Names(candidates) = complete_draft(&commands, "/") else {
+            panic!("a bare slash completes names");
+        };
+        assert!(candidates.len() > 1);
+        let (index, draft) = cycle_next("/", &candidates, candidates.len() - 1);
+        assert_eq!(index, 0);
+        assert_eq!(draft, accept("/", &candidates[0]));
+        let (index, draft) = cycle_prev("/", &candidates, 0);
+        assert_eq!(index, candidates.len() - 1);
+        let Some(last) = candidates.last() else {
+            return;
+        };
+        assert_eq!(draft, accept("/", last));
+        // No candidates: the pointer and the draft stay put.
+        let (index, draft) = cycle_next("/", &[], 3);
+        assert_eq!((index, draft.as_str()), (3, "/"));
     }
 }

@@ -89,6 +89,17 @@ struct Session {
     commands: std::sync::Arc<[dal_core::CommandSpec]>,
     popup: Vec<String>,
     candidates: Vec<crate::popup::Candidate>,
+    /// The draft the completion ring started from; every Tab/Shift+Tab
+    /// applies a candidate to this base, so the ring never compounds
+    /// prefixes. `None` once the draft changes or no candidates exist.
+    popup_base: Option<String>,
+    /// The draft the ring last wrote. Any user edit that diverges from this
+    /// ends the ring, so the next Tab starts a fresh base instead of
+    /// resurrecting a stale one.
+    popup_last: String,
+    /// The candidate the ring most recently accepted; the next Tab steps
+    /// from here and wraps in both directions.
+    popup_index: usize,
     picker: Option<PickerUi>,
     /// The F1 key-table overlay, while it owns the composer and hint rows.
     help: Option<HelpUi>,
@@ -168,9 +179,21 @@ impl Session {
     }
 
     fn update_popup(&mut self) {
+        if self.popup_base.is_some() && self.composer.text() != self.popup_last {
+            self.popup_base = None;
+            self.popup_index = 0;
+            self.popup_last.clear();
+        }
         self.popup.clear();
         self.candidates.clear();
-        match crate::popup::complete_draft(&self.commands, self.composer.text()) {
+        // While a ring is live the draft is the ring's own output, which no
+        // longer completes names (`/mode ` is an argument draft), so the
+        // candidates stay those of the base the ring started from.
+        let draft = match &self.popup_base {
+            Some(base) => base.as_str(),
+            None => self.composer.text(),
+        };
+        match crate::popup::complete_draft(&self.commands, draft) {
             crate::popup::DraftCompletion::Names(candidates) => {
                 self.candidates = candidates.into_iter().take(5).collect();
                 self.popup.extend(self.candidates.iter().map(|item| {
@@ -190,6 +213,61 @@ impl Session {
                         .push(format!("/{name} · {}", crate::width::escape(hint)));
                 }
             }
+        }
+    }
+
+    /// Tab: accepts the next candidate of the completion ring. A fresh ring
+    /// takes the top candidate; a live one steps on from the last accepted
+    /// candidate and wraps past the end.
+    fn complete_forward(&mut self) {
+        // A fresh ring has accepted nothing: it enters one step before the
+        // first candidate.
+        self.cycle_completion(crate::popup::cycle_next, |count| count - 1);
+    }
+
+    /// Shift+Tab: accepts the previous candidate of the completion ring. A
+    /// fresh ring takes the bottom candidate; a live one steps back from the
+    /// last accepted candidate and wraps past the start.
+    fn complete_backward(&mut self) {
+        // A fresh ring has accepted nothing: it enters one step after the
+        // last candidate, which is the seam before the first.
+        self.cycle_completion(crate::popup::cycle_prev, |_| 0);
+    }
+
+    /// Accepts one candidate of the ring into the base draft the ring
+    /// started from, so cycling never compounds prefixes. `fresh_from` gives
+    /// the position a fresh ring steps from, given the candidate count.
+    /// With no candidates Tab keeps its plain-text contract of two spaces.
+    /// A ring of one has nothing to cycle: accepting its only candidate ends
+    /// the ring, so the accepted draft completes as arguments again.
+    fn cycle_completion(
+        &mut self,
+        step: fn(&str, &[crate::popup::Candidate], usize) -> (usize, String),
+        fresh_from: fn(usize) -> usize,
+    ) {
+        let count = self.candidates.len();
+        if count == 0 {
+            self.popup_base = None;
+            self.popup_index = 0;
+            self.popup_last.clear();
+            self.composer.insert("  ");
+            return;
+        }
+        let (base, from) = match self.popup_base.take() {
+            Some(base) => (base, self.popup_index),
+            None => (self.composer.text().to_owned(), fresh_from(count)),
+        };
+        let (index, draft) = step(&base, &self.candidates, from);
+        self.composer.set(&draft);
+        if count == 1 {
+            // The args hint shows for the accepted command and a second Tab
+            // inserts its two spaces, as before the ring existed.
+            self.popup_index = 0;
+            self.popup_last.clear();
+        } else {
+            self.popup_base = Some(base);
+            self.popup_last = draft;
+            self.popup_index = index;
         }
     }
 
@@ -2403,11 +2481,12 @@ fn apply_composer_action(
         }
         Some(Action::AcceptCycleCompletion) => {
             session.viewport.clear_selection();
-            if let Some(candidate) = session.candidates.first() {
-                let completed = crate::popup::accept(session.composer.text(), candidate);
-                session.composer.set(&completed);
+            // Shift+Tab reaches the loop as `BackTab` from a legacy terminal
+            // and as Tab plus Shift from a kitty one; both walk the ring back.
+            if key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT) {
+                session.complete_backward();
             } else {
-                session.composer.insert("  ");
+                session.complete_forward();
             }
         }
         Some(Action::Help) => session.help = Some(HelpUi::default()),
@@ -2790,6 +2869,60 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycles_completion_candidates_and_shift_tab_walks_back() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let commands: Vec<dal_core::CommandSpec> = ["model", "mode", "moth"]
+            .into_iter()
+            .map(|name| dal_core::CommandSpec {
+                name: dal_core::CommandName::parse(name).unwrap(),
+                summary: format!("{name} summary").into(),
+                args_hint: None,
+            })
+            .collect();
+        let mut session = Session {
+            commands: commands.into(),
+            ..Session::default()
+        };
+        session.composer.set("/m");
+        session.update_popup();
+        assert_eq!(session.candidates.len(), 3);
+
+        // Candidates rank by name, whatever order the host listed them in:
+        // mode, model, moth. The first Tab takes the top one, and each press
+        // after it steps the same ring off the same `/m` base.
+        let tab = Key::new(KeyCode::Tab, KeyModifiers::NONE);
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/mode ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/model ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/moth ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/mode ", "Tab wraps past the last");
+        // Shift+Tab arrives as BackTab from a legacy terminal and as Tab plus
+        // Shift under kitty; both walk back, wrapping past the first.
+        apply_key(&mut session, Key::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/moth ");
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(session.composer.text(), "/model ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/moth ", "the ring turns around");
+        // A fresh ring entered with Shift+Tab starts at the last candidate.
+        session.composer.set("/m");
+        session.update_popup();
+        apply_key(&mut session, Key::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/moth ");
+        // No candidates: Tab inserts two spaces, the documented fallback.
+        session.composer.set("plain text");
+        session.update_popup();
+        assert!(session.candidates.is_empty());
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "plain text  ");
+    }
+
+    #[test]
     fn unhandled_front_actions_render_one_debug_row() {
         let mut session = Session::default();
         let rows = session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Import {
@@ -2861,6 +2994,70 @@ mod tests {
         assert_eq!(session.pending_commands.len(), 1);
     }
 
+    #[test]
+    fn editing_the_draft_mid_cycle_starts_a_fresh_ring() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // The `$` lane lists skills only: entries named `skill:<name>`.
+        let commands: Vec<dal_core::CommandSpec> = ["skill:find-anything", "skill:find-files"]
+            .into_iter()
+            .map(|name| dal_core::CommandSpec {
+                name: dal_core::CommandName::parse(name).unwrap(),
+                summary: format!("{name} summary").into(),
+                args_hint: None,
+            })
+            .collect();
+        let mut session = Session {
+            commands: commands.into(),
+            ..Session::default()
+        };
+        session.composer.set("$fi");
+        session.update_popup();
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "$find-anything ");
+        // Backspace edits the accepted draft into `$find-anything`, which
+        // only the first skill still matches. A ring that outlived the edit
+        // would step on from `$fi` to `$find-files`; a fresh ring completes
+        // the edited draft instead.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(session.composer.text(), "$find-anything");
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            session.composer.text(),
+            "$find-anything ",
+            "a fresh ring completes the edited draft"
+        );
+        // A ring of one ends on accept, so the next Tab is plain text again.
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "$find-anything   ");
+    }
+
+    #[test]
+    fn accepting_the_only_candidate_shows_its_args_hint() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let commands = vec![dal_core::CommandSpec {
+            name: dal_core::CommandName::parse("model").unwrap(),
+            summary: "model summary".into(),
+            args_hint: Some("provider/model".into()),
+        }];
+        let mut session = Session {
+            commands: commands.into(),
+            ..Session::default()
+        };
+        session.composer.set("/mod");
+        session.update_popup();
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/model ");
+        assert_eq!(session.popup, ["/model · provider/model"]);
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/model   ");
+    }
     /// A committed id the model list no longer names is a visible, checked row.
     /// Unchecking another row leaves it committed; unchecking it too submits
     /// the empty list that clears the scope.

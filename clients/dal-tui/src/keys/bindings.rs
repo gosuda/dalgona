@@ -331,6 +331,13 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Composer,
+        action: Action::AcceptCycleCompletion,
+        label: "Complete",
+        default: key(KeyCode::BackTab, NONE),
+        legacy: Some(key(KeyCode::Tab, SHIFT)),
+    },
+    Binding {
+        owner: Owner::Composer,
         action: Action::HistoryPrev,
         label: "Previous history",
         default: key(KeyCode::Up, NONE),
