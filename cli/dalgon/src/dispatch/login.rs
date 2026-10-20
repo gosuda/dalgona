@@ -393,8 +393,10 @@ async fn login_oauth(
     let cancel = CancellationToken::new();
     let (paste, paste_receiver) = oneshot::channel();
     let (io, events) = LoginIo::channel(Some(paste_receiver), cancel.clone());
+    let mut signals = edge::ShutdownSignals::register();
     let outcome = super::drive(
         &cancel,
+        &mut signals,
         run_with_paste(&host, def.id, method, io, events, paste),
     )
     .await;
