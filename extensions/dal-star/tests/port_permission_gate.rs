@@ -263,6 +263,33 @@ async fn permission_gate_blocks_configured_patterns_without_side_effect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn permission_gate_keeps_its_default_patterns_when_extra_patterns_are_configured() {
+    // Configuring `drop table` extends the defaults; it must not replace them.
+    let (_root, host, agent, workspace) =
+        start_host(Some(r#"{"patterns":["drop table"]}"#), "rm -rf blocked.txt")
+            .await
+            .expect("permission-gate host starts");
+    let marker = workspace.join("blocked.txt");
+    std::fs::write(&marker, b"keep").expect("blocked marker");
+
+    let outcome = run_exec(&agent).await.expect("exec settles");
+    assert!(
+        outcome.is_error,
+        "a default pattern must still refuse: {outcome:?}"
+    );
+    assert!(
+        outcome.text.contains("matches \"rm -rf\""),
+        "the default pattern is the one named: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("blocked marker remains"),
+        "keep"
+    );
+
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn permission_gate_allows_safe_exec_to_reach_the_real_tool() {
     let (_root, host, agent, workspace) = start_host(None, "printf allowed > allowed.txt")
         .await

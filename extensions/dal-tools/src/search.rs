@@ -1048,8 +1048,71 @@ pub(crate) mod tests {
             .and_then(|v| v.as_str())
             .expect("on description");
         assert!(on_text.starts_with(off_text), "{on_text}");
-        assert!(on_text.contains("symbol"), "{on_text}");
+        assert!(
+            on_text[off_text.len()..].starts_with(" symbol: a name or an A::b path"),
+            "{on_text}"
+        );
         assert!(DESCRIPTION_ON.starts_with(DESCRIPTION_OFF));
+        assert!(
+            DESCRIPTION_ON[DESCRIPTION_OFF.len()..]
+                .starts_with(" mode \"symbol\" lists definitions"),
+            "{DESCRIPTION_ON}"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_spec_and_runtime_agree_on_symbol_mode_at_the_flag_boundary() {
+        use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", b"fn alpha() {}\n");
+        let tool = SearchTool::new(engine(false, None)).unwrap();
+        // Off, on, off again: a flip must republish in both directions.
+        for flag in [false, true, false] {
+            tool.search.symbols.store(flag, Ordering::SeqCst);
+            let published = cfg!(feature = "symbols") && flag;
+            let spec = tool.current_spec();
+            let schema: sonic_rs::Value = sonic_rs::from_str(spec.parameters.as_str()).unwrap();
+            let modes: Vec<&str> = schema
+                .get("properties")
+                .and_then(|properties| properties.get("mode"))
+                .and_then(|mode| mode.get("enum"))
+                .and_then(|modes| modes.as_array())
+                .expect("mode enum")
+                .iter()
+                .map(|mode| mode.as_str().expect("mode entry"))
+                .collect();
+            let expected: &[&str] = if published {
+                &["find", "grep", "symbol"]
+            } else {
+                &["find", "grep"]
+            };
+            assert_eq!(modes, expected, "flag {flag}");
+            assert_eq!(
+                spec.description.contains("mode \"symbol\""),
+                published,
+                "flag {flag}: {}",
+                spec.description
+            );
+            let result = run(
+                &tool.search,
+                dir.path(),
+                r#"{"mode":"symbol","pattern":"alpha"}"#,
+            )
+            .await;
+            if published {
+                let text = result.expect("a published mode must run");
+                assert!(text.contains("alpha"), "{text}");
+            } else {
+                assert_eq!(
+                    result,
+                    Err(
+                        "search: mode \"symbol\" is off. Set search_symbols = true in dal.toml."
+                            .to_owned()
+                    ),
+                    "an unpublished mode must refuse with the off text"
+                );
+            }
+        }
     }
 
     #[test]

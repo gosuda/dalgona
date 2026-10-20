@@ -26,13 +26,20 @@ use dal_core::ext::{NativeOp, OpId, OpSet, Phase};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest, FetchResponse, GenerationId,
     Inference, JobsOp, JobsReply, McpRequest, McpResponse, ModelRequest, Notice, Question, RawJson,
-    RunOutput, RunRequest, ScopeSpec, SidecarOp, StateError, StateOp, StateRecord, TurnOp,
-    TurnOpReply,
+    ReadView, RunOutput, RunRequest, ScopeSpec, SidecarOp, StateError, StateOp, StateRecord,
+    TurnOp, TurnOpReply,
 };
 
 /// One host-facets interaction observed by `RecordingHost`, in call order.
 #[derive(Clone, Debug)]
 pub enum HostRecord {
+    /// An observation reference was submitted to `adopt`.
+    Adopt {
+        /// The adopting invocation.
+        invocation: InvocationId,
+        /// The reference exactly as the script spelled it.
+        reference: Box<str>,
+    },
     /// A cell was admitted through `begin`.
     Begin {
         /// Parent invocation, or `None` for a root cell.
@@ -111,6 +118,8 @@ pub struct RecordingHost {
     environment: Arc<EvalEnvironment>,
     catalog: Catalog,
     replies: Mutex<HashMap<OpId, OpOutcome>>,
+    adoptable: Mutex<HashMap<Box<str>, ReadView>>,
+    submitted: Mutex<Vec<(TaskId, ScopeId, OpId)>>,
     records: Mutex<Vec<HostRecord>>,
     next_scope_id: AtomicU64,
     next_task_id: AtomicU64,
@@ -166,6 +175,8 @@ impl RecordingHost {
             environment: Arc::new(environment),
             catalog: Catalog::for_test(extensions),
             replies: Mutex::new(replies.into_iter().collect()),
+            adoptable: Mutex::new(HashMap::new()),
+            submitted: Mutex::new(Vec::new()),
             records: Mutex::new(Vec::new()),
             next_scope_id: AtomicU64::new(1),
             next_task_id: AtomicU64::new(1),
@@ -191,6 +202,19 @@ impl RecordingHost {
     #[must_use]
     pub fn records(&self) -> Vec<HostRecord> {
         self.records.lock().expect("host records lock").clone()
+    }
+
+    /// Makes `reference` adoptable: `adopt` answers it with `view`, and every
+    /// other reference with an `observation_unavailable` refusal naming it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the adoptable-reference lock is poisoned.
+    pub fn seed_adoptable(&self, reference: &str, view: ReadView) {
+        self.adoptable
+            .lock()
+            .expect("host adoptable lock")
+            .insert(reference.into(), view);
     }
 
     fn record(&self, item: HostRecord) {
@@ -272,13 +296,21 @@ impl ScriptHost for RecordingHost {
     }
 
     fn submit(&self, invocation: &Arc<Invocation>, scope: ScopeId, request: OpRequest) -> Submit {
+        let op = request.op.clone();
         self.record(HostRecord::Submit {
             invocation: invocation.id(),
             scope,
             request,
         });
         match allocate_id(&self.next_task_id, "task ids") {
-            Ok(id) => Submit::Settled(TaskId::new(id)),
+            Ok(id) => {
+                let task = TaskId::new(id);
+                self.submitted
+                    .lock()
+                    .expect("host submitted lock")
+                    .push((task, scope, op));
+                Submit::Settled(task)
+            }
             Err(terminal) => Submit::Terminal(terminal),
         }
     }
@@ -294,9 +326,24 @@ impl ScriptHost for RecordingHost {
             which,
         });
         let explode = self.fault == Some(Fault::Collect);
+        // A task settles only when its operation has a scripted reply: the
+        // others stay unanswered, like a host that never finished them.
+        let collected: Vec<(TaskId, OpOutcome)> = {
+            let replies = self.replies.lock().expect("host reply lock");
+            self.submitted
+                .lock()
+                .expect("host submitted lock")
+                .iter()
+                .filter(|(task, scope, _)| match which {
+                    Collect::Task(wanted) => *task == wanted,
+                    Collect::Seal(sealed) => *scope == sealed,
+                })
+                .filter_map(|(task, _, op)| replies.get(op).map(|reply| (*task, reply.clone())))
+                .collect()
+        };
         Box::pin(async move {
             assert!(!explode, "injected host collect fault");
-            Ok(Box::default())
+            Ok(collected.into_boxed_slice())
         })
     }
 
@@ -309,14 +356,23 @@ impl ScriptHost for RecordingHost {
 
     fn adopt(
         &self,
-        _invocation: &Arc<Invocation>,
-        _reference: &str,
+        invocation: &Arc<Invocation>,
+        reference: &str,
     ) -> Result<dal_core::ReadView, OpFailure> {
-        Err(OpFailure {
-            code: FailureCode::ObservationUnavailable,
-            message: "test host has no evidence".into(),
-            details: None,
-        })
+        self.record(HostRecord::Adopt {
+            invocation: invocation.id(),
+            reference: reference.into(),
+        });
+        self.adoptable
+            .lock()
+            .expect("host adoptable lock")
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| OpFailure {
+                code: FailureCode::ObservationUnavailable,
+                message: format!("test host holds no observation `{reference}`").into(),
+                details: None,
+            })
     }
 
     fn catalog(&self) -> &Catalog {

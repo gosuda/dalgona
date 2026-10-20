@@ -116,6 +116,100 @@ fn classifier_rejects_parse_doubt_and_multiline_shells() {
 }
 
 #[test]
+fn every_shell_operator_turns_a_read_only_command_into_a_mutating_one() {
+    // Each base is read-only on its own, so a rejection below can only come
+    // from the appended operator.
+    const BASES: &[&str] = &[
+        "cat README.md",
+        "ls -la",
+        "git status",
+        "rg foo",
+        "pwd",
+        "find . -name x",
+        "cargo metadata",
+        "env",
+    ];
+    const OPERATORS: &[&str] = &[
+        "> /tmp/o",
+        ">> /tmp/o",
+        "2>/dev/null",
+        "| sh",
+        "; touch /tmp/o",
+        "&& rm -rf /tmp/o",
+        "|| touch /tmp/o",
+        "`touch /tmp/o`",
+        "$(touch /tmp/o)",
+        "& sleep 0",
+        "< /tmp/i",
+    ];
+    for base in BASES {
+        assert!(exec_reads_only(base, None), "control: {base}");
+        for operator in OPERATORS {
+            for command in [format!("{base} {operator}"), format!("{base}{operator}")] {
+                assert!(
+                    !exec_reads_only(&command, None),
+                    "operator after a read-only command classified read-only: {command}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn writer_flags_on_read_only_words_are_never_read_only() {
+    // `tree -o FILE` and `file -C` write files; short clusters, quoting and
+    // option abbreviations must not hide them.
+    for command in [
+        "tree -o out.txt",
+        "tree -ao out.txt",
+        "tree -ofoo",
+        "tree '-o' out.txt",
+        "tree -a -o out.txt",
+        "file -C -m magic",
+        "file -bC -m magic",
+        "file --compile -m magic",
+        "file --comp -m magic",
+        "file '--compile' -m magic",
+    ] {
+        assert!(
+            !exec_reads_only(command, None),
+            "file writer classified read-only: {command}"
+        );
+    }
+    for command in [
+        "tree",
+        "tree -a -L 2",
+        "tree -I target src",
+        "file -b README.md",
+        "file -i README.md",
+        "file --mime-type README.md",
+    ] {
+        assert!(
+            exec_reads_only(command, None),
+            "read-only use rejected: {command}"
+        );
+    }
+}
+
+#[test]
+fn quoted_shell_operators_are_rejected_like_bare_ones() {
+    for command in [
+        "cat 'a;b'",
+        "cat \"a|b\"",
+        "rg 'a>b'",
+        "rg \"a<b\"",
+        "ls 'a&b'",
+        "cat '$(id)'",
+        "cat '`id`'",
+    ] {
+        assert!(
+            !exec_reads_only(command, None),
+            "quoted operator classified read-only: {command}"
+        );
+    }
+}
+
+#[test]
 fn classifier_does_not_consider_cwd() {
     // Classification is cwd-independent: pinning read-only only when a cwd
     // is present must turn this test red.

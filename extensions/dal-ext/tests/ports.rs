@@ -4,7 +4,6 @@
     reason = "integration fixture failures must fail at their specific setup boundary"
 )]
 
-use dal_ext::docs::{DocsSnapshot, Lookup, Manual, lookup};
 use dal_ext::docsgen::{GenArgs, Scheme, generate};
 use dal_star::load::{LoadRoots, PluginsConfig, load};
 use std::collections::BTreeMap;
@@ -238,36 +237,6 @@ fn copy_dir(source: &Path, target: &Path) {
         } else {
             std::fs::copy(entry.path(), to).unwrap();
         }
-    }
-}
-
-/// Reload swaps the published snapshot at once, so the next read sees the
-/// new text while a failed reload keeps the old page readable.
-#[test]
-fn reload_swaps_pages() {
-    let first = DocsSnapshot {
-        manuals: vec![Manual {
-            scheme: "dal".to_owned(),
-            plugin: "dal".to_owned(),
-            pages: vec![("config".to_owned(), "# Settings\n\nOld text.\n".to_owned())],
-        }],
-    };
-    let second = DocsSnapshot {
-        manuals: vec![Manual {
-            scheme: "dal".to_owned(),
-            plugin: "dal".to_owned(),
-            pages: vec![("config".to_owned(), "# Settings\n\nNew text.\n".to_owned())],
-        }],
-    };
-    match lookup(&first, "dal://config") {
-        Lookup::Page { text, .. } => assert!(text.contains("Old text")),
-        other => panic!("expected page, got {other:?}"),
-    }
-    // A reload publishes a new snapshot in one atomic swap; the next read
-    // sees the new text while a failed reload keeps the old page readable.
-    match lookup(&second, "dal://config") {
-        Lookup::Page { text, .. } => assert!(text.contains("New text")),
-        other => panic!("expected page, got {other:?}"),
     }
 }
 

@@ -46,14 +46,23 @@ plugin = dal.plugin(name = "fusion", version = "0.1.0", inject = ["infer"], mode
 }
 
 async fn host_for(run: &str) -> (tempfile::TempDir, Host) {
+    host_with_usage(run, 1, 1).await
+}
+
+/// A host whose scripted provider replays one forwarded answer `replays`
+/// times, each reporting `input_tokens` of input against the priced route.
+async fn host_with_usage(
+    run: &str,
+    replays: usize,
+    input_tokens: u64,
+) -> (tempfile::TempDir, Host) {
     let (data, system) = system_with_plugin("fusion", &model_source(run));
     let extensions = system.extensions().expect("model extension conversion");
     let fixture = data.path().join("script.jsonl");
-    std::fs::write(
-        &fixture,
-        r#"{"kind":"events","events":[{"type":"text_delta","text":"forwarded"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#,
-    )
-    .expect("provider replay fixture");
+    let line = format!(
+        r#"{{"kind":"events","events":[{{"type":"text_delta","text":"forwarded"}},{{"type":"tool_calls_done","calls":[]}},{{"type":"usage","usage":{{"input_tokens":{input_tokens},"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}}}},{{"type":"stop","reason":"end_turn"}}]}}"#
+    );
+    std::fs::write(&fixture, vec![line; replays].join("\n")).expect("provider replay fixture");
     let user = format!(
         "model = \"dalgona/fusion\"\n\n[providers.scripted]\nfixture = {:?}\n\n[prices.gpt-6-luna]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 0.0\n",
         fixture.display().to_string()
@@ -177,13 +186,11 @@ async fn scripted_forward_declined_infer_grant_never_reaches_the_provider() {
     );
 }
 
-/// The scripted model schedules its inner inference through a USD-budgeted
-/// scope on a priced route and settles it; the scope opens a grant request
-/// that the session answers.
-#[tokio::test]
-async fn scripted_model_scope_passes_policy_and_usd_budget_to_scoped_infer() {
-    let run = r#"scope = ctx.scope(limit = 8, on_error = "settle", usd = 0.40)
-request = {
+/// Two inferences through one concurrency-1 scope with a $0.40 budget, then
+/// the per-task verdicts surfaced as the turn text: the first inference runs
+/// and is charged, and only the charge decides whether the second may run.
+const USD_SCOPE_RUN: &str = r#"scope = ctx.scope(limit = 1, on_error = "settle", usd = 0.40)
+req = {
     "purpose": request.purpose,
     "model": {"kind": "api", "family": "openai_chat", "model": "gpt-6-luna"},
     "system": request.system,
@@ -192,17 +199,36 @@ request = {
     "params": request.params,
     "cache_key": request.cache_key,
 }
-task = scope.infer(request)
+scope.infer(req)
+scope.infer(req)
 results = scope.settle()
-return results[0].value"#;
-    let (data, host) = host_for(run).await;
+first = results[0]
+ev = list(first.value.events)
+verdict = "|".join([("ok" if r.ok else r.error.code) for r in results])
+head = ev[0]
+shown = {k: (verdict if k == "text" else head[k]) for k in head}
+return {"model": first.value.model, "events": [shown] + ev[1:]}"#;
+
+/// The USD budget the script asked for reaches the host scope: once the first
+/// inference costs more than $0.40 the scope refuses the one queued behind it,
+/// and the same script over an inference that costs far less runs both.
+#[tokio::test]
+async fn scripted_model_usd_budget_stops_the_scope_once_the_first_inference_overspends() {
+    // 1,000,000 input tokens at $1.00 per million is $1.00 > $0.40.
+    let (data, host) = host_with_usage(USD_SCOPE_RUN, 2, 1_000_000).await;
     let (stop, view, seen) = prompt(&host, &data).await;
     assert_eq!(stop, Stop::EndTurn, "{seen:?} {view}");
     assert!(
         seen.iter().any(|kind| kind.contains("Grant")),
         "scope.infer opened a grant request: {seen:?}"
     );
-    assert!(view.contains("forwarded"), "{seen:?} {view}");
+    assert!(view.contains("ok|cancelled"), "{seen:?} {view}");
+
+    // The control differs only in what the first inference costs.
+    let (data, host) = host_with_usage(USD_SCOPE_RUN, 2, 1).await;
+    let (stop, view, seen) = prompt(&host, &data).await;
+    assert_eq!(stop, Stop::EndTurn, "control: {seen:?} {view}");
+    assert!(view.contains("ok|ok"), "control: {seen:?} {view}");
 }
 
 #[tokio::test]

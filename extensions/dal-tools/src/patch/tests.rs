@@ -564,49 +564,75 @@ async fn replace_happy_path_writes() {
 }
 
 #[test]
-fn contract_enumeration() {
-    // Every dialect renders every EngineError variant without panicking and
-    // parse-class renderings carry the current-dialect suffix. Each class
-    // keeps a distinct wire name and preserves the probe message, so
-    // collapsing every class to one rendering must turn this test red.
-    let mut names = std::collections::BTreeSet::new();
-    for style in [
-        DialectId::Anchor,
-        DialectId::Replace,
-        DialectId::Hashline,
-        DialectId::HashlineLight,
-        DialectId::HashlineEnhanced,
-        DialectId::ApplyPatch,
-    ] {
-        for class in [
-            super::ir::ErrorClass::Parse,
-            super::ir::ErrorClass::Resolve,
-            super::ir::ErrorClass::Proof,
-            super::ir::ErrorClass::Stale,
-            super::ir::ErrorClass::File,
-            super::ir::ErrorClass::Limit,
-            super::ir::ErrorClass::Blocked,
-            super::ir::ErrorClass::Io,
-        ] {
-            let error = super::ir::EngineError::new(class, "probe");
-            assert_eq!(error.class, class);
-            assert!(error.message.contains("probe"), "{}", error.message);
-            assert_eq!(error.to_string(), "probe");
-            names.insert(format!("{class:?}"));
-            let rendered = match class {
-                super::ir::ErrorClass::Parse => {
-                    styles::with_suffix(style, super::ir::ParseError::new(error.message.clone()))
-                }
-                _ => error.message.clone(),
-            };
-            assert_ne!(rendered, "");
-            if class == super::ir::ErrorClass::Parse {
-                assert!(rendered.contains("Current edit_style is"), "{rendered}");
-                assert!(rendered.contains("probe"), "{rendered}");
-            }
-        }
+fn error_class_wire_names_are_the_published_lowercase_words() {
+    use super::ir::ErrorClass;
+    let table = [
+        (ErrorClass::Parse, "\"parse\""),
+        (ErrorClass::Resolve, "\"resolve\""),
+        (ErrorClass::Proof, "\"proof\""),
+        (ErrorClass::Stale, "\"stale\""),
+        (ErrorClass::File, "\"file\""),
+        (ErrorClass::Limit, "\"limit\""),
+        (ErrorClass::Blocked, "\"blocked\""),
+        (ErrorClass::Io, "\"io\""),
+    ];
+    for (class, wire) in table {
+        assert_eq!(
+            sonic_rs::to_string(&class).expect("class serializes"),
+            wire,
+            "{class:?}"
+        );
     }
-    assert_eq!(names.len(), 8, "{names:?}");
+}
+
+/// Every dialect with the exact name its parse errors must carry.
+const DIALECT_NAMES: [(DialectId, &str); 6] = [
+    (DialectId::Anchor, "anchor"),
+    (DialectId::Replace, "replace"),
+    (DialectId::Hashline, "hashline"),
+    (DialectId::HashlineLight, "hashline-light"),
+    (DialectId::HashlineEnhanced, "hashline-enhanced"),
+    (DialectId::ApplyPatch, "apply_patch"),
+];
+
+#[test]
+fn parse_suffix_names_exactly_the_current_dialect() {
+    for (style, name) in DIALECT_NAMES {
+        let text = styles::with_suffix(style, super::ir::ParseError::new("probe"));
+        assert_eq!(
+            text,
+            format!(
+                "probe\nCurrent edit_style is \"{name}\" for this model; past calls in history may use another dialect. Do not imitate them."
+            ),
+            "{style:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_dialect_rejects_a_junk_payload_naming_itself() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    for (style, name) in DIALECT_NAMES {
+        let Err(error) = plan(&session, style, "junk").await else {
+            panic!("{style:?} must reject a junk payload");
+        };
+        assert_eq!(error.class, super::ir::ErrorClass::Parse, "{style:?}");
+        let suffix = format!(
+            "\nCurrent edit_style is \"{name}\" for this model; past calls in history may use another dialect. Do not imitate them."
+        );
+        assert!(
+            error.message.ends_with(&suffix),
+            "{style:?}: {}",
+            error.message
+        );
+        assert_eq!(
+            error.message.matches("Current edit_style is").count(),
+            1,
+            "{style:?}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -1827,7 +1853,13 @@ async fn stage_boundary_lines_gap_span() {
     let bytes = b"a\nb\nc\n";
     let digest = *blake3::hash(bytes).as_bytes();
     session.seen.show(session.session, "a.txt", digest, 1, 3);
-    for (first, last) in [(1_usize, 1_usize), (3, 3)] {
+    for (first, last, expected) in [
+        (1_usize, 1_usize, &b"X\nb\nc\n"[..]),
+        (1, 2, b"X\nc\n"),
+        (2, 3, b"a\nX\n"),
+        (3, 3, b"a\nb\nX\n"),
+        (1, 3, b"X\n"),
+    ] {
         let staged = stage_one(
             &session,
             path,
@@ -1845,7 +1877,11 @@ async fn stage_boundary_lines_gap_span() {
         )
         .await
         .expect("boundary span plans");
-        assert!(staged.after.is_some());
+        assert_eq!(
+            &*staged.after.expect("after"),
+            expected,
+            "span {first}-{last}"
+        );
     }
     // Invalid span combinations reject before any coverage check.
     for (first, last) in [(0_usize, 2_usize), (2, 1)] {

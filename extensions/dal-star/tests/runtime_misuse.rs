@@ -18,7 +18,7 @@ use std::sync::Arc;
 use dal_agent::ext::Extension;
 use dal_agent::ext::script::{FailureCode, HostTerminal, OpOutcome};
 use dal_agent::ext::tool::{Tool, ToolCall, ToolCx, ToolOutcome};
-use dal_core::ext::{NativeOp, OpId, OpSet};
+use dal_core::ext::{NativeOp, OpId, OpSet, ReadView, SourceRow};
 use dal_core::{Part, RawJson};
 use dal_star::{CELL_LIMITS, eval_extension};
 use host::{
@@ -415,17 +415,33 @@ async fn unknown_attributes_are_ordinary_script_errors_not_host_calls() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn results_outside_the_transport_set_fail_the_cell() {
-    for code in [
-        "lambda: 1",
-        "{1: 2}",
-        "{(1, 2): 3}",
-        "float(\"inf\")",
-        "1 << 60",
-        "ctx",
-        "ctx.env.read",
+    for (code, needle) in [
+        (
+            "lambda: 1",
+            "cannot return function across the script boundary",
+        ),
+        (
+            "{1: 2}",
+            "cannot return dict key of type int across the script boundary",
+        ),
+        (
+            "{(1, 2): 3}",
+            "cannot return dict key of type tuple across the script boundary",
+        ),
+        (
+            "float(\"inf\")",
+            "non-finite number cannot cross the boundary",
+        ),
+        ("1 << 60", "integer exceeds signed 53-bit range"),
+        ("ctx", "cannot return ctx across the script boundary"),
+        (
+            "ctx.env.read",
+            "cannot return operation across the script boundary",
+        ),
     ] {
         let run = eval(code).await;
-        run.assert_failed("failed", "eval_error");
+        let message = run.assert_failed("failed", "eval_error");
+        assert!(message.contains(needle), "{code}: {message}");
     }
 }
 
@@ -571,9 +587,21 @@ async fn ctx_methods_reject_bad_arguments() {
             "unknown operation",
         ),
         ("ctx.describe(\"\")", "api_error", "unknown operation"),
-        ("ctx.describe(5)", "eval_error", ""),
-        ("ctx.can(5)", "eval_error", ""),
-        ("ctx.scope()", "eval_error", ""),
+        (
+            "ctx.describe(5)",
+            "eval_error",
+            "Type of parameter `op` doesn't match, expected `str`, actual `int (repr: 5)`",
+        ),
+        (
+            "ctx.can(5)",
+            "eval_error",
+            "Type of parameter `op` doesn't match, expected `str`, actual `int (repr: 5)`",
+        ),
+        (
+            "ctx.scope()",
+            "eval_error",
+            "Missing parameter `limit` for call to `scope`",
+        ),
         (
             "ctx.show({\"path\": \"a\", \"line\": 1, \"text\": \"t\"})",
             "api_error",
@@ -603,6 +631,78 @@ async fn can_answers_false_for_unknown_ids_instead_of_raising() {
 async fn adopt_refusal_is_a_recoverable_boundary_failure_code() {
     let run = eval("ctx.adopt(\"missing-ref\")").await;
     run.assert_failed("failed", "observation_unavailable");
+}
+
+fn seeded_view() -> ReadView {
+    ReadView {
+        path: "src/lib.rs".into(),
+        header: "ref:seed-1".into(),
+        rows: Box::new([
+            SourceRow {
+                line: 10,
+                text: "alpha".into(),
+                complete: true,
+            },
+            SourceRow {
+                line: 11,
+                text: "beta".into(),
+                complete: false,
+            },
+        ]),
+        truncated: true,
+        provenance: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_hands_the_script_the_hosts_view_and_refuses_other_references_by_name() {
+    let extension = eval_extension(CELL_LIMITS).expect("eval extension");
+    let tool = named_tool(&extension, "eval");
+    let extensions = [extension];
+    let host = RecordingHost::new(&extensions, OpSet::EMPTY, []);
+    host.seed_adoptable("seed-1", seeded_view());
+
+    let adopted = eval_on(
+        Arc::clone(&tool),
+        Arc::clone(&host),
+        &eval_args(
+            "v = ctx.adopt(\"seed-1\")\n[v.path, v.header, v.truncated, [[r.line, r.text, r.complete] for r in v.rows]]",
+        ),
+    )
+    .await;
+    assert!(
+        adopted.completed_text().contains(
+            "\"value\":[\"src/lib.rs\",\"ref:seed-1\",true,[[10,\"alpha\",true],[11,\"beta\",false]]]"
+        ),
+        "{}",
+        adopted.completed_text()
+    );
+
+    // The host decides eligibility on the spelling the script used: a
+    // differently cased reference is a different reference.
+    for reference in ["missing-ref", "SEED-1"] {
+        let refused = eval_on(
+            Arc::clone(&tool),
+            Arc::clone(&host),
+            &eval_args(&format!("ctx.adopt(\"{reference}\")")),
+        )
+        .await;
+        let message = refused.assert_failed("failed", "observation_unavailable");
+        assert!(
+            message.contains(&format!("holds no observation `{reference}`")),
+            "{reference}: {message}"
+        );
+    }
+
+    let asked: Vec<String> = host
+        .records()
+        .into_iter()
+        .filter_map(|record| match record {
+            HostRecord::Adopt { reference, .. } => Some(reference.into_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["seed-1", "missing-ref", "SEED-1"]);
 }
 
 // --- scope misuse -----------------------------------------------------------
@@ -858,32 +958,40 @@ async fn cancellation_is_interrupted_not_a_script_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_host_failure_code_reaches_the_script_intact() {
+async fn every_host_failure_code_reaches_the_script_under_its_wire_spelling() {
+    // The wire spellings are the contract scripts and clients match on, so
+    // they are written out here rather than derived from the enum.
     let codes = [
-        FailureCode::Failed,
-        FailureCode::ExitNonZero,
-        FailureCode::Unavailable,
-        FailureCode::Conflict,
-        FailureCode::Busy,
-        FailureCode::Cancelled,
-        FailureCode::ObservationUnavailable,
-        FailureCode::InvocationMismatch,
-        FailureCode::Indeterminate,
-        FailureCode::Domain("budget_exhausted".into()),
+        (FailureCode::Failed, "failed"),
+        (FailureCode::ExitNonZero, "exit_nonzero"),
+        (FailureCode::Unavailable, "unavailable"),
+        (FailureCode::Conflict, "conflict"),
+        (FailureCode::Busy, "busy"),
+        (FailureCode::Cancelled, "cancelled"),
+        (
+            FailureCode::ObservationUnavailable,
+            "observation_unavailable",
+        ),
+        (FailureCode::InvocationMismatch, "invocation_mismatch"),
+        (FailureCode::Indeterminate, "indeterminate"),
+        (
+            FailureCode::Domain("budget_exhausted".into()),
+            "budget_exhausted",
+        ),
     ];
-    for code in codes {
+    for (code, wire) in codes {
         let op = native_op(NativeOp::EnvRead);
-        let reply = failed(op.clone(), code.clone(), "host said no");
+        let reply = failed(op.clone(), code, "host said no");
         let direct = eval_with(
             "ctx.env.read(key = \"k\")",
             &["env.read"],
             vec![(op.clone(), reply.clone())],
         )
         .await;
-        let message = direct.assert_failed("failed", code.as_str());
-        assert!(message.contains("host said no"), "{message}");
+        let message = direct.assert_failed("failed", wire);
+        assert!(message.contains("host said no"), "{wire}: {message}");
         let recovered = eval_with(
-            "r = ctx.try_call(ctx.env.read, key = \"k\")\nr.error.code",
+            "r = ctx.try_call(ctx.env.read, key = \"k\")\n[r.ok, r.error.code, r.error.message]",
             &["env.read"],
             vec![(op, reply)],
         )
@@ -891,8 +999,8 @@ async fn every_host_failure_code_reaches_the_script_intact() {
         assert!(
             recovered
                 .completed_text()
-                .contains(&format!("\"value\":\"{}\"", code.as_str())),
-            "{code:?}: {}",
+                .contains(&format!("\"value\":[false,\"{wire}\",\"host said no\"]")),
+            "{wire}: {}",
             recovered.completed_text()
         );
     }
@@ -902,6 +1010,63 @@ async fn every_host_failure_code_reaches_the_script_intact() {
 async fn unscripted_host_reply_is_an_unavailable_failure_not_a_fake_success() {
     let run = eval_with("ctx.env.read(key = \"k\")", &["env.read"], Vec::new()).await;
     run.assert_failed("failed", "unavailable");
+}
+
+/// Every `(facade, attribute, wire operation)` the dialect exposes on `ctx`.
+const FACADE_OPERATIONS: [(&str, &str, &str); 28] = [
+    ("tools", "read", "tools.read"),
+    ("tools", "search", "tools.search"),
+    ("tools", "patch", "tools.patch"),
+    ("tools", "exec", "tools.exec"),
+    ("models", "infer", "models.infer"),
+    ("models", "forward", "models.forward"),
+    ("net", "fetch", "net.fetch"),
+    ("ask", "confirm", "ask.confirm"),
+    ("ask", "select", "ask.select"),
+    ("ask", "text", "ask.text"),
+    ("state", "read", "state.read"),
+    ("state", "write", "state.write"),
+    ("state", "delete", "state.delete"),
+    ("agents", "start", "agents.start"),
+    ("agents", "wait", "agents.wait"),
+    ("agents", "cancel", "agents.cancel"),
+    ("agents", "list", "agents.list"),
+    ("jobs", "start", "jobs.start"),
+    ("jobs", "wait", "jobs.wait"),
+    ("jobs", "cancel", "jobs.cancel"),
+    ("jobs", "list", "jobs.list"),
+    ("jobs", "text", "jobs.text"),
+    ("turn", "cancel", "turn.cancel"),
+    ("turn", "steer", "turn.steer"),
+    ("turn", "wake", "turn.wake"),
+    ("turn", "is_idle", "turn.is_idle"),
+    ("env", "read", "env.read"),
+    ("mcp", "call", "mcp.call"),
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_facade_attribute_reaches_the_host_as_its_own_wire_operation() {
+    for (facade, attribute, wire) in FACADE_OPERATIONS {
+        // Model operations decode a typed request before they cross; the
+        // others cross with whatever arguments the script supplied.
+        let arguments = if facade == "models" {
+            format!(", {VALID_REQUEST}")
+        } else {
+            String::new()
+        };
+        let code = format!("ctx.try_call(ctx.{facade}.{attribute}{arguments}).ok");
+        let run = eval(&code).await;
+        assert_eq!(run.envelope().status, "completed", "{code}");
+        let called: Vec<String> = run
+            .records()
+            .into_iter()
+            .filter_map(|record| match record {
+                HostRecord::Call { op, .. } => Some(op.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(called, [wire], "ctx.{facade}.{attribute}");
+    }
 }
 
 // --- plugin tools -----------------------------------------------------------
@@ -1012,23 +1177,27 @@ async fn tool_argument_bounds_are_inclusive_on_both_sides() {
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_tool_argument_json_is_a_typed_failure() {
     let source = plugin_with(RETURN_ARGS, "", "");
-    for arguments in ["{\"a\":9007199254740992}", "{\"a\":1e999}"] {
-        let Ok(args) = RawJson::parse(arguments) else {
-            continue;
-        };
-        let (_data, system) = system_with_plugin("probe", &source);
-        let extensions = system.extensions().expect("plugin converts");
-        let tool = named_tool(&extensions[0], "probe__t");
-        let host = RecordingHost::new(&extensions, OpSet::EMPTY, []);
-        let outcome = tool
-            .run(
-                ToolCall::new("adversarial", args),
-                tool_cx(host.script_cx()),
-            )
-            .await;
+    for (arguments, needle) in [
+        (
+            "{\"a\":9007199254740992}",
+            "invalid json: integer exceeds signed 53-bit range",
+        ),
+        (
+            "{\"a\":-9007199254740992}",
+            "invalid json: integer exceeds signed 53-bit range",
+        ),
+        ("{\"a\":1e999}", "invalid json: Float number must be finite"),
+        ("{\"a\":1,\"a\":2}", "invalid json: duplicate key `a`"),
+    ] {
+        let run = run_plugin_tool(&source, arguments).await;
+        let message = failure_text(&run.outcome);
+        assert!(message.contains(needle), "{arguments}: {message}");
         assert!(
-            matches!(outcome, ToolOutcome::Err(_)),
-            "{arguments}: {outcome:?}"
+            !run.host
+                .records()
+                .iter()
+                .any(|record| matches!(record, HostRecord::Begin { .. })),
+            "{arguments}: malformed arguments must not enter the handler"
         );
     }
 }
@@ -1054,54 +1223,84 @@ async fn a_tool_without_a_script_host_fails_closed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn handlers_with_the_wrong_shape_fail_each_call_and_still_finish() {
     let cases = [
-        "def run(ctx):\n    return None\n",
-        "def run(ctx, args, extra):\n    return None\n",
-        "def run(*, ctx, args):\n    return None\n",
+        (
+            "def run(ctx):\n    return None\n",
+            "Found 1 extra positional argument(s) for call to",
+        ),
+        (
+            "def run(ctx, args, extra):\n    return None\n",
+            "Missing parameter `extra` for call to",
+        ),
+        (
+            "def run(*, ctx, args):\n    return None\n",
+            "Missing named-only parameter `ctx` for call to",
+        ),
     ];
-    for run_source in cases {
+    for (run_source, needle) in cases {
         let run = run_plugin_tool(&plugin_with(run_source, "", ""), "{}").await;
         let message = failure_text(&run.outcome);
-        assert_ne!(message, "");
-        let finished = run
-            .host
-            .records()
-            .iter()
-            .any(|record| matches!(record, HostRecord::Finish { .. }));
-        assert!(
-            finished,
-            "{run_source}: the begun invocation must be finished"
+        assert!(message.contains(needle), "{run_source}: {message}");
+        let records = run.host.records();
+        let count = |matching: fn(&HostRecord) -> bool| {
+            records.iter().filter(|record| matching(record)).count()
+        };
+        assert_eq!(
+            (
+                count(|record| matches!(record, HostRecord::Begin { .. })),
+                count(|record| matches!(record, HostRecord::Finish { .. })),
+            ),
+            (1, 1),
+            "{run_source}: the begun invocation must be finished exactly once"
         );
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_callable_run_fails_every_call_with_a_typed_error() {
+async fn a_non_callable_run_fails_every_call_naming_the_uncallable_type() {
     let source = "load(\"@dal/v1\", \"dal\")\nt = dal.tool(description = \"d\", input = dal.schema(), run = \"not callable\")\nplugin = dal.plugin(name = \"probe\", version = \"0.1.0\", tools = {\"t\": t})\n";
-    let run = run_plugin_tool(source, "{}").await;
-    let message = failure_text(&run.outcome);
-    assert!(
-        message.contains("not callable") || message.contains("call"),
-        "{message}"
-    );
+    for attempt in 0..2 {
+        let run = run_plugin_tool(source, "{}").await;
+        let message = failure_text(&run.outcome);
+        assert!(
+            message.contains("Operation `call()` not supported on type `string`"),
+            "attempt {attempt}: {message}"
+        );
+        let finished = run
+            .host
+            .records()
+            .iter()
+            .filter(|record| matches!(record, HostRecord::Finish { .. }))
+            .count();
+        assert_eq!(finished, 1, "attempt {attempt}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn handler_results_outside_the_transport_set_fail_the_call() {
-    for body in [
-        "return lambda: 1",
-        "return {1: 2}",
-        "return float(\"inf\")",
-        "return 1 << 60",
-        "return ctx",
-        "return (1, lambda: 1)",
+    for (body, needle) in [
+        (
+            "return lambda: 1",
+            "cannot return function across the script boundary",
+        ),
+        (
+            "return {1: 2}",
+            "cannot return dict key of type int across the script boundary",
+        ),
+        (
+            "return float(\"inf\")",
+            "non-finite number cannot cross the boundary",
+        ),
+        ("return 1 << 60", "integer exceeds signed 53-bit range"),
+        ("return ctx", "cannot return ctx across the script boundary"),
+        (
+            "return (1, lambda: 1)",
+            "cannot return function across the script boundary",
+        ),
     ] {
         let run_source = format!("def run(ctx, args):\n    {body}\n");
         let run = run_plugin_tool(&plugin_with(&run_source, "", ""), "{}").await;
-        assert!(
-            matches!(run.outcome, ToolOutcome::Err(_)),
-            "{body}: {:?}",
-            run.outcome
-        );
+        let message = failure_text(&run.outcome);
+        assert!(message.contains(needle), "{body}: {message}");
     }
 }
 
@@ -1237,6 +1436,44 @@ async fn tool_handlers_cannot_enter_other_scripted_exports_outside_the_catalog()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_handler_naming_an_uncataloged_export_fails_by_name_without_minting_an_invocation() {
+    let source = plugin_with(
+        "def run(ctx, args):\n    return ctx.tools[\"probe.ghost\"]()\n",
+        "",
+        "",
+    );
+    let run = run_plugin_tool(&source, "{}").await;
+    let message = failure_text(&run.outcome);
+    assert!(
+        message.starts_with("tools.probe.ghost: "),
+        "the failure must name the export it tried to enter: {message}"
+    );
+    let records = run.host.records();
+    let ghost = OpId::parse("tools.probe.ghost").expect("export id");
+    let calls: Vec<(&OpId, &str)> = records
+        .iter()
+        .filter_map(|record| match record {
+            HostRecord::Call { op, args, .. } => Some((op, args.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, [(&ghost, "{}")]);
+    // Entering an export is the host's door: the adapter issues one call and
+    // never begins an invocation of its own for the target.
+    let count = |matching: fn(&HostRecord) -> bool| {
+        records.iter().filter(|record| matching(record)).count()
+    };
+    assert_eq!(
+        (
+            count(|record| matches!(record, HostRecord::Begin { .. })),
+            count(|record| matches!(record, HostRecord::Finish { .. })),
+        ),
+        (1, 1),
+        "only the handler's own invocation exists"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn every_native_facade_attribute_is_reachable_and_nothing_else_is() {
     let probe = eval("dir(ctx)").await;
     let text = probe.completed_text();
@@ -1260,6 +1497,46 @@ async fn every_native_facade_attribute_is_reachable_and_nothing_else_is() {
         run.assert_failed("failed", "eval_error");
     }
     assert_eq!(probe.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_lists_exactly_its_facades_methods_and_config_and_no_other_facade_serves_a_foreign_operation()
+ {
+    let probe = eval("dir(ctx)").await;
+    assert!(
+        probe.completed_text().contains(
+            "\"value\":[\"adopt\",\"agents\",\"ask\",\"can\",\"config\",\"describe\",\"env\",\"jobs\",\"mcp\",\"models\",\"net\",\"scope\",\"show\",\"state\",\"tools\",\"try_call\",\"turn\"]"
+        ),
+        "{}",
+        probe.completed_text()
+    );
+    // `OpId::Native` and export ids are only minted by attribute lookup: an
+    // operation name that belongs to another facade is an attribute error,
+    // not a call. Check every facade against every foreign operation name.
+    let mut attributes: Vec<&str> = FACADE_OPERATIONS.iter().map(|(_, name, _)| *name).collect();
+    attributes.sort_unstable();
+    attributes.dedup();
+    for (facade, owned) in [
+        "tools", "models", "net", "ask", "state", "agents", "jobs", "turn", "env", "mcp",
+    ]
+    .map(|facade| {
+        let owned: Vec<&str> = FACADE_OPERATIONS
+            .iter()
+            .filter(|(owner, _, _)| *owner == facade)
+            .map(|(_, name, _)| *name)
+            .collect();
+        (facade, owned)
+    }) {
+        for attribute in attributes.iter().filter(|name| !owned.contains(name)) {
+            let run = eval(&format!("ctx.{facade}.{attribute}")).await;
+            let message = run.assert_failed("failed", "eval_error");
+            assert!(
+                message.contains(&format!("has no attribute `{attribute}`")),
+                "ctx.{facade}.{attribute}: {message}"
+            );
+            assert_eq!(run.calls(), 0, "ctx.{facade}.{attribute}");
+        }
+    }
 }
 
 // --- a host that misbehaves -------------------------------------------------
@@ -1336,7 +1613,7 @@ async fn malformed_host_results_are_api_errors_not_values() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn host_result_depth_and_integer_bounds_are_inclusive() {
+async fn host_results_at_every_inclusive_bound_reach_the_script_unchanged() {
     // The top-level value is level 0, so 65 nested empty arrays reach level 64.
     let at_cap = format!("{}{}", "[".repeat(65), "]".repeat(65));
     let below_cap = format!("{}{}", "[".repeat(64), "]".repeat(64));
@@ -1345,11 +1622,15 @@ async fn host_result_depth_and_integer_bounds_are_inclusive() {
         below_cap.as_str(),
         "9007199254740991",
         "-9007199254740991",
+        "{\"b\":1,\"a\":[true,null,\"x\"],\"c\":1.5}",
     ] {
-        let run = read_with_reply(json, "None").await;
-        assert_eq!(run.envelope().status, "completed");
-        let run = read_with_reply(json, "ctx.env.read(key = \"k\")\nNone").await;
-        assert_eq!(run.envelope().status, "completed", "{json}");
+        let run = read_with_reply(json, "ctx.env.read(key = \"k\")").await;
+        assert!(
+            run.completed_text()
+                .contains(&format!("\"value\":{json},\"prints\"")),
+            "{json}: {}",
+            run.completed_text()
+        );
     }
 }
 
@@ -1358,29 +1639,66 @@ async fn host_result_depth_and_integer_bounds_are_inclusive() {
 const VALID_REQUEST: &str = r#"{"purpose": "turn", "model": {"kind": "api", "family": "openai_chat", "model": "gpt-6"}, "system": "s", "tools": [], "context": [], "params": {"thinking": "off", "effort": None, "temperature": None, "max_output_tokens": None}, "cache_key": None}"#;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn scoped_infer_reaches_the_host_as_a_model_submit_and_seals_on_settle() {
-    let run = eval(&format!(
-        "s = ctx.scope(limit = 2)\ns.infer({VALID_REQUEST})\nr = s.settle()\nlen(r)"
-    ))
+async fn scoped_infer_submits_the_typed_request_and_settles_to_the_routed_inference() {
+    let op = OpId::Native(NativeOp::ModelsInfer);
+    let reply = completed_json(
+        op.clone(),
+        r#"{"events":[{"type":"delta","channel":{"type":"text"},"text":"hi"},{"type":"stop","end_turn":null}]}"#,
+    );
+    let extension = eval_extension(CELL_LIMITS).expect("eval extension");
+    let tool = named_tool(&extension, "eval");
+    let extensions = [extension];
+    let host = RecordingHost::new(&extensions, OpSet::EMPTY, [(op.clone(), reply)]);
+    let run = eval_on(
+        tool,
+        host,
+        &eval_args(&format!(
+            "s = ctx.scope(limit = 2)\ns.infer({VALID_REQUEST})\nr = s.settle()\n[len(r), r[0].ok, r[0].value.model.model, r[0].value.events[0].text, r[0].value.events[1][\"type\"]]"
+        )),
+    )
     .await;
     assert!(
-        run.completed_text().contains("\"value\":0"),
+        run.completed_text()
+            .contains("\"value\":[1,true,\"gpt-6\",\"hi\",\"stop\"]"),
         "{}",
         run.completed_text()
     );
     let records = run.records();
-    let submitted = records.iter().any(|record| {
-        matches!(record, HostRecord::Submit { request, .. }
-            if request.op == OpId::Native(NativeOp::ModelsInfer))
-    });
-    assert!(submitted, "{records:?}");
-    let sealed = records.iter().any(|record| {
-        matches!(record, HostRecord::Collect { which, .. }
-            if matches!(which, dal_agent::ext::script::Collect::Seal(_)))
-    });
+    let opened = records
+        .iter()
+        .find_map(|record| match record {
+            HostRecord::OpenScope { scope, .. } => Some(*scope),
+            _ => None,
+        })
+        .expect("the scope reaches the host");
+    let submits: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            HostRecord::Submit { scope, request, .. } => Some((*scope, request)),
+            _ => None,
+        })
+        .collect();
+    let [(submitted_to, request)] = submits.as_slice() else {
+        panic!("exactly one submit expected: {records:?}");
+    };
+    assert_eq!(*submitted_to, opened);
+    assert_eq!(request.op, op);
+    let args = request.args.as_str();
     assert!(
+        args.contains("\"purpose\":\"turn\"") && args.contains("\"system\":\"s\""),
+        "the typed request must cross intact: {args}"
+    );
+    let sealed: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            HostRecord::Collect { which, .. } => Some(*which),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
         sealed,
-        "settle must seal and collect the scope: {records:?}"
+        [dal_agent::ext::script::Collect::Seal(opened)],
+        "settle must seal and collect the scope it opened"
     );
 }
 

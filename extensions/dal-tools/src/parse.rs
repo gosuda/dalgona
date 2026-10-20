@@ -678,6 +678,39 @@ type Iota = u32;
     }
 
     #[tokio::test]
+    async fn each_extension_parses_with_its_own_grammar_and_no_sibling_grammar() {
+        // (path, source valid only for that grammar, path of a sibling grammar
+        // that must reject the same bytes)
+        let table = [
+            ("a.tsx", "const a = <div/>;\n", "a.ts"),
+            ("a.ts", "const n: number = 1;\n", "a.js"),
+            (
+                "a.cpp",
+                "template <typename T> T id(T x) { return x; }\n",
+                "a.c",
+            ),
+            ("a.js", "const a = 1;\nlet b = a;\n", "a.py"),
+            ("a.py", "def a():\n    pass\n", "a.rs"),
+            ("a.rs", "fn a() {}\n", "a.py"),
+            ("a.go", "package p\nfunc F() {}\n", "a.c"),
+            ("a.c", "int main(void) { return 0; }\n", "a.go"),
+            ("a.ml", "let x = 1\n", "a.mli"),
+        ];
+        for (path, source, sibling) in table {
+            assert_eq!(
+                errors(Path::new(path), source.as_bytes()).await,
+                Ok(0),
+                "{path} must accept its own source"
+            );
+            let foreign = errors(Path::new(sibling), source.as_bytes()).await.unwrap();
+            assert!(
+                foreign > 0,
+                "{sibling} must reject the {path} source, found {foreign} errors"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn rust_kinds_and_spans() {
         let defs = defs_of("fixture.rs", RUST).await;
         assert_eq!(

@@ -98,29 +98,99 @@ fn parent_link_escape_after_canonicalization_is_denied() {
 #[test]
 fn bare_dot_dot_walk_past_the_root_is_denied() {
     let workspace = tempfile::tempdir().expect("workspace root");
-    let (root, depth) = {
-        let mut path = workspace.path();
-        let mut depth = 0_usize;
-        loop {
-            let Some(parent) = path.parent() else {
-                break (path.to_path_buf(), depth);
-            };
-            depth += 1;
-            path = parent;
-            if path.file_name().is_none() {
-                break (path.to_path_buf(), depth);
-            }
+    // Steps from the workspace up to the filesystem root.
+    let depth = workspace.path().ancestors().count() - 1;
+    for steps in 1..=depth + 1 {
+        for leaf in ["", "walked.txt"] {
+            let escape = format!("{}{leaf}", "../".repeat(steps));
+            let error = resolve_path(workspace.path(), Path::new(&escape)).expect_err(
+                "a dot-dot walk out of the workspace must be denied, not clamped to its root",
+            );
+            assert!(
+                error.message.contains("outside the workspace"),
+                "{escape}: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains(&escape),
+                "{escape}: {}",
+                error.message
+            );
         }
-    };
-    let escape = "../".repeat(depth + 1);
-    let error = resolve_path(workspace.path(), Path::new(&escape))
-        .expect_err("a dot-dot walk past the filesystem root must be denied");
+    }
+}
+
+#[test]
+fn dot_dot_staying_inside_the_workspace_is_normalized_and_one_step_further_is_denied() {
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let root = std::fs::canonicalize(workspace.path()).expect("workspace canonicalizes");
+    for raw in [
+        "a/../inside.txt",
+        "a/b/../../inside.txt",
+        "./a/./../inside.txt",
+        "a/../a/../inside.txt",
+    ] {
+        let (display, canonical) = resolve_path(workspace.path(), Path::new(raw))
+            .expect("a walk that never leaves the workspace plans");
+        assert_eq!(display, std::path::PathBuf::from("inside.txt"), "{raw}");
+        assert_eq!(canonical, root.join("inside.txt"), "{raw}");
+    }
+    for raw in [
+        "a/../../inside.txt",
+        "a/b/../../../inside.txt",
+        "../inside.txt",
+        "a/..",
+        ".",
+    ] {
+        let error = resolve_path(workspace.path(), Path::new(raw))
+            .expect_err("a walk to or past the workspace root must be denied");
+        assert!(
+            error.message.contains("outside the workspace"),
+            "{raw}: {}",
+            error.message
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dot_dot_into_a_sibling_directory_is_denied_not_remapped_inside() {
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let outside = outside_dir(&workspace);
+    std::fs::write(outside.path().join("secret.txt"), b"outside\n").expect("outside fixture");
+    let sibling = outside
+        .path()
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("sibling name is UTF-8")
+        .to_owned();
+    let raw = format!("../{sibling}/secret.txt");
+    let error = resolve_path(workspace.path(), Path::new(&raw))
+        .expect_err("a sibling of the workspace must be denied");
     assert!(
         error.message.contains("outside the workspace"),
-        "got: {}",
+        "{raw}: {}",
         error.message
     );
-    assert!(root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dot_dot_after_a_symlinked_directory_is_resolved_lexically_inside() {
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let outside = outside_dir(&workspace);
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("hop"))
+        .expect("escape symlink");
+    let (display, canonical) = resolve_path(workspace.path(), Path::new("hop/../inside.txt"))
+        .expect("the lexical walk returns to the workspace before any link is followed");
+    assert_eq!(display, std::path::PathBuf::from("inside.txt"));
+    assert_eq!(
+        canonical,
+        std::fs::canonicalize(workspace.path())
+            .expect("workspace canonicalizes")
+            .join("inside.txt"),
+        "the walk must land in the workspace, not in the link target's parent"
+    );
 }
 
 #[cfg(unix)]

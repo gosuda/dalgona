@@ -281,8 +281,23 @@ async fn todo_writes_fail_closed_on_ephemeral_sessions() -> Result<(), Box<dyn E
     let outcomes = run_turn(&agent, "add an ephemeral todo").await?;
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].is_error, "ephemeral state must fail closed");
-    assert!(outcomes[0].text.contains("state"));
-    assert!(outcomes[0].text.contains("unavailable"));
+    // The refusal is the typed `unavailable` outcome of the first state
+    // operation, so a script can tell it from an ordinary failure.
+    assert_eq!(
+        outcomes[0].text.as_ref(),
+        "state.read: unavailable: state is unavailable in this session"
+    );
+    // Failing closed also means the add left nothing behind: a reader in the
+    // same session is refused as well, rather than answering "No todos".
+    let listed = run_command(&agent, "")
+        .await
+        .expect_err("an ephemeral session has no todo list to read");
+    assert!(
+        listed
+            .to_string()
+            .contains("state.read: unavailable: state is unavailable in this session"),
+        "{listed}"
+    );
     host.shutdown(Duration::from_secs(2)).await;
     Ok(())
 }

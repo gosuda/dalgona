@@ -298,7 +298,21 @@ fn entry_file_size_boundary_is_max_code() {
 }
 
 #[test]
-fn oversized_sibling_file_fails_the_whole_plugin() {
+fn oversized_sibling_file_fails_the_whole_plugin_naming_the_file_and_plugin() {
+    let at_cap = vec![b'x'; MAX_CODE];
+    let (_data, result) = load_with(
+        &[
+            ("sized", "plugin.star", plugin_source("sized").as_bytes()),
+            ("sized", "notes.txt", &at_cap),
+        ],
+        &config(),
+    );
+    assert!(
+        result.is_ok(),
+        "a sibling exactly at the cap loads: {:?}",
+        result.err()
+    );
+
     let big = vec![b'x'; MAX_CODE + 1];
     let (_data, result) = load_with(
         &[
@@ -307,31 +321,44 @@ fn oversized_sibling_file_fails_the_whole_plugin() {
         ],
         &config(),
     );
-    assert!(
-        matches!(result, Err(LoadError::Eval { .. })),
-        "{:?}",
-        result.err()
+    let Some(LoadError::Eval { path, message, .. }) = result.err() else {
+        panic!("one byte over the cap must be a located evaluation error");
+    };
+    assert_eq!(path, PathBuf::from("notes.txt"));
+    assert_eq!(
+        message.as_ref(),
+        "file exceeds 262144 bytes in plugin `sized`"
     );
 }
 
 static OVERSIZED: [u8; MAX_CODE + 1] = [b'#'; MAX_CODE + 1];
 
 #[test]
-fn bundled_file_over_the_cap_is_refused() {
-    let big: &'static [u8] = &OVERSIZED;
+fn bundled_file_over_the_cap_is_refused_naming_the_file_and_plugin() {
     let data = tempfile::tempdir().expect("data root");
-    let roots = LoadRoots {
+    let bundled = |bytes: &'static [u8]| LoadRoots {
         data_root: data.path().to_path_buf(),
         bundled: vec![BundledPlugin {
             name: "big".to_owned(),
-            files: BTreeMap::from([(PathBuf::from("plugin.star"), big)]),
+            files: BTreeMap::from([(PathBuf::from("plugin.star"), bytes)]),
         }],
     };
-    let result = load(&roots, &config());
+    // At the cap the size check passes; this comment-only entry then fails
+    // for lacking the SDK load, which is a different refusal.
+    let at_cap = load(&bundled(&OVERSIZED[..MAX_CODE]), &config());
     assert!(
-        matches!(result, Err(LoadError::Eval { .. })),
+        matches!(at_cap, Err(LoadError::UnsupportedEntry { .. })),
         "{:?}",
-        result.err()
+        at_cap.err()
+    );
+    let over = load(&bundled(&OVERSIZED), &config());
+    let Some(LoadError::Eval { path, message, .. }) = over.err() else {
+        panic!("one byte over the cap must be a located evaluation error");
+    };
+    assert_eq!(path, PathBuf::from("plugin.star"));
+    assert_eq!(
+        message.as_ref(),
+        "file exceeds 262144 bytes in plugin `big`"
     );
 }
 
@@ -353,41 +380,57 @@ fn bundled_plugin_without_entry_file_is_refused() {
     );
 }
 
-#[test]
-fn load_tick_budget_stops_a_spinning_module() {
+fn loaded_with(
+    limits: PluginLimits,
+    name: &str,
+    body: &str,
+) -> Result<PluginGeneration, LoadError> {
     let mut cfg = config();
-    cfg.limits = PluginLimits {
+    cfg.limits = limits;
+    let source = format!("{HEADER}{body}{}", &plugin_source(name)[HEADER.len()..]);
+    load_with(&[(name, "plugin.star", source.as_bytes())], &cfg).1
+}
+
+#[test]
+fn load_tick_budget_stops_a_spinning_module_and_reports_the_applied_limit() {
+    let limits = PluginLimits {
         load_ticks: 1_000,
         ..PluginLimits::default()
     };
-    let source = format!(
-        "{HEADER}for _ in range(1000000):\n    pass\n{}",
-        &plugin_source("spin")[HEADER.len()..]
-    );
-    let (_data, result) = load_with(&[("spin", "plugin.star", source.as_bytes())], &cfg);
-    assert!(
-        matches!(result, Err(LoadError::Eval { .. })),
-        "{:?}",
-        result.err()
+    let spin = |iterations: u32| format!("for _ in range({iterations}):\n    pass\n");
+    let short = loaded_with(limits, "spin", &spin(100));
+    assert!(short.is_ok(), "a short loop fits: {:?}", short.err());
+    let Some(LoadError::Eval { message, .. }) = loaded_with(limits, "spin", &spin(1_000_000)).err()
+    else {
+        panic!("a spinning module must be a located evaluation error");
+    };
+    assert_eq!(
+        message.as_ref(),
+        "Execution duration limit of 1000 ticks has been exceeded"
     );
 }
 
 #[test]
-fn load_call_depth_budget_stops_runaway_recursion() {
-    let mut cfg = config();
-    cfg.limits = PluginLimits {
+fn load_call_depth_budget_stops_runaway_recursion_exactly_at_the_limit() {
+    // With `stack_depth: 10` a chain of eight nested calls fits and nine do
+    // not (the module body occupies the first frames).
+    let limits = PluginLimits {
         stack_depth: 10,
         ..PluginLimits::default()
     };
-    let source = format!(
-        "{HEADER}def f(n):\n    return f(n + 1)\nx = f(0)\n{}",
-        &plugin_source("deep")[HEADER.len()..]
-    );
-    let (_data, result) = load_with(&[("deep", "plugin.star", source.as_bytes())], &cfg);
+    let chain = |depth: u32| {
+        format!(
+            "def f(n):\n    if n == 0:\n        return 0\n    return f(n - 1)\nx = f({depth})\n"
+        )
+    };
+    let fits = loaded_with(limits, "deep", &chain(8));
+    assert!(fits.is_ok(), "{:?}", fits.err());
+    let Some(LoadError::Eval { message, .. }) = loaded_with(limits, "deep", &chain(9)).err() else {
+        panic!("nine nested calls must overflow a depth-10 budget");
+    };
     assert!(
-        matches!(result, Err(LoadError::Eval { .. })),
-        "{:?}",
-        result.err()
+        message.contains("error: Starlark call stack overflow"),
+        "{message}"
     );
 }
 
@@ -462,7 +505,19 @@ fn missing_data_root_is_an_empty_generation_not_an_error() {
 }
 
 #[test]
-fn first_bad_plugin_fails_the_whole_generation() {
+fn first_bad_plugin_fails_the_whole_generation_and_names_its_file() {
+    // The control is the same pair with the broken plugin fixed.
+    let (_data, result) = load_with(
+        &[
+            ("alpha", "plugin.star", plugin_source("alpha").as_bytes()),
+            ("beta", "plugin.star", plugin_source("beta").as_bytes()),
+        ],
+        &config(),
+    );
+    let generation = result.expect("two valid plugins load");
+    assert_eq!(generation.names().collect::<Vec<_>>(), ["alpha", "beta"]);
+
+    // One bad plugin among good ones fails the load, located in its file.
     let (_data, result) = load_with(
         &[
             ("alpha", "plugin.star", plugin_source("alpha").as_bytes()),
@@ -470,10 +525,25 @@ fn first_bad_plugin_fails_the_whole_generation() {
         ],
         &config(),
     );
-    assert!(
-        result.is_err(),
-        "a generation is published whole or not at all"
+    let error = result.expect_err("a generation is published whole or not at all");
+    let LoadError::Eval { path, .. } = &error else {
+        panic!("expected a located evaluation error, got {error:?}");
+    };
+    assert!(path.ends_with("beta/plugin.star"), "{}", path.display());
+
+    // With several bad plugins the first one in load order is the one reported.
+    let (_data, result) = load_with(
+        &[
+            ("alpha", "plugin.star", b"y ="),
+            ("beta", "plugin.star", b"x ="),
+        ],
+        &config(),
     );
+    let error = result.expect_err("both plugins are broken");
+    let LoadError::Eval { path, .. } = &error else {
+        panic!("expected a located evaluation error, got {error:?}");
+    };
+    assert!(path.ends_with("alpha/plugin.star"), "{}", path.display());
 }
 
 #[test]
