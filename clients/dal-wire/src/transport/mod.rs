@@ -247,6 +247,7 @@ pub(crate) type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 /// A line-framed transport over separate asynchronous reader and writer handles.
 pub(crate) struct LineTransport {
     reader: BufReader<BoxRead>,
+    partial: Vec<u8>,
     writer: FrameWriter,
     closed: Arc<AtomicBool>,
     eof: bool,
@@ -261,6 +262,7 @@ impl LineTransport {
         let closed = Arc::new(AtomicBool::new(false));
         Self {
             reader: BufReader::new(Box::new(reader)),
+            partial: Vec::new(),
             writer: FrameWriter::new(Box::new(writer), Arc::clone(&closed)),
             closed,
             eof: false,
@@ -275,7 +277,6 @@ impl LineTransport {
             return Err(ReadFrameError::EndOfInput);
         }
         loop {
-            let mut frame = Vec::with_capacity(1024);
             let mut reached_eof = false;
             loop {
                 let available = match self.reader.fill_buf().await {
@@ -293,27 +294,30 @@ impl LineTransport {
                 }
 
                 if let Some(end) = available.iter().position(|byte| *byte == b'\n') {
-                    if frame.len().saturating_add(end) > MAX_FRAME_BYTES {
+                    if self.partial.len().saturating_add(end) > MAX_FRAME_BYTES {
                         self.reader.consume(end + 1);
+                        self.partial = Vec::new();
                         self.closed.store(true, Ordering::Release);
                         return Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES));
                     }
-                    frame.extend_from_slice(&available[..end]);
+                    self.partial.extend_from_slice(&available[..end]);
                     self.reader.consume(end + 1);
                     break;
                 }
 
-                if frame.len().saturating_add(available.len()) > MAX_FRAME_BYTES {
+                if self.partial.len().saturating_add(available.len()) > MAX_FRAME_BYTES {
                     let len = available.len();
                     self.reader.consume(len);
+                    self.partial = Vec::new();
                     self.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES));
                 }
                 let len = available.len();
-                frame.extend_from_slice(available);
+                self.partial.extend_from_slice(available);
                 self.reader.consume(len);
             }
 
+            let mut frame = std::mem::take(&mut self.partial);
             if frame.last() == Some(&b'\r') {
                 frame.pop();
             }
