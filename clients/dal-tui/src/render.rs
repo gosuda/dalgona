@@ -1023,10 +1023,7 @@ fn status_line(
         &input.view.session.workspace.as_path().display().to_string(),
         input.opts.env.home.as_deref(),
     ));
-    let path = match input.branch {
-        Some(branch) => format!("{home} ({})", escape(branch)),
-        None => home,
-    };
+    let branch = input.branch.map(escape);
     let usage = &input.view.usage.usage;
     let tokens = (usage.input_tokens > 0 || usage.output_tokens > 0).then(|| {
         crate::copy::render(
@@ -1089,7 +1086,8 @@ fn status_line(
             state,
             spinner,
             model,
-            path: Some(&path),
+            path: Some(&home),
+            branch: branch.as_deref(),
             tokens: tokens.as_deref(),
             context: context.as_ref().map(|(text, _)| text.as_str()),
             context_role: context.as_ref().and_then(|(_, role)| *role),

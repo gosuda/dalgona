@@ -14,8 +14,10 @@ pub struct StatusData<'a> {
     pub spinner: Option<&'a str>,
     /// Model identifier.
     pub model: Option<&'a str>,
-    /// Workspace path and branch.
+    /// Escaped, home-contracted workspace path, without branch decoration.
     pub path: Option<&'a str>,
+    /// Escaped branch text, without surrounding punctuation.
+    pub branch: Option<&'a str>,
     /// Input and output token labels.
     pub tokens: Option<&'a str>,
     /// Context usage percentage.
@@ -79,14 +81,17 @@ pub fn render_with_roles(
         .context
         .map_or(CONTEXT_SLOT, |text| width(text, mode).max(CONTEXT_SLOT));
     let compact_tokens = data.tokens.map(compact_token_pair);
-    let basename = data.path.map(path_basename);
+    let path = data.path.map(|path| decorate_path(path, data.branch));
+    let basename = data
+        .path
+        .map(|path| decorate_path(path_basename(path), data.branch));
     let slots = slots_for(
         &data,
         state.as_deref(),
         state_width,
         context_width,
         compact_tokens.as_deref(),
-        basename.as_deref(),
+        (path.as_deref(), basename.as_deref()),
         columns,
     );
 
@@ -133,7 +138,7 @@ fn slots_for<'a>(
     state_width: usize,
     context_width: usize,
     compact_tokens: Option<&'a str>,
-    basename: Option<&'a str>,
+    paths: (Option<&'a str>, Option<&'a str>),
     columns: usize,
 ) -> Vec<Slot<'a>> {
     let state = Slot {
@@ -149,7 +154,8 @@ fn slots_for<'a>(
         role: data.context_role,
     };
     let model = Slot::fixed(data.model, 24, Align::Left);
-    let path = Slot::fixed(data.path, 24, Align::Left);
+    let (path, basename) = paths;
+    let path = Slot::fixed(path, 24, Align::Left);
     if columns >= 120 {
         vec![
             state,
@@ -396,15 +402,19 @@ pub(crate) fn style_sgr(
     }
 }
 
-fn path_basename(path: &str) -> String {
-    let (path, branch) = path
-        .split_once(" ( ")
-        .map_or((path, None), |(path, rest)| (path, Some(rest)));
-    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    branch.map_or_else(
-        || basename.to_owned(),
-        |branch| format!("{basename} ({branch}"),
-    )
+fn path_basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return path;
+    }
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+fn decorate_path<'a>(path: &'a str, branch: Option<&str>) -> std::borrow::Cow<'a, str> {
+    match branch {
+        Some(branch) => std::borrow::Cow::Owned(format!("{path} ({branch})")),
+        None => std::borrow::Cow::Borrowed(path),
+    }
 }
 
 #[cfg(test)]
@@ -437,7 +447,8 @@ mod tests {
             state: Some("working"),
             spinner: Some("⠋"),
             model: Some("provider/model"),
-            path: Some("~/work/project (main)"),
+            path: Some("~/work/project"),
+            branch: Some("main"),
             tokens: Some("in 14k out 4k"),
             context: Some("ctx 47%"),
             context_role: None,
