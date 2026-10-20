@@ -4870,6 +4870,60 @@ async fn bedrock_bearer_token_rides_authorization_header_unsigned() -> TestResul
 }
 
 #[tokio::test]
+async fn bedrock_auth_none_sends_no_credentials_to_proxy() -> TestResult {
+    let dir = TestDir::new()?;
+    store_groq_key(&dir)?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let mut row = bedrock_override_entry();
+    row.base_url = base.into();
+    row.auth = AuthStyle::None;
+    let set = ProviderSet::new(
+        &config(vec![row], 0),
+        identity(),
+        // Both bearer sources are present on purpose: the explicit
+        // `auth = "none"` entry must win before either is read.
+        bedrock_env(&[("AWS_BEARER_TOKEN_BEDROCK", "CANARY-env-bearer")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("groq", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /model/anthropic.claude-test/converse-stream "));
+    assert!(
+        !head.contains("authorization:"),
+        "auth=none must send no authorization header: {head}"
+    );
+    assert!(!head.contains("x-amz-date:"));
+    assert!(!head.contains("x-amz-content-sha256:"));
+    assert!(!head.contains("x-amz-security-token:"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn bedrock_unauthorized_invalidates_and_retries_once() -> TestResult {
     let dir = TestDir::new()?;
     let (base, mut server) = bytes_server(vec![

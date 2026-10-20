@@ -1,7 +1,9 @@
-//! Bedrock dual-mode auth: a bearer-token bypass ahead of the `SigV4`
-//! five-tier credential chain.
+//! Bedrock auth: an explicit `auth = "none"` entry, a bearer-token bypass,
+//! and the `SigV4` five-tier credential chain.
 //!
-//! Precedence: a stored provider API key or `AWS_BEARER_TOKEN_BEDROCK`
+//! Precedence: an entry configured `auth = "none"` resolves no credential
+//! source at all and its request goes out unsigned; then a stored provider
+//! API key or `AWS_BEARER_TOKEN_BEDROCK`
 //! emits `Authorization: Bearer <token>` and skips `SigV4` entirely (a
 //! request-level bearer option, when the caller holds one, wins before
 //! this); otherwise credentials resolve through static environment keys,
@@ -36,7 +38,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::AwsCredential;
-use crate::{AuthStore, EnvSnapshot, ProviderEntry, ProviderError, SecretString};
+use crate::{AuthStore, AuthStyle, EnvSnapshot, ProviderEntry, ProviderError, SecretString};
 
 /// Seconds of clock skew absorbed before a cached expiry: a credential that
 /// dies within this window is re-resolved instead of served.
@@ -119,6 +121,9 @@ const DEFAULT_REGION: &str = "us-east-1";
 /// bypasses `SigV4`, or a `SigV4` credential from the five-tier chain.
 #[derive(Clone, Debug)]
 pub(crate) enum BedrockAuth {
+    /// No credential: the entry configured `auth = "none"`, so the request
+    /// goes out unsigned and header-less.
+    None,
     /// `Authorization: Bearer <token>`; `SigV4` signing is skipped entirely.
     Bearer(SecretString),
     /// `SigV4`-signed with this credential.
@@ -448,9 +453,11 @@ impl AwsCredentialResolver {
             .map(SecretString::from)
     }
 
-    /// Resolves the auth a Bedrock request carries. A bearer token wins and
-    /// bypasses `SigV4`; otherwise the five-tier chain resolves `SigV4`
-    /// credentials, or [`ProviderError::NoCredentials`] names the provider.
+    /// Resolves the auth a Bedrock request carries. An explicit
+    /// `auth = "none"` entry wins before any credential source is read, so
+    /// the request goes out unsigned. Otherwise a bearer token wins and
+    /// bypasses `SigV4`; the five-tier chain resolves `SigV4` credentials,
+    /// or [`ProviderError::NoCredentials`] names the provider.
     ///
     /// # Errors
     ///
@@ -467,6 +474,9 @@ impl AwsCredentialResolver {
     ) -> Result<BedrockAuth, ProviderError> {
         if cancel.is_cancelled() {
             return Err(cancelled());
+        }
+        if provider.auth == AuthStyle::None {
+            return Ok(BedrockAuth::None);
         }
         if let Some(token) = self.resolve_bearer_token(provider, store) {
             return Ok(BedrockAuth::Bearer(token));

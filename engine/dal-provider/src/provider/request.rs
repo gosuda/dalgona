@@ -377,17 +377,30 @@ async fn bedrock_try(
     )))
 }
 
-/// Builds the Converse `RequestBuilder` for one resolved auth: a bearer token
-/// rides `Authorization: Bearer` with no signing, and `SigV4` signs through
-/// the family's narrow signer seam. The second member is the redaction list
-/// of the credential material the request carries; every response and stream
-/// error of the attempt passes through it.
+/// Builds the Converse `RequestBuilder` for one resolved auth: an
+/// `auth = "none"` entry sends no auth header and no signature, a bearer
+/// token rides `Authorization: Bearer` with no signing, and `SigV4` signs
+/// through the family's narrow signer seam. The second member is the
+/// redaction list of the credential material the request carries; every
+/// response and stream error of the attempt passes through it.
 fn bedrock_request(
     context: &StreamContext,
     auth: &BedrockAuth,
     region: &str,
 ) -> Result<(reqwest::RequestBuilder, Vec<Box<str>>), ProviderError> {
     match auth {
+        BedrockAuth::None => {
+            let path = bedrock::request_path(&context.model);
+            let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
+            let body = bedrock::request_body(&context.request, &context.thinking)
+                .map_err(bedrock_body_error)?;
+            let builder = context
+                .client
+                .post(url)
+                .header("content-type", "application/json")
+                .header("accept", BEDROCK_EVENTSTREAM_ACCEPT);
+            Ok((builder.body(body), Vec::new()))
+        }
         BedrockAuth::Bearer(token) => {
             let path = bedrock::request_path(&context.model);
             let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
