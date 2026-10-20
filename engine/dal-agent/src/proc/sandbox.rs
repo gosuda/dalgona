@@ -74,20 +74,20 @@ impl Display for SandboxSetupError {
 
 impl std::error::Error for SandboxSetupError {}
 
-/// Fails closed when the macOS Seatbelt utility is absent.
-///
-/// When the sandbox is enabled, commands run under macOS Seatbelt, which
-/// requires the system utility `/usr/bin/sandbox-exec`.
-#[cfg(target_os = "macos")]
-fn require_seatbelt() -> Result<(), SandboxSetupError> {
-    require_seatbelt_at(Path::new("/usr/bin/sandbox-exec"))
+/// The macOS system utility that wraps every launched command.
+const SEATBELT: &str = "/usr/bin/sandbox-exec";
+
+/// The system executable every command launch runs through on this
+/// platform, if any. On macOS direct launches use it for process-lifetime
+/// containment, so it is needed whether or not the filesystem sandbox is on.
+fn launch_utility() -> Option<&'static Path> {
+    cfg!(target_os = "macos").then_some(Path::new(SEATBELT))
 }
 
-/// The existence check behind [`require_seatbelt`], kept separate so tests
-/// can exercise the contract against a path the host controls.
-#[cfg(target_os = "macos")]
-fn require_seatbelt_at(seatbelt: &Path) -> Result<(), SandboxSetupError> {
-    if !seatbelt.exists() {
+/// Fails closed when the launch utility is absent, so a missing executable
+/// refuses at session start instead of failing every later spawn.
+fn require_launch_utility(utility: Option<&Path>) -> Result<(), SandboxSetupError> {
+    if utility.is_some_and(|path| !path.exists()) {
         return Err(SandboxSetupError::new(
             "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.",
         ));
@@ -95,7 +95,8 @@ fn require_seatbelt_at(seatbelt: &Path) -> Result<(), SandboxSetupError> {
     Ok(())
 }
 
-/// Resolves the session launcher, failing closed before any child starts.
+/// Resolves the sandbox launcher; [`session_launcher`] has already checked
+/// the platform launch utility, ahead of the sandbox flag.
 pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, SandboxSetupError> {
     if !inputs.sandbox_on {
         return Ok(Launcher::Direct);
@@ -117,7 +118,6 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     {
         #[cfg(target_os = "macos")]
         {
-            require_seatbelt()?;
             Ok(Launcher::Sandbox {
                 helper: None,
                 roots: roots.into_boxed_slice(),
@@ -145,6 +145,8 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
 /// Resolves the launcher for one session from the host snapshot, failing
 /// closed: sandbox off runs directly, an unresolvable setup refuses every
 /// spawn with the typed setup error instead of ever running unsandboxed.
+/// The platform launch utility is required first, so `sandbox = false`
+/// cannot start a session whose every spawn would fail.
 pub(crate) fn session_launcher(
     config: &dal_core::Config,
     vars: &BTreeMap<OsString, OsString>,
@@ -152,6 +154,27 @@ pub(crate) fn session_launcher(
     protected_roots: &[PathBuf],
     helper: Option<&Path>,
 ) -> Result<Launcher, SandboxSetupError> {
+    session_launcher_with(
+        config,
+        vars,
+        workspace_root,
+        protected_roots,
+        helper,
+        launch_utility(),
+    )
+}
+
+/// [`session_launcher`] with the launch utility supplied, so the decision
+/// runs on any host.
+fn session_launcher_with(
+    config: &dal_core::Config,
+    vars: &BTreeMap<OsString, OsString>,
+    workspace_root: &Path,
+    protected_roots: &[PathBuf],
+    helper: Option<&Path>,
+    utility: Option<&Path>,
+) -> Result<Launcher, SandboxSetupError> {
+    require_launch_utility(utility)?;
     if !config.sandbox() {
         return Ok(Launcher::Direct);
     }
@@ -497,7 +520,7 @@ pub(crate) fn lifetime_argv(
         target.clone(),
     ];
     args.extend(target_args.iter().cloned());
-    (OsString::from("/usr/bin/sandbox-exec"), args, None)
+    (OsString::from(SEATBELT), args, None)
 }
 
 /// Builds the sandboxed argv for one platform; macOS returns the profile
@@ -520,7 +543,7 @@ pub(crate) fn sandbox_argv(
             target.clone(),
         ];
         args.extend(target_args.iter().cloned());
-        Ok((OsString::from("/usr/bin/sandbox-exec"), args, Some(profile)))
+        Ok((OsString::from(SEATBELT), args, Some(profile)))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -822,37 +845,71 @@ mod tests {
         assert_eq!(platform_temp(&vars, home.path()), expected);
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn missing_seatbelt_fails_closed_when_sandbox_enabled() {
-        let error = require_seatbelt_at(Path::new("/dal-probe/missing-seatbelt"))
-            .expect_err("a missing utility is rejected");
-        assert_eq!(
-            error.to_string(),
-            "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.",
-        );
-        require_seatbelt_at(Path::new("/")).expect("an existing path resolves");
-    }
+    const MISSING_UTILITY_ERROR: &str =
+        "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.";
 
-    #[test]
-    fn session_launcher_sandbox_off_returns_direct_without_seatbelt() {
+    fn session_launcher_for(
+        sandbox: bool,
+        utility: Option<&Path>,
+    ) -> Result<Launcher, SandboxSetupError> {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = dal_core::Config::load(
             dal_core::ConfigProduct::Dalgon,
             temp.path(),
             "",
-            Some("sandbox = false"),
+            Some(if sandbox {
+                "sandbox = true"
+            } else {
+                "sandbox = false"
+            }),
         )
         .expect("config");
-        let vars = BTreeMap::new();
-        let launcher = session_launcher(
-            &config,
-            &vars,
-            Path::new("/nonexistent-workspace"),
-            &[],
-            None,
+        let home = tempfile::tempdir().expect("home");
+        let vars = BTreeMap::from([(OsString::from("HOME"), home.path().as_os_str().to_owned())]);
+        session_launcher_with(&config, &vars, home.path(), &[], None, utility)
+    }
+
+    #[test]
+    fn missing_launch_utility_refuses_with_the_documented_error() {
+        let error = require_launch_utility(Some(Path::new("/dal-probe/missing-seatbelt")))
+            .expect_err("a missing utility is rejected");
+        assert_eq!(error.to_string(), MISSING_UTILITY_ERROR);
+        require_launch_utility(Some(Path::new("/"))).expect("an existing path resolves");
+        require_launch_utility(None).expect("a platform without a utility has nothing to check");
+    }
+
+    #[test]
+    fn sandbox_off_still_requires_the_launch_utility() {
+        let error = session_launcher_for(false, Some(Path::new("/dal-probe/missing-seatbelt")))
+            .expect_err("direct launches need the utility too");
+        assert_eq!(error.to_string(), MISSING_UTILITY_ERROR);
+    }
+
+    #[test]
+    fn sandbox_on_requires_the_launch_utility_before_resolving_roots() {
+        let error = session_launcher_for(true, Some(Path::new("/dal-probe/missing-seatbelt")))
+            .expect_err("sandboxed launches need the utility");
+        assert_eq!(error.to_string(), MISSING_UTILITY_ERROR);
+    }
+
+    #[test]
+    fn sandbox_off_returns_direct_when_the_launch_utility_is_present_or_unneeded() {
+        assert!(matches!(
+            session_launcher_for(false, Some(Path::new("/"))),
+            Ok(Launcher::Direct)
+        ));
+        assert!(matches!(
+            session_launcher_for(false, None),
+            Ok(Launcher::Direct)
+        ));
+    }
+
+    #[test]
+    fn launch_utility_is_the_seatbelt_executable_only_on_macos() {
+        assert_eq!(
+            launch_utility(),
+            cfg!(target_os = "macos").then_some(Path::new("/usr/bin/sandbox-exec")),
         );
-        assert!(matches!(launcher, Ok(Launcher::Direct)));
     }
 
     #[cfg(target_os = "macos")]
