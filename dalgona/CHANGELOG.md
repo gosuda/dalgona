@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Run the released-artifact gates (`dalgona-release-10`, `-11`, `-12`) only
+  when `DALGONA_RELEASED_ARTIFACTS` is set. They install the published crate
+  and the tag's release assets, so a plain `cargo test` before a release no
+  longer fails on artifacts that cannot exist yet. The tag-only CI job sets
+  the variable. Each gate now reads the expected version from the workspace
+  metadata instead of a fixed `0.1.0`.
 - Stop waiting on an MCP tool call when its turn is cancelled. The client
   tells the server the request is abandoned and the cancelled turn ends at
   once instead of holding until the call deadline.

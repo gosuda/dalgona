@@ -10,13 +10,19 @@ use std::process::Command;
 
 #[test]
 fn installer_reinstall_is_idempotent() -> support::TestResult<()> {
+    if !support::released_artifacts_requested() {
+        return Ok(());
+    }
+    let version = support::dalgona_version()?;
+    support::assert_release_tag_matches_version(&version)?;
     let scratch = support::Scratch::new("dalgona-installer")?;
     let home = scratch.path().join("home");
     let cargo_home = home.join(".cargo");
     std::fs::create_dir_all(&cargo_home)?;
     let installer = scratch.path().join("dalgona-installer.sh");
-    let url =
-        "https://github.com/gosuda/dalgona/releases/download/dalgona-v0.1.0/dalgona-installer.sh";
+    let url = format!(
+        "https://github.com/gosuda/dalgona/releases/download/dalgona-v{version}/dalgona-installer.sh"
+    );
     let download = support::run_command(
         Command::new("curl")
             .args([
@@ -47,7 +53,10 @@ fn installer_reinstall_is_idempotent() -> support::TestResult<()> {
     );
     let before =
         support::run_command(Command::new(cargo_home.join("bin/dalgona")).arg("--version"))?;
-    assert_eq!(String::from_utf8(before.stdout)?, "dalgona 0.1.0\n");
+    assert_eq!(
+        String::from_utf8(before.stdout)?,
+        format!("dalgona {version}\n")
+    );
     let second = support::run_command(
         Command::new("bash")
             .arg(&installer)
@@ -61,6 +70,9 @@ fn installer_reinstall_is_idempotent() -> support::TestResult<()> {
     );
     let after =
         support::run_command(Command::new(cargo_home.join("bin/dalgona")).arg("--version"))?;
-    assert_eq!(String::from_utf8(after.stdout)?, "dalgona 0.1.0\n");
+    assert_eq!(
+        String::from_utf8(after.stdout)?,
+        format!("dalgona {version}\n")
+    );
     Ok(())
 }

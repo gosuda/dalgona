@@ -10,12 +10,17 @@ use std::process::Command;
 
 #[test]
 fn cargo_install_delivers_both_dalgona_binaries() -> support::TestResult<()> {
+    if !support::released_artifacts_requested() {
+        return Ok(());
+    }
+    let version = support::dalgona_version()?;
+    support::assert_release_tag_matches_version(&version)?;
     let scratch = support::Scratch::new("dalgona-cargo-install")?;
     let cargo_home = scratch.path().join("cargo-home");
     std::fs::create_dir_all(&cargo_home)?;
     let install = support::run_command(
         Command::new("cargo")
-            .args(["install", "dalgona", "--version", "0.1.0", "--locked"])
+            .args(["install", "dalgona", "--version", &version, "--locked"])
             .env("CARGO_HOME", &cargo_home),
     )?;
     assert!(
@@ -32,7 +37,10 @@ fn cargo_install_delivers_both_dalgona_binaries() -> support::TestResult<()> {
             "{binary}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8(output.stdout)?, "dalgona 0.1.0\n");
+        assert_eq!(
+            String::from_utf8(output.stdout)?,
+            format!("dalgona {version}\n")
+        );
     }
     Ok(())
 }

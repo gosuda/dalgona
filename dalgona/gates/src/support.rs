@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use sonic_rs::JsonValueTrait;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 /// The gate-wide result type: any error fails the criterion.
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -46,6 +46,74 @@ impl Drop for Scratch {
 #[must_use]
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Whether the released-artifact gates run.
+///
+/// They install the published crate and the release assets of a tag, which
+/// exist only after a release. The tag-only CI job sets
+/// `DALGONA_RELEASED_ARTIFACTS`; every other run skips them.
+#[must_use]
+pub fn released_artifacts_requested() -> bool {
+    std::env::var_os("DALGONA_RELEASED_ARTIFACTS").is_some_and(|value| !value.is_empty())
+}
+
+/// The `dalgona` package version from the workspace metadata.
+///
+/// # Errors
+/// Returns the `cargo metadata` failure or a metadata document without the
+/// `dalgona` package version.
+pub fn dalgona_version() -> TestResult<String> {
+    let output = run_command(
+        std::process::Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version=1", "--locked"])
+            .current_dir(repo_root()),
+    )?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+    }
+    let metadata: sonic_rs::Value = sonic_rs::from_slice(&output.stdout)?;
+    metadata
+        .get("packages")
+        .and_then(sonic_rs::Value::as_array)
+        .and_then(|packages| {
+            packages.iter().find(|package| {
+                package.get("name").and_then(sonic_rs::Value::as_str) == Some("dalgona")
+            })
+        })
+        .and_then(|package| package.get("version"))
+        .and_then(sonic_rs::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Cargo metadata omitted the dalgona version".into())
+}
+
+/// Fails unless the release tag names this workspace's `dalgona` version.
+///
+/// Runs only when the released-artifact gates run and a ref name is present:
+/// without the opt-in, or without `GITHUB_REF_NAME`, there is nothing to
+/// compare and the check passes.
+///
+/// # Errors
+/// Returns a mismatch naming the tag, the workspace version, and the expected
+/// tag, so a diverged tag or version is reconciled on either side.
+pub fn assert_release_tag_matches_version(version: &str) -> TestResult<()> {
+    let Some(tag) = std::env::var_os("GITHUB_REF_NAME") else {
+        return Ok(());
+    };
+    if !released_artifacts_requested() {
+        return Ok(());
+    }
+    let tag = tag.to_string_lossy();
+    let expected = format!("dalgona-v{version}");
+    if tag == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "release tag `{tag}` does not match workspace dalgona version `{version}` \
+             (expected tag `{expected}`): retag `{expected}` or update the workspace version to the tag"
+        )
+        .into())
+    }
 }
 
 /// Runs `command` to completion and returns its captured output.
