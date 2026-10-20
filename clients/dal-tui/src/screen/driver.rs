@@ -237,6 +237,7 @@ impl Painter {
             && input.live.expanded().is_none()
             && input.signin.is_none()
             && input.picker.is_none()
+            && input.exit_draft.is_none()
             && input.help.is_none()
         {
             for row in &mut rows {
@@ -1359,7 +1360,7 @@ mod tests {
                 screen: crate::Screen::Inline,
                 composer,
                 cursor,
-                exit_draft: false,
+                exit_draft: None,
                 branch: None,
                 popup: &[],
                 live: &self.live,

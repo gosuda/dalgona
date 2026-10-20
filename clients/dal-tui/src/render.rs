@@ -7,7 +7,7 @@ use std::sync::Arc;
 use dal_core::{BlobId, Block, EntryId, EntryKind, EntryView, JournalPart, TurnState, View};
 
 use crate::diagram::{ArtRole, DiagramKind, DiagramSettings, RenderCache, WiredBlock, wire_block};
-use crate::dialog::DialogUi;
+use crate::dialog::{DialogUi, DraftChoice};
 use crate::frame::{RegionBudget, RegionRequest};
 use crate::live::{BlobRead, ExpandedCard, ExpandedView, Live};
 use crate::picker::PickerUi;
@@ -25,8 +25,9 @@ pub(crate) struct FrameInput<'a> {
     pub(crate) composer: &'a str,
     /// Byte offset of the caret within `composer`.
     pub(crate) cursor: usize,
-    /// Whether the discard-draft question owns the composer and hint rows.
-    pub(crate) exit_draft: bool,
+    /// The discard-draft question's focused verb when it owns the composer
+    /// and hint rows; `None` when no draft-confirm is open.
+    pub(crate) exit_draft: Option<DraftChoice>,
     /// The checked-out git branch of the workspace, when it has one.
     pub(crate) branch: Option<&'a str>,
     pub(crate) popup: &'a [String],
@@ -342,7 +343,7 @@ fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<u
         Some(signin.rows(w, mode, usize::MAX).len())
     } else if let Some(picker) = input.picker {
         Some(picker.visible_len().max(1) + 2)
-    } else if input.exit_draft {
+    } else if input.exit_draft.is_some() {
         Some(1)
     } else {
         input.help.map(crate::help::HelpUi::height)
@@ -570,15 +571,19 @@ fn overlay_rows(
         bottom.extend(signin.rows(w, mode, budget.overlay));
     } else if let Some(picker) = input.picker {
         bottom.extend(picker_overlay_rows(picker));
-    } else if input.exit_draft {
-        bottom.push(RenderRow::plain(
-            format!(
-                "[y] {}   [n] {}",
-                crate::copy::ids::EXIT_DRAFT_TITLE,
-                crate::copy::ids::EXIT_KEEP_EDITING
-            ),
-            Role::Accent,
-        ));
+    } else if let Some(choice) = input.exit_draft {
+        // The focused verb paints the selection range and leads the row, so
+        // a narrow frame can never clip the verb Enter activates. The
+        // bracketed key cue is the same token the confirm dialogs carry.
+        let discard = format!("[y] {}", crate::copy::ids::EXIT_DRAFT_TITLE);
+        let keep = format!("[n] {}", crate::copy::ids::EXIT_KEEP_EDITING);
+        let (focused, other) = match choice {
+            DraftChoice::Discard => (discard, keep),
+            DraftChoice::Keep => (keep, discard),
+        };
+        let mut row = RenderRow::plain(format!("{focused}   {other}"), Role::Accent);
+        row.selected.push(0..focused.len());
+        bottom.push(row);
     } else if let Some(help) = input.help {
         bottom.extend(help.rows(budget.overlay));
     } else {
@@ -2261,7 +2266,7 @@ mod tests {
             screen: crate::Screen::Inline,
             composer: "",
             cursor: 0,
-            exit_draft: false,
+            exit_draft: None,
             branch: None,
             popup: &[],
             live,
@@ -2551,6 +2556,79 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("[ ]") || text.contains("[x]")),
             "no check markers on a single picker: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_draft_confirm_leads_with_the_focused_verb() {
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        for choice in [
+            crate::dialog::DraftChoice::Keep,
+            crate::dialog::DraftChoice::Discard,
+        ] {
+            let mut input = expanded_frame(
+                &view,
+                &live,
+                &transcript,
+                &viewport,
+                &opts,
+                &theme,
+                &dialog,
+                &cache,
+            );
+            input.exit_draft = Some(choice);
+            let rows = super::frame_rows(input, 80, 24);
+            let row = rows
+                .iter()
+                .find(|row| !row.selected.is_empty())
+                .expect("the focused verb paints the selection range");
+            let focused = &row.text[..row.selected[0].end.min(row.text.len())];
+            let want = match choice {
+                crate::dialog::DraftChoice::Keep => "[n]",
+                crate::dialog::DraftChoice::Discard => "[y]",
+            };
+            assert!(
+                focused.starts_with(want),
+                "{choice:?}: the focused verb heads the row so clipping can never hide it: {row:?}"
+            );
+        }
+        // The focused verb still heads the row at a starved width.
+        let mut input = expanded_frame(
+            &view,
+            &live,
+            &transcript,
+            &viewport,
+            &opts,
+            &theme,
+            &dialog,
+            &cache,
+        );
+        input.exit_draft = Some(crate::dialog::DraftChoice::Discard);
+        let narrow = super::frame_rows(input, 20, 10);
+        assert!(
+            narrow
+                .iter()
+                .any(|row| row.text.starts_with("[y]") && !row.selected.is_empty()),
+            "narrow frame keeps the focused verb first and selected: {:?}",
+            narrow
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
         );
     }
 

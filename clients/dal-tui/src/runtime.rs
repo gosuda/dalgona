@@ -26,13 +26,6 @@ use crate::term::{ReplyParser, TermIo, TermState, restore, startup_probe};
 use crate::transcript::Transcript;
 use crate::{TuiError, TuiExit, TuiOptions};
 
-/// Draft-quit confirmation owned by the composer state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExitDialog {
-    /// The user typed `/quit` with a non-empty draft.
-    DiscardDraft,
-}
-
 const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Renders the outcome note for a request this client showed.
@@ -75,7 +68,10 @@ fn resolution_notice(
 )]
 struct Session {
     composer: Composer,
-    dialog: Option<ExitDialog>,
+    /// The draft-discard question, while it owns the composer and hint rows.
+    /// Focus starts on the conservative `Keep` verb; a blind Enter never
+    /// throws the draft away.
+    dialog: Option<crate::dialog::DraftConfirm>,
     quit: bool,
     overlay: bool,
     /// Fullscreen transcript viewport: follow, frozen scroll window, search.
@@ -197,16 +193,12 @@ impl Session {
         }
     }
 
-    fn answer_dialog(&mut self, key: char) {
-        match key {
-            'y' | 'Y' => {
-                self.quit = true;
-                self.dialog = None;
-                self.composer.clear();
-            }
-            'n' | 'N' => self.dialog = None,
-            _ => {}
-        }
+    /// The discard-draft dialog resolved to `Discard`: the draft goes and
+    /// the loop quits. `Keep` answers leave the draft and session alone.
+    fn discard_draft(&mut self) {
+        self.quit = true;
+        self.dialog = None;
+        self.composer.clear();
     }
 
     fn interrupt(&mut self) {
@@ -283,7 +275,9 @@ impl Session {
                 if self.composer.text().trim().is_empty() {
                     self.quit = true;
                 } else {
-                    self.dialog = Some(ExitDialog::DiscardDraft);
+                    // Focus starts on Keep: a blind Enter keeps the draft,
+                    // and Esc lands on the same conservative verb.
+                    self.dialog = Some(crate::dialog::DraftConfirm::default());
                 }
                 Vec::new()
             }
@@ -1194,7 +1188,11 @@ impl Surfaces {
                 screen: opts.screen,
                 composer: self.session.composer.text(),
                 cursor: self.session.composer.cursor(),
-                exit_draft: self.session.dialog.is_some(),
+                exit_draft: self
+                    .session
+                    .dialog
+                    .as_ref()
+                    .map(crate::dialog::DraftConfirm::focused),
                 branch: self.branch.as_deref(),
                 popup: &self.session.popup,
                 live: &self.live,
@@ -2289,13 +2287,13 @@ fn apply_event_at(
         session.interrupt_or_dismiss(live, transcript);
         return;
     }
-    if let Some(ExitDialog::DiscardDraft) = session.dialog {
-        match key.code {
-            KeyCode::Char(choice) if key.modifiers == KeyModifiers::NONE => {
-                session.answer_dialog(choice);
-            }
-            KeyCode::Esc => session.dialog = None,
-            _ => {}
+    if let Some(mut confirm) = session.dialog.take() {
+        match confirm.key(key) {
+            Some(crate::dialog::DraftChoice::Discard) => session.discard_draft(),
+            // `Keep` answers the question: the dialog closes and the draft stays.
+            Some(crate::dialog::DraftChoice::Keep) => {}
+            // A focus move or an ignored key leaves the question open.
+            None => session.dialog = Some(confirm),
         }
         return;
     }
@@ -2743,6 +2741,27 @@ mod tests {
     }
 
     #[test]
+    fn the_exit_draft_frame_input_names_the_focused_verb() {
+        let mut session = Session {
+            composer: crate::composer::Composer::default(),
+            ..Session::default()
+        };
+        session.composer.set("draft");
+        session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
+        let confirm = session.dialog.as_ref().expect("the question opened");
+        assert_eq!(
+            Some(confirm.focused()),
+            Some(crate::dialog::DraftChoice::Keep),
+            "the frame input names the focused verb for the highlight"
+        );
+        let no_dialog = Session::default();
+        assert!(
+            no_dialog.dialog.is_none(),
+            "no question, no exit-draft rows"
+        );
+    }
+
+    #[test]
     fn chooser_reply_is_not_rendered_as_debug_text() {
         use dal_core::Chooser;
         // Every chooser opens its picker upstream in fold_submit_reply; at this
@@ -2916,6 +2935,9 @@ mod tests {
 
     #[test]
     fn quit_with_draft_requires_confirmation() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
         let mut composer = crate::composer::Composer::default();
         composer.set("rewrite the query");
         let mut session = Session {
@@ -2928,14 +2950,80 @@ mod tests {
             "a non-empty draft asks before quitting"
         );
         assert!(!session.quit);
-        session.answer_dialog('n');
-        assert_eq!(session.dialog, None);
+
+        // A blind Enter keeps the draft: the conservative verb holds focus.
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(session.dialog.is_none());
         assert!(!session.quit);
         assert_eq!(session.composer.text(), "rewrite the query");
+
+        // Esc answers Keep too, so a panicked Esc never throws work away.
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
-        session.answer_dialog('y');
+        apply_key(&mut session, Key::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(session.dialog.is_none());
+        assert!(!session.quit);
+        assert_eq!(session.composer.text(), "rewrite the query");
+
+        // Tab and Shift+Tab move the focus without answering; Enter on the
+        // focused verb activates it.
+        session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            session.dialog.is_some(),
+            "focus moves never answer the question"
+        );
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(session.quit);
         assert_eq!(session.composer.text(), "");
+    }
+
+    /// The committed quit-confirmation letters still work beside Tab, Enter
+    /// and Esc: `n`/`N` close the question and keep the draft, `y`/`Y` discard
+    /// it and quit, and a key that is none of those leaves the question open.
+    #[test]
+    fn draft_confirm_keeps_the_committed_y_and_n_answers() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let ask = || {
+            let mut composer = crate::composer::Composer::default();
+            composer.set("rewrite the query");
+            let mut session = Session {
+                composer,
+                ..Session::default()
+            };
+            session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
+            assert!(session.dialog.is_some(), "a non-empty draft asks first");
+            session
+        };
+        for letter in ['n', 'N'] {
+            let mut session = ask();
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(letter), KeyModifiers::NONE),
+            );
+            assert!(session.dialog.is_none(), "{letter:?} closes the question");
+            assert!(!session.quit, "{letter:?} keeps the session");
+            assert_eq!(session.composer.text(), "rewrite the query");
+        }
+        for letter in ['y', 'Y'] {
+            let mut session = ask();
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(letter), KeyModifiers::NONE),
+            );
+            assert!(session.quit, "{letter:?} quits");
+            assert!(session.dialog.is_none());
+            assert_eq!(session.composer.text(), "", "{letter:?} discards the draft");
+        }
+        let mut session = ask();
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(session.dialog.is_some(), "an unrelated key leaves it open");
+        assert!(!session.quit);
+        assert_eq!(session.composer.text(), "rewrite the query");
     }
 
     #[test]

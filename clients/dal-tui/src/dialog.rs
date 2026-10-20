@@ -132,6 +132,96 @@ pub fn confirm_answer(choice: char) -> Answer {
     })
 }
 
+/// The verb a draft-confirm dialog lands on.
+///
+/// `Keep` is the conservative choice — the one that loses nothing — so it
+/// is where the focus starts and where Esc stays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DraftChoice {
+    /// Drop the draft and leave.
+    Discard,
+    /// Keep the draft and stay.
+    Keep,
+}
+
+/// The two-verb confirm for discarding a held draft.
+///
+/// Focus starts on `Keep`: an Enter typed while the dialog was still
+/// forming can never throw work away. Left, Right, Tab, and Shift+Tab move
+/// the focused verb in both directions through the dialog binding table;
+/// the letters answer directly.
+#[derive(Debug)]
+pub struct DraftConfirm {
+    focused: DraftChoice,
+}
+
+impl DraftConfirm {
+    /// The verb Enter activates right now.
+    #[must_use]
+    pub fn focused(&self) -> DraftChoice {
+        self.focused
+    }
+
+    /// One key on the confirm: letters answer directly, focus keys move,
+    /// Enter activates the focused verb. Anything else is ignored.
+    pub fn key(&mut self, key: crate::keys::Key) -> Option<DraftChoice> {
+        use crate::keys::{Action, Owner, resolve_in};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                self.focused = DraftChoice::Keep;
+                Some(DraftChoice::Keep)
+            }
+            // Plain text reaches the decoder as the character itself, an
+            // uppercase letter included and with no modifier; a terminal that
+            // reports Shift as well is accepted too, so `y`, `Y`, `n`, and `N`
+            // answer exactly as the committed quit confirmation did.
+            (KeyCode::Char('y'), KeyModifiers::NONE)
+            | (KeyCode::Char('Y'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.focused = DraftChoice::Discard;
+                Some(DraftChoice::Discard)
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE)
+            | (KeyCode::Char('N'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.focused = DraftChoice::Keep;
+                Some(DraftChoice::Keep)
+            }
+            (KeyCode::BackTab, _) => {
+                let plain = crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::NONE);
+                match resolve_in(plain, false, &[Owner::Dialog]) {
+                    Some(Action::DialogFocusLeft) | Some(Action::DialogFocusRight) => {
+                        self.focused = match self.focused {
+                            DraftChoice::Discard => DraftChoice::Keep,
+                            DraftChoice::Keep => DraftChoice::Discard,
+                        };
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            _ => match resolve_in(key, false, &[Owner::Dialog]) {
+                Some(Action::DialogFocusLeft) | Some(Action::DialogFocusRight) => {
+                    self.focused = match self.focused {
+                        DraftChoice::Discard => DraftChoice::Keep,
+                        DraftChoice::Keep => DraftChoice::Discard,
+                    };
+                    None
+                }
+                Some(Action::DialogActivate) | Some(Action::AskSubmit) => Some(self.focused),
+                _ => None,
+            },
+        }
+    }
+}
+
+impl Default for DraftConfirm {
+    fn default() -> Self {
+        Self {
+            focused: DraftChoice::Keep,
+        }
+    }
+}
+
 /// Builds a single-select value answer from the focused option label.
 #[must_use]
 pub fn select_single(label: &str) -> Answer {
@@ -2641,6 +2731,81 @@ mod tests {
         assert!(press(&mut dialog, KeyCode::Tab).is_none());
         assert!(press(&mut dialog, KeyCode::Enter).is_none());
         assert!(press(&mut dialog, KeyCode::Left).is_none());
+    }
+
+    /// The draft-confirm surface defaults to Keep — the choice that loses
+    /// nothing — and left/right move it before activation.
+    #[test]
+    fn the_draft_confirm_defaults_to_keeping_the_draft() {
+        use super::{DraftChoice, DraftConfirm};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut confirm = DraftConfirm::default();
+        assert_eq!(confirm.focused(), DraftChoice::Keep);
+        assert_eq!(
+            confirm.key(crate::keys::Key::new(KeyCode::Left, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(confirm.focused(), DraftChoice::Discard);
+        assert_eq!(
+            confirm.key(crate::keys::Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(DraftChoice::Discard)
+        );
+
+        let mut confirm = DraftConfirm::default();
+        // Shift+Tab from Keep wraps to Discard — the legacy BackTab form.
+        assert_eq!(
+            confirm.key(crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(confirm.focused(), DraftChoice::Discard);
+        // The kitty form carries SHIFT and must move the same way.
+        let mut confirm = DraftConfirm::default();
+        assert_eq!(
+            confirm.key(crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(confirm.focused(), DraftChoice::Discard);
+    }
+
+    /// The letters of the committed quit confirmation still answer, in both
+    /// cases and with or without a reported Shift, and Esc answers Keep; the
+    /// default focus stays on the choice that loses nothing.
+    #[test]
+    fn the_draft_confirm_keeps_the_committed_letter_answers() {
+        use super::{DraftChoice, DraftConfirm};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let key = |code, modifiers| crate::keys::Key::new(code, modifiers);
+        for (letter, modifiers, expected) in [
+            ('y', KeyModifiers::NONE, DraftChoice::Discard),
+            ('Y', KeyModifiers::NONE, DraftChoice::Discard),
+            ('Y', KeyModifiers::SHIFT, DraftChoice::Discard),
+            ('n', KeyModifiers::NONE, DraftChoice::Keep),
+            ('N', KeyModifiers::NONE, DraftChoice::Keep),
+            ('N', KeyModifiers::SHIFT, DraftChoice::Keep),
+        ] {
+            let mut confirm = DraftConfirm::default();
+            assert_eq!(
+                confirm.key(key(KeyCode::Char(letter), modifiers)),
+                Some(expected),
+                "{letter:?} {modifiers:?}"
+            );
+        }
+        let mut confirm = DraftConfirm::default();
+        assert_eq!(
+            confirm.key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(DraftChoice::Keep)
+        );
+        for other in ['x', 'q', ' '] {
+            let mut confirm = DraftConfirm::default();
+            assert_eq!(
+                confirm.key(key(KeyCode::Char(other), KeyModifiers::NONE)),
+                None,
+                "{other:?} is ignored"
+            );
+            assert_eq!(confirm.focused(), DraftChoice::Keep);
+        }
     }
 
     /// An uppercase answer letter answers an approval like its lowercase

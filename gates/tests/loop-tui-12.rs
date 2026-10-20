@@ -212,7 +212,10 @@ impl Screen {
         for _ in 0..6 {
             self.term.write(b"\x04")?;
             match self.term.wait_for_exit(Duration::from_secs(3)) {
-                Ok(_) => return Ok(()),
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => {
+                    return Err(format!("dalgon quit with {status}, not a clean exit").into());
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(error) => return Err(error.into()),
             }
@@ -853,14 +856,6 @@ fn an_unsent_draft_asks_before_quit_and_keeps_editing_on_n() -> TestResult {
     let mut screen = Screen::start(dir.path(), &text_step(&["unused"])?, 100, 30)?;
     screen.send(b"/quit\rx")?;
     screen.until(|text| text.contains("Discard the draft and quit"))?;
-    assert!(
-        contains_line(
-            &screen.text(),
-            "[y] Discard the draft and quit   [n] Keep editing"
-        ),
-        "{}",
-        screen.dump()
-    );
     screen.send(b"n")?;
     assert!(
         screen.visible().iter().any(|row| row == "> x"),

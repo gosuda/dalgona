@@ -299,7 +299,7 @@ pub fn draw_frame(
             screen,
             composer: "",
             cursor: 0,
-            exit_draft: false,
+            exit_draft: None,
             branch: None,
             popup: &[],
             live: &live,
