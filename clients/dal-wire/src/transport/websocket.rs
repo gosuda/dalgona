@@ -19,7 +19,9 @@
 //! one case: while the serve loop is not taking frames and one is already
 //! waiting, the driver cannot read past it to reach the peer's pong, so a
 //! consumer that stalls that long with a frame waiting loses the
-//! connection. A closed connection leaves sessions and turns running like
+//! connection. The driver still takes a local close while the end of the
+//! connection waits for the reader, so `close` never waits out that
+//! deadline. A closed connection leaves sessions and turns running like
 //! any other disconnect.
 
 use std::pin::Pin;
@@ -300,7 +302,8 @@ struct Driver {
     close_code: Option<CloseCode>,
     /// A ping is due once the sink is idle.
     ping_due: bool,
-    /// The connection is ending: no more reads, pings, or frames to send.
+    /// The connection is ending: no more reads, pings, or frames to send,
+    /// but close requests are still taken.
     finishing: bool,
     /// The frame writer's closed flag, raised when the driver ends.
     closed: Arc<AtomicBool>,
@@ -412,7 +415,7 @@ impl Driver {
         let writing = self.out.busy();
         let holding = self.held.is_some();
         let reading = !holding && !self.finishing;
-        let commanding = !writing && !self.finishing;
+        let commanding = !writing;
         tokio::select! {
             () = tokio::time::sleep_until(self.deadline) => Event::Expired,
             _ = self.ticker.tick() => Event::Tick,
@@ -428,6 +431,11 @@ impl Driver {
     }
 
     /// Applies one event; returns false when the driver must stop at once.
+    ///
+    /// A text request that arrives while the connection is ending is dropped,
+    /// which fails its writer: no frame follows the end. A close request is
+    /// always taken, so a held item the frame reader never collects cannot
+    /// delay it.
     fn handle(&mut self, event: Event) -> bool {
         match event {
             Event::Expired | Event::Delivered(false) => return false,
@@ -442,6 +450,7 @@ impl Driver {
                     return false;
                 }
             }
+            Event::Command(Some(Outgoing::Text(..))) if self.finishing => {}
             Event::Command(Some(Outgoing::Text(text, ack))) => {
                 self.out.start(Message::Text(text.into()), Some(ack));
             }
@@ -492,9 +501,20 @@ impl Driver {
     }
 
     /// Closes on request: a normal close frame that `ack` resolves on, and no reads.
+    ///
+    /// A connection that is already ending has flushed its close frame or
+    /// forgone it, and the sink is idle whenever a request arrives, so the
+    /// request only drops the item held for the frame reader and resolves
+    /// `ack` at once.
     fn close_now(&mut self, ack: Option<oneshot::Sender<()>>) {
-        self.finishing = true;
         self.held = None;
+        if self.finishing {
+            if let Some(ack) = ack {
+                let _ = ack.send(());
+            }
+            return;
+        }
+        self.finishing = true;
         self.out.start(close_message(CloseCode::Normal), ack);
     }
 }
