@@ -331,14 +331,15 @@ fn grammar_violations_are_rejected_at_build_naming_the_step() {
             "stop before usage",
         ),
         (
-            vec![ScriptStep::Events(vec![
-                done(),
-                text("a"),
-                usage_event(),
-                stop(),
-            ])],
-            0,
-            "a delta or replay after tool calls done",
+            // The offending events step follows a failing stream and its
+            // bound fail step, so its index is not 0 and counts both.
+            vec![
+                ScriptStep::Events(vec![text("cut")]),
+                ScriptStep::Fail(ProviderError::StreamCut),
+                ScriptStep::Events(vec![done(), text("a"), usage_event(), stop()]),
+            ],
+            2,
+            "a delta after tool calls done",
         ),
         (
             vec![ScriptStep::Events(vec![
@@ -374,12 +375,13 @@ fn grammar_violations_are_rejected_at_build_naming_the_step() {
             "events without stop must be followed by a fail step",
         ),
     ];
-    for (steps, step, detail) in cases {
-        assert_eq!(
-            Script::new(steps).unwrap_err(),
-            ScriptError::Grammar { step, detail },
-            "{detail}"
-        );
+    for (steps, step, case) in cases {
+        match Script::new(steps).unwrap_err() {
+            ScriptError::Grammar { step: named, .. } => {
+                assert_eq!(named, step, "{case}: names the offending step");
+            }
+            other => panic!("{case}: expected a grammar rejection, got {other:?}"),
+        }
     }
 }
 
@@ -506,10 +508,15 @@ fn replay_fail_with_status_and_family_is_an_http_status_failure() {
 
 #[test]
 fn replay_fail_status_and_family_must_come_together() {
+    // The usage record is complete, so only the status and family guard can
+    // reject it; an incomplete usage object would be refused by the usage
+    // decoder whatever the guard does.
+    let usage_with_status =
+        format!(r#"{{"kind":"usage","usage":{FULL_USAGE},"status":413,"family":"openai_chat"}}"#);
     for line in [
         r#"{"kind":"fail","message":"x","status":413}"#,
         r#"{"kind":"fail","message":"x","family":"openai_chat"}"#,
-        r#"{"kind":"usage","usage":{"input_tokens":1,"output_tokens":1},"status":413,"family":"openai_chat"}"#,
+        usage_with_status.as_str(),
     ] {
         assert!(
             matches!(
@@ -519,6 +526,364 @@ fn replay_fail_status_and_family_must_come_together() {
             "{line} must be rejected"
         );
     }
+}
+
+const FULL_USAGE: &str = concat!(
+    r#"{"input_tokens":3,"cached_input_tokens":1,"output_tokens":4,"#,
+    r#""reasoning_tokens":2,"cache_write_tokens":5,"cost_usd":null}"#,
+);
+
+/// The events the single events step of `line` serves, which must end
+/// cleanly.
+fn replayed_events(line: &str) -> Vec<StreamEvent> {
+    let script = Script::from_replay(line.as_bytes()).expect("the fixture decodes");
+    let mut stream = script.open().expect("the events step opens");
+    drain(&mut stream)
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .expect("the stream ends cleanly")
+}
+
+#[test]
+fn replay_decodes_every_event_kind_from_independent_wire_literals() {
+    // The literal is hand-written wire text, not the encoder's output, so a
+    // decoder and an encoder cannot drift together unnoticed. Argument bytes
+    // that are not UTF-8 only fit `fragment_bytes`.
+    let line = format!(
+        concat!(
+            r#"{{"kind":"events","events":["#,
+            r#"{{"type":"reasoning_delta","text":"mull"}},"#,
+            r#"{{"type":"text_delta","text":"Hi"}},"#,
+            r#"{{"type":"tool_call_started","id":"c1","name":"read"}},"#,
+            r#"{{"type":"tool_args_delta","id":"c1","fragment":"{{\"p\":"}},"#,
+            r#"{{"type":"tool_args_delta","id":"c1","fragment_bytes":[255,0,34]}},"#,
+            r#"{{"type":"replay","payload":{{"family":"openai_responses","model":"m","item":{{"type": "reasoning"}}}}}},"#,
+            r#"{{"type":"tool_calls_done","calls":["#,
+            r#"{{"id":"c1","name":"read","args":{{"kind":"parsed","value":{{"p": 1}}}}}},"#,
+            r#"{{"id":"c2","name":"bad","args":{{"kind":"invalid","message":"eof"}}}},"#,
+            r#"{{"id":"c3","name":"cut","args":{{"kind":"truncated"}}}}]}},"#,
+            r#"{{"type":"usage","usage":{usage}}},"#,
+            r#"{{"type":"stop","reason":"max_tokens"}}]}}"#,
+        ),
+        usage = FULL_USAGE,
+    );
+    let call = |id: &str, name: &str, args: ToolArgs| ToolCall {
+        id: id.into(),
+        name: name.into(),
+        args,
+    };
+    assert_eq!(
+        replayed_events(&line),
+        vec![
+            StreamEvent::ReasoningDelta {
+                text: "mull".into()
+            },
+            text("Hi"),
+            StreamEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "read".into(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "c1".into(),
+                fragment: br#"{"p":"#.to_vec(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "c1".into(),
+                fragment: vec![255, 0, 34],
+            },
+            StreamEvent::Replay {
+                payload: ReplayPayload {
+                    family: Family::Responses,
+                    model: "m".into(),
+                    item: RawJson::parse(r#"{"type": "reasoning"}"#).unwrap(),
+                },
+            },
+            StreamEvent::ToolCallsDone {
+                calls: vec![
+                    call(
+                        "c1",
+                        "read",
+                        ToolArgs::Parsed(RawJson::parse(r#"{"p": 1}"#).unwrap()),
+                    ),
+                    call(
+                        "c2",
+                        "bad",
+                        ToolArgs::Invalid {
+                            message: "eof".into()
+                        },
+                    ),
+                    call("c3", "cut", ToolArgs::Truncated),
+                ],
+            },
+            StreamEvent::Usage {
+                usage: Usage {
+                    input_tokens: 3,
+                    cached_input_tokens: 1,
+                    output_tokens: 4,
+                    reasoning_tokens: Some(2),
+                    cache_write_tokens: 5,
+                    premium_requests: None,
+                    cost_usd: None,
+                },
+            },
+            StreamEvent::Stop {
+                reason: StopReason::MaxTokens,
+            },
+        ]
+    );
+}
+
+#[test]
+fn replay_maps_each_stop_reason_and_keeps_unknown_ones_verbatim() {
+    let stop_of = |reason: &str| {
+        let line = format!(
+            r#"{{"kind":"events","events":[{{"type":"tool_calls_done","calls":[]}},{{"type":"usage","usage":{FULL_USAGE}}},{{"type":"stop","reason":{}}}]}}"#,
+            sonic_rs::to_string(reason).expect("escapes"),
+        );
+        match replayed_events(&line).pop() {
+            Some(StreamEvent::Stop { reason }) => reason,
+            other => panic!("the last event is not a stop: {other:?}"),
+        }
+    };
+    for (wire, expected) in [
+        ("end_turn", StopReason::EndTurn),
+        ("tool_use", StopReason::ToolUse),
+        ("max_tokens", StopReason::MaxTokens),
+        ("refusal", StopReason::Refusal),
+        ("paused", StopReason::Paused),
+        // Anything else rides through byte for byte: no case folding, no
+        // trimming, no empty-to-default.
+        ("pause_turn", StopReason::Other("pause_turn".into())),
+        ("END_TURN", StopReason::Other("END_TURN".into())),
+        (" end_turn", StopReason::Other(" end_turn".into())),
+        ("", StopReason::Other(String::new())),
+    ] {
+        assert_eq!(stop_of(wire), expected, "{wire:?}");
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of refusal cases, each a one-line fixture"
+)]
+fn replay_rejects_contradictory_or_malformed_records_naming_the_physical_line() {
+    let unknown = "unknown or malformed step";
+    let usage_member = format!(r#","usage":{FULL_USAGE}"#);
+    let events = |event: &str| format!(r#"{{"kind":"events","events":[{event}]}}"#);
+    let args = |args: &str| {
+        events(&format!(
+            r#"{{"type":"tool_calls_done","calls":[{{"id":"c","name":"n","args":{args}}}]}}"#
+        ))
+    };
+    let cases: Vec<(&str, String, usize, &str)> = vec![
+        // Blank and whitespace-only lines are skipped but still counted.
+        (
+            "blank and CRLF lines before the bad record",
+            String::from("\n\r\n  \n{\"kind\":\"usage\"}\n"),
+            4,
+            "usage is required",
+        ),
+        (
+            "blank lines between a good record and a bad one",
+            String::from("{\"kind\":\"fail\",\"message\":\"x\"}\n\n\n{\"kind\":\"bogus\"}"),
+            4,
+            unknown,
+        ),
+        // A step kind with a member that belongs to another kind is refused.
+        (
+            "events with a message",
+            String::from(r#"{"kind":"events","events":[],"message":"x"}"#),
+            1,
+            unknown,
+        ),
+        (
+            "fail with events",
+            String::from(r#"{"kind":"fail","message":"x","events":[]}"#),
+            1,
+            unknown,
+        ),
+        (
+            "fail with usage",
+            format!(r#"{{"kind":"fail","message":"x"{usage_member}}}"#),
+            1,
+            unknown,
+        ),
+        (
+            "usage with a message",
+            format!(r#"{{"kind":"usage"{usage_member},"message":"x"}}"#),
+            1,
+            unknown,
+        ),
+        (
+            "compact with a status",
+            String::from(r#"{"kind":"compact","outcome":{"kind":"unsupported"},"status":500}"#),
+            1,
+            unknown,
+        ),
+        // A required member that is missing.
+        (
+            "events without events",
+            String::from(r#"{"kind":"events"}"#),
+            1,
+            "events is required",
+        ),
+        (
+            "fail without a message",
+            String::from(r#"{"kind":"fail"}"#),
+            1,
+            "message is required",
+        ),
+        (
+            "compact without an outcome",
+            String::from(r#"{"kind":"compact"}"#),
+            1,
+            "outcome is required",
+        ),
+        (
+            "unsupported outcome carrying items",
+            String::from(r#"{"kind":"compact","outcome":{"kind":"unsupported","items":[]}}"#),
+            1,
+            "invalid compact outcome",
+        ),
+        (
+            "compacted outcome without a model",
+            String::from(
+                r#"{"kind":"compact","outcome":{"kind":"compacted","family":"openai_codex","items":[]}}"#,
+            ),
+            1,
+            "invalid compact outcome",
+        ),
+        // Events.
+        (
+            "unknown event type",
+            events(r#"{"type":"mystery"}"#),
+            1,
+            "unknown event type",
+        ),
+        (
+            "event with an unknown member",
+            events(r#"{"type":"text_delta","text":"a","extra":1}"#),
+            1,
+            "invalid text delta",
+        ),
+        (
+            "both fragment spellings",
+            events(r#"{"type":"tool_args_delta","id":"c","fragment":"a","fragment_bytes":[97]}"#),
+            1,
+            "invalid tool argument delta",
+        ),
+        (
+            "neither fragment spelling",
+            events(r#"{"type":"tool_args_delta","id":"c"}"#),
+            1,
+            "invalid tool argument delta",
+        ),
+        (
+            "a fragment byte over 255",
+            events(r#"{"type":"tool_args_delta","id":"c","fragment_bytes":[256]}"#),
+            1,
+            "invalid tool argument delta",
+        ),
+        // Tool arguments: each kind carries exactly its own member.
+        (
+            "truncated arguments with a value",
+            args(r#"{"kind":"truncated","value":{}}"#),
+            1,
+            "invalid tool arguments",
+        ),
+        (
+            "parsed arguments with a message",
+            args(r#"{"kind":"parsed","value":{},"message":"m"}"#),
+            1,
+            "invalid tool arguments",
+        ),
+        (
+            "parsed arguments without a value",
+            args(r#"{"kind":"parsed"}"#),
+            1,
+            "invalid tool arguments",
+        ),
+        (
+            "invalid arguments without a message",
+            args(r#"{"kind":"invalid"}"#),
+            1,
+            "invalid tool arguments",
+        ),
+        (
+            "an unknown arguments kind",
+            args(r#"{"kind":"weird"}"#),
+            1,
+            "invalid tool arguments",
+        ),
+    ];
+    for (label, fixture, line, detail) in cases {
+        assert_eq!(
+            Script::from_replay(fixture.as_bytes()).unwrap_err(),
+            ScriptError::ReplayFormat { line, detail },
+            "{label}"
+        );
+    }
+    assert_eq!(
+        Script::from_replay(b"{\"kind\":\"fail\",\"message\":\"\xff\"}").unwrap_err(),
+        ScriptError::ReplayFormat {
+            line: 1,
+            detail: "fixture is not UTF-8",
+        }
+    );
+}
+
+#[test]
+fn a_cut_is_legal_at_every_grammar_position_only_with_its_bound_fail_step() {
+    let turn = [text("a"), done(), usage_event(), stop()];
+    // Cut before every event of the turn: nothing, after text, after tool
+    // calls done, after usage. Each is a valid beginning only when a fail
+    // step directly follows.
+    for kept in 0..turn.len() {
+        let prefix = turn[..kept].to_vec();
+        assert_eq!(
+            Script::new(vec![ScriptStep::Events(prefix.clone())]).unwrap_err(),
+            ScriptError::Grammar {
+                step: 0,
+                detail: "events without stop must be followed by a fail step",
+            },
+            "{kept} events and no fail step"
+        );
+        let script = Script::new(vec![
+            ScriptStep::Events(prefix.clone()),
+            ScriptStep::Fail(ProviderError::StreamCut),
+        ])
+        .unwrap();
+        assert_eq!(script.remaining(), 1, "{kept}: the pair is one operation");
+        let mut stream = script.open().unwrap();
+        let seen = drain(&mut stream);
+        assert_eq!(seen.len(), kept + 1, "{kept}");
+        assert_eq!(
+            seen[..kept]
+                .iter()
+                .map(|item| item.as_ref().unwrap().clone())
+                .collect::<Vec<_>>(),
+            prefix,
+            "{kept}"
+        );
+        assert!(
+            matches!(seen[kept], Err(ProviderError::StreamCut)),
+            "{kept}"
+        );
+        assert_eq!(script.aborted_streams(), 1, "{kept}");
+    }
+    // A turn that already stopped needs no fail step, and a fail step after
+    // it is a separate operation, not the stream's terminal.
+    let script = Script::new(vec![
+        ScriptStep::Events(turn.to_vec()),
+        ScriptStep::Fail(ProviderError::Overloaded),
+    ])
+    .unwrap();
+    assert_eq!(script.remaining(), 2);
+    let mut stream = script.open().unwrap();
+    assert!(drain(&mut stream).iter().all(Result::is_ok));
+    assert!(matches!(script.open(), Err(ProviderError::Overloaded)));
+    assert_eq!(script.aborted_streams(), 0);
 }
 
 proptest::proptest! {
@@ -561,8 +926,11 @@ proptest::proptest! {
         }
     }
 
-    /// Typed events carrying fuzzed scalar fields stay valid JSON but probe
-    /// every field validator: reason strings, ids, names, numbers.
+    /// A grammar-valid turn whose scalar fields are fuzzed must decode, and
+    /// every field must reach the served stream byte for byte: ids, names,
+    /// token counts, and any stop reason the decoder has no name for. (A
+    /// turn that breaks the grammar, or a usage object missing a counter,
+    /// would only ever exercise the rejection path.)
     #[test]
     fn from_replay_typed_events_with_fuzzed_fields(
         reason in "[ -~]{0,40}",
@@ -570,9 +938,16 @@ proptest::proptest! {
         tool_name in "[ -~]{0,24}",
         tokens in proptest::prelude::any::<u64>(),
     ) {
+        proptest::prop_assume!(!matches!(
+            reason.as_str(),
+            "end_turn" | "tool_use" | "max_tokens" | "refusal" | "paused"
+        ));
         let events = format!(
             "[{{\"type\":\"tool_call_started\",\"id\":{i},\"name\":{n}}},\
-              {{\"type\":\"usage\",\"usage\":{{\"input_tokens\":{t},\"output_tokens\":{t}}}}},\
+              {{\"type\":\"tool_calls_done\",\"calls\":[]}},\
+              {{\"type\":\"usage\",\"usage\":{{\"input_tokens\":{t},\"cached_input_tokens\":0,\
+              \"output_tokens\":{t},\"reasoning_tokens\":null,\"cache_write_tokens\":0,\
+              \"cost_usd\":null}}}},\
               {{\"type\":\"stop\",\"reason\":{r}}}]",
             i = sonic_rs::to_string(&call_id).expect("escapes"),
             n = sonic_rs::to_string(&tool_name).expect("escapes"),
@@ -580,15 +955,35 @@ proptest::proptest! {
             r = sonic_rs::to_string(&reason).expect("escapes"),
         );
         let line = format!("{{\"kind\":\"events\",\"events\":{events}}}");
-        // Accepted or rejected, the decoder must answer with a typed result.
-        if let Err(error) = Script::from_replay(line.as_bytes()) {
-            assert!(
-                matches!(
-                    error,
-                    ScriptError::ReplayFormat { .. } | ScriptError::Grammar { .. }
-                ),
-                "untyped replay failure: {error:?}"
-            );
-        }
+        let script = Script::from_replay(line.as_bytes()).expect("a grammar-valid turn decodes");
+        let mut stream = script.open().expect("the events step opens");
+        let served = drain(&mut stream)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the stream ends cleanly");
+        assert_eq!(
+            served,
+            vec![
+                StreamEvent::ToolCallStarted {
+                    id: call_id,
+                    name: tool_name,
+                },
+                done(),
+                StreamEvent::Usage {
+                    usage: Usage {
+                        input_tokens: tokens,
+                        cached_input_tokens: 0,
+                        output_tokens: tokens,
+                        reasoning_tokens: None,
+                        cache_write_tokens: 0,
+                        premium_requests: None,
+                        cost_usd: None,
+                    },
+                },
+                StreamEvent::Stop {
+                    reason: StopReason::Other(reason),
+                },
+            ]
+        );
     }
 }
