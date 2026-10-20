@@ -46,6 +46,85 @@ fn base_url_admits_https_and_literal_loopback_http() {
 }
 
 #[test]
+fn host_confusion_never_reads_as_loopback() {
+    for (base, host) in [
+        ("http://localhost@evil.example/v1", "evil.example"),
+        ("http://127.0.0.1@evil.example/v1", "evil.example"),
+        ("http://[::1]@example.com", "example.com"),
+        ("http://localhost.evil.example", "localhost.evil.example"),
+        ("http://127.0.0.1.evil.example", "127.0.0.1.evil.example"),
+        ("http://localhost%2eevil.example", "localhost.evil.example"),
+        (
+            "http://localhost\u{ff0e}evil.example",
+            "localhost.evil.example",
+        ),
+        ("http://evil.example\\@127.0.0.1/v1", "evil.example"),
+        ("HTTP://example.com", "example.com"),
+        ("HtTp://EXAMPLE.com/v1", "example.com"),
+    ] {
+        let error = check_base_url(Family::Chat, base).expect_err(base);
+        assert!(
+            matches!(&error, ProviderError::PlainHttp { host: seen } if seen == host),
+            "{base}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn addresses_next_to_the_loopback_literals_are_plain_http() {
+    let mut problems = Vec::new();
+    for (base, host) in [
+        ("http://127.1.0.1/v1", "127.1.0.1"),
+        ("http://[::]/v1", "[::]"),
+        ("http://[::2]/v1", "[::2]"),
+        ("http://[::7f00:1]/v1", "[::7f00:1]"),
+    ] {
+        match check_base_url(Family::Chat, base) {
+            Err(ProviderError::PlainHttp { host: seen }) if seen == host => {}
+            other => problems.push(format!("{base}: {other:?}")),
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn base_url_credentials_are_refused_in_every_spelling_and_never_echoed() {
+    for (base, host) in [
+        ("https://user:hunter2@example.com/v1", "example.com"),
+        ("https://user@example.com/v1", "example.com"),
+        ("https://:hunter2@example.com/v1", "example.com"),
+        ("http://user:hunter2@127.0.0.1:8080/v1", "127.0.0.1"),
+        ("http://hunter2@localhost/v1", "localhost"),
+    ] {
+        assert_eq!(
+            transport_reason(check_base_url(Family::Chat, base).expect_err(base)),
+            format!("base URL for {host} must not carry credentials"),
+            "{base}"
+        );
+    }
+}
+
+#[test]
+fn base_url_query_and_fragment_are_refused_even_when_empty_and_never_echoed() {
+    for (base, origin) in [
+        (
+            "https://example.com/v1?api_key=hunter2",
+            "https://example.com",
+        ),
+        ("https://example.com/v1#hunter2", "https://example.com"),
+        ("https://example.com/v1?", "https://example.com"),
+        ("https://example.com/v1#", "https://example.com"),
+        ("http://127.0.0.1:8080/v1?x=1", "http://127.0.0.1:8080"),
+    ] {
+        assert_eq!(
+            transport_reason(check_base_url(Family::Chat, base).expect_err(base)),
+            format!("base URL for {origin} must not carry a query or fragment"),
+            "{base}"
+        );
+    }
+}
+
+#[test]
 fn plain_http_elsewhere_fails_before_any_connection() {
     for (base, host) in [
         ("http://example.com", "example.com"),
@@ -69,16 +148,33 @@ fn plain_http_elsewhere_fails_before_any_connection() {
 
 #[test]
 fn other_base_url_defects_are_transport() {
-    for base in [
-        "ftp://example.com",
-        "ws://127.0.0.1",
-        "not a url",
-        "https://user:secret@example.com/v1",
-        "https://example.com/v1?key=1",
-        "https://example.com/v1#top",
+    for (base, reason) in [
+        ("ftp://example.com", "URL scheme \"ftp\" is not https"),
+        ("ws://127.0.0.1", "URL scheme \"ws\" is not https"),
+        (
+            "https://user:secret@example.com/v1",
+            "base URL for example.com must not carry credentials",
+        ),
+        (
+            "https://example.com/v1?key=1",
+            "base URL for https://example.com must not carry a query or fragment",
+        ),
+        (
+            "https://example.com/v1#top",
+            "base URL for https://example.com must not carry a query or fragment",
+        ),
     ] {
-        transport_reason(check_base_url(Family::Chat, base).unwrap_err());
+        assert_eq!(
+            transport_reason(check_base_url(Family::Chat, base).unwrap_err()),
+            reason,
+            "{base}"
+        );
     }
+    let unparsable = transport_reason(check_base_url(Family::Chat, "not a url").unwrap_err());
+    assert!(
+        unparsable.starts_with("base URL is not a URL: "),
+        "{unparsable}"
+    );
 }
 
 #[test]
@@ -123,6 +219,23 @@ fn endpoint_joins_with_exactly_one_slash() {
         assert_eq!(
             endpoint(Family::Chat, base, path).unwrap().as_str(),
             expected
+        );
+    }
+}
+
+#[test]
+fn endpoint_refuses_encoded_dot_segments_that_climb_out_of_the_base_prefix() {
+    for path in [
+        "%2e%2e/admin",
+        "%2E%2E/admin",
+        ".%2e/admin",
+        "%2e./admin",
+        "a/%2e%2e/%2e%2e/admin",
+    ] {
+        assert_eq!(
+            transport_reason(endpoint(Family::Chat, "https://h.example/v1", path).unwrap_err()),
+            format!("endpoint path {path:?} escapes the base URL"),
+            "{path}"
         );
     }
 }
@@ -178,10 +291,56 @@ fn redirects_stay_within_the_origin_and_never_reach_plaintext() {
 }
 
 #[test]
+fn redirects_never_leave_the_hop_origin_in_disguise() {
+    let remote = [url("https://api.openai.com/v1/responses")];
+    let local = [url("http://127.0.0.1:4000/v1/responses")];
+    for next in ["https://api.openai.com:443/x", "HTTPS://API.OPENAI.COM/x"] {
+        assert!(follow(&url(next), &remote).is_ok(), "{next}");
+    }
+    for (next, previous) in [
+        ("https://api.openai.com@evil.example/x", &remote),
+        ("https://api.openai.com.evil.example/x", &remote),
+        ("https://api.openai.com%2eevil.example/x", &remote),
+        ("https://127.0.0.1:4000/y", &local),
+        ("https://127.0.0.1:4000@evil.example/y", &local),
+    ] {
+        assert!(
+            matches!(
+                follow(&url(next), previous),
+                Err(RefusedRedirect::Target { .. })
+            ),
+            "{next}"
+        );
+    }
+    for next in [
+        "http://localhost@evil.example/x",
+        "http://127.0.0.1.evil.example/x",
+        "http://localhost.evil.example/x",
+    ] {
+        assert!(
+            matches!(
+                follow(&url(next), &local),
+                Err(RefusedRedirect::PlainHttp { host }) if host.ends_with("evil.example")
+            ),
+            "{next}"
+        );
+    }
+}
+
+#[test]
+fn a_redirect_hop_with_no_previous_origin_fails_closed() {
+    assert!(matches!(
+        follow(&url("https://api.openai.com/x"), &[]),
+        Err(RefusedRedirect::Target { .. })
+    ));
+}
+
+#[test]
 fn redirect_chain_is_capped() {
     let hops: Vec<Url> = (0..=MAX_REDIRECTS)
         .map(|n| url(&format!("https://h.example/{n}")))
         .collect();
+    assert!(follow(&url("https://h.example/next"), &hops[..MAX_REDIRECTS - 1]).is_ok());
     assert!(follow(&url("https://h.example/next"), &hops[..MAX_REDIRECTS]).is_ok());
     assert!(matches!(
         follow(&url("https://h.example/next"), &hops),

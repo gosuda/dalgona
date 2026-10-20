@@ -99,6 +99,35 @@ fn second_stop_is_never_delivered() {
     });
 }
 
+fn refused_capture(reason: dal_core::ReplayRefusal) -> StreamEvent {
+    StreamEvent::MessageReplay {
+        capture: dal_core::ReplayCapture::Refused { reason },
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "yielded a second"))]
+fn a_second_message_replay_is_never_delivered() {
+    let first = refused_capture(dal_core::ReplayRefusal::NoRecords);
+    let second = refused_capture(dal_core::ReplayRefusal::RecordNotJson);
+    let (mut events, count) = from_items(vec![Ok(first.clone()), Ok(second), Ok(stop())]);
+    block_on(async {
+        assert_eq!(events.next().await.unwrap().unwrap(), first);
+        assert_eq!(
+            events.next().await.unwrap().unwrap(),
+            stop(),
+            "the second capture is dropped, not delivered"
+        );
+        assert!(events.next().await.is_none());
+    });
+    drop(events);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "a clean Stop never cancels"
+    );
+}
+
 #[test]
 fn stop_after_error_is_unreachable() {
     // An error drops the source at once, so a second terminal queued

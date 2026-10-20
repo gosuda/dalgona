@@ -7,8 +7,8 @@ use std::{
     time::Instant,
 };
 
-use dal_core::Family;
-use futures::{StreamExt, stream};
+use dal_core::{Family, InferFailure, RawJson, ReplayCapture, ReplayRefusal, Usage};
+use futures::{FutureExt, StreamExt, stream};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -17,9 +17,12 @@ use tokio::{
 use super::*;
 use crate::{
     auth::credential::SecretString,
+    error::LimitError,
     http::{self, Exchange},
-    stream::{StopReason, StreamEvent},
+    stream::{ReplayPayload, StopReason, StreamEvent},
 };
+
+const FIXED_NOW: &str = "Mon, 15 Jul 2024 16:24:59 +0000";
 
 #[derive(Clone)]
 struct TestClock {
@@ -269,6 +272,188 @@ fn oauth(token: &str) -> Credential {
     })
 }
 
+fn failure(status: u16, retry_after: Option<&str>, message: &str) -> AttemptFailure {
+    AttemptFailure::Response {
+        status,
+        code: None,
+        message: String::from(message),
+        retry_after: retry_after.map(String::from),
+    }
+}
+
+fn token_of(credential: &Credential) -> String {
+    match credential {
+        Credential::ApiKey { key } => key.expose().to_owned(),
+        Credential::OAuth(oauth) => oauth.access_token.expose().to_owned(),
+        Credential::None => String::new(),
+    }
+}
+
+/// What a scripted `request` saw: attempts started, refreshes run, and the
+/// credential token each attempt carried.
+#[derive(Clone, Default)]
+struct Counts {
+    attempts: Arc<AtomicUsize>,
+    refreshes: Arc<AtomicUsize>,
+    tokens: Arc<Mutex<Vec<String>>>,
+}
+
+impl Counts {
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    fn refreshes(&self) -> usize {
+        self.refreshes.load(Ordering::SeqCst)
+    }
+
+    fn tokens(&self) -> Vec<String> {
+        lock(&self.tokens).clone()
+    }
+}
+
+/// Runs `request` with `script` deciding the outcome of each zero-based
+/// attempt and `refresh` deciding the outcome of each OAuth refresh.
+async fn run<C: Clock>(
+    lifecycle_plan: Plan<C>,
+    credential: Credential,
+    counts: &Counts,
+    script: impl Fn(usize) -> Result<Option<u16>, AttemptFailure> + Send,
+    refresh: impl Fn() -> Result<Credential, ProviderError> + Send,
+) -> Result<Option<u16>, ProviderError> {
+    let attempts = Arc::clone(&counts.attempts);
+    let tokens = Arc::clone(&counts.tokens);
+    let refreshes = Arc::clone(&counts.refreshes);
+    request(
+        lifecycle_plan,
+        credential,
+        move |credential, _cancel| {
+            let number = attempts.fetch_add(1, Ordering::SeqCst);
+            lock(&tokens).push(token_of(credential));
+            let outcome = script(number);
+            async move { outcome }
+        },
+        move |_held| {
+            refreshes.fetch_add(1, Ordering::SeqCst);
+            let outcome = refresh();
+            async move { outcome }
+        },
+    )
+    .await
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the refresh outcome type of the `run` helper"
+)]
+fn never_refreshed() -> Result<Credential, ProviderError> {
+    Ok(oauth("unexpected"))
+}
+
+fn text(chunk: &str) -> StreamEvent {
+    StreamEvent::TextDelta {
+        text: String::from(chunk),
+    }
+}
+
+fn stop() -> StreamEvent {
+    StreamEvent::Stop {
+        reason: StopReason::EndTurn,
+    }
+}
+
+/// A lifecycle stream whose attempt `n` yields the events `script(n)`.
+fn scripted_stream(
+    permits: Arc<Semaphore>,
+    cancel: CancellationToken,
+    max_retries: u32,
+    attempts: Arc<AtomicUsize>,
+    script: impl Fn(usize) -> Vec<Result<StreamEvent, ProviderError>> + Send + 'static,
+) -> EventStream {
+    stream(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            max_retries,
+            permits,
+            cancel,
+        ),
+        api_key(),
+        move |_credential, _cancel| {
+            let events = script(attempts.fetch_add(1, Ordering::SeqCst));
+            async move { Ok(Some(EventStream::new(stream::iter(events), || {}))) }
+        },
+        |oauth| async move { Ok(Credential::OAuth(oauth)) },
+    )
+}
+
+/// A stalled lifecycle stream whose attempt records, when it is closed, how
+/// many permits were free at that moment.
+fn stream_probing_permits(
+    permits: &Arc<Semaphore>,
+    cancel: CancellationToken,
+    seen: &Arc<Mutex<Vec<usize>>>,
+) -> EventStream {
+    let attempt_permits = Arc::clone(permits);
+    let attempt_seen = Arc::clone(seen);
+    stream(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            1,
+            Arc::clone(permits),
+            cancel,
+        ),
+        api_key(),
+        move |_credential, _cancel| {
+            let permits = Arc::clone(&attempt_permits);
+            let seen = Arc::clone(&attempt_seen);
+            async move {
+                Ok(Some(EventStream::new(
+                    stream::pending::<Result<StreamEvent, ProviderError>>(),
+                    move || lock(&seen).push(permits.available_permits()),
+                )))
+            }
+        },
+        |oauth| async move { Ok(Credential::OAuth(oauth)) },
+    )
+}
+
+/// A clock that records how many permits are free whenever it is asked to
+/// sleep.
+#[derive(Clone)]
+struct PermitProbeClock {
+    permits: Arc<Semaphore>,
+    free_during_sleep: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Clock for PermitProbeClock {
+    type Sleep = Ready<()>;
+
+    fn now(&self) -> Timestamp {
+        timestamp(FIXED_NOW)
+    }
+
+    fn sleep(&self, _duration: Duration) -> Self::Sleep {
+        lock(&self.free_during_sleep).push(self.permits.available_permits());
+        ready(())
+    }
+}
+
+/// A clock whose sleeps never finish.
+#[derive(Clone, Copy)]
+struct StalledClock;
+
+impl Clock for StalledClock {
+    type Sleep = std::future::Pending<()>;
+
+    fn now(&self) -> Timestamp {
+        timestamp(FIXED_NOW)
+    }
+
+    fn sleep(&self, _duration: Duration) -> Self::Sleep {
+        std::future::pending()
+    }
+}
+
 #[tokio::test]
 async fn retries_a_loopback_503_then_returns_the_success() {
     let (url, mut server) =
@@ -356,10 +541,11 @@ async fn refuses_retry_after_above_budget_without_sleeping() {
     )
     .await
     .expect_err("over-budget retry is refused");
-    assert!(matches!(
-        error,
-        ProviderError::RetryAfterTooLong { seconds: 120, .. }
-    ));
+    assert!(
+        matches!(&error, ProviderError::RetryAfterTooLong { seconds: 120, message }
+            if message == "slow down"),
+        "{error:?}"
+    );
     assert_eq!(clock.sleeps(), []);
     assert_eq!(
         server
@@ -975,6 +1161,10 @@ fn hostile_retry_after_values_never_panic_or_shorten_the_wait() {
     let wait =
         |value: &str| crate::retry::delay_for_attempt(1, retry_after_seconds(value, now), 1.0);
     assert_eq!(wait("7"), Ok(Duration::from_secs(7)));
+    assert_eq!(wait("2.5"), Ok(Duration::from_millis(2_500)));
+    assert_eq!(wait("0"), Ok(Duration::ZERO));
+    assert_eq!(wait("60.0"), Ok(Duration::from_secs(60)));
+    assert_eq!(wait("60.2").unwrap_err().seconds, 61);
     assert_eq!(wait("  7  "), Ok(Duration::from_secs(7)));
     assert_eq!(wait("60"), Ok(Duration::from_secs(60)));
     assert_eq!(wait("61").unwrap_err().seconds, 61);
@@ -988,4 +1178,723 @@ fn hostile_retry_after_values_never_panic_or_shorten_the_wait() {
         wait("Mon, 15 Jul 2024 16:26:59 GMT").unwrap_err().seconds,
         120
     );
+}
+
+#[tokio::test]
+async fn backoff_doubles_per_retry_and_attempts_stop_at_one_plus_max_retries() {
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let counts = Counts::default();
+    let notices = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut retrying = plan(
+        clock.clone(),
+        3,
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+    );
+    let sink = Arc::clone(&notices);
+    retrying.notices = Arc::new(move |notice| lock(&sink).push(notice));
+    let error = run(
+        retrying,
+        api_key(),
+        &counts,
+        |number| {
+            if number > 20 {
+                return Ok(None);
+            }
+            Err(failure(503, None, "busy"))
+        },
+        never_refreshed,
+    )
+    .await
+    .expect_err("every attempt is a 503");
+    assert!(
+        matches!(&error, ProviderError::Status { family: Family::Responses, status: 503, message }
+            if message == "busy"),
+        "{error:?}"
+    );
+    assert_eq!(counts.attempts(), 4);
+    let sleeps = clock.sleeps();
+    assert_eq!(sleeps.len(), 3, "{sleeps:?}");
+    for (index, wait) in sleeps.iter().enumerate() {
+        let base = f64::from(1_u32 << index);
+        let secs = wait.as_secs_f64();
+        assert!(
+            (base * 0.9 - 1e-6..=base * 1.1 + 1e-6).contains(&secs),
+            "retry {index} waited {secs} s, expected about {base} s"
+        );
+    }
+    let shown = lock(&notices).clone();
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    for (index, notice) in shown.iter().enumerate() {
+        assert!(notice.starts_with("Retrying in "), "{notice}");
+        assert!(
+            notice.ends_with(&format!("s (attempt {}/3).", index + 1)),
+            "{notice}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_huge_configured_retry_count_still_ends_after_one_hundred_retries() {
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let counts = Counts::default();
+    let error = run(
+        plan(
+            clock.clone(),
+            u32::MAX,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+        ),
+        api_key(),
+        &counts,
+        |number| {
+            if number > 500 {
+                return Ok(None);
+            }
+            Err(failure(503, None, "busy"))
+        },
+        never_refreshed,
+    )
+    .await
+    .expect_err("the retry budget is capped at 100");
+    assert!(
+        matches!(&error, ProviderError::Status { status: 503, .. }),
+        "{error:?}"
+    );
+    assert_eq!(counts.attempts(), 101);
+    let sleeps = clock.sleeps();
+    assert_eq!(sleeps.len(), 100);
+    assert!(sleeps.iter().all(|wait| *wait <= Duration::from_secs(60)));
+}
+
+#[tokio::test]
+async fn a_request_keeps_its_permit_through_every_backoff_sleep() {
+    let permits = Arc::new(Semaphore::new(1));
+    let clock = PermitProbeClock {
+        permits: Arc::clone(&permits),
+        free_during_sleep: Arc::new(Mutex::new(Vec::new())),
+    };
+    let counts = Counts::default();
+    let output = run(
+        plan(
+            clock.clone(),
+            2,
+            Arc::clone(&permits),
+            CancellationToken::new(),
+        ),
+        api_key(),
+        &counts,
+        |number| {
+            if number < 2 {
+                return Err(failure(503, None, "busy"));
+            }
+            Ok(Some(200))
+        },
+        never_refreshed,
+    )
+    .await
+    .expect("the third attempt succeeds");
+    assert_eq!(output, Some(200));
+    let free = lock(&clock.free_during_sleep).clone();
+    assert_eq!(free, vec![0, 0], "the permit is held while sleeping");
+    assert_eq!(permits.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_refresh_ends_the_request_with_the_refresh_error_and_no_replay() {
+    let permits = Arc::new(Semaphore::new(1));
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let counts = Counts::default();
+    let error = run(
+        plan(
+            clock.clone(),
+            3,
+            Arc::clone(&permits),
+            CancellationToken::new(),
+        ),
+        oauth("old"),
+        &counts,
+        |_| Err(failure(401, None, "expired")),
+        || {
+            Err(ProviderError::TokenExchange {
+                status: 400,
+                message: String::from("invalid_grant"),
+            })
+        },
+    )
+    .await
+    .expect_err("a rejected refresh is final");
+    assert!(
+        matches!(&error, ProviderError::TokenExchange { status: 400, message }
+            if message == "invalid_grant"),
+        "{error:?}"
+    );
+    assert_eq!(counts.attempts(), 1);
+    assert_eq!(counts.refreshes(), 1);
+    assert_eq!(counts.tokens(), ["old"]);
+    assert_eq!(clock.sleeps(), []);
+    assert_eq!(permits.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn a_refresh_does_not_spend_the_retry_budget() {
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let counts = Counts::default();
+    let output = run(
+        plan(
+            clock.clone(),
+            1,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+        ),
+        oauth("old"),
+        &counts,
+        |number| match number {
+            0 => Err(failure(401, None, "expired")),
+            1 => Err(failure(503, None, "busy")),
+            _ => Ok(Some(200)),
+        },
+        || Ok(oauth("new")),
+    )
+    .await
+    .expect("one refresh and one retry still fit in max_retries = 1");
+    assert_eq!(output, Some(200));
+    assert_eq!(counts.attempts(), 3);
+    assert_eq!(counts.refreshes(), 1);
+    assert_eq!(counts.tokens(), ["old", "new", "new"]);
+    assert_eq!(clock.sleeps().len(), 1);
+}
+
+#[tokio::test]
+async fn the_single_refresh_is_not_re_armed_by_a_later_retry() {
+    let counts = Counts::default();
+    let error = run(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            2,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+        ),
+        oauth("old"),
+        &counts,
+        |number| match number {
+            1 => Err(failure(503, None, "busy")),
+            _ => Err(failure(401, None, "expired")),
+        },
+        || Ok(oauth("new")),
+    )
+    .await
+    .expect_err("the refreshed token's 401 is terminal");
+    assert!(
+        matches!(&error, ProviderError::SignInExpired { provider } if provider == "openai"),
+        "{error:?}"
+    );
+    assert_eq!(counts.attempts(), 3);
+    assert_eq!(counts.refreshes(), 1);
+    assert_eq!(counts.tokens(), ["old", "new", "new"]);
+}
+
+#[tokio::test]
+async fn an_over_budget_retry_after_keeps_the_server_message_on_every_path() {
+    for max_retries in [0, 2] {
+        for (header, seconds) in [("61", 61_u64), ("60.5", 61), ("120", 120)] {
+            let clock = TestClock::new(timestamp(FIXED_NOW));
+            let counts = Counts::default();
+            let error = run(
+                plan(
+                    clock.clone(),
+                    max_retries,
+                    Arc::new(Semaphore::new(1)),
+                    CancellationToken::new(),
+                ),
+                api_key(),
+                &counts,
+                |_| Err(failure(429, Some(header), "slow down")),
+                never_refreshed,
+            )
+            .await
+            .expect_err("a wait over 60 s is refused");
+            assert!(
+                matches!(&error, ProviderError::RetryAfterTooLong { seconds: got, message }
+                    if *got == seconds && message == "slow down"),
+                "retries {max_retries}, Retry-After {header}: {error:?}"
+            );
+            assert_eq!(counts.attempts(), 1);
+            assert_eq!(clock.sleeps(), []);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_sixty_second_retry_after_is_honored_exactly_not_refused() {
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let counts = Counts::default();
+    let output = run(
+        plan(
+            clock.clone(),
+            1,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+        ),
+        api_key(),
+        &counts,
+        |number| {
+            if number == 0 {
+                return Err(failure(429, Some("60"), "slow down"));
+            }
+            Ok(Some(200))
+        },
+        never_refreshed,
+    )
+    .await
+    .expect("a 60 s wait is inside the budget");
+    assert_eq!(output, Some(200));
+    assert_eq!(clock.sleeps(), vec![Duration::from_secs(60)]);
+
+    let exhausted = run(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            0,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+        ),
+        api_key(),
+        &Counts::default(),
+        |_| Err(failure(429, Some("60"), "slow down")),
+        never_refreshed,
+    )
+    .await
+    .expect_err("no retry is left");
+    assert!(
+        matches!(&exhausted, ProviderError::RateLimited { message, retry_after: Some(wait) }
+            if message == "slow down" && *wait == Duration::from_secs(60)),
+        "{exhausted:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_error_that_is_not_transient_is_final_on_the_first_attempt() {
+    fn final_errors() -> Vec<ProviderError> {
+        vec![
+            ProviderError::Protocol {
+                family: Family::Responses,
+                detail: String::from("bad frame"),
+            },
+            ProviderError::Limit(LimitError::SseLine),
+            ProviderError::PlainHttp {
+                host: String::from("example.com"),
+            },
+            ProviderError::Quota {
+                message: String::from("no credits"),
+            },
+            ProviderError::UnknownModel {
+                reference: String::from("nope"),
+            },
+        ]
+    }
+    for index in 0..final_errors().len() {
+        let expected = format!("{:?}", final_errors()[index]);
+        let clock = TestClock::new(timestamp(FIXED_NOW));
+        let counts = Counts::default();
+        let error = run(
+            plan(
+                clock.clone(),
+                5,
+                Arc::new(Semaphore::new(1)),
+                CancellationToken::new(),
+            ),
+            api_key(),
+            &counts,
+            move |_| Err(AttemptFailure::Provider(final_errors().swap_remove(index))),
+            never_refreshed,
+        )
+        .await
+        .expect_err("a non-transient provider error is final");
+        assert_eq!(format!("{error:?}"), expected);
+        assert_eq!(counts.attempts(), 1, "{expected}");
+        assert_eq!(clock.sleeps(), [], "{expected}");
+    }
+}
+
+#[tokio::test]
+async fn a_closed_admission_semaphore_is_a_typed_transport_failure_without_an_attempt() {
+    let permits = Arc::new(Semaphore::new(1));
+    permits.close();
+    let counts = Counts::default();
+    let error = run(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            3,
+            Arc::clone(&permits),
+            CancellationToken::new(),
+        ),
+        api_key(),
+        &counts,
+        |_| Ok(Some(200)),
+        never_refreshed,
+    )
+    .await
+    .expect_err("admission is closed");
+    assert!(
+        matches!(&error, ProviderError::Transport { family: Family::Responses, reason }
+            if reason == "provider request admission is closed"),
+        "{error:?}"
+    );
+    assert_eq!(counts.attempts(), 0);
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut events = scripted_stream(
+        permits,
+        CancellationToken::new(),
+        3,
+        Arc::clone(&attempts),
+        |_| vec![Ok(stop())],
+    );
+    let first = tokio::time::timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("a closed admission fails the stream instead of stalling it");
+    assert!(
+        matches!(&first, Some(Err(ProviderError::Transport { reason, .. }))
+            if reason == "provider request admission is closed"),
+        "{first:?}"
+    );
+    assert!(events.next().await.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelling_during_a_backoff_sleep_returns_without_another_attempt() {
+    let cancel = CancellationToken::new();
+    let permits = Arc::new(Semaphore::new(1));
+    let counts = Counts::default();
+    let canceller = {
+        let cancel = cancel.clone();
+        let attempts = Arc::clone(&counts.attempts);
+        async move {
+            while attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            cancel.cancel();
+        }
+    };
+    let running = run(
+        plan(StalledClock, 3, Arc::clone(&permits), cancel),
+        api_key(),
+        &counts,
+        |_| Err(failure(503, None, "busy")),
+        never_refreshed,
+    );
+    let (output, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(running, canceller)
+    })
+    .await
+    .expect("cancellation ends a backoff sleep that never finishes");
+    assert!(matches!(output, Ok(None)), "{output:?}");
+    assert_eq!(counts.attempts(), 1);
+    assert_eq!(permits.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn cancelling_during_an_oauth_refresh_returns_without_replaying_the_request() {
+    let cancel = CancellationToken::new();
+    let permits = Arc::new(Semaphore::new(1));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let canceller = {
+        let cancel = cancel.clone();
+        let refreshes = Arc::clone(&refreshes);
+        async move {
+            while refreshes.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            cancel.cancel();
+        }
+    };
+    let attempt_count = Arc::clone(&attempts);
+    let refresh_count = Arc::clone(&refreshes);
+    let running = request(
+        plan(
+            TestClock::new(timestamp(FIXED_NOW)),
+            3,
+            Arc::clone(&permits),
+            cancel,
+        ),
+        oauth("old"),
+        move |_credential, _cancel| {
+            attempt_count.fetch_add(1, Ordering::SeqCst);
+            async { Err::<Option<()>, _>(failure(401, None, "expired")) }
+        },
+        move |_held| {
+            refresh_count.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<Result<Credential, ProviderError>>()
+        },
+    );
+    let (output, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(running, canceller)
+    })
+    .await
+    .expect("cancellation ends a refresh that never finishes");
+    assert!(matches!(output, Ok(None)), "{output:?}");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(permits.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn every_event_kind_sets_the_delivery_barrier_so_a_later_error_is_not_replayed() {
+    let kinds = vec![
+        text("t"),
+        StreamEvent::ReasoningDelta {
+            text: String::from("r"),
+        },
+        StreamEvent::ToolCallStarted {
+            id: String::from("c1"),
+            name: String::from("read"),
+        },
+        StreamEvent::ToolArgsDelta {
+            id: String::from("c1"),
+            fragment: b"{".to_vec(),
+        },
+        StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Responses,
+                model: "gpt-6".into(),
+                item: RawJson::parse("{}").expect("an empty object is JSON"),
+            },
+        },
+        StreamEvent::ToolCallsDone { calls: Vec::new() },
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Refused {
+                reason: ReplayRefusal::NoRecords,
+            },
+        },
+        StreamEvent::Usage {
+            usage: Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                premium_requests: None,
+                cost_usd: None,
+            },
+        },
+    ];
+    for kind in kinds {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let sent = kind.clone();
+        let mut events = scripted_stream(
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+            5,
+            Arc::clone(&attempts),
+            move |_| vec![Ok(sent.clone()), Err(ProviderError::Overloaded)],
+        );
+        let first = events.next().await;
+        assert!(
+            matches!(&first, Some(Ok(event)) if *event == kind),
+            "{kind:?}: {first:?}"
+        );
+        let second = events.next().await;
+        assert!(
+            matches!(&second, Some(Err(ProviderError::Overloaded))),
+            "{kind:?}: {second:?}"
+        );
+        assert!(events.next().await.is_none(), "{kind:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn nothing_follows_the_terminal_stop() {
+    let tails: [fn() -> Result<StreamEvent, ProviderError>; 3] = [
+        || Ok(text("late")),
+        || Ok(stop()),
+        || Err(ProviderError::Overloaded),
+    ];
+    for tail in tails {
+        let permits = Arc::new(Semaphore::new(1));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut events = scripted_stream(
+            Arc::clone(&permits),
+            CancellationToken::new(),
+            5,
+            Arc::clone(&attempts),
+            move |_| vec![Ok(text("hello")), Ok(stop()), tail()],
+        );
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::TextDelta { .. }))
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::Stop { .. }))
+        ));
+        assert!(events.next().await.is_none());
+        assert!(events.next().await.is_none());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(permits.available_permits(), 1);
+    }
+}
+
+#[tokio::test]
+async fn the_permit_is_released_at_the_terminal_stop_before_the_stream_is_dropped() {
+    let permits = Arc::new(Semaphore::new(1));
+    let mut events = scripted_stream(
+        Arc::clone(&permits),
+        CancellationToken::new(),
+        0,
+        Arc::default(),
+        |_| vec![Ok(text("hello")), Ok(stop())],
+    );
+    assert!(matches!(
+        events.next().await,
+        Some(Ok(StreamEvent::TextDelta { .. }))
+    ));
+    assert_eq!(
+        permits.available_permits(),
+        0,
+        "held while the reply streams"
+    );
+    assert!(matches!(
+        events.next().await,
+        Some(Ok(StreamEvent::Stop { .. }))
+    ));
+    assert_eq!(
+        permits.available_permits(),
+        1,
+        "the terminal event releases the permit"
+    );
+    assert!(events.next().await.is_none());
+}
+
+#[tokio::test]
+async fn cancellation_releases_the_permit_while_the_stream_is_still_alive() {
+    let permits = Arc::new(Semaphore::new(1));
+    let cancel = CancellationToken::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut events = stream_probing_permits(&permits, cancel.clone(), &seen);
+    assert!(events.next().now_or_never().is_none());
+    assert_eq!(permits.available_permits(), 0);
+    cancel.cancel();
+    assert!(events.next().now_or_never().is_none());
+    assert_eq!(permits.available_permits(), 1);
+    assert_eq!(
+        *lock(&seen),
+        [0],
+        "the attempt closed while the permit was held"
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_stream_closes_the_attempt_before_releasing_its_permit() {
+    let permits = Arc::new(Semaphore::new(1));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut events = stream_probing_permits(&permits, CancellationToken::new(), &seen);
+    assert!(events.next().now_or_never().is_none());
+    assert_eq!(permits.available_permits(), 0);
+    drop(events);
+    assert_eq!(permits.available_permits(), 1);
+    assert_eq!(
+        *lock(&seen),
+        [0],
+        "the socket must be gone before the permit frees"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_stream_before_any_event_is_a_cut_that_is_retried_then_surfaced() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut events = scripted_stream(
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+        1,
+        Arc::clone(&attempts),
+        |number| {
+            if number == 0 {
+                return Vec::new();
+            }
+            vec![Ok(stop())]
+        },
+    );
+    assert!(matches!(
+        events.next().await,
+        Some(Ok(StreamEvent::Stop { .. }))
+    ));
+    assert!(events.next().await.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut exhausted = scripted_stream(
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+        0,
+        Arc::clone(&attempts),
+        |_| Vec::new(),
+    );
+    let Some(Err(error)) = exhausted.next().await else {
+        panic!("an empty stream with no retry left must surface an error");
+    };
+    assert!(
+        matches!(
+            InferFailure::from(error),
+            InferFailure::Retryable { message, .. }
+                if message.contains("stream cut off before completion")
+        ),
+        "a cut is transient"
+    );
+    assert!(exhausted.next().await.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_websocket_close_after_delivery_keeps_its_code_and_before_it_is_retried() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut events = scripted_stream(
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+        5,
+        Arc::clone(&attempts),
+        |_| {
+            vec![
+                Ok(text("partial")),
+                Err(ProviderError::WsClosed {
+                    code: Some((1011, String::from("busy"))),
+                }),
+            ]
+        },
+    );
+    assert!(matches!(
+        events.next().await,
+        Some(Ok(StreamEvent::TextDelta { .. }))
+    ));
+    let closed = events.next().await;
+    assert!(
+        matches!(&closed, Some(Err(ProviderError::WsClosed { code: Some((1011, reason)) }))
+            if reason == "busy"),
+        "{closed:?}"
+    );
+    assert!(events.next().await.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut retried = scripted_stream(
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+        1,
+        Arc::clone(&attempts),
+        |number| {
+            if number == 0 {
+                return vec![Err(ProviderError::WsClosed {
+                    code: Some((1006, String::from("gone"))),
+                })];
+            }
+            vec![Ok(stop())]
+        },
+    );
+    assert!(matches!(
+        retried.next().await,
+        Some(Ok(StreamEvent::Stop { .. }))
+    ));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }

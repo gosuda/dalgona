@@ -657,3 +657,575 @@ fn from_config_reads_combined_dal_toml() {
     assert_eq!(zenmux.family, Family::Chat);
     assert_eq!(&*zenmux.base_url, "https://example.test");
 }
+
+/// A named `zenmux` provider whose `api` is the TOML basic string `api` (escape
+/// sequences allowed) with every required key, plus `extra` lines.
+fn zenmux_api(api: &str, extra: &str) -> String {
+    format!(
+        "[providers.zenmux]\napi = \"{api}\"\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n{extra}\n"
+    )
+}
+
+/// A named Chat `zenmux` provider with every required key, plus `extra` lines.
+fn zenmux(extra: &str) -> String {
+    zenmux_api("openai_chat", extra)
+}
+
+/// A refusal expected from [`parse`]. A surprise success reports `what` and the
+/// number of decoded providers, not the whole decoded configuration.
+trait ExpectRefused {
+    fn expect_refused(self, what: &str) -> ProviderConfigError;
+}
+
+impl ExpectRefused for Result<ProviderConfig, ProviderConfigError> {
+    fn expect_refused(self, what: &str) -> ProviderConfigError {
+        match self {
+            Err(error) => error,
+            Ok(config) => panic!("{what}: accepted with {} providers", config.providers.len()),
+        }
+    }
+}
+
+/// Every `api` spelling `parse_api` accepts.
+const API_SPELLINGS: [&str; 15] = [
+    "openai_chat",
+    "openai_responses",
+    "anthropic",
+    "bedrock",
+    "cursor",
+    "devin",
+    "droid",
+    "gitlab",
+    "google-generative-ai",
+    "google-vertex",
+    "google-gemini-cli",
+    "google-antigravity",
+    "mistral",
+    "ollama",
+    "pi-messages",
+];
+
+#[test]
+fn retry_limits_accept_both_inclusive_bounds_and_refuse_one_step_outside() {
+    for key in ["request_max_retries", "stream_max_retries"] {
+        let request = key == "request_max_retries";
+        for accepted in [0_i64, 1, 99, 100] {
+            let config = parse(&format!("[retry]\n{key} = {accepted}\n"))
+                .unwrap_or_else(|error| panic!("{key} = {accepted}: {error}"));
+            let (set, untouched) = if request {
+                (config.request_max_retries, config.stream_max_retries)
+            } else {
+                (config.stream_max_retries, config.request_max_retries)
+            };
+            assert_eq!(i64::from(set), accepted, "{key}");
+            assert_eq!(
+                untouched,
+                if request { 5 } else { 4 },
+                "{key} moved the other limit"
+            );
+        }
+        for refused in [-1_i64, 101, i64::MAX, i64::MIN] {
+            let error = parse(&format!("[retry]\n{key} = {refused}\n"))
+                .expect_refused(&format!("{key} = {refused} is outside 0..=100"));
+            assert!(
+                matches!(
+                    &error,
+                    ProviderConfigError::RetryOutOfRange { key: found, value }
+                        if *found == key && *value == refused
+                ),
+                "{key} = {refused}: {error}"
+            );
+        }
+        for wrong in ["3.5", "'3'", "true", "[3]"] {
+            let error = parse(&format!("[retry]\n{key} = {wrong}\n"))
+                .expect_refused(&format!("{key} = {wrong} is not an integer"));
+            assert_eq!(
+                error.to_string(),
+                format!("retry.{key} must be an integer"),
+                "{key} = {wrong}"
+            );
+        }
+    }
+}
+
+#[test]
+fn concurrency_accepts_one_and_the_documented_maximum_and_refuses_one_step_outside() {
+    for id in ["zenmux", "groq"] {
+        let input = |value: &str| {
+            if id == "zenmux" {
+                zenmux(&format!("max_concurrent_requests = {value}"))
+            } else {
+                format!("[providers.groq]\nmax_concurrent_requests = {value}\n")
+            }
+        };
+        for accepted in [1_u32, 2, 63, 64] {
+            let config = parse(&input(&accepted.to_string()))
+                .unwrap_or_else(|error| panic!("{id} = {accepted}: {error}"));
+            assert_eq!(entry(&config, id).max_concurrent_requests, accepted, "{id}");
+        }
+        for refused in [0_i64, -1, 65, i64::MIN, i64::MAX] {
+            let error = parse(&input(&refused.to_string()))
+                .expect_refused(&format!("{id} = {refused} is outside 1..=64"));
+            assert!(
+                matches!(
+                    &error,
+                    ProviderConfigError::ConcurrencyOutOfRange { name, value }
+                        if &**name == id && *value == refused
+                ),
+                "{id} = {refused}: {error}"
+            );
+        }
+        for wrong in ["4.0", "'4'", "true"] {
+            let error =
+                parse(&input(wrong)).expect_refused(&format!("{id} = {wrong} is not an integer"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.{id}.max_concurrent_requests must be an integer"),
+                "{id} = {wrong}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_builtin_row_honors_every_connection_override_of_its_own_table() {
+    let config = parse(concat!(
+        "[providers.openai]\nkey_env = 'MY_OPENAI_KEY'\nauth = 'api-key'\ntransport = 'websocket'\n",
+        "base_url = 'https://proxy.example.test/v1'\nmax_concurrent_requests = 9\n",
+        "[providers.openai-codex]\ntransport = 'https'\n",
+        "[providers.groq]\nauth = 'none'\nkey_env = 'MY_GROQ_KEY'\n",
+    ))
+    .expect("built-in overrides are valid");
+    let openai = entry(&config, "openai");
+    assert_eq!(openai.key_env.as_deref(), Some("MY_OPENAI_KEY"));
+    assert_eq!(openai.auth, AuthStyle::ApiKey);
+    assert_eq!(openai.transport, Transport::Websocket);
+    assert_eq!(&*openai.base_url, "https://proxy.example.test/v1");
+    assert_eq!(openai.max_concurrent_requests, 9);
+    assert!(!openai.settings.base_url_defaulted);
+    assert_eq!(entry(&config, "openai-codex").transport, Transport::Https);
+    let groq = entry(&config, "groq");
+    assert_eq!(groq.auth, AuthStyle::None);
+    assert_eq!(groq.key_env.as_deref(), Some("MY_GROQ_KEY"));
+    // A row whose table is absent keeps every default.
+    let anthropic = entry(&config, "anthropic");
+    assert_eq!(anthropic.key_env, None);
+    assert_eq!(anthropic.auth, AuthStyle::XApiKey);
+    assert_eq!(anthropic.transport, Transport::Https);
+    assert_eq!(anthropic.max_concurrent_requests, 4);
+}
+
+#[test]
+fn a_builtin_row_refuses_a_bad_connection_override_under_its_own_name() {
+    for (input, expected) in [
+        (
+            "[providers.openai]\ntransport = 'ws'\n",
+            "providers.openai.transport must be https or websocket",
+        ),
+        (
+            "[providers.openai]\nauth = 'basic'\n",
+            "providers.openai.auth must be bearer, x-api-key, api-key, or none",
+        ),
+        (
+            "[providers.openai]\nunknown = 1\n",
+            "providers.openai.unknown: unknown key",
+        ),
+        (
+            "[providers.groq]\nunknown = 1\n",
+            "providers.groq.unknown: unknown key",
+        ),
+        (
+            "[providers.groq]\nmax_concurrent_requests = 0\n",
+            "providers.groq.max_concurrent_requests: 0 is outside 1..=64.",
+        ),
+    ] {
+        let error = parse(input).expect_refused(&format!("a bad override {input:?}"));
+        assert_eq!(error.to_string(), expected, "{input}");
+    }
+}
+
+#[test]
+fn an_api_value_is_matched_exactly_without_case_folding_or_trimming() {
+    for api in [
+        "OpenAI_Chat",
+        "OPENAI_CHAT",
+        " openai_chat",
+        "openai_chat ",
+        "openai_chat\\n",
+        "openai-chat",
+        "chat",
+        "",
+    ] {
+        for input in [
+            zenmux_api(api, ""),
+            format!("[providers.groq]\napi = \"{api}\"\n"),
+        ] {
+            let error = parse(&input).expect_refused(&format!("a respelled api {api:?}"));
+            // The refusal carries the value as written, never a normalised one.
+            let written = api.replace("\\n", "\n");
+            assert!(
+                matches!(
+                    &error,
+                    ProviderConfigError::UnknownApi { value, .. } if **value == *written
+                ),
+                "{api:?}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_transport_value_is_matched_exactly_without_case_folding_or_trimming() {
+    for transport in [
+        "HTTPS",
+        "Https",
+        " https",
+        "https ",
+        "WebSocket",
+        "websocket\\n",
+        "wss",
+        "http",
+        "",
+    ] {
+        for (id, input) in [
+            ("zenmux", zenmux(&format!("transport = \"{transport}\""))),
+            (
+                "openai",
+                format!("[providers.openai]\ntransport = \"{transport}\"\n"),
+            ),
+        ] {
+            let error = parse(&input)
+                .expect_refused(&format!("a respelled transport {transport:?} on {id}"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.{id}.transport must be https or websocket"),
+                "{transport:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_auth_value_is_matched_exactly_without_case_folding_or_trimming() {
+    for auth in [
+        "Bearer",
+        "BEARER",
+        " bearer",
+        "bearer ",
+        "none\\n",
+        "NONE",
+        "None",
+        "x_api_key",
+        "X-Api-Key",
+        "apikey",
+        "basic",
+        "",
+    ] {
+        for (id, input) in [
+            ("zenmux", zenmux(&format!("auth = \"{auth}\""))),
+            ("groq", format!("[providers.groq]\nauth = \"{auth}\"\n")),
+        ] {
+            let error = parse(&input).expect_refused(&format!("a respelled auth {auth:?} on {id}"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.{id}.auth must be bearer, x-api-key, api-key, or none"),
+                "{auth:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn websocket_is_refused_for_every_named_api_except_openai_responses() {
+    for api in API_SPELLINGS {
+        let result = parse(&zenmux_api(api, "transport = 'websocket'"));
+        if api == "openai_responses" {
+            let config = result.expect("Responses speaks WebSocket");
+            assert_eq!(entry(&config, "zenmux").transport, Transport::Websocket);
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ProviderConfigError::TransportMismatch { name }) if &**name == "zenmux"
+                ),
+                "{api}: {:?}",
+                result.as_ref().map(|_| "accepted")
+            );
+        }
+    }
+}
+
+#[test]
+fn websocket_is_refused_for_every_builtin_row_whose_family_has_none() {
+    for def in PROVIDERS {
+        let result = parse(&format!(
+            "[providers.{}]\ntransport = 'websocket'\n",
+            def.id
+        ));
+        if matches!(def.family, Family::Responses | Family::Codex) {
+            let config = result.unwrap_or_else(|error| panic!("{}: {error}", def.id));
+            assert_eq!(entry(&config, def.id).transport, Transport::Websocket);
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ProviderConfigError::TransportMismatch { name }) if &**name == def.id
+                ),
+                "{}: {:?}",
+                def.id,
+                result.as_ref().map(|_| "accepted")
+            );
+        }
+    }
+}
+
+#[test]
+fn a_native_row_accepts_only_its_own_api_spelling() {
+    for (id, own) in [
+        ("openai-codex", "openai_codex"),
+        ("anthropic", "anthropic"),
+        ("factory-droid", "droid"),
+        ("gitlab-duo", "gitlab"),
+        ("github-copilot", "openai_chat"),
+        ("radius", "pi-messages"),
+        ("google", "google-generative-ai"),
+        ("google-vertex", "google-vertex"),
+    ] {
+        let row = find(id).expect("a native row");
+        let config = parse(&format!("[providers.{id}]\napi = '{own}'\n"))
+            .unwrap_or_else(|error| panic!("{id} refuses its own api {own}: {error}"));
+        assert_eq!(entry(&config, id).family, row.family, "{id}");
+        for other in API_SPELLINGS.iter().chain(&["openai_codex"]) {
+            if *other == own {
+                continue;
+            }
+            let error = parse(&format!("[providers.{id}]\napi = '{other}'\n"))
+                .expect_refused(&format!("{id} refuses api {other}"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.{id}.api conflicts with its fixed family"),
+                "{id} with api {other}"
+            );
+        }
+    }
+    // The Responses-family rows take their documented Chat alternate and
+    // nothing else.
+    for id in ["openai", "openrouter"] {
+        for other in API_SPELLINGS {
+            if matches!(other, "openai_responses" | "openai_chat") {
+                continue;
+            }
+            let error = parse(&format!("[providers.{id}]\napi = '{other}'\n"))
+                .expect_refused(&format!("{id} refuses api {other}"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.{id}.api must be openai_responses or openai_chat"),
+                "{id} with api {other}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_retargeted_preset_takes_the_default_header_of_the_family_it_was_pointed_at() {
+    for (id, api, family, auth) in [
+        ("groq", "anthropic", Family::Anthropic, AuthStyle::XApiKey),
+        (
+            "groq",
+            "openai_responses",
+            Family::Responses,
+            AuthStyle::Bearer,
+        ),
+        ("groq", "openai_chat", Family::Chat, AuthStyle::Bearer),
+        ("xai", "openai_chat", Family::Chat, AuthStyle::Bearer),
+        // The `umans` row is Anthropic with an `x-api-key` header; pointed at
+        // a bearer family it must not keep that header.
+        ("umans", "openai_chat", Family::Chat, AuthStyle::Bearer),
+        ("umans", "anthropic", Family::Anthropic, AuthStyle::XApiKey),
+        (
+            "minimax",
+            "openai_responses",
+            Family::Responses,
+            AuthStyle::Bearer,
+        ),
+        ("minimax", "anthropic", Family::Anthropic, AuthStyle::Bearer),
+        ("ollama", "openai_chat", Family::Chat, AuthStyle::Bearer),
+    ] {
+        let row = find(id).expect("a preset row");
+        let config = parse(&format!("[providers.{id}]\napi = '{api}'\n"))
+            .unwrap_or_else(|error| panic!("{id} with api {api}: {error}"));
+        let retargeted = entry(&config, id);
+        assert_eq!(retargeted.family, family, "{id} with api {api}");
+        assert_eq!(retargeted.auth, auth, "{id} with api {api}");
+        assert_eq!(
+            retargeted.shape(),
+            Shape::of_family(family),
+            "{id} with api {api}"
+        );
+        assert_eq!(
+            &*retargeted.base_url, row.base_url,
+            "{id} keeps its endpoint"
+        );
+        assert_eq!(retargeted.key_env, None, "{id}");
+    }
+    // An explicit `auth` still wins over the family default.
+    let config = parse("[providers.groq]\napi = 'anthropic'\nauth = 'bearer'\n")
+        .expect("an explicit auth is valid");
+    assert_eq!(entry(&config, "groq").auth, AuthStyle::Bearer);
+}
+
+#[test]
+fn a_preset_pointed_at_gemini_cli_authenticates_nothing_and_refuses_a_credential_header() {
+    let config = parse("[providers.groq]\napi = 'google-gemini-cli'\n")
+        .expect("a preset may be pointed at the CLI family");
+    assert_eq!(entry(&config, "groq").family, Family::GoogleGeminiCli);
+    assert_eq!(entry(&config, "groq").auth, AuthStyle::None);
+    let config = parse("[providers.groq]\napi = 'google-gemini-cli'\nauth = 'none'\n")
+        .expect("an explicit none is valid");
+    assert_eq!(entry(&config, "groq").auth, AuthStyle::None);
+    let error = parse("[providers.groq]\napi = 'google-gemini-cli'\nauth = 'bearer'\n")
+        .expect_refused("the CLI family sends no credential");
+    assert_eq!(
+        error.to_string(),
+        "providers.groq.auth must be none for api google-gemini-cli"
+    );
+}
+
+#[test]
+fn every_thinking_level_decodes_and_any_other_spelling_is_refused_verbatim() {
+    for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        let config = parse(&format!("[models]\nthinking = '{level}'\n"))
+            .unwrap_or_else(|error| panic!("{level}: {error}"));
+        assert_eq!(config.thinking.name(), level);
+    }
+    for bad in [
+        "", "ultra", "HIGH", "High", " high", "high ", "x-high", "none",
+    ] {
+        let error = parse(&format!("[models]\nthinking = \"{bad}\"\n"))
+            .expect_refused(&format!("an unknown level {bad:?}"));
+        assert_eq!(
+            error.to_string(),
+            format!("models.thinking has unsupported value {bad:?}")
+        );
+    }
+}
+
+#[test]
+fn wrong_section_and_field_types_name_the_offending_path() {
+    for (input, expected) in [
+        ("models = 3\n", "models must be a table"),
+        ("[models]\ndefault = 3\n", "models.default must be a string"),
+        (
+            "[models]\nthinking = 3\n",
+            "models.thinking must be a string",
+        ),
+        ("[models]\naliases = 3\n", "models.aliases must be a table"),
+        (
+            "[models.aliases]\nfast = 3\n",
+            "models.aliases.fast must be a string",
+        ),
+        ("retry = 3\n", "retry must be a table"),
+        ("providers = 3\n", "providers must be a table"),
+        (
+            "[providers]\nzenmux = 3\n",
+            "providers.zenmux must be a table",
+        ),
+        (
+            "[providers]\nopenai = 3\n",
+            "providers.openai must be a table",
+        ),
+        (
+            "[providers.groq]\nbase_url = 1\n",
+            "providers.groq.base_url must be a string",
+        ),
+        (
+            "[providers.groq]\ntransport = 1\n",
+            "providers.groq.transport must be a string",
+        ),
+        (
+            "[providers.groq]\nauth = 1\n",
+            "providers.groq.auth must be a string",
+        ),
+        (
+            "[providers.groq]\nkey_env = 1\n",
+            "providers.groq.key_env must be a string",
+        ),
+        (
+            "[providers.groq]\napi = 1\n",
+            "providers.groq.api must be a string",
+        ),
+    ] {
+        let error = parse(input).expect_refused(&format!("a wrong type in {input:?}"));
+        assert_eq!(error.to_string(), expected, "{input:?}");
+    }
+    for (key, expected) in [
+        ("api = 1", "providers.zenmux.api must be a string"),
+        ("base_url = 1", "providers.zenmux.base_url must be a string"),
+        (
+            "transport = 1",
+            "providers.zenmux.transport must be a string",
+        ),
+        ("auth = 1", "providers.zenmux.auth must be a string"),
+        ("key_env = 1", "providers.zenmux.key_env must be a string"),
+    ] {
+        let name = key.split(' ').next().expect("a key name");
+        let mut lines: Vec<String> = zenmux("")
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{name} =")))
+            .map(String::from)
+            .collect();
+        lines.push(key.to_owned());
+        let error = parse(&lines.join("\n")).expect_refused(&format!("a wrong type for {key}"));
+        assert_eq!(error.to_string(), expected, "{key}");
+    }
+}
+
+#[test]
+fn each_missing_required_key_of_a_named_provider_is_named_and_api_is_reported_first() {
+    for omitted in ["api", "base_url", "key_env"] {
+        let lines: Vec<String> = zenmux("")
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{omitted} =")))
+            .map(String::from)
+            .collect();
+        let error = parse(&lines.join("\n")).expect_refused(&format!("{omitted} is missing"));
+        assert_eq!(
+            error.to_string(),
+            format!("providers.zenmux: missing key {omitted}."),
+            "{omitted}"
+        );
+    }
+    let error = parse("[providers.zenmux]\n").expect_refused("an empty named table is refused");
+    assert_eq!(error.to_string(), "providers.zenmux: missing key api.");
+}
+
+#[test]
+fn blank_settings_are_refused_for_every_unicode_whitespace_spelling_and_padding_is_trimmed() {
+    for key in ["api_version", "region", "location"] {
+        for blank in ["\\t", "\\u00A0", "\\u3000", " \\u00A0 \\t"] {
+            let error = parse(&zenmux(&format!("{key} = \"{blank}\"")))
+                .expect_refused(&format!("{key} = {blank} is blank"));
+            assert_eq!(
+                error.to_string(),
+                format!("providers.zenmux.{key} must be a non-empty string"),
+                "{key} = {blank}"
+            );
+        }
+    }
+    let error = parse(&zenmux("deployments = { prod = \"\\u00A0\" }"))
+        .expect_refused("a blank deployment name is refused");
+    assert_eq!(
+        error.to_string(),
+        "providers.zenmux.deployments.prod must be a non-empty string"
+    );
+    let config = parse(&zenmux(
+        "region = \"\\u00A0us-west-2\\u3000\"\ndeployments = { prod = \"\\u00A0blue\\t\" }",
+    ))
+    .expect("padding is trimmed away");
+    let zenmux = entry(&config, "zenmux");
+    assert_eq!(zenmux.settings.region.as_deref(), Some("us-west-2"));
+    assert_eq!(
+        zenmux.settings.deployments.get("prod").map(|name| &**name),
+        Some("blue")
+    );
+}

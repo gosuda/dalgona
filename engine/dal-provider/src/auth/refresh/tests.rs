@@ -519,6 +519,99 @@ async fn rejected_refresh_token_is_sign_in_expired_after_one_request() {
 }
 
 #[tokio::test]
+async fn every_permanent_code_shape_ends_the_refresh_for_each_client_error_status() {
+    // The four places a token endpoint carries its code, one permanent code
+    // each, crossed with client-error statuses at both ends of the 4xx range.
+    let shapes = [
+        r#"{"error":"invalid_grant"}"#,
+        r#"{"error":{"code":"refresh_token_expired"}}"#,
+        r#"{"error":{"type":"refresh_token_reused"}}"#,
+        r#"{"code":"refresh_token_invalidated"}"#,
+    ];
+    for status in [400_u16, 401, 403, 499] {
+        for body in shapes {
+            let dir = TestDir::new("shape");
+            let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+            seed(&dir.auth(), held.clone());
+            let before = fs::read(dir.auth()).expect("read seed");
+            let (listener, base) = listen().await;
+            let refresher = refresher(&dir.auth(), &base);
+            // The second answer would succeed, so a retry cannot go unseen.
+            let replies = vec![
+                Reply::Json(status, String::from(body)),
+                Reply::Json(200, String::from(NEW_TOKENS)),
+            ];
+            let client = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
+            let (result, seen) = with_server(listener, replies, client).await;
+
+            let error = result.expect_err("a dead refresh token fails");
+            assert!(
+                matches!(&error, ProviderError::SignInExpired { .. }),
+                "{status} {body}: {error:?}"
+            );
+            assert_eq!(
+                seen.len(),
+                1,
+                "{status} {body}: a dead token is not retried"
+            );
+            assert_eq!(
+                fs::read(dir.auth()).expect("read after"),
+                before,
+                "{status} {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn only_timeouts_rate_limits_and_server_errors_are_retried() {
+    let runs = [
+        (400_u16, false),
+        (401, false),
+        (404, false),
+        (499, false),
+        (408, true),
+        (429, true),
+        (500, true),
+        (599, true),
+    ]
+    .into_iter()
+    .map(|(status, retried)| async move {
+        let dir = TestDir::new("retry-class");
+        let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+        seed(&dir.auth(), held.clone());
+        let (listener, base) = listen().await;
+        let refresher = refresher(&dir.auth(), &base);
+        // The second answer succeeds: a retry shows as a success after two
+        // requests, a final failure as an error after one.
+        let replies = vec![
+            Reply::Json(status, String::from(r#"{"error":"try_later"}"#)),
+            Reply::Json(200, String::from(NEW_TOKENS)),
+        ];
+        let client = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
+        let (result, seen) = with_server(listener, replies, client).await;
+        if retried {
+            assert_eq!(seen.len(), 2, "{status} is retried once");
+            assert_eq!(
+                oauth(result.expect("the retry succeeds"))
+                    .access_token
+                    .expose(),
+                NEW_ACCESS,
+                "{status}"
+            );
+        } else {
+            assert_eq!(seen.len(), 1, "{status} is final");
+            let error = result.expect_err("a final failure");
+            assert!(
+                matches!(&error, ProviderError::Status { status: got, .. } if *got == status),
+                "{status}: {error:?}"
+            );
+        }
+    });
+    join_all(runs).await;
+}
+
+#[tokio::test]
 async fn cancelled_refresh_persists_rotated_credential() {
     let dir = TestDir::new("cancel");
     let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
@@ -732,6 +825,40 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
             ..
         }
     ));
+}
+
+#[test]
+fn an_empty_null_or_absent_refresh_token_keeps_the_stored_one() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let refresh_of = |extra: &str| {
+        let body = format!(r#"{{"access_token":"a"{extra}}}"#);
+        fresh_credential(codex_def(), &stored, body.as_bytes(), 0)
+            .expect("valid body")
+            .refresh_token
+    };
+    for extra in ["", r#","refresh_token":"""#, r#","refresh_token":null"#] {
+        assert_eq!(refresh_of(extra).expose(), OLD_REFRESH, "{extra:?}");
+    }
+    assert_eq!(
+        refresh_of(r#","refresh_token":"rotated""#).expose(),
+        "rotated"
+    );
+}
+
+#[test]
+fn a_new_id_token_moves_the_codex_account_binding_with_it() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let rebound = jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-2"}}"#);
+    let body = format!(r#"{{"access_token":"a","id_token":"{rebound}"}}"#);
+    let fresh = fresh_credential(codex_def(), &stored, body.as_bytes(), 0).expect("valid body");
+    assert_eq!(fresh.id_token.as_deref(), Some(rebound.as_str()));
+    assert_eq!(fresh.account_id.as_deref(), Some("acct-2"));
+
+    // An answer without an ID token leaves the stored pair whole.
+    let kept =
+        fresh_credential(codex_def(), &stored, br#"{"access_token":"a"}"#, 0).expect("valid body");
+    assert_eq!(kept.id_token.as_deref(), Some("old-id-token"));
+    assert_eq!(kept.account_id.as_deref(), Some("acct-1"));
 }
 
 #[tokio::test]

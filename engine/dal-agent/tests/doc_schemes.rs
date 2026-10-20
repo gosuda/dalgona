@@ -332,6 +332,18 @@ async fn live_job_uris_resolve_through_the_owning_session_table() {
     let log_uri = format!("job://{job}/log");
     let log = host.doc(&log_uri).expect("live job log resolves");
     assert_eq!(log.uri.as_ref(), log_uri.as_str());
+    assert_eq!(
+        log.text.as_ref(),
+        "",
+        "a quiet job's log page is its empty output tail, never the status page"
+    );
+    for route in ["bogus", "log/", "LOG", "log/extra"] {
+        let bad = format!("job://{job}/{route}");
+        match host.doc(&bad) {
+            Err(SchemeError::NotFound { uri }) => assert_eq!(uri.as_ref(), bad.as_str()),
+            other => panic!("route {route:?} is outside the job grammar, got {other:?}"),
+        }
+    }
 
     let missing = JobId::new_v7();
     match host.doc(&format!("job://{missing}")) {
@@ -383,6 +395,27 @@ async fn live_session_entries_read_back_as_json() {
         hits += u32::from(trimmed.contains(marker));
     }
     assert_eq!(hits, 1, "exactly the prompt entry carries the marker text");
+
+    // Paths outside the `<session>/<entry>` grammar are typed misses: a
+    // malformed entry never defaults to the first entry or panics.
+    let first = view.entries.items[0].id;
+    for path in [
+        format!("{session}"),
+        format!("{session}/"),
+        format!("{session}/0"),
+        format!("{session}/-{first}"),
+        format!("{session}/abc"),
+        format!("{session}/{first}/{first}"),
+        format!("{session}/{first}x"),
+        format!("not-a-session/{first}"),
+        format!("/{first}"),
+    ] {
+        let bad = format!("session://{path}");
+        match host.doc(&bad) {
+            Err(SchemeError::NotFound { uri }) => assert_eq!(uri.as_ref(), bad.as_str()),
+            other => panic!("{bad} is outside the session grammar, got {other:?}"),
+        }
+    }
 
     host.close(agent.session()).await.expect("close");
 }

@@ -92,6 +92,60 @@ impl Tool for Todo {
     }
 }
 
+/// Appends its call arguments as a record of one fixed kind.
+struct Writer {
+    base: Arc<Recorder>,
+    kind: &'static str,
+}
+
+impl Tool for Writer {
+    fn name(&self) -> &Name {
+        &self.base.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.base.spec)
+    }
+
+    fn classify(
+        &self,
+        _args: &RawValue,
+        _workspace: &Workspace,
+    ) -> Result<ToolClass, dal_agent::ext::ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            match cx
+                .services()
+                .append_record(cx.caller(), self.kind, Box::new(call.args))
+                .await
+            {
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("recorded"))),
+                Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
+            }
+        })
+    }
+}
+
+/// Lists the calling extension's records of one fixed kind.
+struct ListKind(&'static str);
+
+impl CommandHandler for ListKind {
+    fn run<'a>(
+        &'a self,
+        _args: &'a str,
+        cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
+        Box::pin(async move {
+            let rows = cx.services().records(cx.caller(), self.0).await?;
+            let text: Vec<&str> = rows.iter().map(|row| row.as_str()).collect();
+            Ok(Reply::Done(Output::Text(text.join(";").into())))
+        })
+    }
+}
+
 type AskOutcome = Result<Option<Answer>, ServiceError>;
 
 struct Asker {
@@ -132,9 +186,12 @@ impl Tool for Asker {
     }
 }
 
+/// The oversize refusal text, if any, and whether the next record landed.
+type OverflowSeen = Arc<Mutex<Option<(Option<String>, bool)>>>;
+
 struct Overflow {
     base: Arc<Recorder>,
-    seen: Arc<Mutex<Option<(bool, bool)>>>,
+    seen: OverflowSeen,
 }
 
 impl Tool for Overflow {
@@ -162,7 +219,8 @@ impl Tool for Overflow {
             let refused = services
                 .append_record(cx.caller(), "todo", Box::new(huge))
                 .await
-                .is_err();
+                .err()
+                .map(|error| error.to_string());
             let small = RawJson::parse(r#"{"ok":1}"#).expect("small json");
             let accepted = services
                 .append_record(cx.caller(), "todo", Box::new(small))
@@ -221,6 +279,58 @@ fn work_extension() -> Extension {
         .expect("work extension")
 }
 
+/// Two extensions each record `todo` rows, and the first also records
+/// `note` rows: every record is private to its extension and its kind.
+fn ledger_extension() -> Extension {
+    let command = |name: &str| CommandSpec {
+        name: CommandName::parse(name).expect("command name"),
+        summary: "List one record kind".into(),
+        args_hint: None,
+    };
+    ExtensionBuilder::new("ledger", "0.1.0", ServiceSet::EMPTY)
+        .expect("builder")
+        .tool(
+            Arc::new(Writer {
+                base: Recorder::new("ltodo"),
+                kind: "todo",
+            }),
+            Visibility::Model,
+        )
+        .tool(
+            Arc::new(Writer {
+                base: Recorder::new("lnote"),
+                kind: "note",
+            }),
+            Visibility::Model,
+        )
+        .command(command("ltodos"), Arc::new(ListKind("todo")))
+        .command(command("lnotes"), Arc::new(ListKind("note")))
+        .build()
+        .expect("ledger extension")
+}
+
+fn rival_extension() -> Extension {
+    ExtensionBuilder::new("rival", "0.1.0", ServiceSet::EMPTY)
+        .expect("builder")
+        .tool(
+            Arc::new(Writer {
+                base: Recorder::new("rtodo"),
+                kind: "todo",
+            }),
+            Visibility::Model,
+        )
+        .command(
+            CommandSpec {
+                name: CommandName::parse("rtodos").expect("command name"),
+                summary: "List one record kind".into(),
+                args_hint: None,
+            },
+            Arc::new(ListKind("todo")),
+        )
+        .build()
+        .expect("rival extension")
+}
+
 fn asker_extension(seen: Arc<Mutex<Option<AskOutcome>>>) -> Extension {
     let inject = ServiceSet::from_names(["ask"]).expect("ask service");
     ExtensionBuilder::new("asker", "0.1.0", inject)
@@ -236,7 +346,7 @@ fn asker_extension(seen: Arc<Mutex<Option<AskOutcome>>>) -> Extension {
         .expect("asker extension")
 }
 
-fn big_extension(seen: Arc<Mutex<Option<(bool, bool)>>>) -> Extension {
+fn big_extension(seen: OverflowSeen) -> Extension {
     ExtensionBuilder::new("big", "0.1.0", ServiceSet::EMPTY)
         .expect("builder")
         .tool(
@@ -365,10 +475,14 @@ async fn prompt(agent: &Agent, subscription: &mut Subscription, text: &str) {
 }
 
 async fn todos(agent: &Agent) -> String {
+    listing(agent, "todos").await
+}
+
+async fn listing(agent: &Agent, command: &str) -> String {
     let reply = until_ok(async || {
         agent
             .submit(Command::Run {
-                name: "todos".into(),
+                name: command.into(),
                 args: "".into(),
                 expected: None,
             })
@@ -467,9 +581,10 @@ async fn a_tool_uses_the_services_its_extension_injects() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    assert!(
-        matches!(outcome, Some(Ok(Some(Answer::Value(_))))),
-        "the injected ask reached the client: {outcome:?}"
+    assert_eq!(
+        outcome,
+        Some(Ok(Some(answer))),
+        "the injected ask returned exactly the client's answer"
     );
     drop(fixture);
 }
@@ -540,15 +655,19 @@ async fn an_open_ask_survives_its_answerer_detaching() {
 
     let mut subscription = agent.subscribe(None).expect("resubscription");
     let answer = Answer::Value(RawJson::parse("\"ada\"").expect("answer json"));
-    agent.answer(request, answer).await.expect("answered");
+    agent
+        .answer(request, answer.clone())
+        .await
+        .expect("answered");
     turn_ended(&mut subscription).await;
     let outcome = seen
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    assert!(
-        matches!(outcome, Some(Ok(Some(Answer::Value(_))))),
-        "the reattached client answered the waiting ask: {outcome:?}"
+    assert_eq!(
+        outcome,
+        Some(Ok(Some(answer))),
+        "the waiting ask received exactly the reattached client's answer"
     );
     drop(fixture);
 }
@@ -639,6 +758,40 @@ async fn records_survive_resume_from_the_journal() {
     assert_eq!(todos(&resumed).await, r#"{"n":1}"#);
 }
 
+/// A record is readable only by the extension that wrote it and only under
+/// the kind it was written with: a rival extension's `todo` rows and the
+/// owner's own `note` rows never leak into a `todo` listing.
+#[tokio::test]
+async fn records_are_private_to_their_extension_and_kind() {
+    let script = format!(
+        "{}{}{}",
+        turn_script("ltodo", r#"{"w":1}"#),
+        turn_script("lnote", r#"{"n":1}"#),
+        turn_script("rtodo", r#"{"r":1}"#),
+    );
+    let (fixture, agent) = start(vec![ledger_extension(), rival_extension()], script).await;
+    let mut subscription = agent.subscribe(None).expect("subscription");
+    prompt(&agent, &mut subscription, "one").await;
+    prompt(&agent, &mut subscription, "two").await;
+    prompt(&agent, &mut subscription, "three").await;
+    assert_eq!(
+        listing(&agent, "ltodos").await,
+        r#"{"w":1}"#,
+        "the owner's todo listing holds neither the rival's todo nor its own note"
+    );
+    assert_eq!(
+        listing(&agent, "lnotes").await,
+        r#"{"n":1}"#,
+        "the owner's note listing holds neither todo row"
+    );
+    assert_eq!(
+        listing(&agent, "rtodos").await,
+        r#"{"r":1}"#,
+        "the rival reads only its own todo row"
+    );
+    drop(fixture);
+}
+
 #[tokio::test]
 async fn a_rejected_record_leaves_the_session_writable() {
     let seen = Arc::new(Mutex::new(None));
@@ -646,14 +799,17 @@ async fn a_rejected_record_leaves_the_session_writable() {
     let (fixture, agent) = start(vec![big_extension(Arc::clone(&seen))], script).await;
     let mut subscription = agent.subscribe(None).expect("subscription");
     prompt(&agent, &mut subscription, "overflow").await;
-    let outcome = *seen
+    let (refusal, accepted) = seen
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(
-        outcome,
-        Some((true, true)),
-        "the oversize record is refused and the next one is journaled"
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("the overflow tool ran");
+    let refusal = refusal.expect("the oversize record is refused");
+    assert!(
+        refusal.contains(&format!("exceeds the {}-byte limit", dal_core::MAX_RECORD)),
+        "the refusal names the journal record limit: {refusal}"
     );
+    assert!(accepted, "the next record is journaled");
     assert_eq!(todos(&agent).await, r#"{"ok":1}"#);
     drop(fixture);
 }

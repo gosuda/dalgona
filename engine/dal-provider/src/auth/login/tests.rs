@@ -286,6 +286,17 @@ mod copilot {
         Reply::Json(status, body.into())
     }
 
+    /// One string member of the structured key envelope a sign-in stores.
+    fn envelope_member(key_text: &str, name: &str) -> Option<String> {
+        use sonic_rs::JsonValueTrait as _;
+        let envelope = sonic_rs::from_str::<sonic_rs::Value>(key_text)
+            .expect("the stored key is a JSON envelope");
+        envelope
+            .get(name)
+            .and_then(|member| member.as_str())
+            .map(str::to_owned)
+    }
+
     struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
     impl Drop for AbortOnDrop {
@@ -440,13 +451,19 @@ mod copilot {
         };
 
         let key_text = key.expose();
-        assert!(
-            key_text.contains("token-test-12345"),
-            "stored key must contain token"
+        assert_eq!(
+            envelope_member(key_text, "token").as_deref(),
+            Some("token-test-12345")
         );
-        assert!(
-            key_text.contains("apiEndpoint"),
-            "stored key must contain apiEndpoint"
+        assert_eq!(
+            envelope_member(key_text, "apiEndpoint").as_deref(),
+            Some("https://api.githubcopilot.com"),
+            "the discovered account endpoint is stored"
+        );
+        assert_eq!(
+            envelope_member(key_text, "enterpriseUrl"),
+            None,
+            "a public GitHub sign-in names no enterprise host"
         );
 
         let store = AuthStore::load(dir.0.join("auth.json")).expect("load auth.json");
@@ -602,13 +619,19 @@ mod copilot {
             other => panic!("expected ApiKey, got {other:?}"),
         };
         let key_text = key.expose();
-        assert!(
-            key_text.contains("github.myenterprise.com"),
-            "must contain enterprise domain: {key_text}"
+        assert_eq!(
+            envelope_member(key_text, "token").as_deref(),
+            Some("token-ent-67890")
         );
-        assert!(
-            key_text.contains("token-ent-67890"),
-            "must contain token: {key_text}"
+        assert_eq!(
+            envelope_member(key_text, "enterpriseUrl").as_deref(),
+            Some("github.myenterprise.com"),
+            "the pasted enterprise host is stored by itself"
+        );
+        assert_eq!(
+            envelope_member(key_text, "apiEndpoint").as_deref(),
+            Some("https://copilot-api.github.myenterprise.com"),
+            "the discovered enterprise endpoint is stored by itself"
         );
     }
 

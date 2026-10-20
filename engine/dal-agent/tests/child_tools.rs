@@ -882,6 +882,30 @@ async fn an_unbounded_prompt_runs_every_step_and_the_bound_does_not_carry_over()
     );
 }
 
+/// The tool-round bound belongs to the prompted turn alone: an ordinary
+/// prompt on the same child afterwards runs every step, so the leftover
+/// scripted tool round and the closing reply both happen.
+#[tokio::test]
+async fn a_step_bound_ends_with_the_prompted_turn() {
+    let rig = rig().await;
+    rig.run("spawn", "*").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    let mut updates = rig.child_updates(child).await;
+    rig.probe.queue("alpha");
+    rig.probe.queue("alpha");
+    rig.run("prompt-child", &format!("{child} 1")).await;
+    assert_eq!(turn_stop(&mut updates, 2).await, Stop::MaxSteps);
+    assert_eq!(rig.probe.script_left(), 1, "the bound left one step unrun");
+    rig.prompt_child(child).await;
+    assert_eq!(
+        rig.probe.requests().len(),
+        4,
+        "the later ordinary turn ran its tool round and its closing reply"
+    );
+    assert_eq!(rig.probe.script_left(), 0, "the later turn used the step");
+}
+
 #[tokio::test]
 async fn parent_await_reads_report_tool_without_grace() {
     let rig = rig().await;

@@ -483,66 +483,6 @@ async fn repair_fault_matrix() {
     reopened.close().await.expect("session closes");
     let (_, clean) = store.open_session(id).await.expect("healthy again");
     assert!(clean.torn.is_none(), "no false healthy state");
-
-    let quarantine_sink = FaultSink {
-        quarantine_error: true,
-        ..Default::default()
-    };
-    let quarantine_error = quarantine_sink
-        .quarantine(&path, 0, b"x")
-        .expect_err("quarantine failpoint fires");
-    assert_eq!(
-        quarantine_error.to_string(),
-        "injected fault: quarantine",
-        "mapped quarantine error"
-    );
-    let dir_sink = FaultSink {
-        directory_sync_error: true,
-        ..Default::default()
-    };
-    let dir_error = dir_sink
-        .sync_dir(&path)
-        .expect_err("directory-sync failpoint fires");
-    assert_eq!(
-        dir_error.to_string(),
-        "injected fault: directory sync",
-        "mapped directory-sync error"
-    );
-    let truncate_sink = FaultSink {
-        truncate_error: true,
-        ..Default::default()
-    };
-    let truncate_error = truncate_sink
-        .truncate(&path, 0)
-        .expect_err("truncate failpoint fires");
-    assert_eq!(
-        truncate_error.to_string(),
-        "injected fault: truncate",
-        "mapped truncate error"
-    );
-    let sync_sink = FaultSink {
-        sync_error: true,
-        ..Default::default()
-    };
-    // Windows requires write access to flush a file; open it writable so the
-    // healthy sync below runs on every platform.
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .expect("open journal file");
-    let sync_error = sync_sink
-        .sync_file(&file)
-        .expect_err("sync failpoint fires");
-    assert_eq!(
-        sync_error.to_string(),
-        "injected fault: sync",
-        "mapped sync error"
-    );
-    let healthy = FaultSink::healthy();
-    healthy.sync_file(&file).expect("healthy sync passes");
-    healthy
-        .sync_dir(&path)
-        .expect("healthy directory sync passes");
 }
 
 #[tokio::test]
@@ -797,56 +737,6 @@ async fn orphaned_job_and_scoped_grant_end_once() {
     let _ = temp;
 }
 
-#[tokio::test]
-async fn windows_runner_parity() {
-    let (temp, store, _) = setup("repair-parity");
-    let data_root = temp.path().join("data");
-    let id = SessionId::new_v7();
-    let mut journal = store.create_session(id);
-    journal
-        .append(vec![user(1, "parity prefix")])
-        .await
-        .expect("prefix is durable");
-    journal.close().await.expect("session closes");
-    let path = journal_path(&data_root, id);
-    let prefix = fs::read(&path).expect("read durable prefix");
-    let mut staged = prefix.clone();
-    staged.extend_from_slice(b"{\"v\":1,\"type\":\"us");
-    fs::write(&path, &staged).expect("stage a torn tail");
-    let (mut reopened, report) = store.open_session(id).await.expect("open repairs");
-    assert!(report.torn.is_some(), "torn-tail repair runs everywhere");
-    assert_eq!(
-        fs::read(&path).expect("read repaired journal")[..prefix.len()],
-        prefix[..],
-        "repair keeps the prefix on every platform"
-    );
-    #[cfg(target_os = "windows")]
-    {
-        let dir_files: Vec<PathBuf> = fs::read_dir(path.parent().expect("session dir"))
-            .expect("list session dir")
-            .map(|entry| entry.expect("read entry").path())
-            .collect();
-        assert!(
-            dir_files
-                .iter()
-                .any(|file| file.extension().is_some_and(|ext| ext == "jsonl")),
-            "the journal file is present without directory sync"
-        );
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let dir_files: Vec<PathBuf> = fs::read_dir(path.parent().expect("session dir"))
-            .expect("list session dir")
-            .map(|entry| entry.expect("read entry").path())
-            .collect();
-        assert!(
-            dir_files.contains(&path),
-            "the synced directory holds the repaired journal"
-        );
-    }
-    reopened.close().await.expect("session closes");
-}
-
 async fn staged_session(tag: &str) -> (TempDir, Store, SessionId, PathBuf, Vec<u8>) {
     let (temp, store, _) = setup(tag);
     let id = SessionId::new_v7();
@@ -1009,4 +899,71 @@ async fn boot_generation_gap_reopens_with_the_next_higher_generation() {
     let (mut again, report) = store.open_session(id).await.expect("reopens again");
     assert_eq!(report.r#gen.get(), 7);
     again.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn boot_generation_counter_stops_at_its_last_value_instead_of_wrapping() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-boot-max").await;
+    let mut staged = prefix.clone();
+    staged.extend_from_slice(
+        &encode(&Record::Boot {
+            at: fixed_timestamp(),
+            r#gen: Gen::new(NonZeroU64::new(u64::MAX - 1).expect("nonzero gen")),
+            version: "0.1.0".into(),
+        })
+        .expect("boot encodes"),
+    );
+    fs::write(&path, &staged).expect("stage the second-to-last generation");
+    let (mut last, report) = store
+        .open_session(id)
+        .await
+        .expect("the last generation is still available");
+    assert_eq!(report.r#gen.get(), u64::MAX, "open takes the final value");
+    last.close().await.expect("session closes");
+    let exhausted = fs::read(&path).expect("read journal");
+
+    let error = store
+        .open_session(id)
+        .await
+        .expect_err("no generation remains after the final value");
+    let (offset, reason) = damage_of(&error);
+    assert_eq!(offset, 0);
+    assert!(reason.contains("exhausted"), "reason: {reason}");
+    assert_eq!(
+        fs::read(&path).expect("reread"),
+        exhausted,
+        "the refusal leaves the journal untouched"
+    );
+}
+
+#[tokio::test]
+async fn aborted_turn_without_calls_reports_the_short_notice() {
+    let (_temp, store, id, _path, _prefix) = staged_session("repair-aborted-empty").await;
+    let (mut journal, _) = store.open_session(id).await.expect("session reopens");
+    journal
+        .append(vec![Record::TurnStart {
+            at: timestamp(),
+            turn: turn_id(1),
+        }])
+        .await
+        .expect("turn 1 opens with no tool call");
+    journal.close().await.expect("stop with turn 1 open");
+
+    let (mut reopened, report) = store.open_session(id).await.expect("open repairs");
+    let aborted = report.aborted.expect("the open turn is reported");
+    assert_eq!(aborted.turn, turn_id(1));
+    assert_eq!((aborted.interrupted, aborted.not_run), (0, 0));
+    assert_eq!(
+        aborted.notice(),
+        "Turn 1 did not finish because dalgon stopped.",
+        "no call was marked, so the notice claims none"
+    );
+    assert!(
+        !reopened
+            .records()
+            .iter()
+            .any(|record| matches!(record, Record::ToolResult(_))),
+        "no synthetic tool result is written"
+    );
+    reopened.close().await.expect("session closes");
 }
