@@ -27,12 +27,12 @@
 
 use dal_core::{
     Answer, ApprovalMode, Block, CallId, CancelScope, ClientId, Command, CompactLimits,
-    CompactOutcome, CompactionSummary, Effect, Event, Expect, Family, HookEvent, HookOutcome,
-    HookVerdict, InferFailure, Inference, InferredPurpose, JobId, JobKind, JobOutcome, Mode,
-    ModelRoute, Name, Output, Owner, Part, PartialResponse, Phase, Question, RawJson, Record,
-    Rejection, ReplayCapture, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Save,
-    Session, SettledOutcome, Stop, StreamChannel, StreamEvent, StreamVerdict, ThinkingLevel,
-    ToolClass, TurnId, Usage, decode, encode,
+    CompactOutcome, CompactionSummary, Effect, EntryKind, Event, Expect, Family, HookEvent,
+    HookOutcome, HookVerdict, InferFailure, Inference, InferredPurpose, JobId, JobKind, JobOutcome,
+    JournalPart, Mode, ModelRoute, Name, Output, Owner, Part, PartialResponse, Phase, Question,
+    RawJson, Record, Rejection, ReplayCapture, Reply, Request, RequestId, ResolutionCause,
+    ResolvedCall, Save, Session, SettledOutcome, Stop, StreamChannel, StreamEvent, StreamVerdict,
+    ThinkingLevel, ToolClass, TurnId, Usage, decode, encode,
 };
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -49,6 +49,7 @@ fn route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "matrix-model".into(),
+        provider: None,
     }
 }
 
@@ -1082,7 +1083,7 @@ fn overflowing_turn_usage_is_refused_without_partial_mutation() {
 }
 
 #[test]
-fn duplicate_call_identities_never_dispatch_twice() {
+fn duplicate_call_identities_are_failed_once_and_never_dispatched() {
     let mut fixture = Fixture::fresh("dup").opening().boundary().streaming();
     let turn = fixture.turn;
     fixture.drive(Event::StreamEnded {
@@ -1094,34 +1095,46 @@ fn duplicate_call_identities_never_dispatch_twice() {
     });
     let mut session = fixture.session.clone();
     let mut out = Vec::new();
-    let accepted = session
+    session
         .step(resolved_reads(turn, &["dup", "dup"]), stamp(), &mut out)
-        .is_ok();
-    let dispatched: Vec<&dal_core::Unit> = if accepted {
-        out.iter()
-            .filter_map(|effect| match effect {
-                Effect::Dispatch { units, .. } => Some(units.as_slice()),
-                _ => None,
-            })
-            .flatten()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let planned: usize = dispatched
-        .iter()
-        .map(|unit| match unit {
-            dal_core::Unit::Reads { calls } => {
-                calls.iter().filter(|call| call.as_str() == "dup").count()
-            }
-            dal_core::Unit::Serial { call } => usize::from(call.as_str() == "dup"),
-            _ => panic!("Unit grew a variant; update this proof"),
-        })
-        .sum();
+        .expect("a resolution that names the duplicated id twice is accepted");
     assert!(
-        planned <= 1,
-        "call id `dup` was planned for dispatch {planned} times"
+        !out.iter()
+            .any(|effect| matches!(effect, Effect::Dispatch { .. })),
+        "a duplicated call id must not reach the dispatcher"
     );
+    let mut emitted = Vec::new();
+    collect(&out, &mut emitted);
+    let results: Vec<(&str, bool, Vec<JournalPart>)> = emitted
+        .iter()
+        .filter_map(|record| match record {
+            Record::ToolResult(entry) => match &entry.kind {
+                EntryKind::ToolResult {
+                    call, error, parts, ..
+                } => Some((call.as_str(), *error, parts.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![(
+            "dup",
+            true,
+            vec![JournalPart::Text {
+                text: "invalid arguments for read_file: duplicate call id dup".into()
+            }]
+        )],
+        "the provider's call needs exactly one answer, and it is the failure"
+    );
+    assert!(
+        out.iter().any(|effect| matches!(effect, Effect::Infer(_))),
+        "with nothing left to run the turn asks the model again"
+    );
+    let mut journal = fixture.journal.clone();
+    journal.extend(emitted);
+    Session::replay_declared(journal).expect("the journal with the failure replays");
 }
 
 #[test]
@@ -1143,6 +1156,55 @@ fn stale_turn_events_never_touch_a_running_turn() {
             );
         }
     }
+}
+
+#[test]
+fn a_busy_turn_takes_an_approval_change_live_and_journals_it_before_acknowledging() {
+    let busy = Fixture::fresh("busy").opening().boundary();
+    let mut session = busy.session.clone();
+    let mut out = Vec::new();
+    session
+        .step(
+            Event::Command {
+                cmd: Command::SetApproval {
+                    mode: ApprovalMode::All,
+                    save: Save::SessionOnly,
+                },
+                by: client(),
+            },
+            stamp(),
+            &mut out,
+        )
+        .expect("a running turn takes the approval change");
+    assert_eq!(session.approval_mode(), ApprovalMode::All);
+    assert!(
+        matches!(session.phase(), Phase::Running { turn, .. } if *turn == busy.turn),
+        "the change neither ends nor restarts the running turn: {:?}",
+        session.phase()
+    );
+    let mut emitted = Vec::new();
+    collect(&out, &mut emitted);
+    assert!(
+        matches!(
+            emitted.as_slice(),
+            [Record::Approval(entry)]
+                if matches!(entry.kind, EntryKind::Approval { mode: ApprovalMode::All })
+        ),
+        "exactly one approval record is journaled: {emitted:?}"
+    );
+    let emit_at = out
+        .iter()
+        .position(|effect| matches!(effect, Effect::Emit(_)))
+        .expect("the change is journaled");
+    let reply_at = out
+        .iter()
+        .position(|effect| matches!(effect, Effect::Reply(Ok(Reply::Done(Output::Nothing)))))
+        .expect("the change is acknowledged");
+    assert!(emit_at < reply_at, "the acknowledgement outran the journal");
+    let mut journal = busy.journal.clone();
+    journal.extend(emitted);
+    let replayed = Session::replay_declared(journal).expect("the journal replays");
+    assert_eq!(replayed.approval_mode(), ApprovalMode::All);
 }
 
 #[test]

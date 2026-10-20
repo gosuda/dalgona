@@ -61,6 +61,7 @@ pub(crate) fn search_surface(provider: &str, route: &ModelRoute) -> SearchSurfac
         ModelRoute::Api {
             family: Family::Anthropic,
             model,
+            ..
         } if dal_provider::supports_tool_search(provider, model) => SearchSurface::Native,
         _ => SearchSurface::Client,
     }
@@ -119,10 +120,13 @@ struct ToolSearchArgs {
     query: Box<str>,
 }
 
-/// Display metadata for one resolved catalog row.
+/// Display metadata for one resolved catalog row. `provider` is the catalog
+/// provider id the resolver matched the row under; it travels on the row so
+/// clients never rebuild it from a display label.
 pub(crate) fn model_info_for(
     entry: &CatalogEntry,
     route: &ModelRoute,
+    provider: &str,
     default_level: ThinkingLevel,
 ) -> ModelInfo {
     let family = api_family(route).unwrap_or(Family::Chat);
@@ -130,6 +134,7 @@ pub(crate) fn model_info_for(
     ModelInfo {
         route: route.clone(),
         name: format!("{} · {}/{}", entry.display, entry.provider, entry.id).into(),
+        provider: provider.into(),
         caps: Caps {
             context_window: entry.context_window,
             thinking: levels_for(&entry.thinking),
@@ -1100,6 +1105,7 @@ mod tests {
         let route = |model: &str| ModelRoute::Api {
             family: Family::Anthropic,
             model: model.into(),
+            provider: None,
         };
         assert_eq!(
             search_surface("anthropic", &route("claude-opus-4-5-20251101")),
@@ -1120,6 +1126,7 @@ mod tests {
         let chat = ModelRoute::Api {
             family: Family::Chat,
             model: "claude-opus-5-5".into(),
+            provider: None,
         };
         assert_eq!(search_surface("anthropic", &chat), SearchSurface::Client);
     }

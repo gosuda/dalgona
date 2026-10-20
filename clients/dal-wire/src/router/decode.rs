@@ -461,7 +461,7 @@ pub(crate) fn resolve_model(
 /// or the synthetic or harness id itself.
 pub(crate) fn route_id(route: &ModelRoute) -> String {
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api { family, model, .. } => {
             let prefix = match family {
                 Family::Chat => "openai-chat",
                 Family::Responses => "openai-responses",
@@ -505,6 +505,7 @@ pub(crate) fn parse_route_id(id: &str) -> Option<ModelRoute> {
     (!name.is_empty()).then(|| ModelRoute::Api {
         family,
         model: name.into(),
+        provider: None,
     })
 }
 
@@ -527,7 +528,10 @@ pub(crate) fn listed_ids(
     ids.extend(aliases.keys().map(ToString::to_string));
     let mut routes: Vec<String> = catalog
         .iter()
-        .filter(|info| parse_route_id(&route_id(&info.route)).as_ref() == Some(&info.route))
+        .filter(|info| {
+            parse_route_id(&route_id(&info.route))
+                .is_some_and(|parsed| parsed.same_model(&info.route))
+        })
         .map(|info| route_id(&info.route))
         .filter(|id| !ids.contains(id))
         .collect();

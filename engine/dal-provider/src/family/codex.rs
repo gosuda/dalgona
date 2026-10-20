@@ -72,6 +72,7 @@ pub(crate) fn build(input: &CodexRequest<'_>) -> Result<CodexWire, ProviderError
     let ModelRoute::Api {
         family: Family::Codex,
         model,
+        ..
     } = &input.request.model
     else {
         return Err(ProviderError::InvalidRequest {

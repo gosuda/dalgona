@@ -2852,6 +2852,7 @@ mod tests {
                 },
                 save: dal_core::command::Save::SessionAndDefault,
             },
+            scoped_id: None,
         }];
         let mut good_source =
             || -> Result<Vec<crate::picker::ModelOption>, crate::TuiError> { Ok(models.clone()) };
@@ -2898,6 +2899,7 @@ mod tests {
                 },
                 save: dal_core::command::Save::SessionAndDefault,
             },
+            scoped_id: None,
         }];
         session.picker = Some(crate::picker::model_picker(&models, ""));
         apply_key(

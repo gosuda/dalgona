@@ -557,6 +557,7 @@ pub(crate) fn build_proxy(input: &DuoProxyRequest<'_>) -> Result<DuoProxyWire, P
     let ModelRoute::Api {
         family: Family::GitLab,
         model,
+        ..
     } = &input.request.model
     else {
         return Err(invalid(
@@ -668,6 +669,7 @@ fn derived_request(input: &DuoProxyRequest<'_>, route: ProxyRoute, upstream: &st
         model: ModelRoute::Api {
             family,
             model: Box::from(upstream),
+            provider: None,
         },
         system: Arc::clone(&request.system),
         tools: Arc::clone(&request.tools),

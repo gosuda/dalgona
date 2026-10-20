@@ -54,6 +54,7 @@ fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest
         model: ModelRoute::Api {
             family: Family::Ollama,
             model: "qwen3:8b".into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: tools.into(),
@@ -232,6 +233,7 @@ fn request_body_rejects_what_ollama_cannot_carry() {
     other.model = ModelRoute::Api {
         family: Family::Chat,
         model: "qwen3:8b".into(),
+        provider: None,
     };
     assert_eq!(
         request_body(&other, &plan(None, None), WirePolicy::SELF_HOSTED),

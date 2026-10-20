@@ -20,7 +20,7 @@ impl Compactor for Remote {
             // The route travels in the request and stays behind for the
             // binding check below; the name is genuinely needed twice.
             let expected = match &input.model {
-                ModelRoute::Api { family, model } => Some((*family, model.clone())),
+                ModelRoute::Api { family, model, .. } => Some((*family, model.clone())),
                 _ => None,
             };
             let span = input.span;
@@ -175,6 +175,7 @@ mod tests {
         let route = ModelRoute::Api {
             family: Family::Chat,
             model: "chat-model".into(),
+            provider: None,
         };
         let request = remote_request(route, Arc::from([]), RequestParams::default());
         assert_eq!(request.purpose, Purpose::Compact);
@@ -183,6 +184,7 @@ mod tests {
             ModelRoute::Api {
                 family: Family::Chat,
                 model: "chat-model".into(),
+                provider: None,
             }
         );
         assert_eq!(request.system.as_ref(), "");

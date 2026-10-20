@@ -535,6 +535,7 @@ fn model_record_keeps_format1_api_bytes() -> Result<(), Box<dyn std::error::Erro
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-6-luna".into(),
+                provider: None,
             },
         }
     );
@@ -913,6 +914,7 @@ fn empty_model_id_is_rejected_both_ways() -> Result<(), Box<dyn std::error::Erro
             route: ModelRoute::Api {
                 family: Family::Anthropic,
                 model: "".into(),
+                provider: None,
             },
         },
     });
@@ -1750,6 +1752,7 @@ fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn s
             model: ModelRoute::Api {
                 family: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
             },
             family: Family::Chat,
             result: Ok(Inference {
@@ -2649,4 +2652,213 @@ fn encoded_len_and_encode_error_parity() {
     let enc_err = encode(&invalid_cost);
     assert_eq!(len_err, Err(EncodeError::InvalidCost));
     assert_eq!(enc_err.map(|v| v.len()), len_err);
+}
+
+fn provider_model_record(route: ModelRoute) -> Record {
+    Record::Model(Entry {
+        id: EntryId::new(nz(1)),
+        parent: None,
+        at: "2026-09-25T10:15:30.125Z"
+            .parse()
+            .expect("valid fixture timestamp"),
+        kind: EntryKind::Model { route },
+    })
+}
+
+#[test]
+fn model_record_with_provider_round_trips_byte_exactly() -> Result<(), Box<dyn std::error::Error>> {
+    let route = ModelRoute::Api {
+        family: Family::Responses,
+        model: "gpt-6-luna".into(),
+        provider: Some("acme".into()),
+    };
+    let record = provider_model_record(route.clone());
+    let line = "{\"v\":1,\"type\":\"model\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.125Z\",\"api\":\"openai_responses\",\"model\":\"gpt-6-luna\",\"provider\":\"acme\"}\n";
+    let encoded = encode(&record)?;
+    assert_eq!(encoded.as_slice(), line.as_bytes());
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(decoded_route(line)?, route);
+    Ok(())
+}
+
+#[test]
+fn provider_less_api_record_keeps_its_legacy_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let record = provider_model_record(ModelRoute::Api {
+        family: Family::Anthropic,
+        model: "claude-opus".into(),
+        provider: None,
+    });
+    let line = "{\"v\":1,\"type\":\"model\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.125Z\",\"api\":\"anthropic\",\"model\":\"claude-opus\"}\n";
+    assert!(!line.contains("provider"));
+    assert_eq!(encode(&record)?.as_slice(), line.as_bytes());
+    assert_eq!(decode(line.as_bytes())?.record, record);
+    assert_eq!(decoded_route(line)?.provider(), None);
+    Ok(())
+}
+
+#[test]
+fn model_record_rejects_bad_provider_members() {
+    for tail in [
+        r#""api":"anthropic","model":"m","provider":"""#,
+        r#""api":"anthropic","model":"m","provider":null"#,
+        r#""api":"anthropic","model":"m","provider":7"#,
+        r#""api":"anthropic","model":"m","provider":true"#,
+        r#""api":"anthropic","model":"m","provider":["acme"]"#,
+        r#""route":{"synthetic":{"id":"a/b"}},"provider":"acme""#,
+    ] {
+        let line = model_line(tail);
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn encode_refuses_an_empty_provider_id() {
+    let record = provider_model_record(ModelRoute::Api {
+        family: Family::Chat,
+        model: "m".into(),
+        provider: Some("".into()),
+    });
+    assert!(matches!(encode(&record), Err(EncodeError::EmptyProvider)));
+}
+
+#[test]
+fn synthetic_and_harness_model_records_never_carry_a_provider()
+-> Result<(), Box<dyn std::error::Error>> {
+    for route in [
+        ModelRoute::synthetic("a/b").expect("valid fixture id"),
+        ModelRoute::harness("dalgon/normal").expect("valid fixture id"),
+    ] {
+        assert_eq!(route.provider(), None);
+        assert_eq!(route.with_provider("acme"), route);
+        let record = provider_model_record(route);
+        let encoded = encode(&record)?;
+        let text = std::str::from_utf8(&encoded)?;
+        assert!(!text.contains("provider"), "{text}");
+        assert_eq!(decode(&encoded)?.record, record);
+    }
+    Ok(())
+}
+
+fn turn_end_line_with_micro(micro: &str) -> String {
+    format!(
+        "{{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":{micro}}},\"changes\":[]}}\n"
+    )
+}
+
+/// A stored cost is whole micro-dollars read into an `f64` dollar amount.
+/// Measured: every count through 2^51 (about $2.25 billion) comes back byte
+/// for byte, and from 2^52 the float starts to round, so only the exact
+/// region is pinned. The member keeps its unsigned-integer type: a negative,
+/// fractional, exponent, quoted, boolean or past-`u64` spelling is refused at
+/// its value, never rounded in.
+#[test]
+fn micro_dollar_costs_round_trip_byte_exactly_through_two_to_the_fifty_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    for micro in [
+        "null",
+        "0",
+        "1",
+        "999999",
+        "1000000",
+        "1125899906842623",
+        "1125899906842624",
+        "2251799813685247",
+        "2251799813685248",
+        "2251799813685249",
+    ] {
+        let line = turn_end_line_with_micro(micro);
+        let decoded = decode(line.as_bytes())?;
+        assert_eq!(
+            encode(&decoded.record)?.as_slice(),
+            line.as_bytes(),
+            "{micro}"
+        );
+    }
+    for bad in [
+        "18446744073709551616",
+        "-1",
+        "1.5",
+        "1e3",
+        "\"5\"",
+        "true",
+        "[]",
+    ] {
+        let line = turn_end_line_with_micro(bad);
+        let marker = "\"cost_micro_usd\":";
+        let expected = line.find(marker).map(|at| at + marker.len());
+        assert!(
+            matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if Some(offset) == expected
+            ),
+            "{bad}"
+        );
+    }
+    Ok(())
+}
+
+/// Bytes a corrupting edit may write: digits and signs, exponent and null
+/// spellings, structure characters, an escape and a NUL.
+#[cfg(unix)]
+const CORRUPTING_BYTES: &[u8] = b"0123456789-+.eEnul\"\\,:{}[] \t/\x00truefalsenull";
+
+#[cfg(unix)]
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(4000))]
+
+    /// The decoder is the only gate a stored line passes. Every line it
+    /// accepts after one to three corrupting edits of a canonical vector must
+    /// encode, the encoded line must decode, and encoding that again must give
+    /// the same bytes: the writer normalizes (millisecond timestamps, dropped
+    /// unknown members) once and then holds still. A refusal or a drifting
+    /// second encoding means the reader accepted what the writer cannot keep.
+    #[test]
+    fn a_line_the_decoder_accepts_re_encodes_to_a_fixed_point(
+        index in 0..VECTORS.len(),
+        edits in proptest::collection::vec(
+            (0_usize..4096, 0_u8..3, proptest::sample::select(CORRUPTING_BYTES.to_vec())),
+            1..4,
+        ),
+    ) {
+        let mut line = VECTORS[index].as_bytes().to_vec();
+        for (at, kind, byte) in edits {
+            if line.is_empty() {
+                break;
+            }
+            let at = at % line.len();
+            match kind {
+                0 => {
+                    line.remove(at);
+                }
+                1 => line[at] = byte,
+                _ => line.insert(at, byte),
+            }
+        }
+        let Ok(decoded) = decode(&line) else {
+            return Ok(());
+        };
+        let shown = || String::from_utf8_lossy(&line).into_owned();
+        let first = encode(&decoded.record).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the decoder accepted {} but the encoder refuses it: {error:?}",
+                shown()
+            ))
+        })?;
+        let again = decode(&first).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the encoder wrote a line the decoder refuses ({error:?}) from {}",
+                shown()
+            ))
+        })?;
+        let second = encode(&again.record).map_err(|error| {
+            proptest::test_runner::TestCaseError::fail(format!(
+                "the second encoding failed ({error:?}) from {}",
+                shown()
+            ))
+        })?;
+        proptest::prop_assert_eq!(second, first, "from {}", shown());
+    }
 }

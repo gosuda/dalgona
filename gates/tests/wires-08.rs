@@ -65,6 +65,7 @@ impl ModelHandler for Fusion {
             request.model = ModelRoute::Api {
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
+                provider: None,
             };
             cx.forward(request, &[]).await
         })

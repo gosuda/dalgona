@@ -150,7 +150,20 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .settings
         .model
         .as_ref()
-        .map(|model| escape(model.id()))
+        .map(|model| match model {
+            dal_core::ModelRoute::Api {
+                provider: Some(provider),
+                model: native,
+                ..
+            } => {
+                let label = format!("{provider}/{native}");
+                match dal_core::terminal::escape(&label) {
+                    std::borrow::Cow::Borrowed(_) => label,
+                    std::borrow::Cow::Owned(escaped) => escaped,
+                }
+            }
+            other => escape(other.id()),
+        })
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
     let floor = if h < 8 {

@@ -478,6 +478,7 @@ fn request_with_system(
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: "claude-sonnet-5".into(),
+            provider: None,
         },
         system: Arc::from(system),
         tools: Arc::from(tools),
@@ -1775,5 +1776,82 @@ fn cumulative_tool_input_stops_at_the_stream_event_budget() {
     assert_eq!(
         decoder.calls.get(&0).map(|call| call.args.len()),
         Some(crate::stream_budget::STREAM_EVENTS_LIMIT - 1)
+    );
+}
+
+#[test]
+fn a_known_output_limit_below_the_cap_is_the_max_tokens_and_larger_ones_are_capped() {
+    // Unknown, well below, one below, at, one above and far above the cap.
+    for (max_output, sent) in [
+        (None, 32_000_u32),
+        (Some(4_096), 4_096),
+        (Some(31_999), 31_999),
+        (Some(32_000), 32_000),
+        (Some(32_001), 32_000),
+        (Some(64_000), 32_000),
+    ] {
+        let request = request(history(), vec![tool("read")]);
+        let input = AnthropicRequest {
+            request: &request,
+            max_output,
+            thinking: AnthropicThinking::Omit,
+            effort: None,
+            display_supported: false,
+            temperature: None,
+            compaction: None,
+            summarize: false,
+        };
+        let body = String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body)
+            .unwrap();
+        assert!(
+            body.contains(&format!(r#""max_tokens":{sent},"stream":true"#)),
+            "{max_output:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn thinking_tokens_split_the_output_count_and_hostile_counters_saturate() {
+    let usage_of = |start: &str, delta: &str| {
+        let start = format!(r#"{{"type":"message_start","message":{{"usage":{start}}}}}"#);
+        let delta = format!(
+            r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{delta}}}"#
+        );
+        let events = ok(decode(&frames(&[&start, &delta, STOP]), false));
+        events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .expect("a finished message carries one usage")
+    };
+    // (output, thinking, output after the split): below, at and above the
+    // boundary where thinking would consume the whole output count.
+    for (output, thinking, expected) in [(3_u64, 9_u64, 0_u64), (9, 9, 0), (10, 9, 1)] {
+        let usage = usage_of(
+            r#"{"input_tokens":4}"#,
+            &format!(
+                r#"{{"output_tokens":{output},"output_tokens_details":{{"thinking_tokens":{thinking}}}}}"#
+            ),
+        );
+        assert_eq!(
+            (usage.output_tokens, usage.reasoning_tokens),
+            (expected, Some(thinking)),
+            "output {output}, thinking {thinking}"
+        );
+    }
+    // Without a split the whole count is output and no reasoning is reported.
+    let plain = usage_of(r#"{"input_tokens":4}"#, r#"{"output_tokens":7}"#);
+    assert_eq!((plain.output_tokens, plain.reasoning_tokens), (7, None));
+    // The three input counters sum past the largest count: it sticks there.
+    let hostile = usage_of(
+        r#"{"input_tokens":18446744073709551615,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}"#,
+        r#"{"output_tokens":1}"#,
+    );
+    assert_eq!(hostile.input_tokens, u64::MAX);
+    assert_eq!(
+        (hostile.cached_input_tokens, hostile.cache_write_tokens),
+        (5, 7)
     );
 }

@@ -129,19 +129,25 @@ impl Found {
 
     /// The namespace part of the model id.
     pub(crate) fn provider(&self) -> Box<str> {
-        let id = self.record.id.as_str();
-        id.split_once('/')
-            .map_or(id, |(namespace, _)| namespace)
-            .into()
+        namespace(self.record.id.as_str()).into()
     }
+}
+
+/// The namespace of a synthetic model id: the segment before the first `/`,
+/// or the whole id when it has none. The one owner of that split: the
+/// catalog row ([`entry_for`]), the found model, its listing row, and its
+/// running identity all read the provider from here, so they agree by
+/// construction.
+fn namespace(id: &str) -> &str {
+    id.split_once('/').map_or(id, |(namespace, _)| namespace)
 }
 
 fn entry_for(record: &ModelRecord) -> CatalogEntry {
     let caps = &record.caps;
     let id = record.id.as_str();
-    let (provider, name) = id.split_once('/').unwrap_or((id, id));
+    let name = id.split_once('/').map_or(id, |(_, name)| name);
     CatalogEntry {
-        provider: provider.into(),
+        provider: namespace(id).into(),
         id: name.into(),
         display: id.into(),
         listing: Listing::Listed,
@@ -179,6 +185,7 @@ pub(crate) fn listed(generation: &Generation) -> Vec<ModelInfo> {
                 id: record.id.as_str().into(),
             },
             name: record.id.as_str().into(),
+            provider: namespace(record.id.as_str()).into(),
             caps: record.caps.clone(),
         })
         .collect()
@@ -369,6 +376,7 @@ pub(crate) async fn open(
         info: ModelInfo {
             route: found.route(),
             name: found.record.id.as_str().into(),
+            provider: found.provider(),
             caps: found.record.caps.clone(),
         },
         generation: Arc::clone(&found.generation),

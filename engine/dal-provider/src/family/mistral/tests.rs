@@ -42,6 +42,7 @@ fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest
         model: ModelRoute::Api {
             family: Family::Mistral,
             model: "mistral-medium-latest".into(),
+            provider: None,
         },
         system: "Be concise.".into(),
         tools: tools.into(),
@@ -260,6 +261,7 @@ fn request_body_rejects_what_mistral_cannot_carry() {
     other.model = ModelRoute::Api {
         family: Family::Chat,
         model: "mistral-medium-latest".into(),
+        provider: None,
     };
     assert_eq!(
         request_body(&other, &plan(None, None)),
@@ -1148,6 +1150,7 @@ fn signed_reasoning_is_replayed_only_to_the_family_and_model_that_produced_it() 
     other.model = ModelRoute::Api {
         family: Family::Mistral,
         model: "mistral-large-latest".into(),
+        provider: None,
     };
     let body = replayed_body(&other);
     assert!(body.contains(TEXT_ONLY), "{body}");
@@ -1449,4 +1452,94 @@ fn the_signed_stream_runs_through_sse_framing_and_the_event_stream_guard() {
     ]
     .concat();
     assert_eq!(seen, expected);
+}
+
+#[test]
+fn wire_ids_never_leave_the_ascii_alphanumeric_alphabet() {
+    let mut normalizer = CallIdNormalizer::default();
+    // Nine characters that are not nine ASCII alphanumerics, ids of any other
+    // length, and ids with nothing usable in them.
+    for id in [
+        "é1b2c3d4e",
+        "a1b2c3d4é",
+        "１２３４５６７８９",
+        "日本語日本語日本語",
+        "a1b2c3d4",
+        "a1b2c3d4ef",
+        "",
+        "-",
+        "..........",
+    ] {
+        let wire = normalizer.normalize(id);
+        assert_eq!(wire.len(), TOOL_CALL_ID_LENGTH, "{id:?}: {wire}");
+        assert!(
+            wire.chars()
+                .all(|character| character.is_ascii_alphanumeric()),
+            "{id:?}: {wire}"
+        );
+    }
+    // Eight and ten alphanumerics are not nine, so they never pass through.
+    assert_ne!(normalizer.normalize("a1b2c3d4"), "a1b2c3d4");
+    assert_ne!(normalizer.normalize("a1b2c3d4ef"), "a1b2c3d4ef");
+}
+
+#[test]
+fn colliding_call_id_projections_get_distinct_wire_ids_and_each_call_pairs_with_its_result() {
+    use sonic_rs::JsonContainerTrait as _;
+    // "a1b2-c3d4e" projects onto the nine alphanumerics of the other id, so
+    // whichever comes first takes the plain spelling and the second must not.
+    for order in [["a1b2c3d4e", "a1b2-c3d4e"], ["a1b2-c3d4e", "a1b2c3d4e"]] {
+        let mut context = vec![ContextItem::Assistant {
+            source: replay_source(),
+            replay: None,
+            parts: order
+                .iter()
+                .map(|id| AssistantPart::ToolCall {
+                    call: CallId::new(*id),
+                    name: "search".into(),
+                    args: raw("{}"),
+                    replay: None,
+                })
+                .collect(),
+        }];
+        for id in order {
+            context.push(ContextItem::ToolResult {
+                call: CallId::new(id),
+                name: "search".into(),
+                is_error: false,
+                parts: vec![text("found")],
+            });
+        }
+        let body = body_text(&request(Vec::new(), context), &plan(None, None));
+        let parsed: sonic_rs::Value = sonic_rs::from_str(&body).expect("the body is valid JSON");
+        let ids_of = |kind: &str| -> Vec<String> {
+            parsed
+                .get("inputs")
+                .and_then(|inputs| inputs.as_array())
+                .expect("inputs is an array")
+                .iter()
+                .filter(|input| input.get("type").and_then(|value| value.as_str()) == Some(kind))
+                .map(|input| {
+                    input
+                        .get("tool_call_id")
+                        .and_then(|value| value.as_str())
+                        .expect("a string id")
+                        .to_owned()
+                })
+                .collect()
+        };
+        let calls = ids_of("function.call");
+        let results = ids_of("function.result");
+        assert_eq!(calls.len(), 2, "{order:?}: {body}");
+        assert_eq!(calls, results, "{order:?}: each call pairs with its result");
+        assert_ne!(calls[0], calls[1], "{order:?}: {body}");
+        for wire in &calls {
+            assert_eq!(wire.len(), TOOL_CALL_ID_LENGTH, "{order:?}: {wire}");
+            assert!(
+                wire.chars()
+                    .all(|character| character.is_ascii_alphanumeric()),
+                "{order:?}: {wire}"
+            );
+        }
+    }
 }

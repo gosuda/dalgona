@@ -287,6 +287,11 @@ pub mod ids {
     pub const FORK_PICKER_TITLE: &str = "Pick a user message to fork from";
     /// Picker key guide.
     pub const PICKER_HINT: &str = "↑/↓ move · type to filter · enter confirm · esc cancel";
+    /// Scoped-model picker title.
+    pub const SCOPED_MODELS_TITLE: &str =
+        "Pick the models /model lists · space checks · enter applies";
+    /// Scoped-model row for a committed id the current model list does not name.
+    pub const SCOPED_UNAVAILABLE_ROW: &str = "{id} · not in the current model list";
     /// Empty picker notice.
     pub const PICKER_EMPTY: &str = "No choices are available.";
     /// Unsupported picker notice.

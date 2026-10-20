@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use dal_agent::ext::command::{CommandCx, SaveError};
+use dal_agent::ext::command::{CatalogView, CommandCx, SaveError};
 use dal_agent::login::{find_provider, login_providers};
 use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
 use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
@@ -63,7 +63,10 @@ pub(super) async fn model(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply
             provider,
             id,
             route,
-        } => apply_route(cx, &provider, &id, route).await,
+        } => {
+            let route = exact_route(catalog.as_ref(), &provider, &id, route)?;
+            apply_route(cx, &provider, &id, route).await
+        }
         ModelResolution::Unknown => {
             // Config aliases (and nothing else) resolve through the host,
             // which consults the cached catalog plus aliases without fetching.
@@ -82,6 +85,55 @@ pub(super) async fn model(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply
                 Err(_) => Err(unknown_model(word)),
             }
         }
+    }
+}
+
+/// Gives a cached `provider/id` row the API family its provider serves.
+///
+/// The cached rows carry no family, and [`provider_family`] can only name the
+/// families of built-in providers, so its answer is provisional. The catalog
+/// view lists every configured provider with its own family, with no
+/// synthetic-model or scope step in between, so a custom Responses provider
+/// keeps its family. A provider the view does not list cannot serve the row
+/// (a request would fail typed on every turn), so the selection is refused
+/// before anything is saved.
+///
+/// # Errors
+/// Returns the unavailable-provider triple when `view` is absent or does not
+/// list `provider`.
+pub(super) fn exact_route(
+    view: Option<&CatalogView>,
+    provider: &str,
+    id: &str,
+    route: ModelRoute,
+) -> Result<ModelRoute, ErrorTriple> {
+    let family = view.and_then(|view| {
+        view.providers
+            .iter()
+            .find(|(known, _)| &**known == provider)
+            .map(|(_, family)| *family)
+    });
+    match (family, route) {
+        (
+            Some(family),
+            ModelRoute::Api {
+                model,
+                provider: named,
+                ..
+            },
+        ) => Ok(ModelRoute::Api {
+            family,
+            model,
+            provider: named,
+        }),
+        (Some(_), other) => Ok(other),
+        (None, _) => Err(super::error_triple(
+            format!("Provider \"{provider}\" is not configured"),
+            format!(
+                "the model list names {provider}/{id}, but dal.toml configures no provider with that id"
+            ),
+            "Type /model to pick from the list, or add the provider to dal.toml.",
+        )),
     }
 }
 
@@ -189,22 +241,48 @@ pub(super) fn unknown_provider(cmd: &str, provider: &str) -> ErrorTriple {
 
 /// Submits a harness mode and prints the mode line, keeping the model.
 async fn apply_mode(cx: &CommandCx<'_>, mode: Mode) -> Result<Reply, ErrorTriple> {
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetMode {
             mode,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    let line = match cx.view().settings.model.as_ref() {
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Mode: {current}. Not changed to {}: {message}.",
+                    mode.as_str()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!("Mode: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = match cx.view().settings.model.as_ref() {
         Some(route) => {
             let (provider, id) = route_origin(route);
-            format!(
-                "Mode: {}. The model stays {provider}/{id}. Saved as the default.",
-                mode.as_str()
-            )
+            format!("Mode: {}. The model stays {provider}/{id}.", mode.as_str())
         }
-        None => format!("Mode: {}. Saved as the default.", mode.as_str()),
+        None => format!("Mode: {}.", mode.as_str()),
     };
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
     Ok(Reply::Done(Output::Text(line.into())))
 }
 
@@ -232,8 +310,19 @@ async fn apply_route(
         .await
     {
         Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = old.as_ref().map(ModelRoute::id).unwrap_or("no model");
+            return Ok(Reply::Done(Output::Text(
+                format!("Model: {current}. Not changed to {provider}/{id}: {message}.").into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = old.as_ref().map(ModelRoute::id).unwrap_or("no model");
+            return Ok(Reply::Done(Output::Text(
+                format!("Model: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
         Err(SaveError::Failed { message }) => Some(message.to_string()),
-        Err(SaveError::SessionClosed { id }) => Some(format!("session {id} is closed")),
         Err(_) => Some("the save failed".to_owned()),
     };
     let mut line = format!("Model: {provider}/{id}.");
@@ -243,7 +332,7 @@ async fn apply_route(
     match saved {
         None => line.push_str(" Saved as the default."),
         Some(reason) => {
-            let _ = write!(line, " It was not saved as the default: {reason}.");
+            let _ = write!(line, " It did not persist: {reason}.");
         }
     }
     if let Some(previous) = old {
@@ -256,9 +345,18 @@ async fn apply_route(
 }
 
 /// Renders the saved route as the `provider/id` the model lines print.
+///
+/// An API route that names its provider prints that provider. A route
+/// without one (an older record) prints the family label, which can name
+/// only the API family, not the configured provider.
 fn route_origin(route: &ModelRoute) -> (String, String) {
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api {
+            provider: Some(provider),
+            model,
+            ..
+        } => (provider.to_string(), model.to_string()),
+        ModelRoute::Api { family, model, .. } => {
             let provider = match family {
                 Family::Anthropic => "anthropic",
                 Family::Codex => "openai-codex",
@@ -303,7 +401,8 @@ pub(super) enum ModelResolution {
     },
 }
 
-/// Maps a provider id to the API family its models route through.
+/// Maps a provider id to the API family a built-in provider uses: the
+/// provisional family of a typed row until [`exact_route`] reads the catalog's.
 fn provider_family(provider: &str) -> Family {
     find_provider(provider).map_or(Family::Chat, |def| def.family)
 }
@@ -331,6 +430,7 @@ pub(super) fn resolve_model(pairs: &[(&str, &str)], arg: &str) -> ModelResolutio
                 route: ModelRoute::Api {
                     family: provider_family(p),
                     model: (*i).into(),
+                    provider: Some((*p).into()),
                 },
             };
         }
@@ -348,6 +448,7 @@ pub(super) fn resolve_model(pairs: &[(&str, &str)], arg: &str) -> ModelResolutio
             route: ModelRoute::Api {
                 family: provider_family(p),
                 model: (*i).into(),
+                provider: Some((*p).into()),
             },
         },
         (Some((first, _)), Some((second, _))) => ModelResolution::Ambiguous {
@@ -396,15 +497,43 @@ pub(super) async fn thinking(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Re
             .join(", ");
         return Err(unsupported_thinking(level.name(), &whose, &levels));
     }
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetThinking {
             level,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    Ok(Reply::Done(Output::Text(
-        format!("Thinking: {}. Saved as the default.", level.name()).into(),
-    )))
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.thinking.name();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Thinking: {current}. Not changed to {}: {message}.",
+                    level.name()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.thinking.name();
+            return Ok(Reply::Done(Output::Text(
+                format!("Thinking: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = format!("Thinking: {}.", level.name());
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
+    Ok(Reply::Done(Output::Text(line.into())))
 }
 
 /// Parses a thinking level from its canonical spelling.
@@ -437,15 +566,43 @@ pub(super) async fn mode(cx: &CommandCx<'_>, arg: &str) -> Result<Reply, ErrorTr
     let Some(mode) = parse_mode(arg) else {
         return Err(unknown_mode(arg));
     };
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetMode {
             mode,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    Ok(Reply::Done(Output::Text(
-        format!("Mode: {}. Saved as the default.", mode.as_str()).into(),
-    )))
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Mode: {current}. Not changed to {}: {message}.",
+                    mode.as_str()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!("Mode: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = format!("Mode: {}.", mode.as_str());
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
+    Ok(Reply::Done(Output::Text(line.into())))
 }
 
 /// Runs `/login`.

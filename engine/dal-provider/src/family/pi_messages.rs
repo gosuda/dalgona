@@ -231,6 +231,7 @@ pub(crate) fn request_body(
     let ModelRoute::Api {
         family: Family::PiMessages,
         model,
+        ..
     } = &request.model
     else {
         return Err(PiMessagesBodyError::NotPiMessages {

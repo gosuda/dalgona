@@ -74,6 +74,7 @@ fn responses_wire(
         model: ModelRoute::Api {
             family: Family::Responses,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("Test instructions"),
         tools: Vec::new().into(),
@@ -1152,5 +1153,90 @@ async fn websocket_rejects_a_message_above_the_shared_limit() -> Result<(), Box<
         Err(ProviderError::Limit(LimitError::WsMessage))
     ));
     servers.abort_all();
+    Ok(())
+}
+
+/// Opens `requests` turns on one session, moving the clock to each offset
+/// first, and returns how many handshakes the loopback server saw.
+async fn handshakes_after_turns_at(
+    wires: &[CodexWire],
+    offsets: &[u64],
+) -> Result<usize, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}/backend-api/codex", listener.local_addr()?);
+    let handshakes = Arc::new(AtomicUsize::new(0));
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(server_replies(listener, Arc::clone(&handshakes), 2));
+    let offset = Arc::new(AtomicU64::new(0));
+    let sessions = fast_sessions(Arc::clone(&offset));
+    let (notice, _) = notices();
+    for (wire, at) in wires.iter().zip(offsets) {
+        offset.store(*at, Ordering::SeqCst);
+        drain(open_stream(&sessions, &base, wire, &notice).await).await?;
+    }
+    servers.abort_all();
+    Ok(handshakes.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn websocket_reuse_ends_exactly_at_the_five_minute_idle_limit() -> Result<(), Box<dyn Error>>
+{
+    // The second turn comes one second inside the limit, on it, and one
+    // second past it. A socket idle for the whole limit is expired.
+    for (idle, expected) in [(299_u64, 1_usize), (300, 2), (301, 2)] {
+        let session = SessionId::new_v7();
+        let wires = [
+            wire_for_session("gpt-6-luna", session),
+            wire_for_session("gpt-6-luna", session),
+        ];
+        assert_eq!(
+            handshakes_after_turns_at(&wires, &[0, idle]).await?,
+            expected,
+            "second turn {idle}s after the first"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_reuse_ends_at_the_fifty_five_minute_age_limit_however_busy_the_socket()
+-> Result<(), Box<dyn Error>> {
+    // Twelve turns, each inside the idle limit, keep one socket busy: the
+    // first eleven reuses bring it to 3289 s. The twelfth turn lands one
+    // second inside the 3300 s age limit, on it, and one second past it.
+    let busy_for = |last_step: u64| {
+        let mut offsets = vec![0_u64];
+        for turn in 1..=11_u64 {
+            offsets.push(turn * 299);
+        }
+        offsets.push(11 * 299 + last_step);
+        offsets
+    };
+    for (last_step, expected) in [(10_u64, 1_usize), (11, 2), (12, 2)] {
+        let offsets = busy_for(last_step);
+        let session = SessionId::new_v7();
+        let wires: Vec<CodexWire> = offsets
+            .iter()
+            .map(|_| wire_for_session("gpt-6-luna", session))
+            .collect();
+        assert_eq!(
+            handshakes_after_turns_at(&wires, &offsets).await?,
+            expected,
+            "last turn at {} s",
+            offsets[offsets.len() - 1]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_never_reuses_a_socket_for_another_model_of_the_same_session()
+-> Result<(), Box<dyn Error>> {
+    let session = SessionId::new_v7();
+    let wires = [
+        wire_for_session("gpt-6-luna", session),
+        wire_for_session("gpt-5.6-luna", session),
+    ];
+    assert_eq!(handshakes_after_turns_at(&wires, &[0, 1]).await?, 2);
     Ok(())
 }

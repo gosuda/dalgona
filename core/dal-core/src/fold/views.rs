@@ -141,7 +141,7 @@ impl Session {
         let (model, tokens, compactions) = self.last_usage.as_ref()?;
         if *tokens == 0
             || *compactions != self.compactions
-            || current_model.is_some_and(|current| current != model)
+            || current_model.is_some_and(|current| !current.same_model(model))
         {
             return None;
         }
@@ -274,6 +274,7 @@ impl Session {
                 name: None,
                 mode: Mode::Normal,
             },
+            model_selected: false,
             request_params: RequestParams {
                 thinking: ThinkingLevel::Off,
                 effort: None,

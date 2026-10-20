@@ -466,6 +466,7 @@ async fn before_request_preserves_payload_and_clamps_typed_params() {
                 id: "acme/test".into(),
             },
             name: "test".into(),
+            provider: "".into(),
             caps: caps.clone(),
         },
         caps: caps.clone(),

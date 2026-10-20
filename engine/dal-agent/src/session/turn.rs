@@ -77,7 +77,9 @@ pub(crate) async fn model_ready(
             Ok(resolved) => resolved,
             Err(
                 dal_provider::ResolveError::UnknownModel { .. }
-                | dal_provider::ResolveError::AmbiguousModel { .. },
+                | dal_provider::ResolveError::AmbiguousModel { .. }
+                | dal_provider::ResolveError::UnknownProvider { .. }
+                | dal_provider::ResolveError::ProviderFamilyMismatch { .. },
             ) => return Ok(None),
             Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         };

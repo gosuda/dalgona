@@ -631,6 +631,7 @@ struct ModelRouteText {
     family: Option<toml::Value>,
     model: Option<toml::Value>,
     id: Option<toml::Value>,
+    provider: Option<toml::Value>,
 }
 
 /// Parses the authoritative structured default route from the top-level
@@ -728,7 +729,24 @@ fn parse_model_route_api(text: ModelRouteText) -> Result<crate::model::ModelRout
             ));
         }
     };
-    Ok(crate::model::ModelRoute::Api { family, model })
+    let provider = match text.provider {
+        None => None,
+        Some(toml::Value::String(provider)) if !provider.is_empty() => {
+            Some(provider.into_boxed_str())
+        }
+        Some(other) => {
+            return Err(invalid_value(
+                "model_route.provider",
+                value_text(&other),
+                "non-empty configured provider id",
+            ));
+        }
+    };
+    Ok(crate::model::ModelRoute::Api {
+        family,
+        model,
+        provider,
+    })
 }
 
 /// Builds a synthetic or harness route after rejecting the members those
@@ -748,6 +766,13 @@ fn parse_model_route_id(
     if let Some(unexpected) = text.model.as_ref() {
         return Err(invalid_value(
             "model_route.model",
+            value_text(unexpected),
+            "absent unless kind api",
+        ));
+    }
+    if let Some(unexpected) = text.provider.as_ref() {
+        return Err(invalid_value(
+            "model_route.provider",
             value_text(unexpected),
             "absent unless kind api",
         ));

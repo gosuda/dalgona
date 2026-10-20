@@ -160,7 +160,10 @@ fn provider_stream(
                 });
             }
             CoreEvent::ThinkingReplay { payload } => {
-                let ModelRoute::Api { family, model: id } = model else {
+                let ModelRoute::Api {
+                    family, model: id, ..
+                } = model
+                else {
                     return Err(fatal("model replay data requires an API model route"));
                 };
                 output.push(Ok(StreamEvent::Replay {

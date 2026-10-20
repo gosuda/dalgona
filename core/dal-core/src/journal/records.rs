@@ -395,6 +395,13 @@ pub enum EncodeError {
     /// replay one, so the record is refused instead of written.
     #[error("cannot encode an empty model id")]
     EmptyModel,
+    /// An API model record names an empty provider id.
+    ///
+    /// The decoder rejects an empty `provider`; absence, not an empty
+    /// string, means the route names no provider, so the record is refused
+    /// instead of written.
+    #[error("cannot encode an empty provider id")]
+    EmptyProvider,
     /// An assistant entry replay holds an explicit JSON `null`.
     ///
     /// Only an absent member means absent replay: the decoder rejects a

@@ -90,9 +90,10 @@ struct SharedInner {
 }
 
 impl Shared {
-    /// Returns the sequence of the most recently published update; zero
-    /// before the first publish. Observation cutoffs and delivery marks
-    /// share this cursor.
+    /// Returns the sequence of the most recently published update; one
+    /// before the first publish (the empty-snapshot sentinel; no update
+    /// carries it). Observation cutoffs and delivery marks share this
+    /// cursor.
     pub(crate) fn cursor(&self) -> u64 {
         self.inner
             .lock()
@@ -119,7 +120,7 @@ impl Shared {
                 generation,
                 projection: Projection::seed(thinking, approval, mode),
                 ring: ReplayRing::new(caps, generation, None),
-                next_seq: 1,
+                next_seq: 2,
                 subscribers: Vec::new(),
             }),
             ext: Mutex::new(ExtSnap {
@@ -446,8 +447,18 @@ impl Shared {
     }
 
     /// Applies, sequences, rings, and offers one update under the held lock.
+    ///
+    /// A settings update is offered as the projection's effective settings,
+    /// not as it arrived. The fold authors settings with `scoped_models:
+    /// None` (inherit); the projection merges that with the committed scope,
+    /// and a subscriber that adopts the update wholesale must see the merged
+    /// value or it would drop a scope another client committed.
     fn publish_locked(inner: &mut SharedInner, kind: UpdateKind) {
         inner.projection.apply(&kind);
+        let kind = match kind {
+            UpdateKind::Settings(_) => UpdateKind::Settings(inner.projection.effective_settings()),
+            other => other,
+        };
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
         inner.next_seq = inner.next_seq.max(1).saturating_add(1);
         inner.projection.note_seq(seq);
@@ -669,6 +680,70 @@ mod tests {
             shared
                 .allow_always()
                 .contains(&Name::parse("run").expect("run name parses"))
+        );
+    }
+
+    /// The fold authors settings with `scoped_models: None` (inherit). The
+    /// owner offers subscribers the effective settings, so a client that
+    /// adopts the update wholesale keeps a scope another client committed,
+    /// and an explicit clear stays `Some([])` instead of reading as inherit.
+    #[test]
+    fn settings_updates_publish_the_effective_scope() {
+        let generation = Gen::new(NonZeroU64::MIN);
+        let shared = Shared::new(
+            false,
+            generation,
+            ThinkingLevel::Medium,
+            ApprovalMode::Ask,
+            Mode::Normal,
+        );
+        let fold_settings = |thinking| dal_core::SettingsView {
+            model: None,
+            thinking,
+            approval: ApprovalMode::Ask,
+            mode: Mode::Normal,
+            name: None,
+            scoped_models: None,
+        };
+        let published_after = |seen: u64| {
+            let inner = shared
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cursor = (
+                generation,
+                Seq::new(NonZeroU64::new(seen).expect("sequence numbers start at one")),
+            );
+            match inner.ring.replay(Some(cursor)) {
+                Replay::Suffix(mut suffix) => match suffix.next().map(|update| update.kind.clone())
+                {
+                    Some(UpdateKind::Settings(settings)) => settings,
+                    other => panic!("expected a retained settings update, got {other:?}"),
+                },
+                other => panic!("expected a retained suffix, got {other:?}"),
+            }
+        };
+
+        shared.publish_scope(vec!["openai/gpt-6".into()]);
+        let at_scope = shared.cursor();
+        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::High)));
+        let after_fold = published_after(at_scope);
+        assert_eq!(after_fold.thinking, ThinkingLevel::High);
+        assert_eq!(
+            after_fold.scoped_models,
+            Some(vec!["openai/gpt-6".into()]),
+            "a fold settings update keeps the committed scope"
+        );
+
+        shared.publish_scope(Vec::new());
+        let at_clear = shared.cursor();
+        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::Low)));
+        let after_clear = published_after(at_clear);
+        assert_eq!(after_clear.thinking, ThinkingLevel::Low);
+        assert_eq!(
+            after_clear.scoped_models,
+            Some(Vec::new()),
+            "an explicit clear stays committed as an empty list"
         );
     }
 }

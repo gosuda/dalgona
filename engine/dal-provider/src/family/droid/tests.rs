@@ -47,6 +47,7 @@ fn request(model: &str, context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Droid,
             model: model.into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: vec![tool("read")].into(),
@@ -137,6 +138,29 @@ fn route_table_covers_the_pinned_rows_and_defaults_unknown() {
     assert_eq!(wire_for("gemini-3.8-flash"), Wire::Gemini);
     assert_eq!(wire_for("kimi-k3"), Wire::Completions);
     assert_eq!(wire_for("something-new"), Wire::Completions);
+}
+
+#[test]
+fn route_lookup_is_exact_so_near_miss_ids_take_the_default() {
+    // Each id sits one edit away from a pinned row on another wire. A prefix
+    // match, a case-folded match, or a trimmed match would route it there
+    // instead of to the default chat-completions wire.
+    for near in [
+        "claude-sonnet-5-evil",
+        "claude-sonnet",
+        "Claude-Sonnet-5",
+        "CLAUDE-SONNET-5",
+        " claude-sonnet-5",
+        "claude-sonnet-5 ",
+        "gpt-5.5-turbo",
+        "GPT-5.5",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5",
+        "grok-4.5-fast",
+        "",
+    ] {
+        assert_eq!(wire_for(near), Wire::Completions, "{near:?}");
+    }
 }
 
 #[test]
@@ -336,6 +360,7 @@ fn responses_tools_with_quoted_text_still_declare_non_strict() {
         model: ModelRoute::Api {
             family: Family::Droid,
             model: "gpt-5.4".into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: vec![quoted].into(),

@@ -344,7 +344,7 @@ pub(crate) fn request_body(
     thinking: WireThinking,
     reasoning_summary: bool,
 ) -> Result<Vec<u8>, ProviderError> {
-    let ModelRoute::Api { family, model } = &request.model else {
+    let ModelRoute::Api { family, model, .. } = &request.model else {
         return Err(invalid("a Responses body needs an API model route"));
     };
     if !matches!(family, Family::Responses | Family::Codex) {
@@ -398,6 +398,7 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
     let ModelRoute::Api {
         family: Family::Responses,
         model,
+        ..
     } = &input.request.model
     else {
         return Err(invalid(

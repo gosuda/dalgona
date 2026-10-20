@@ -242,6 +242,7 @@ mod tests {
         let route = ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         };
         let request = summary_request(
             route,
@@ -257,6 +258,7 @@ mod tests {
             ModelRoute::Api {
                 family: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
             }
         );
         assert_ne!(request.system.as_ref(), "");
@@ -271,6 +273,7 @@ mod tests {
         let route = ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         };
         let request = summary_request(
             route,

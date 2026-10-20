@@ -231,6 +231,7 @@ mod tests {
         let route = ModelRoute::Api {
             family: Family::Mistral,
             model: "mistral/large".into(),
+            provider: None,
         };
         let only = [
             Command::SetMode {
@@ -308,11 +309,51 @@ mod tests {
             let route = ModelRoute::Api {
                 family,
                 model: "provider/model-1".into(),
+                provider: None,
             };
             let (scratch, reloaded) = restart(&DefaultUpdate::Model(route.clone()));
             assert_eq!(scratch.default_model_route(), Some(route.clone()));
             assert_eq!(reloaded.default_model_route(), Some(route), "{family:?}");
         }
+    }
+
+    #[test]
+    fn a_route_with_provider_survives_a_restart_beside_a_providerless_mirror() {
+        let route = ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-5".into(),
+            provider: Some("acme-proxy".into()),
+        };
+        let (scratch, reloaded) = restart(&DefaultUpdate::Model(route.clone()));
+        assert_eq!(scratch.default_model_route(), Some(route.clone()));
+        assert_eq!(reloaded.default_model_route(), Some(route));
+        // The legacy `model` mirror never gains a provider segment; the
+        // structured table is the only form that carries it.
+        assert_eq!(
+            scratch.model().map(ToString::to_string),
+            Some("openai-responses/gpt-5".into())
+        );
+        let (scratch, reloaded) = restart(&DefaultUpdate::Model(ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-5".into(),
+            provider: None,
+        }));
+        assert_eq!(
+            scratch.default_model_route(),
+            Some(ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-5".into(),
+                provider: None,
+            })
+        );
+        assert_eq!(
+            reloaded.default_model_route(),
+            Some(ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-5".into(),
+                provider: None,
+            })
+        );
     }
 
     #[test]
@@ -487,6 +528,7 @@ mod tests {
             let route = ModelRoute::Api {
                 family: Family::Mistral,
                 model: "mistral/mistral-large".into(),
+                provider: None,
             };
             saver
                 .submit(Command::SetModel {
@@ -515,6 +557,79 @@ mod tests {
             let fresh = open(&restarted, &rig, "restarted").await;
             assert_eq!(thinking(&fresh), target, "the default survives a restart");
             let _ = restarted.shutdown(CLOSE).await;
+        }
+
+        fn selected_model(agent: &Agent) -> Option<ModelRoute> {
+            let view = agent.view(PageReq::default()).expect("view");
+            view.settings.model
+        }
+
+        fn proxy_route(provider: Option<&str>) -> ModelRoute {
+            ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-6-luna".into(),
+                provider: provider.map(Into::into),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_saved_provider_route_survives_a_restart_with_a_providerless_mirror() {
+            let rig = Rig::new();
+            let host = rig.start(rig.local()).await;
+            let saver = open(&host, &rig, "saver").await;
+            let route = proxy_route(Some("acme-proxy"));
+            saver
+                .submit(Command::SetModel {
+                    model: route.clone(),
+                    save: Save::SessionAndDefault,
+                })
+                .await
+                .expect("the provider default saves");
+            let text = std::fs::read_to_string(&rig.user).expect("user config reads");
+            assert!(text.contains("# kept user comment"), "{text}");
+            assert!(text.contains("provider = \"acme-proxy\""), "{text}");
+            assert!(
+                text.contains("model = \"openai-chat/gpt-6-luna\""),
+                "the legacy mirror keeps the family spelling: {text}"
+            );
+            assert!(
+                !text.contains("acme-proxy/gpt-6-luna"),
+                "the legacy mirror never gains a provider segment: {text}"
+            );
+            assert_eq!(rig.reload().default_model_route(), Some(route));
+            let _ = host.shutdown(CLOSE).await;
+
+            let restarted = rig.start(rig.local()).await;
+            let fresh = open(&restarted, &rig, "restarted").await;
+            assert_eq!(
+                selected_model(&fresh),
+                None,
+                "a session opened after the restart inherits the saved default"
+            );
+            let _ = restarted.shutdown(CLOSE).await;
+        }
+
+        #[tokio::test]
+        async fn a_providerless_default_save_drops_the_previous_provider_member() {
+            let rig = Rig::new();
+            let host = rig.start(rig.local()).await;
+            let saver = open(&host, &rig, "saver").await;
+            for route in [proxy_route(Some("acme-proxy")), proxy_route(None)] {
+                saver
+                    .submit(Command::SetModel {
+                        model: route,
+                        save: Save::SessionAndDefault,
+                    })
+                    .await
+                    .expect("the default saves");
+            }
+            let text = std::fs::read_to_string(&rig.user).expect("user config reads");
+            assert!(
+                !text.contains("provider"),
+                "a provider-less save leaves no stale provider member: {text}"
+            );
+            assert_eq!(rig.reload().default_model_route(), Some(proxy_route(None)));
+            let _ = host.shutdown(CLOSE).await;
         }
 
         #[tokio::test]

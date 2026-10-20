@@ -456,11 +456,7 @@ impl Driver {
                 .or_else(|| api_family(&route))
                 .unwrap_or(Family::Chat);
             let state = self.turn(turn);
-            if state
-                .model
-                .as_ref()
-                .is_some_and(|(current, _)| current != &route)
-            {
+            if !provider_pin_holds(state.model.as_ref().map(|(current, _)| current), &route) {
                 state.provider = None;
             }
             state.model = Some((route, family));
@@ -703,14 +699,45 @@ struct ResolvedRequest {
     entry: dal_provider::CatalogEntry,
 }
 
+/// Whether the provider an earlier round of this turn resolved still
+/// qualifies the route the next batch requests.
+///
+/// The turn keeps the route its last round resolved, and that route names
+/// its provider, while the batch re-sends the requested route, which may
+/// not. They name the same model when family and native id agree and no
+/// two providers disagree, so a provider-less request keeps the pin; a
+/// different model, family, or provider drops it. Exact equality would drop
+/// the pin on every round for a provider-less request.
+fn provider_pin_holds(current: Option<&ModelRoute>, requested: &ModelRoute) -> bool {
+    current.is_none_or(|current| current.same_model(requested))
+}
+
 /// Resolves a requested route through the catalog, caching it for commands.
-/// `provider` is the provider an earlier round of the same turn resolved.
+///
+/// A route that names its provider resolves exactly that provider's row and
+/// never consults the synthetic registry: a provider-native id that spells a
+/// registered synthetic id is still the provider's model. `provider` is the
+/// provider an earlier round of the same turn resolved; it only qualifies a
+/// route that does not name one.
 async fn resolve_requested(
     shared: &HostShared,
     route: &ModelRoute,
     provider: Option<&str>,
 ) -> Result<ResolvedRequest, Box<str>> {
     match (route, provider) {
+        (
+            ModelRoute::Api {
+                provider: Some(_), ..
+            },
+            _,
+        ) => {
+            resolve_catalog(
+                shared,
+                &crate::host::ops::request_reference(route),
+                Some(route),
+            )
+            .await
+        }
         (ModelRoute::Api { model, .. }, Some(provider)) => {
             resolve_reference(shared, &format!("{provider}/{model}"), None).await
         }
@@ -755,6 +782,16 @@ async fn resolve_reference(
             route: found.route(),
         });
     }
+    resolve_catalog(shared, reference, route).await
+}
+
+/// Resolves `reference`, or the model `route` names, through the provider
+/// catalog alone; the synthetic registry is not consulted.
+async fn resolve_catalog(
+    shared: &HostShared,
+    reference: &str,
+    route: Option<&ModelRoute>,
+) -> Result<ResolvedRequest, Box<str>> {
     let catalog = shared
         .providers
         .catalog()
@@ -771,7 +808,13 @@ async fn resolve_reference(
         Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
         None => dal_provider::resolve(&catalog, &aliases, reference),
     }
-    .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
+    .map_err(|error| {
+        let shown = route.and_then(ModelRoute::provider).map_or_else(
+            || reference.to_owned(),
+            |provider| format!("{provider}/{reference}"),
+        );
+        format!("model {shown} did not resolve: {error}").into_boxed_str()
+    })?;
     Ok(ResolvedRequest {
         family: api_family(&resolved.route).unwrap_or(Family::Chat),
         provider: resolved.provider.clone(),
@@ -802,7 +845,12 @@ pub(crate) async fn opening_model(
         None => resolve_default(shared).await,
     }
     .ok()?;
-    Some(model_info_for(&resolved.entry, &resolved.route, thinking))
+    Some(model_info_for(
+        &resolved.entry,
+        &resolved.route,
+        &resolved.provider,
+        thinking,
+    ))
 }
 
 impl Driver {
@@ -838,7 +886,12 @@ impl Driver {
         let thinking = self.deps.thinking;
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
-        let info = model_info_for(&resolved.entry, &resolved.route, thinking);
+        let info = model_info_for(
+            &resolved.entry,
+            &resolved.route,
+            &resolved.provider,
+            thinking,
+        );
         let model_id = cache_model_id(&resolved.provider, &resolved.route);
         let mur = self.turn(turn).round;
         self.turn(turn).round = mur + 1;
@@ -2277,6 +2330,49 @@ mod tests {
         assert!(!compaction_has_reserved_policy_record(&parts(letter(
             "ordinary",
         ))));
+    }
+
+    fn chat(model: &str, provider: Option<&str>) -> ModelRoute {
+        ModelRoute::Api {
+            family: Family::Chat,
+            model: model.into(),
+            provider: provider.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_provider_less_request_keeps_the_pin_its_resolved_route_carries() {
+        // Round one resolves a provider-less request to a route that names
+        // its provider; the next batch re-sends the provider-less request.
+        let resolved = chat("gpt-4o", Some("acme"));
+        assert_ne!(resolved, chat("gpt-4o", None), "exact equality differs");
+        assert!(provider_pin_holds(Some(&resolved), &chat("gpt-4o", None)));
+        assert!(provider_pin_holds(None, &chat("gpt-4o", None)));
+        assert!(provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o", Some("acme"))
+        ));
+    }
+
+    #[test]
+    fn a_different_model_family_or_provider_drops_the_pin() {
+        let resolved = chat("gpt-4o", Some("acme"));
+        assert!(!provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o", Some("beta"))
+        ));
+        assert!(!provider_pin_holds(
+            Some(&resolved),
+            &chat("gpt-4o-mini", None)
+        ));
+        let responses = ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: None,
+        };
+        assert!(!provider_pin_holds(Some(&resolved), &responses));
+        let synthetic = ModelRoute::synthetic("acme/gpt-4o").expect("synthetic route");
+        assert!(!provider_pin_holds(Some(&resolved), &synthetic));
     }
 
     const FOOTER: &str =

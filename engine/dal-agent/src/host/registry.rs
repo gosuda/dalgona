@@ -149,6 +149,35 @@ fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostEr
     }))
 }
 
+/// The route extension setup and the session's model identity start from:
+/// the last `Model` record, else the route of the last response, else the
+/// configured default.
+///
+/// A response records its API family and native model id but never its
+/// provider, so a route rebuilt from it names none. The fold's requested
+/// route is the configured default when no `Model` record exists; when it
+/// names the same family and model as the response, it is that response's
+/// route with its provider, and it is what the session's own turns send.
+/// Setup consumers (reviewer, judge, history) then request through the
+/// provider the session uses, not through a bare-id search that two
+/// same-family providers make ambiguous. A response from a different model
+/// keeps the provider-less route it recorded.
+fn replayed_model(
+    records: &[Record],
+    fold: &Session,
+    configured: Option<ModelRoute>,
+) -> Option<ModelRoute> {
+    replay_model(records)
+        .or_else(|| {
+            fold.last_response_model()
+                .map(|last| match fold.requested_model() {
+                    Some(requested) if requested.same_model(&last) => requested.clone(),
+                    _ => last,
+                })
+        })
+        .or(configured)
+}
+
 fn replay_model(records: &[Record]) -> Option<ModelRoute> {
     records.iter().rev().find_map(|record| match record {
         Record::Model(entry) => match &entry.kind {
@@ -917,9 +946,7 @@ impl Host {
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
         })?;
         let opening_texts: Arc<[String]> = super::history::opening_texts(&fold).into();
-        let model = replay_model(journal.records())
-            .or_else(|| fold.last_response_model())
-            .or(configured_model);
+        let model = replayed_model(journal.records(), &fold, configured_model);
         let model_id = model
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());

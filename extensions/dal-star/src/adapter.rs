@@ -737,4 +737,36 @@ mod tests {
             "{error}"
         );
     }
+
+    #[test]
+    fn model_request_schema_for_scripts_stays_without_a_provider() {
+        // Scripts never receive a route that names a provider and the script
+        // schema is unchanged: an api route here is family and model only.
+        let request = Value::decode(
+            r#"{"purpose":"turn","model":{"kind":"api","family":"openai_chat","model":"gpt-6","provider":"acme-proxy"},"system":"system","tools":[],"context":[],"params":{"thinking":"off","effort":null,"temperature":null,"max_output_tokens":null},"cache_key":null}"#,
+        )
+        .expect("request transport value");
+        let error = OpAdapter::decode_model_request(&request)
+            .expect_err("a script route cannot name a provider");
+        assert!(
+            error.contains("request.model has unknown field `provider`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn model_request_refuses_a_provider_on_synthetic_and_harness_kinds() {
+        for (kind, id) in [("synthetic", "acme/model"), ("harness", "dalgon/normal")] {
+            let text = format!(
+                "{{\"purpose\":\"turn\",\"model\":{{\"kind\":\"{kind}\",\"id\":\"{id}\",\"provider\":\"acme-proxy\"}},\"system\":\"system\",\"tools\":[],\"context\":[],\"params\":{{\"thinking\":\"off\",\"effort\":null,\"temperature\":null,\"max_output_tokens\":null}},\"cache_key\":null}}",
+            );
+            let request = Value::decode(&text).expect("request transport value");
+            let error =
+                OpAdapter::decode_model_request(&request).expect_err("provider on a non-api kind");
+            assert!(
+                error.contains("request.model has unknown field `provider`"),
+                "{error}"
+            );
+        }
+    }
 }

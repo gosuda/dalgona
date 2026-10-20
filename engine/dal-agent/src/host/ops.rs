@@ -319,7 +319,7 @@ impl Host {
                     message: error.to_string().into(),
                 }
             })?;
-        if !route_matches(&route, &resolved.route) {
+        if !route.same_model(&resolved.route) {
             return Err(HostError::Config {
                 message: format!("request route does not match {route:?}.").into(),
             });
@@ -366,7 +366,13 @@ impl Host {
         if reference.is_empty() {
             return None;
         }
-        if let Some(found) = crate::ext::synthetic::find(shared, reference) {
+        // A default route that names its provider is that provider's model;
+        // the synthetic registry is not consulted for its native id.
+        let names_provider = matches!(
+            &default,
+            super::DefaultModel::Route(route) if route.provider().is_some()
+        );
+        if !names_provider && let Some(found) = crate::ext::synthetic::find(shared, reference) {
             return Some(found.route());
         }
         let catalog = shared.providers.catalog().await.ok()?;
@@ -469,6 +475,7 @@ fn builtin_models(
         models.push(crate::session::context::model_info_for(
             &resolved.entry,
             &resolved.route,
+            &resolved.provider,
             shared.default_thinking(),
         ));
     }
@@ -479,23 +486,6 @@ pub(crate) fn request_reference(route: &ModelRoute) -> String {
     match route {
         ModelRoute::Api { model, .. } => model.to_string(),
         ModelRoute::Synthetic { id } | ModelRoute::Harness { id } => id.to_string(),
-    }
-}
-
-/// Whether two routes name the same model.
-fn route_matches(wanted: &ModelRoute, resolved: &ModelRoute) -> bool {
-    match (wanted, resolved) {
-        (
-            ModelRoute::Api {
-                family: a,
-                model: m,
-            },
-            ModelRoute::Api {
-                family: b,
-                model: n,
-            },
-        ) => a == b && m == n,
-        _ => wanted == resolved,
     }
 }
 

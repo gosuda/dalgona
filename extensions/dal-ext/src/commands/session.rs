@@ -1,5 +1,5 @@
 //! Session-level commands and export formatting.
-use dal_agent::ext::command::CommandCx;
+use dal_agent::ext::command::{CommandCx, SaveError};
 use dal_core::command::{Command, ErrorTriple, FrontAction, Output, Reply};
 use dal_core::{ApprovalMode, Block, EntryKind, ModelRoute, SessionId, resume_token};
 
@@ -198,10 +198,34 @@ pub(super) async fn name(cx: &CommandCx<'_>, raw: &str) -> Result<Reply, ErrorTr
         return Ok(Reply::Done(Output::Text(line.into())));
     }
     let token = check_name(word, cx.view().session.id)?;
-    let _ = cx.submit_wait(Command::Rename(word.into())).await;
-    Ok(Reply::Done(Output::Text(
-        format!("Session name: {word}. Resume it with dalgon -r {token}.").into(),
-    )))
+    let saved = match cx.submit_wait(Command::Rename(word.into())).await {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let view = cx.view();
+            let line = match view.settings.name.as_deref() {
+                Some(name) => format!("Session name: {name}. Not changed to {word}: {message}."),
+                None => format!("Session name not changed to {word}: {message}."),
+            };
+            return Ok(Reply::Done(Output::Text(line.into())));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let view = cx.view();
+            let line = match view.settings.name.as_deref() {
+                Some(name) => format!("Session name: {name}. Not changed: session {id} is closed."),
+                None => format!("Session name not changed: session {id} is closed."),
+            };
+            return Ok(Reply::Done(Output::Text(line.into())));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    // The resume hint names the session by a name that only a persisted
+    // rename makes resolvable, so a failed save reports the reason instead.
+    let line = match saved {
+        None => format!("Session name: {word}. Resume it with dalgon -r {token}."),
+        Some(reason) => format!("Session name: {word}. It did not persist: {reason}."),
+    };
+    Ok(Reply::Done(Output::Text(line.into())))
 }
 
 /// Validates a `/name` argument and returns the token its resume hint prints.

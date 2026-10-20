@@ -1145,6 +1145,7 @@ async fn an_empty_reviewer_model_reviews_with_the_session_route() {
     let session_route = dal_core::ModelRoute::Api {
         family: dal_core::Family::Responses,
         model: "gpt-6".into(),
+        provider: None,
     };
     status.set_session_route(cx.session(), Some(session_route.clone()));
 

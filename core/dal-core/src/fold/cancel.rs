@@ -378,9 +378,26 @@ impl Session {
         }
     }
 
-    pub(super) fn settings_view(&self) -> SettingsView {
+    /// The settings a client sees for this session.
+    ///
+    /// Every live settings update and every replayed journal report the same
+    /// view, so a reopened session shows what it showed before it closed.
+    ///
+    /// `model` is the route a `Model` entry selected, including one equal to
+    /// the default the host seeded. A session that only follows the seeded
+    /// default has no selection and reports `None`, which tells a client to
+    /// use the host's default; [`Session::requested_model`] still returns the
+    /// route new rounds request. `scoped_models` is always `None`: the fold
+    /// never authors the committed scope.
+    #[must_use]
+    pub fn settings_view(&self) -> SettingsView {
         SettingsView {
-            model: self.settings.model.clone(),
+            model: self
+                .settings
+                .model
+                .as_ref()
+                .filter(|_| self.model_selected)
+                .cloned(),
             thinking: self.settings.thinking,
             approval: self.settings.approval,
             mode: self.settings.mode,
@@ -442,7 +459,10 @@ impl Session {
 
     pub(super) fn replay_setting(&mut self, entry: &Entry) {
         match &entry.kind {
-            EntryKind::Model { route } => self.settings.model = Some(route.clone()),
+            EntryKind::Model { route } => {
+                self.settings.model = Some(route.clone());
+                self.model_selected = true;
+            }
             EntryKind::Thinking { level } => {
                 self.settings.thinking = *level;
                 self.request_params.thinking = *level;

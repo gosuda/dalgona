@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dal_core::{
-    Command, EntryView, JobId, JournalPart, ModelRoute, Origin, Page, PageReq, Reply, SessionId,
-    SessionSummary, ThinkingLevel, TurnId, View,
+    Command, EntryView, Family, JobId, JournalPart, ModelRoute, Origin, Page, PageReq, Reply,
+    SessionId, SessionSummary, ThinkingLevel, TurnId, View,
 };
 use dal_provider::CatalogEntry;
 
@@ -64,6 +64,12 @@ pub enum SaveError {
         /// The closed session.
         id: SessionId,
     },
+    /// The host rejected the command before changing session state.
+    #[error("rejected: {message}")]
+    Rejected {
+        /// The complete product text.
+        message: Box<str>,
+    },
     /// The effect applied but the save failed with the product text.
     #[error("save failed: {message}")]
     Failed {
@@ -93,6 +99,11 @@ pub enum ResolveMiss {
 pub struct CatalogView {
     /// Cached rows in provider order.
     pub entries: Vec<CatalogEntry>,
+    /// Every configured provider id with the API family it serves, in
+    /// catalog order. A cached row names its provider but not its family;
+    /// this is where a command reads the family, never a guess from the
+    /// provider's name.
+    pub providers: Vec<(Box<str>, Family)>,
 }
 
 /// Counts published by a successful plugin reload.

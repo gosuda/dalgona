@@ -42,6 +42,7 @@ fn request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GoogleGenerativeAi,
             model: "gemini-3-pro".into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: Vec::new().into(),
@@ -324,6 +325,7 @@ fn wrong_family_route_names_the_family() {
     request.model = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-6".into(),
+        provider: None,
     };
     let thinking = plan(Some("high"));
     let error = request_body(&google_request(&request, &thinking)).unwrap_err();
@@ -1061,6 +1063,270 @@ fn a_signature_only_part_after_a_call_signs_nothing() {
     );
 }
 
+/// The `thoughtSignature` of every `functionCall` part of a flat body, in
+/// wire order; `None` for a call part that carries no signature.
+fn call_signatures(body: &str) -> Vec<Option<String>> {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    let root: sonic_rs::Value = sonic_rs::from_str(body).unwrap();
+    let mut signatures = Vec::new();
+    for content in root["contents"].as_array().unwrap() {
+        for part in content["parts"].as_array().unwrap() {
+            if part["functionCall"].is_object() {
+                signatures.push(part["thoughtSignature"].as_str().map(str::to_owned));
+            }
+        }
+    }
+    signatures
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "reads as one Option element beside the None and signed entries it is compared with"
+)]
+fn sentinel() -> Option<String> {
+    Some(String::from("skip_thought_signature_validator"))
+}
+
+/// The flat body of `request` under one sentinel policy.
+fn body_under(request: &ModelRequest, skip: SignaturePolicy) -> String {
+    let thinking = plan(Some("high"));
+    let input = GoogleRequest {
+        compat: Compat { skip, ..compat() },
+        ..google_request(request, &thinking)
+    };
+    String::from_utf8(request_body(&input).unwrap()).unwrap()
+}
+
+fn assistant(parts: Vec<AssistantPart>) -> ContextItem {
+    ContextItem::Assistant {
+        source: source(),
+        replay: None,
+        parts,
+    }
+}
+
+/// A stored carrier binding `signature` to the call id `call`, on the bound
+/// thinking part the replay protocol hangs it from.
+fn stored_call_signature(call: &str, signature: &str) -> AssistantPart {
+    AssistantPart::Thinking {
+        text: "prior".into(),
+        replay: Some(raw(&format!(r#"{{"calls":{{"{call}":"{signature}"}}}}"#))),
+    }
+}
+
+#[test]
+fn unsigned_calls_carry_the_sentinel_by_policy_and_position() {
+    let policies = [
+        SignaturePolicy::Always,
+        SignaturePolicy::FirstCall,
+        SignaturePolicy::Never,
+    ];
+    // Three unsigned calls in one message with text between the first two:
+    // only the position among the calls matters, never the text around them.
+    let one_message = request(vec![assistant(vec![
+        call_part("call_1"),
+        AssistantPart::Text {
+            text: "between".into(),
+            replay: None,
+        },
+        call_part("call_2"),
+        call_part("call_3"),
+    ])]);
+    let expected = [
+        vec![sentinel(), sentinel(), sentinel()],
+        vec![sentinel(), None, None],
+        vec![None, None, None],
+    ];
+    for (skip, expected) in policies.into_iter().zip(expected) {
+        assert_eq!(
+            call_signatures(&body_under(&one_message, skip)),
+            expected,
+            "one message under {skip:?}"
+        );
+    }
+
+    // Each assistant message starts its own first call.
+    let two_messages = request(vec![
+        assistant(vec![call_part("call_1"), call_part("call_2")]),
+        result_for("call_1"),
+        result_for("call_2"),
+        assistant(vec![call_part("call_3"), call_part("call_4")]),
+    ]);
+    let expected = [
+        vec![sentinel(), sentinel(), sentinel(), sentinel()],
+        vec![sentinel(), None, sentinel(), None],
+        vec![None, None, None, None],
+    ];
+    for (skip, expected) in policies.into_iter().zip(expected) {
+        assert_eq!(
+            call_signatures(&body_under(&two_messages, skip)),
+            expected,
+            "two messages under {skip:?}"
+        );
+    }
+
+    // A stored signature on the second call is replayed verbatim under every
+    // policy. The unsigned first call spends the one sentinel of the message,
+    // so the unsigned third call gets none on the first-call policy.
+    let mixed = request(vec![assistant(vec![
+        stored_call_signature("call_2", "QUJD"),
+        call_part("call_1"),
+        call_part("call_2"),
+        call_part("call_3"),
+    ])]);
+    let signed = Some(String::from("QUJD"));
+    let expected = [
+        vec![sentinel(), signed.clone(), sentinel()],
+        vec![sentinel(), signed.clone(), None],
+        vec![None, signed, None],
+    ];
+    for (skip, expected) in policies.into_iter().zip(expected) {
+        assert_eq!(
+            call_signatures(&body_under(&mixed, skip)),
+            expected,
+            "mixed message under {skip:?}"
+        );
+    }
+}
+
+#[test]
+fn stored_call_signatures_replay_only_when_valid_base64_of_a_whole_quantum() {
+    let replayed = |signature: &str, skip: SignaturePolicy| {
+        let message = request(vec![assistant(vec![
+            stored_call_signature("call_1", signature),
+            call_part("call_1"),
+        ])]);
+        call_signatures(&body_under(&message, skip))
+    };
+    let policies = [
+        SignaturePolicy::Always,
+        SignaturePolicy::FirstCall,
+        SignaturePolicy::Never,
+    ];
+    // Lengths 4 and 8 are whole four-character quanta; every other length
+    // one step either side of them is not base64 and never travels.
+    let valid = ["QUJD", "QUJDRA==", "QUJDRAA=", "AAA+", "AAA/", "AAAAAAAA"].map(str::to_owned);
+    let mut invalid: Vec<String> = [1, 2, 3, 5, 6, 7, 9]
+        .into_iter()
+        .map(|length| "A".repeat(length))
+        .collect();
+    invalid.extend(
+        // Right length, wrong alphabet: URL-safe symbols, a space, a star.
+        ["AAA-", "AAA_", "AA A", "AAA*"].map(str::to_owned),
+    );
+    invalid.push(String::new());
+    for signature in &valid {
+        for skip in policies {
+            assert_eq!(
+                replayed(signature, skip),
+                vec![Some(signature.clone())],
+                "{signature:?} under {skip:?} replays verbatim"
+            );
+        }
+    }
+    for signature in &invalid {
+        // A rejected signature falls back to the policy as if none was stored.
+        assert_eq!(
+            replayed(signature, SignaturePolicy::Always),
+            vec![sentinel()],
+            "{signature:?} under Always"
+        );
+        assert_eq!(
+            replayed(signature, SignaturePolicy::FirstCall),
+            vec![sentinel()],
+            "{signature:?} under FirstCall"
+        );
+        assert_eq!(
+            replayed(signature, SignaturePolicy::Never),
+            vec![None],
+            "{signature:?} under Never"
+        );
+    }
+}
+
+#[test]
+fn reused_provider_ids_get_fresh_ids_that_keep_their_own_signatures() {
+    use sonic_rs::JsonValueTrait;
+    let events = decode(&[
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{},"id":"call_1"},"thoughtSignature":"QUJD"},{"functionCall":{"name":"read","args":{},"id":"call_1"},"thoughtSignature":"QUJE"}]},"finishReason":"STOP"}]}"#,
+    ]);
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolCallStarted { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 2, "{events:?}");
+    assert_eq!(started[0], "call_1");
+    assert_ne!(started[1], "call_1", "the reused id must not be kept");
+    let item = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Replay { payload } => Some(payload.item.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("two signed calls emit one carrier: {events:?}"));
+    // The carrier keys each signature by the id the call was announced
+    // under, so replay finds the right signature for each call.
+    let carrier: sonic_rs::Value = sonic_rs::from_str(item).unwrap();
+    assert_eq!(
+        carrier["calls"][started[0]].as_str(),
+        Some("QUJD"),
+        "{item}"
+    );
+    assert_eq!(
+        carrier["calls"][started[1]].as_str(),
+        Some("QUJE"),
+        "{item}"
+    );
+}
+
+#[test]
+fn status_only_error_frames_take_their_canonical_http_status() {
+    // The numeric code is the HTTP status when it fits; a frame without one
+    // is classified by its RPC status spelling.
+    let status = |frame: &str| match in_band(frame) {
+        ProviderError::Status { status, .. } => status,
+        other => panic!("expected a status error, got {other:?} for {frame}"),
+    };
+    assert_eq!(
+        status(r#"{"error":{"status":"UNAVAILABLE","message":"m"}}"#),
+        503
+    );
+    assert_eq!(
+        status(r#"{"error":{"status":"DEADLINE_EXCEEDED","message":"m"}}"#),
+        504
+    );
+    assert_eq!(
+        status(r#"{"error":{"status":"PERMISSION_DENIED","message":"m"}}"#),
+        403
+    );
+    assert!(matches!(
+        in_band(r#"{"error":{"status":"INVALID_ARGUMENT","message":"m"}}"#),
+        ProviderError::InvalidRequest { .. }
+    ));
+    assert!(matches!(
+        in_band(r#"{"error":{"status":"UNAUTHENTICATED","message":"m"}}"#),
+        ProviderError::AuthRejected { .. }
+    ));
+    // A numeric code that is not a valid HTTP status number is ignored, not
+    // wrapped: 65 579 is not 43, and a negative code is not 65 535.
+    assert_eq!(
+        status(r#"{"error":{"code":65579,"status":"UNAVAILABLE","message":"m"}}"#),
+        503
+    );
+    assert_eq!(
+        status(r#"{"error":{"code":-1,"status":"UNAVAILABLE","message":"m"}}"#),
+        503
+    );
+    // A numeric code that fits wins over the RPC spelling.
+    assert!(matches!(
+        in_band(r#"{"error":{"code":400,"status":"UNAVAILABLE","message":"m"}}"#),
+        ProviderError::InvalidRequest { .. }
+    ));
+}
+
 #[test]
 fn flat_bodies_refuse_model_ids_that_leave_the_request_path() {
     for model in [
@@ -1074,6 +1340,7 @@ fn flat_bodies_refuse_model_ids_that_leave_the_request_path() {
             model: ModelRoute::Api {
                 family: Family::GoogleGenerativeAi,
                 model: model.into(),
+                provider: None,
             },
             ..request(vec![])
         };
@@ -1319,6 +1586,43 @@ fn invalid_argument_is_an_invalid_request() {
 }
 
 #[test]
+fn retry_hints_turn_terminal_at_exactly_five_minutes() {
+    let throttle = |delay: &str| {
+        format!(
+            r#"{{"error":{{"code":429,"message":"Slow down","status":"RESOURCE_EXHAUSTED","details":[{{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"{delay}"}}]}}}}"#
+        )
+    };
+    // One step below the limit stays a retryable throttle; the limit and
+    // every step above it is account exhaustion. A hint that is not a number
+    // of seconds never counts.
+    for (delay, terminal) in [
+        ("299s", false),
+        ("299.999999999s", false),
+        ("300s", true),
+        ("300.000000001s", true),
+        ("301s", true),
+        ("-300s", false),
+        ("soon", false),
+        ("", false),
+    ] {
+        let body = throttle(delay);
+        let error = classify_http(429, &body, &request_state());
+        assert_eq!(
+            matches!(error, ProviderError::Quota { .. }),
+            terminal,
+            "http {delay:?}: {error:?}"
+        );
+        // The in-band frame takes the same decision as the HTTP body.
+        let frame_error = in_band(&body);
+        assert_eq!(
+            matches!(frame_error, ProviderError::Quota { .. }),
+            terminal,
+            "in-band {delay:?}: {frame_error:?}"
+        );
+    }
+}
+
+#[test]
 fn error_fields_fall_back_to_the_first_line() {
     let (code, message) = error_fields(quota_body());
     assert_eq!(code.as_deref(), Some("RESOURCE_EXHAUSTED"));
@@ -1353,6 +1657,7 @@ fn loopback_request(family: Family, model: &str) -> ModelRequest {
         model: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: Vec::new().into(),

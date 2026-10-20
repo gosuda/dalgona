@@ -13,6 +13,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GoogleAntigravity,
             model: "gemini-3-flash-agent".into(),
+            provider: None,
         },
         system: "Be brief.".into(),
         tools: Vec::new().into(),

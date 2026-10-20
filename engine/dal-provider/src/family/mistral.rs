@@ -280,6 +280,7 @@ pub(crate) fn request_body(
     let ModelRoute::Api {
         family: Family::Mistral,
         model,
+        ..
     } = &request.model
     else {
         return Err(MistralBodyError::NotMistral {

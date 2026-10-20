@@ -306,6 +306,7 @@ fn image_model() -> ModelInfo {
     ModelInfo {
         route: ModelRoute::from_id("p/model"),
         name: "p/model".into(),
+        provider: "".into(),
         caps: Caps {
             context_window: None,
             thinking: Box::new([]),

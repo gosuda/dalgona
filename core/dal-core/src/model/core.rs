@@ -136,6 +136,15 @@ pub enum ModelRoute {
         family: Family,
         /// Provider-native model name.
         model: Box<str>,
+        /// The configured provider id the route resolves under, when the
+        /// route carries that identity. `None` keeps the pre-provider
+        /// semantics: the request re-resolves the bare model id through
+        /// aliases, the catalog, and the family retry. `Some(provider)`
+        /// resolves `provider/model` exactly, skips synthetic-first lookup
+        /// for that id, and never re-binds to another same-family provider.
+        /// Absent in older payloads and read as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<Box<str>>,
     },
     /// A composed model identified by `namespace/name`.
     Synthetic {
@@ -178,6 +187,70 @@ impl ModelRoute {
         }
     }
 
+    /// Returns the configured provider id the route names, when it carries
+    /// one. Synthetic and harness routes never carry a provider: their id's
+    /// namespace is not a configured provider.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Api { provider, .. } => provider.as_deref(),
+            Self::Synthetic { .. } | Self::Harness { .. } => None,
+        }
+    }
+
+    /// Whether `other` names the same model as this route.
+    ///
+    /// Two API routes name the same model when family and native id agree
+    /// and, if *both* name a provider, the providers agree too. A route that
+    /// names no provider (an older record, an old client, a measurement
+    /// journaled before providers travelled on routes) has no provider to
+    /// disagree with. Every other pairing compares exactly. Use this for
+    /// continuity checks across records; use `==` where an exact selection
+    /// must be told apart.
+    #[must_use]
+    pub fn same_model(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Api {
+                    family: left_family,
+                    model: left_model,
+                    provider: left_provider,
+                },
+                Self::Api {
+                    family: right_family,
+                    model: right_model,
+                    provider: right_provider,
+                },
+            ) => {
+                left_family == right_family
+                    && left_model == right_model
+                    && match (left_provider, right_provider) {
+                        (Some(left), Some(right)) => left == right,
+                        _ => true,
+                    }
+            }
+            _ => self == other,
+        }
+    }
+
+    /// Returns the route with `provider` set, leaving every other member as
+    /// it is. Synthetic and harness routes are returned unchanged.
+    #[must_use]
+    pub fn with_provider(&self, provider: &str) -> Self {
+        match self {
+            Self::Api {
+                family,
+                model,
+                provider: _,
+            } => Self::Api {
+                family: *family,
+                model: model.clone(),
+                provider: Some(provider.into()),
+            },
+            other => other.clone(),
+        }
+    }
+
     /// Renders this route as the `family/id` reference persisted to `dal.toml`.
     ///
     /// API families use their persisted provider prefix (`openai-chat`,
@@ -187,14 +260,16 @@ impl ModelRoute {
     /// `radius` for [`Family::PiMessages`]); synthetic and harness routes
     /// render as their bare id. This is the legacy `model` string mirror:
     /// best-effort for old readers, never the authoritative decode. The
-    /// authoritative form is the structured `model_route` table. Note the
+    /// authoritative form is the structured `model_route` table. The mirror
+    /// never names the route's provider: its prefix is the API family, which
+    /// cannot say which same-family provider the route belongs to. Note the
     /// intentional divergence from the UI `route_origin` spelling, which
     /// renders [`Family::Responses`] as `openai`: persistence uses
     /// `openai-responses` so old readers decode the family correctly.
     #[must_use]
     pub fn family_qualified_reference(&self) -> String {
         match self {
-            Self::Api { family, model } => {
+            Self::Api { family, model, .. } => {
                 let prefix = match family {
                     Family::Chat => "openai-chat",
                     Family::Responses => "openai-responses",
@@ -230,6 +305,7 @@ impl ModelRoute {
             return Self::Api {
                 family: Family::Chat,
                 model: id.into(),
+                provider: None,
             };
         };
         match prefix {
@@ -237,23 +313,28 @@ impl ModelRoute {
             "openai-chat" => Self::Api {
                 family: Family::Chat,
                 model: model.into(),
+                provider: None,
             },
             "openai-responses" => Self::Api {
                 family: Family::Responses,
                 model: model.into(),
+                provider: None,
             },
             "openai-codex" => Self::Api {
                 family: Family::Codex,
                 model: model.into(),
+                provider: None,
             },
             "anthropic" => Self::Api {
                 family: Family::Anthropic,
                 model: model.into(),
+                provider: None,
             },
             _ if Self::is_valid_synthetic_id(id) => Self::Synthetic { id: id.into() },
             _ => Self::Api {
                 family: Family::Chat,
                 model: id.into(),
+                provider: None,
             },
         }
     }
@@ -315,6 +396,16 @@ impl ModelRoute {
 pub(super) struct ApiRouteFields {
     pub(super) family: Family,
     pub(super) model: Box<str>,
+    #[serde(default, deserialize_with = "provider_field")]
+    pub(super) provider: Option<Box<str>>,
+}
+
+/// Reads the optional `provider`. `null` is malformed, not absent: only a
+/// missing member means the route names no provider, as in the journal.
+fn provider_field<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Box<str>>, D::Error> {
+    Box::<str>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -329,9 +420,15 @@ impl<'de> Deserialize<'de> for ModelRoute {
             "api" => {
                 let fields: ApiRouteFields =
                     sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
+                if fields.provider.as_deref().is_some_and(str::is_empty) {
+                    return Err(de::Error::custom(
+                        "model route `provider` must not be empty",
+                    ));
+                }
                 Ok(Self::Api {
                     family: fields.family,
                     model: fields.model,
+                    provider: fields.provider,
                 })
             }
             "synthetic" => {

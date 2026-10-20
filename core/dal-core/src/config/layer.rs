@@ -310,6 +310,13 @@ impl Config {
     /// readers) and the authoritative `model_route` table are replaced
     /// atomically in the same document.
     ///
+    /// An API route that names its provider also writes `provider` in the
+    /// table; the legacy `model` string never carries it. A route without a
+    /// provider writes exactly the table earlier versions wrote. A version
+    /// from before `provider` existed refuses a table that has the member
+    /// (its table decoder rejects unknown members), so a file saved with a
+    /// provider route does not load there.
+    ///
     /// [`ModelRoute::family_qualified_reference`]: crate::model::ModelRoute::family_qualified_reference
     ///
     /// # Errors
@@ -688,10 +695,19 @@ fn replace_model_route_table(
     use crate::model::ModelRoute;
     let mut table = toml_edit::Table::new();
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api {
+            family,
+            model,
+            provider,
+        } => {
             table.insert("kind", toml_edit::value("api"));
             table.insert("family", toml_edit::value(family_wire(*family)));
             table.insert("model", toml_edit::value(model.as_ref()));
+            // Provider-less routes keep their byte-identical file shape: the
+            // member is written only when the route names its provider.
+            if let Some(provider) = provider.as_ref() {
+                table.insert("provider", toml_edit::value(provider.as_ref()));
+            }
         }
         ModelRoute::Synthetic { id } => {
             table.insert("kind", toml_edit::value("synthetic"));

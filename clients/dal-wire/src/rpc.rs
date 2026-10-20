@@ -633,6 +633,9 @@ async fn initialize(state: &Arc<Mutex<Conn>>, params: &Value) -> Result<Value, E
 }
 
 /// Returns the provider label when a non-harness route has no resolvable credential.
+///
+/// A route that names its provider is checked under that provider id; any
+/// other route is checked under its family label.
 pub(crate) fn missing_credential(host: &Host, route: &dal_core::ModelRoute) -> Option<String> {
     if matches!(route, dal_core::ModelRoute::Harness { .. }) {
         return None;
@@ -641,28 +644,39 @@ pub(crate) fn missing_credential(host: &Host, route: &dal_core::ModelRoute) -> O
     (!host.has_credential(&provider)).then_some(provider)
 }
 
-/// Returns the provider label for one model route.
+/// Returns the provider label for one model route: the configured provider
+/// id when the route names one, else the label of its API family.
 pub(crate) fn provider_label(route: &dal_core::ModelRoute) -> String {
     match route {
         dal_core::ModelRoute::Synthetic { id } => id.split('/').next().unwrap_or("").to_owned(),
-        dal_core::ModelRoute::Api { family, .. } => match family {
-            dal_core::Family::Chat | dal_core::Family::Responses => "openai".to_owned(),
-            dal_core::Family::Codex => "openai-codex".to_owned(),
-            dal_core::Family::Anthropic => "anthropic".to_owned(),
-            dal_core::Family::Bedrock => "bedrock".to_owned(),
-            dal_core::Family::Cursor => "cursor".to_owned(),
-            dal_core::Family::Devin => "devin".to_owned(),
-            dal_core::Family::Droid => "droid".to_owned(),
-            dal_core::Family::GitLab => "gitlab".to_owned(),
-            dal_core::Family::GoogleGenerativeAi => "google-generative-ai".to_owned(),
-            dal_core::Family::GoogleVertex => "google-vertex".to_owned(),
-            dal_core::Family::GoogleGeminiCli => "google-gemini-cli".to_owned(),
-            dal_core::Family::GoogleAntigravity => "google-antigravity".to_owned(),
-            dal_core::Family::Mistral => "mistral".to_owned(),
-            dal_core::Family::Ollama => "ollama".to_owned(),
-            dal_core::Family::PiMessages => "radius".to_owned(),
-        },
+        dal_core::ModelRoute::Api {
+            provider: Some(provider),
+            ..
+        } => provider.to_string(),
+        dal_core::ModelRoute::Api { family, .. } => family_label(*family).to_owned(),
         dal_core::ModelRoute::Harness { .. } => "dalgon".to_owned(),
+    }
+}
+
+/// Returns the wire label of one API family. It names the family, never a
+/// configured provider: every Chat and Responses provider shares `openai`.
+pub(crate) const fn family_label(family: dal_core::Family) -> &'static str {
+    match family {
+        dal_core::Family::Chat | dal_core::Family::Responses => "openai",
+        dal_core::Family::Codex => "openai-codex",
+        dal_core::Family::Anthropic => "anthropic",
+        dal_core::Family::Bedrock => "bedrock",
+        dal_core::Family::Cursor => "cursor",
+        dal_core::Family::Devin => "devin",
+        dal_core::Family::Droid => "droid",
+        dal_core::Family::GitLab => "gitlab",
+        dal_core::Family::GoogleGenerativeAi => "google-generative-ai",
+        dal_core::Family::GoogleVertex => "google-vertex",
+        dal_core::Family::GoogleGeminiCli => "google-gemini-cli",
+        dal_core::Family::GoogleAntigravity => "google-antigravity",
+        dal_core::Family::Mistral => "mistral",
+        dal_core::Family::Ollama => "ollama",
+        dal_core::Family::PiMessages => "radius",
     }
 }
 

@@ -34,6 +34,11 @@ pub struct ModelOption {
     pub label: String,
     /// Typed host command submitted when the row is selected.
     pub command: Command,
+    /// Provider-qualified scope id (`{provider}/{route.id()}`) for `Api`
+    /// rows with a known provider; `None` for synthetic, harness, or
+    /// legacy rows the scope gate cannot match. Never derived from display
+    /// labels or family tables.
+    pub scoped_id: Option<Box<str>>,
 }
 
 /// Converts host model rows into typed route selections.
@@ -43,12 +48,20 @@ pub fn model_options(models: Vec<ModelInfo>) -> Vec<ModelOption> {
         .into_iter()
         .map(|model| {
             let label = format!("{} · {}", model.name, route_label(&model.route));
+            let scoped_id = match &model.route {
+                ModelRoute::Api { .. } if !model.provider.is_empty() => {
+                    Some(format!("{}/{}", model.provider, model.route.id()).into_boxed_str())
+                }
+                _ => None,
+            };
+            let command = Command::SetModel {
+                model: model.route,
+                save: dal_core::command::Save::SessionAndDefault,
+            };
             ModelOption {
                 label,
-                command: Command::SetModel {
-                    model: model.route,
-                    save: dal_core::command::Save::SessionAndDefault,
-                },
+                command,
+                scoped_id,
             }
         })
         .collect()
@@ -56,7 +69,7 @@ pub fn model_options(models: Vec<ModelInfo>) -> Vec<ModelOption> {
 
 pub(crate) fn route_label(route: &ModelRoute) -> String {
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api { family, model, .. } => {
             let provider = match family {
                 Family::Chat => "openai-chat",
                 Family::Responses => "openai-responses",
@@ -92,6 +105,10 @@ pub(crate) enum PickerAction {
     },
     /// Open the remove-all confirmation.
     ConfirmLogoutAll,
+    /// One scoped-model row: carries the `{provider}/{id}` the scope gate
+    /// matches. Entering the row alone scopes that one model; in a
+    /// multi-select the checked rows win instead.
+    ScopeModel(Box<str>),
     /// Activate nothing: the failed model picker keeps its instruction row
     /// selectable without running a command or dismissing the failure state.
     Noop,
@@ -116,6 +133,11 @@ pub(crate) struct PickerUi {
     /// retries through the real model source, and a typed id still runs
     /// `/model <id>`. Every other picker leaves this false.
     load_failed: bool,
+    /// Space toggles rows instead of activating them; Enter submits the
+    /// checked set. Option indices survive refiltering so narrowing the
+    /// query never loses a check.
+    multi: bool,
+    checked: std::collections::BTreeSet<usize>,
 }
 
 impl PickerUi {
@@ -129,9 +151,48 @@ impl PickerUi {
             diagram_enabled: None,
             model_fallback: false,
             load_failed: false,
+            multi: false,
+            checked: std::collections::BTreeSet::new(),
         };
         picker.refilter();
         picker
+    }
+
+    /// Marks the picker multi-select: space toggles the focused row, Enter
+    /// submits every checked row, and `checked` seeds the initial set.
+    pub(crate) fn with_multi(&mut self, checked: impl IntoIterator<Item = usize>) {
+        self.multi = true;
+        self.checked = checked.into_iter().collect();
+    }
+
+    /// Whether space toggles and Enter submits the checked set.
+    pub(crate) fn is_multi(&self) -> bool {
+        self.multi
+    }
+
+    /// Whether the row at `index` in the visible list is checked. Only a
+    /// multi picker reports checks.
+    pub(crate) fn is_checked(&self, index: usize) -> bool {
+        self.multi
+            && self
+                .visible
+                .get(index)
+                .is_some_and(|option| self.checked.contains(option))
+    }
+
+    /// Toggles the focused row's check; ignored outside a multi picker.
+    /// Returns the row's new state.
+    pub(crate) fn toggle_selected(&mut self) -> Option<bool> {
+        if !self.multi {
+            return None;
+        }
+        let index = *self.visible.get(self.selected)?;
+        Some(if self.checked.insert(index) {
+            true
+        } else {
+            self.checked.remove(&index);
+            false
+        })
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
@@ -173,9 +234,35 @@ impl PickerUi {
                 expected: None,
             }));
         }
+        if self.multi {
+            // The checked rows are the whole answer. A committed id the model
+            // list no longer names is a row of its own (see
+            // `scoped_models_picker`), so unchecking it removes it and an
+            // untouched one is submitted unchanged. Nothing checked clears.
+            let mut seen = std::collections::BTreeSet::new();
+            let mut ids: Vec<Box<str>> = Vec::new();
+            for id in self
+                .checked
+                .iter()
+                .filter_map(|index| self.options.get(*index))
+                .filter_map(|option| match &option.action {
+                    PickerAction::ScopeModel(id) => Some(id.clone()),
+                    _ => None,
+                })
+            {
+                if seen.insert(id.to_string()) {
+                    ids.push(id);
+                }
+            }
+            ids.sort();
+            return Some(PickerAction::Command(Command::SetScopedModels(ids)));
+        }
         let index = *self.visible.get(self.selected)?;
         let action = self.options.get(index)?.action.clone();
         match action {
+            PickerAction::ScopeModel(id) => {
+                Some(PickerAction::Command(Command::SetScopedModels(vec![id])))
+            }
             PickerAction::ToggleDiagrams => {
                 let enabled = self.diagram_enabled.as_mut()?;
                 *enabled = !*enabled;
@@ -367,6 +454,63 @@ pub(crate) fn model_picker(models: &[ModelOption], filter: &str) -> PickerUi {
     picker
 }
 
+/// One scoped-model row: `id` is the `{provider}/{id}` the session's scope
+/// gate matches against resolved routes.
+pub(crate) struct ScopedModelRow {
+    /// Scoped id in `{provider}/{id}` form.
+    pub(crate) id: Box<str>,
+    /// The rendered row label.
+    pub(crate) label: String,
+}
+
+/// The `/scoped-models` picker: a multi-select over the model catalog
+/// whose checked rows submit as `SetScopedModels`. Every committed id in
+/// `active` arrives checked. One the catalog has no row for stays on screen
+/// as a selectable row of its own, after the catalog rows, labelled as not in
+/// the current model list: it keeps its scope until the user unchecks it, and
+/// unchecking every row submits the empty list that clears the scope.
+pub(crate) fn scoped_models_picker(
+    rows: Vec<ScopedModelRow>,
+    active: &[Box<str>],
+    filter: &str,
+) -> PickerUi {
+    let mut checked = Vec::new();
+    let mut options = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if active.iter().any(|id| **id == *row.id) {
+                checked.push(index);
+            }
+            PickerOption {
+                label: row.label,
+                action: PickerAction::ScopeModel(row.id),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut unavailable: Vec<&str> = Vec::new();
+    for id in active {
+        let id: &str = id;
+        let listed = options.iter().any(|option| match &option.action {
+            PickerAction::ScopeModel(row) => &**row == id,
+            _ => false,
+        });
+        if !listed && !unavailable.contains(&id) {
+            unavailable.push(id);
+        }
+    }
+    for id in unavailable {
+        checked.push(options.len());
+        options.push(PickerOption {
+            label: crate::copy::render(ids::SCOPED_UNAVAILABLE_ROW, &[("id", id)], 1),
+            action: PickerAction::ScopeModel(id.into()),
+        });
+    }
+    let mut picker = PickerUi::new(ids::SCOPED_MODELS_TITLE, filter, options);
+    picker.with_multi(checked);
+    picker
+}
+
 /// The model picker's failure surface: the failure copy is the title, the
 /// typed-id fallback is the one selectable row, and `r` retries the real
 /// model source while the query/filter stays intact.
@@ -440,6 +584,52 @@ mod tests {
         assert_eq!(offer.notice(Some("luna_reserve")), None);
         assert_eq!(offer.notice(None), None);
         assert!(resume_row("fix", "today", 1, "/w").contains("/w"));
+    }
+
+    /// A committed scope id the model list does not name stays selected as a
+    /// visible row once, survives an untouched submit, and can be unchecked:
+    /// unchecking every row submits the empty list that clears the scope.
+    #[test]
+    fn a_committed_scope_id_missing_from_the_catalog_is_a_removable_row() {
+        use dal_core::Command;
+
+        use super::PickerAction;
+
+        let rows = vec![super::ScopedModelRow {
+            id: "openai/gpt-6".into(),
+            label: "GPT 6".into(),
+        }];
+        let active: Vec<Box<str>> = vec![
+            "openai/gpt-6".into(),
+            "anthropic/vanished".into(),
+            "anthropic/vanished".into(),
+        ];
+        let mut picker = super::scoped_models_picker(rows, &active, "");
+        assert_eq!(picker.visible_len(), 2, "the missing id is one row, once");
+        assert!(picker.is_checked(0) && picker.is_checked(1));
+        assert!(picker.visible_option(1).is_some_and(|option| {
+            option.label.contains("not in the current model list")
+                && option.label.contains("anthropic/vanished")
+        }));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished", "openai/gpt-6"])
+        ));
+        // Uncheck the listed row only: the missing id is still committed.
+        assert_eq!(picker.toggle_selected(), Some(false));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished"])
+        ));
+        // Uncheck the missing row too: the scope clears.
+        picker.move_selection(true);
+        assert_eq!(picker.toggle_selected(), Some(false));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids))) if ids.is_empty()
+        ));
     }
 
     #[test]
@@ -547,11 +737,12 @@ mod picker_tests {
     }
 
     #[test]
-    fn host_model_choices_preserve_the_exact_api_family() {
-        let options = super::model_options(vec![dal_core::ModelInfo {
+    fn host_model_choices_preserve_the_exact_api_family_and_provider() {
+        let row = |provider: &str| dal_core::ModelInfo {
             route: dal_core::ModelRoute::Api {
                 family: dal_core::Family::Chat,
                 model: "gpt-4.1".into(),
+                provider: Some(provider.into()),
             },
             name: "GPT 4.1".into(),
             caps: dal_core::Caps {
@@ -561,18 +752,27 @@ mod picker_tests {
                 image_input: false,
                 custom_grammar: false,
             },
-        }]);
+            provider: provider.into(),
+        };
+        let options = super::model_options(vec![row("openai"), row("acme-proxy")]);
         assert!(options[0].label.contains("openai-chat/gpt-4.1"));
-        assert!(matches!(
-            &options[0].command,
-            Command::SetModel {
-                model: dal_core::ModelRoute::Api {
-                    family: dal_core::Family::Chat,
-                    ..
-                },
-                save: dal_core::command::Save::SessionAndDefault,
-            }
-        ));
+        assert_eq!(options[0].scoped_id.as_deref(), Some("openai/gpt-4.1"));
+        assert_eq!(options[1].scoped_id.as_deref(), Some("acme-proxy/gpt-4.1"));
+        // Two same-family providers list one native id: each row submits the
+        // route that names its own provider, never one shared route.
+        for (option, expected) in options.iter().zip(["openai", "acme-proxy"]) {
+            assert!(matches!(
+                &option.command,
+                Command::SetModel {
+                    model: dal_core::ModelRoute::Api {
+                        family: dal_core::Family::Chat,
+                        provider: Some(provider),
+                        ..
+                    },
+                    save: dal_core::command::Save::SessionAndDefault,
+                } if provider.as_ref() == expected
+            ));
+        }
     }
 
     #[test]
@@ -686,4 +886,84 @@ mod picker_tests {
             Some(PickerAction::Command(Command::MoveLeaf(_)))
         ));
     }
+
+    /// A multi picker toggles the focused row on space and submits every
+    /// checked row's scope id on enter; an empty set clears the scope.
+    #[test]
+    fn a_multi_picker_submits_the_checked_scope() {
+        let rows = vec![
+            super::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            super::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut picker = super::scoped_models_picker(rows, &["anthropic/opus-4".into()], "");
+        assert!(picker.is_multi());
+        assert!(!picker.is_checked(0));
+        assert!(picker.is_checked(1));
+        // Uncheck the second row and check the first: enter submits only
+        // the checked ids, whatever the focus is.
+        picker.move_selection(true);
+        assert_eq!(picker.toggle_selected(), Some(false));
+        picker.move_selection(false);
+        assert_eq!(picker.toggle_selected(), Some(true));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(|id| id.as_ref()).eq(["openai/gpt-6"])
+        ));
+        // Checking nothing submits the empty scope, which clears it.
+        picker.toggle_selected();
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids))) if ids.is_empty()
+        ));
+    }
+
+    /// Filter narrowing cannot lose a check: checked option indices
+    /// survive refiltering and still submit.
+    #[test]
+    fn checks_survive_a_narrowing_filter() {
+        let rows = vec![
+            super::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            super::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut picker = super::scoped_models_picker(rows, &[], "");
+        picker.toggle_selected();
+        picker.add_filter_char('o');
+        assert_eq!(picker.visible_len(), 1);
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(|id| id.as_ref()).eq(["openai/gpt-6"])
+        ));
+    }
+
+    /// Space on a single picker is a filter character, not a toggle: the
+    /// checked contract stays off until `with_multi` marks the picker.
+    #[test]
+    fn a_single_picker_has_no_toggle_state() {
+        let mut picker = PickerUi::new(
+            "Pick",
+            "",
+            vec![PickerOption {
+                label: "alpha".to_owned(),
+                action: PickerAction::Noop,
+            }],
+        );
+        assert!(!picker.is_multi());
+        assert_eq!(picker.toggle_selected(), None);
+        assert!(!picker.is_checked(0));
+    }
+
 }

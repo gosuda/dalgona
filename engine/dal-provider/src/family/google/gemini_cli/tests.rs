@@ -26,6 +26,7 @@ fn request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GoogleGeminiCli,
             model: "gemini-3-pro".into(),
+            provider: None,
         },
         system: "Be brief.".into(),
         tools: Vec::new().into(),

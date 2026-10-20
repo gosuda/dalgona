@@ -51,6 +51,7 @@ fn devin_request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Devin,
             model: "devin-test".into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: Vec::new().into(),
@@ -472,10 +473,27 @@ fn terminal_latch_tracks_delivery() {
     let mut terminal = Terminal::new();
     assert!(!terminal.is_finished());
     assert!(!terminal.delivered());
+    // An empty batch delivers nothing, a real batch does, and a later empty
+    // batch must not erase the delivery the retry table keys on.
+    terminal.note_events(0);
+    assert!(!terminal.delivered());
     terminal.note_events(2);
     assert!(terminal.delivered());
+    terminal.note_events(0);
+    assert!(
+        terminal.delivered(),
+        "a later empty batch erased an earlier delivery"
+    );
+    // Delivery does not close the latch, and closing it keeps the delivery.
+    assert!(!terminal.is_finished());
     terminal.finish_ok();
     assert!(terminal.is_finished());
+    assert!(terminal.delivered());
+    // The failure path closes the latch as well, with nothing delivered.
+    let mut failed = Terminal::new();
+    failed.finish_err();
+    assert!(failed.is_finished());
+    assert!(!failed.delivered());
 }
 
 #[test]
@@ -886,6 +904,7 @@ fn chat_body_rejects_foreign_routes() {
     request.model = ModelRoute::Api {
         family: Family::Chat,
         model: "other".into(),
+        provider: None,
     };
     let input = chat_input(&request);
     assert!(matches!(

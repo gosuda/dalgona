@@ -40,6 +40,7 @@ fn request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GitLab,
             model: "duo-agent".into(),
+            provider: None,
         },
         system: "Be terse.".into(),
         tools: vec![dal_core::ModelToolSpec {

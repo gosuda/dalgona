@@ -1,8 +1,46 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, mem, path::PathBuf, time::Duration};
 
 use super::*;
-use crate::{run::RunLostReason, usage::LUNA_RESERVE_MODEL};
+use crate::{
+    run::RunLostReason,
+    scripted::{Operation, ScriptError},
+    usage::LUNA_RESERVE_MODEL,
+};
 use dal_core::InferFailure;
+
+/// Every provider API family, in declaration order.
+const ALL_FAMILIES: [Family; 16] = [
+    Family::Chat,
+    Family::Responses,
+    Family::Codex,
+    Family::Anthropic,
+    Family::Bedrock,
+    Family::Cursor,
+    Family::Devin,
+    Family::Droid,
+    Family::GitLab,
+    Family::GoogleGenerativeAi,
+    Family::GoogleVertex,
+    Family::GoogleGeminiCli,
+    Family::GoogleAntigravity,
+    Family::Mistral,
+    Family::Ollama,
+    Family::PiMessages,
+];
+
+/// The longest prefix of the first line of `message` that is at most 300
+/// bytes and ends on a character boundary, built one character at a time.
+fn first_bounded_line(message: &str) -> String {
+    let line = message.split(['\r', '\n']).next().unwrap_or_default();
+    let mut kept = String::new();
+    for ch in line.chars() {
+        if kept.len() + ch.len_utf8() > 300 {
+            break;
+        }
+        kept.push(ch);
+    }
+    kept
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -292,6 +330,27 @@ fn error_display_texts() {
         ),
         (ProviderError::LoginCancelled, "sign-in cancelled.", None),
         (
+            ProviderError::Cancelled,
+            "provider operation cancelled.",
+            None,
+        ),
+        (
+            ProviderError::LoginInput {
+                reason: String::from("the API key is empty."),
+            },
+            "sign-in failed: the API key is empty.",
+            None,
+        ),
+        (
+            ProviderError::ToolNameCollision {
+                wire: String::from("read_file"),
+                first: String::from("fs.read"),
+                second: String::from("fs_read"),
+            },
+            "tools fs.read and fs_read both map to the provider tool name read_file; no request was sent.",
+            None,
+        ),
+        (
             ProviderError::UsageCheck {
                 reason: UsageCheckReason::Timeout,
             },
@@ -373,10 +432,16 @@ fn error_display_texts() {
             None,
         ),
     ];
+    let mut wrong = Vec::new();
     for (error, display, fix) in cases {
-        assert_eq!(error.to_string(), *display);
-        assert_eq!(error.fix().as_deref(), *fix);
+        let (text, next) = (error.to_string(), error.fix());
+        if text != *display || next.as_deref() != *fix {
+            wrong.push(format!(
+                "{error:?}: expected {display:?} / {fix:?}, got {text:?} / {next:?}"
+            ));
+        }
     }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 #[test]
@@ -457,6 +522,23 @@ fn usage_limit_head_names_luna_reserve_for_gpt_reserve() {
         message: String::from("try tomorrow"),
     };
     assert_eq!(other.to_string(), "usage limit reached: try tomorrow");
+    for near_miss in [
+        format!("{LUNA_RESERVE_MODEL}-2"),
+        format!("x{LUNA_RESERVE_MODEL}"),
+        format!("{LUNA_RESERVE_MODEL} "),
+        LUNA_RESERVE_MODEL.to_uppercase(),
+        String::new(),
+    ] {
+        let error = ProviderError::UsageLimit {
+            model: near_miss.clone(),
+            message: String::from("try tomorrow"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "usage limit reached: try tomorrow",
+            "model {near_miss:?} is not the Luna Reserve model"
+        );
+    }
 }
 
 #[test]
@@ -596,7 +678,17 @@ fn context_overflow_is_typed_by_code_never_by_message() {
             "{error:?}"
         );
     }
-    for code in ["invalid_request_error", "Context_Length_Exceeded", ""] {
+    for code in [
+        "invalid_request_error",
+        "Context_Length_Exceeded",
+        "",
+        " context_length_exceeded",
+        "context_length_exceeded ",
+        "context_length_exceeded\n",
+        "context_length_exceeded_extra",
+        "context_window",
+        "CONTEXT_WINDOW_EXCEEDED",
+    ] {
         assert!(
             ProviderError::context_overflow(
                 Family::Anthropic,
@@ -681,19 +773,27 @@ fn infer_failure_retries_only_transient_provider_failures() {
 
 #[test]
 fn infer_failure_hints_only_the_rate_limit_wait() {
-    let limited = ProviderError::RateLimited {
-        message: String::from("slow down"),
-        retry_after: Some(Duration::from_millis(2_500)),
-    };
-    let failure = InferFailure::from(limited);
-    assert!(
-        matches!(
-            &failure,
-            InferFailure::Retryable { hint: Some(hint), message }
-                if *hint == Duration::from_millis(2_500) && &**message == "rate limited: slow down"
-        ),
-        "{failure:?}"
-    );
+    for wait in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_millis(2_500),
+        Duration::from_secs(60),
+        Duration::MAX,
+    ] {
+        let limited = ProviderError::RateLimited {
+            message: String::from("slow down"),
+            retry_after: Some(wait),
+        };
+        let failure = InferFailure::from(limited);
+        assert!(
+            matches!(
+                &failure,
+                InferFailure::Retryable { hint: Some(hint), message }
+                    if *hint == wait && &**message == "rate limited: slow down"
+            ),
+            "{wait:?}: {failure:?}"
+        );
+    }
 }
 
 #[test]
@@ -807,4 +907,395 @@ fn resolve_error_texts_and_fixes() {
     let no_default = ResolveError::NoDefault;
     assert_eq!(no_default.to_string(), "no default model is configured");
     assert_eq!(no_default.fix(), None);
+    let unknown_provider = ResolveError::UnknownProvider {
+        provider: String::from("acme-proxy"),
+        model: String::from("gpt-5"),
+    };
+    assert_eq!(
+        unknown_provider.to_string(),
+        "provider acme-proxy is not configured for model gpt-5"
+    );
+    let family = ResolveError::ProviderFamilyMismatch {
+        provider: String::from("openai"),
+        model: String::from("claude-3"),
+    };
+    assert_eq!(
+        family.to_string(),
+        "provider openai does not serve the API family of model claude-3"
+    );
+    assert_eq!(
+        unknown_provider.fix().as_deref(),
+        Some("Configure that provider or pick another model with /model.")
+    );
+    assert_eq!(unknown_provider.fix(), family.fix());
+}
+
+#[test]
+fn only_http_413_folds_to_a_request_size_overflow_in_every_family() {
+    let statuses = (0..=700).chain([u16::MAX - 1, u16::MAX]);
+    for family in ALL_FAMILIES {
+        for status in statuses.clone() {
+            let error = ProviderError::Status {
+                family,
+                status,
+                message: String::from("body"),
+            };
+            let text = error.to_string();
+            assert!(!error.retryable_by_loop(), "{family:?} {status}");
+            let failure = InferFailure::from(error);
+            if status == 413 {
+                assert!(
+                    matches!(&failure, InferFailure::Overflow { code, message }
+                        if &**code == "request_too_large" && **message == *text),
+                    "{family:?}: {failure:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&failure, InferFailure::Fatal { message, fix: None }
+                        if **message == *text),
+                    "{family:?} {status}: {failure:?}"
+                );
+            }
+        }
+    }
+}
+
+fn hostile_messages() -> Vec<String> {
+    let a = |count: usize| "a".repeat(count);
+    vec![
+        String::new(),
+        String::from("head\rsecret"),
+        String::from("head\r\nsecret"),
+        String::from("head\nsecret"),
+        String::from("\nleading newline"),
+        String::from("\rleading return"),
+        format!("{}\nsecond", a(400)),
+        format!("{}\rsecond", a(300)),
+        a(299),
+        a(300),
+        a(301),
+        format!("{}\u{e9}tail", a(299)),
+        format!("{}\u{20ac}tail", a(298)),
+        format!("{}\u{20ac}tail", a(297)),
+        format!("{}\u{1f600}tail", a(297)),
+        format!("{}\u{1f600}tail", a(296)),
+    ]
+}
+
+#[test]
+fn every_capped_renderer_cuts_hostile_messages_to_one_bounded_line() {
+    for message in hostile_messages() {
+        let kept = first_bounded_line(&message);
+        let rendered = [
+            (
+                ProviderError::Status {
+                    family: Family::Chat,
+                    status: 502,
+                    message: message.clone(),
+                }
+                .to_string(),
+                format!("openai error 502: {kept}"),
+            ),
+            (
+                ProviderError::ContextOverflow {
+                    family: Family::Codex,
+                    code: String::from("context_window_exceeded"),
+                    message: message.clone(),
+                }
+                .to_string(),
+                format!("codex context window exceeded (context_window_exceeded): {kept}"),
+            ),
+            (
+                UsageCheckReason::Status {
+                    status: 500,
+                    message: message.clone(),
+                }
+                .to_string(),
+                format!("500 {kept}"),
+            ),
+            (
+                UsageCheckReason::Transport {
+                    reason: message.clone(),
+                }
+                .to_string(),
+                kept.clone(),
+            ),
+            (
+                ProviderError::RunLost {
+                    family: Family::Chat,
+                    reason: RunLostReason::Transport(message.clone()),
+                }
+                .to_string(),
+                format!("openai run lost: transport failure: {kept}"),
+            ),
+            (
+                ProviderError::RunLost {
+                    family: Family::Chat,
+                    reason: RunLostReason::Protocol(message.clone()),
+                }
+                .to_string(),
+                format!("openai run lost: invalid stream: {kept}"),
+            ),
+            (
+                ProviderError::RunLost {
+                    family: Family::Chat,
+                    reason: RunLostReason::Authority(message.as_str().into()),
+                }
+                .to_string(),
+                format!("openai run lost: the server acted beyond the host's authority: {kept}"),
+            ),
+        ];
+        for (text, expected) in rendered {
+            assert_eq!(text, expected, "message {message:?}");
+            assert!(!text.contains(['\r', '\n']), "{text:?}");
+        }
+    }
+}
+
+#[test]
+fn every_family_label_is_distinct_and_matches_its_wire_name() {
+    let mut seen = BTreeMap::new();
+    for family in ALL_FAMILIES {
+        let label = family_label(family);
+        assert!(
+            !label.is_empty() && label.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "{family:?}: {label:?}"
+        );
+        if let Some(other) = seen.insert(label, family) {
+            assert!(
+                matches!((other, family), (Family::Chat, Family::Responses)),
+                "{other:?} and {family:?} share the label {label}"
+            );
+        }
+        let wire = sonic_rs::to_string(&family).expect("a family serializes");
+        let wire = wire.trim_matches('"');
+        let expected = match family {
+            Family::Chat | Family::Responses => "openai",
+            Family::Codex => "codex",
+            _ => wire,
+        };
+        assert_eq!(label, expected, "{family:?} has wire name {wire}");
+    }
+    assert_eq!(seen.len(), ALL_FAMILIES.len() - 1);
+}
+
+#[test]
+fn a_synthetic_failure_passes_through_the_fold_exactly() {
+    let failures = [
+        InferFailure::Cancelled,
+        InferFailure::Overflow {
+            code: "context_length_exceeded".into(),
+            message: "too long".into(),
+        },
+        InferFailure::Retryable {
+            hint: Some(Duration::from_secs(5)),
+            message: "later".into(),
+        },
+        InferFailure::Retryable {
+            hint: None,
+            message: "again".into(),
+        },
+        InferFailure::Fatal {
+            message: "no".into(),
+            fix: Some("Run dalgon login p.".into()),
+        },
+        InferFailure::Fatal {
+            message: "no".into(),
+            fix: None,
+        },
+    ];
+    for failure in failures {
+        let error = ProviderError::Synthetic(failure.clone());
+        assert_eq!(error.to_string(), failure.to_string());
+        assert!(!error.retryable_by_loop(), "{failure:?}");
+        assert_eq!(InferFailure::from(error), failure);
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one constructor per public error variant keeps the sweep complete"
+)]
+fn every_variant() -> Vec<ProviderError> {
+    let family = Family::Responses;
+    let detail = || String::from("detail");
+    let path = || PathBuf::from("/data/auth.json");
+    vec![
+        ProviderError::Transport {
+            family,
+            reason: detail(),
+        },
+        ProviderError::Status {
+            family,
+            status: 500,
+            message: detail(),
+        },
+        ProviderError::InvalidRequest { message: detail() },
+        ProviderError::ContextOverflow {
+            family,
+            code: String::from("context_length_exceeded"),
+            message: detail(),
+        },
+        ProviderError::InvalidThinkingLevel { spelling: detail() },
+        ProviderError::RateLimited {
+            message: detail(),
+            retry_after: None,
+        },
+        ProviderError::RetryAfterTooLong {
+            seconds: 61,
+            message: detail(),
+        },
+        ProviderError::Quota { message: detail() },
+        ProviderError::Overloaded,
+        ProviderError::AuthRejected { provider: detail() },
+        ProviderError::SignInExpired { provider: detail() },
+        ProviderError::NoCredentials { provider: detail() },
+        ProviderError::StreamCut,
+        ProviderError::WsClosed { code: None },
+        ProviderError::Protocol {
+            family,
+            detail: detail(),
+        },
+        ProviderError::RunLost {
+            family,
+            reason: RunLostReason::ServerClosed,
+        },
+        ProviderError::Limit(LimitError::Body),
+        ProviderError::PlainHttp { host: detail() },
+        ProviderError::UnresolvedBlob {
+            blob_id: dal_core::BlobId::from_bytes(b"blob"),
+        },
+        ProviderError::ToolNameCollision {
+            wire: detail(),
+            first: detail(),
+            second: detail(),
+        },
+        ProviderError::CompactionMissing {
+            family,
+            noun: "item",
+        },
+        ProviderError::CompactionForeign {
+            bound_family: Family::Anthropic,
+            bound_model: detail(),
+            family,
+            model: detail(),
+        },
+        ProviderError::UsageLimit {
+            model: detail(),
+            message: detail(),
+        },
+        ProviderError::UsageNotIncluded { message: detail() },
+        ProviderError::ReserveUnavailable {
+            status: 404,
+            message: detail(),
+        },
+        ProviderError::UnknownModel {
+            reference: detail(),
+        },
+        ProviderError::AmbiguousModel {
+            id: detail(),
+            candidates: String::from("a/m, b/m"),
+        },
+        ProviderError::AuthFilePerms { path: path() },
+        ProviderError::AuthFileSymlink { path: path() },
+        ProviderError::AuthFileInvalid {
+            path: path(),
+            message: detail(),
+        },
+        ProviderError::AuthWrite { reason: detail() },
+        ProviderError::CallbackBind {
+            port: 7437,
+            reason: detail(),
+        },
+        ProviderError::StateMismatch,
+        ProviderError::LoginTimeout,
+        ProviderError::TokenExchange {
+            status: 400,
+            message: detail(),
+        },
+        ProviderError::DeviceCode {
+            status: 500,
+            message: detail(),
+        },
+        ProviderError::NoAccountId,
+        ProviderError::LoginCancelled,
+        ProviderError::Cancelled,
+        ProviderError::LoginInput { reason: detail() },
+        ProviderError::UsageCheck {
+            reason: UsageCheckReason::Timeout,
+        },
+        ProviderError::Script(ScriptError::Exhausted {
+            operation: Operation::Open,
+        }),
+        ProviderError::Synthetic(InferFailure::Cancelled),
+    ]
+}
+
+#[test]
+fn the_fold_retries_exactly_five_variants_and_keeps_every_fix() {
+    let variants = every_variant();
+    assert_eq!(
+        variants
+            .iter()
+            .map(mem::discriminant)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        43,
+        "every variant appears exactly once"
+    );
+    for error in variants {
+        let text = error.to_string();
+        assert!(!text.is_empty(), "{error:?}");
+        let fix = error.fix();
+        let by_loop = error.retryable_by_loop();
+        let transient = matches!(
+            &error,
+            ProviderError::RateLimited { .. }
+                | ProviderError::Overloaded
+                | ProviderError::StreamCut
+                | ProviderError::WsClosed { .. }
+                | ProviderError::Transport { .. }
+        );
+        let overflow = matches!(&error, ProviderError::ContextOverflow { .. });
+        let synthetic = matches!(&error, ProviderError::Synthetic(_));
+        let debug = format!("{error:?}");
+        let failure = InferFailure::from(error);
+        match &failure {
+            InferFailure::Overflow { message, .. } => {
+                assert!(overflow, "{debug} folded to Overflow");
+                assert_eq!(**message, *text, "{debug}");
+            }
+            InferFailure::Retryable { message, .. } => {
+                assert!(transient, "{debug} folded to Retryable");
+                assert_eq!(**message, *text, "{debug}");
+            }
+            InferFailure::Fatal {
+                message,
+                fix: folded,
+            } => {
+                assert!(
+                    !overflow && !transient,
+                    "{debug} folded to Fatal, but it is transient or an overflow"
+                );
+                if synthetic {
+                    continue;
+                }
+                assert_eq!(**message, *text, "{debug}");
+                assert_eq!(folded.as_deref(), fix.as_deref(), "{debug}");
+            }
+            other => assert!(synthetic, "{debug} folded to {other:?}"),
+        }
+        if overflow {
+            assert!(matches!(failure, InferFailure::Overflow { .. }), "{debug}");
+        }
+        if transient {
+            assert!(
+                matches!(failure, InferFailure::Retryable { .. }),
+                "{debug} must fold to Retryable"
+            );
+        }
+        if by_loop {
+            assert!(transient, "{debug} is replayable but not transient");
+        }
+    }
 }

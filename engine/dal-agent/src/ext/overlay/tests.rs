@@ -81,6 +81,7 @@ fn model() -> ModelInfo {
     ModelInfo {
         route: ModelRoute::from_id("acme/test"),
         name: "test-model".into(),
+        provider: "".into(),
         caps: Caps {
             context_window: Some(8192),
             thinking: Box::default(),
@@ -701,6 +702,170 @@ fn mcp_grant_detail_redacts_url_and_argv_credentials() {
             "the grant detail leaks {leaked}: {detail}"
         );
     }
+}
+
+fn notes_extension() -> crate::ext::Extension {
+    ExtensionBuilder::new("notes", "1.0.0", ServiceSet::EMPTY)
+        .unwrap()
+        .with_origin(Origin::User, None)
+        .skill(SkillRecord {
+            name: name("memo"),
+            description: "Notes".into(),
+            body: "Take notes".into(),
+            letter2image: false,
+            mcp: None,
+        })
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn an_allowlist_hides_and_blocks_every_tool_outside_it() {
+    let generation = generation(vec![
+        extension("core", &["native", "other_native"]),
+        extension("battery", &[]),
+    ]);
+    let overlay = Overlay::default();
+    overlay
+        .stage(
+            &generation,
+            &name("battery"),
+            vec![
+                (stub("mcp_web"), Visibility::Model),
+                (stub("mcp_docs"), Visibility::Model),
+            ],
+        )
+        .unwrap();
+    let turn = overlay.publish(&generation, Arc::new(BTreeSet::new()));
+    let narrowed = turn.clone().restricted_to(Some(Arc::new(BTreeSet::from([
+        name("native"),
+        name("mcp_web"),
+    ]))));
+    assert_eq!(
+        listed(&generation, &narrowed),
+        ["mcp_web", "native"],
+        "the model sees only allowed tools"
+    );
+    assert!(narrowed.tool(&generation, &name("native")).is_some());
+    assert!(narrowed.tool(&generation, &name("mcp_web")).is_some());
+    assert!(
+        narrowed.tool(&generation, &name("other_native")).is_none(),
+        "a generation tool outside the allowlist cannot be called"
+    );
+    assert!(
+        narrowed.tool(&generation, &name("mcp_docs")).is_none(),
+        "an overlay tool outside the allowlist cannot be called"
+    );
+    assert!(
+        narrowed.owner(&name("mcp_docs")).is_none(),
+        "a filtered overlay entry has no owner"
+    );
+    assert_eq!(narrowed.entries().len(), 1);
+
+    let open = turn.restricted_to(None);
+    assert_eq!(
+        listed(&generation, &open),
+        ["mcp_docs", "mcp_web", "native", "other_native"],
+        "no allowlist leaves every tool visible"
+    );
+    assert!(open.tool(&generation, &name("other_native")).is_some());
+}
+
+#[test]
+fn staging_rejects_each_bad_mcp_declaration_with_its_own_reason() {
+    let generation = generation(vec![
+        extension("battery", &[]),
+        docs_extension("https://docs.example/mcp", ServiceSet::EMPTY),
+        notes_extension(),
+    ]);
+    let overlay = Overlay::default();
+    for (tool, declaring, reason) in [
+        ("docs", "docs", "missing server segment"),
+        ("docs.web", "docs", "missing remote tool segment"),
+        ("docs..list", "docs", "server name must be non-empty"),
+        ("dOcs.web.list", "docs", "skill name is invalid"),
+        (
+            "docs.web.list",
+            "ghost",
+            "declaring extension is not loaded",
+        ),
+        ("ghost.web.list", "docs", "declaring skill is not loaded"),
+        ("memo.web.list", "notes", "skill has no MCP servers"),
+        ("docs.ghost.list", "docs", "declared server is missing"),
+    ] {
+        let error = overlay
+            .stage(
+                &generation,
+                &name("battery"),
+                vec![(stub_declared(tool, Some(declaring)), Visibility::Deferred)],
+            )
+            .expect_err("a malformed or unloaded declaration is refused");
+        let ServiceError::McpToolDeclaration {
+            tool: rejected,
+            plugin,
+            reason: reported,
+            ..
+        } = error
+        else {
+            panic!("{tool}: expected McpToolDeclaration, got {error:?}");
+        };
+        assert_eq!(&*rejected, tool);
+        assert_eq!(&*plugin, declaring, "{tool}");
+        assert_eq!(reported, reason, "{tool}");
+    }
+    assert!(
+        overlay
+            .publish(&generation, Arc::new(BTreeSet::new()))
+            .entries()
+            .is_empty(),
+        "every refused declaration staged nothing"
+    );
+    overlay
+        .stage(
+            &generation,
+            &name("battery"),
+            vec![(
+                stub_declared("docs.web.list", Some("docs")),
+                Visibility::Deferred,
+            )],
+        )
+        .expect("the declared server stages");
+}
+
+#[test]
+fn a_mapped_tool_retires_when_its_declaration_changes_on_reload() {
+    let before = generation(vec![
+        extension("battery", &[]),
+        docs_extension("https://docs.example/mcp", ServiceSet::EMPTY),
+    ]);
+    let overlay = Overlay::default();
+    overlay
+        .stage(
+            &before,
+            &name("battery"),
+            vec![
+                (
+                    stub_declared("docs.web.list", Some("docs")),
+                    Visibility::Model,
+                ),
+                (stub("plain"), Visibility::Model),
+            ],
+        )
+        .unwrap();
+    let none = Arc::new(BTreeSet::new());
+    assert_eq!(
+        listed(&before, &overlay.publish(&before, Arc::clone(&none))),
+        ["docs.web.list", "plain"]
+    );
+    let changed = generation(vec![
+        extension("battery", &[]),
+        docs_extension("https://changed.example/mcp", ServiceSet::EMPTY),
+    ]);
+    assert_eq!(
+        listed(&changed, &overlay.publish(&changed, none)),
+        ["plain"],
+        "a changed MCP declaration retires its mapped tools and keeps the rest"
+    );
 }
 
 #[test]

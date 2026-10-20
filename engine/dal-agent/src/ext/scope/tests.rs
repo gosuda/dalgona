@@ -264,6 +264,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: dal_core::Family::Chat,
             model: "scripted".into(),
+            provider: None,
         },
         system: "".into(),
         tools: Arc::from(Vec::new()),
@@ -705,6 +706,108 @@ fn unit_price() -> super::PriceFn {
             tiers: Box::default(),
         })
     })
+}
+
+#[tokio::test]
+async fn a_request_budget_admits_exactly_its_count_and_refuses_the_next() {
+    let rig = rig_with(
+        Budget {
+            requests: Some(2),
+            ..Budget::default()
+        },
+        None,
+    );
+    let first = rig.scope.agent(start()).expect("the first request admits");
+    let second = rig
+        .scope
+        .agent(start())
+        .expect("the second request fills the budget");
+    assert!(
+        matches!(rig.scope.agent(start()), Err(ScopeError::Exhausted)),
+        "admission counts requests before they finish, so the third is refused"
+    );
+    drop((first, second));
+}
+
+/// Runs one measured inference (3 input and 2 output tokens) in a scope
+/// under `budget` and reports whether the scope then refuses new work.
+async fn exhausted_after_measured_inference(budget: Budget, price: Option<super::PriceFn>) -> bool {
+    let rig = rig_with(budget, price);
+    let handle = admitted_inference(&rig.scope, &rig).await;
+    finish_events(&rig.upstream);
+    timed(handle.result())
+        .await
+        .expect("the inference succeeds");
+    matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted))
+}
+
+#[tokio::test]
+async fn an_input_limit_equal_to_the_measured_usage_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        input_tokens: Some(limit),
+        ..Budget::default()
+    };
+    assert!(
+        exhausted_after_measured_inference(limited(3), None).await,
+        "3 measured input tokens reach a limit of 3"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(4), None).await,
+        "3 measured input tokens stay under a limit of 4"
+    );
+}
+
+#[tokio::test]
+async fn an_output_limit_equal_to_the_measured_usage_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        output_tokens: Some(limit),
+        ..Budget::default()
+    };
+    assert!(
+        exhausted_after_measured_inference(limited(2), None).await,
+        "2 measured output tokens reach a limit of 2"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(3), None).await,
+        "2 measured output tokens stay under a limit of 3"
+    );
+}
+
+#[tokio::test]
+async fn a_usd_limit_equal_to_the_priced_cost_exhausts_and_one_above_stays_open() {
+    let limited = |limit| Budget {
+        usd: Some(limit),
+        ..Budget::default()
+    };
+    // 3 input plus 2 output tokens at one USD per million tokens each.
+    assert!(
+        exhausted_after_measured_inference(limited(5e-6), Some(unit_price())).await,
+        "a cost of 5e-6 reaches a limit of 5e-6"
+    );
+    assert!(
+        !exhausted_after_measured_inference(limited(6e-6), Some(unit_price())).await,
+        "a cost of 5e-6 stays under a limit of 6e-6"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_wall_refuses_new_work_and_a_distant_one_does_not() {
+    let walled = |wall| Budget {
+        wall: Some(wall),
+        ..Budget::default()
+    };
+    let expired = rig_with(walled(Duration::from_millis(1)), None);
+    std::thread::sleep(Duration::from_millis(25));
+    assert!(
+        matches!(expired.scope.agent(start()), Err(ScopeError::Exhausted)),
+        "a scope past its wall refuses new work"
+    );
+    let distant = rig_with(walled(Duration::from_secs(3_600)), None);
+    let handle = distant
+        .scope
+        .agent(start())
+        .expect("a scope inside its wall admits");
+    drop(handle);
 }
 
 #[tokio::test]

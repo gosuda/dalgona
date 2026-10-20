@@ -349,7 +349,7 @@ fn unanswered_calls(context: &[ContextItem]) -> Vec<Vec<(&CallId, &str)>> {
 /// error result follows its assistant item at once, so the model can see the call
 /// was interrupted and re-issue it. A request with neither is borrowed unchanged.
 pub(crate) fn repair_pairing(request: &ModelRequest) -> Cow<'_, ModelRequest> {
-    let ModelRoute::Api { family, model } = &request.model else {
+    let ModelRoute::Api { family, model, .. } = &request.model else {
         return Cow::Borrowed(request);
     };
     let unanswered = unanswered_calls(&request.context);
@@ -414,6 +414,7 @@ fn azure_thinking<'a>(request: &ModelRequest, plan: &'a ThinkingPlan) -> Cow<'a,
     let ModelRoute::Api {
         family: Family::Chat,
         model,
+        ..
     } = &request.model
     else {
         return Cow::Borrowed(plan);
@@ -543,7 +544,7 @@ impl fmt::Debug for AzureWire {
 /// one URL segment, an unparsable base URL, or a body the family builder
 /// rejects; [`ProviderError::NoCredentials`] without a credential.
 pub(crate) fn build(input: &AzureRequest<'_>) -> Result<AzureWire, ProviderError> {
-    let ModelRoute::Api { family, model } = &input.request.model else {
+    let ModelRoute::Api { family, model, .. } = &input.request.model else {
         return Err(invalid("an Azure request needs an API model route"));
     };
     let key = match input.credential {
@@ -775,6 +776,7 @@ mod tests {
             model: ModelRoute::Api {
                 family,
                 model: model.into(),
+                provider: None,
             },
             system: "sys".into(),
             tools: Vec::<ModelToolSpec>::new().into(),

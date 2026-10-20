@@ -587,6 +587,7 @@ pub(crate) fn build_wire(input: &DroidRequest<'_>) -> Result<DroidWire, Provider
     let ModelRoute::Api {
         family: Family::Droid,
         model,
+        ..
     } = &input.request.model
     else {
         return Err(invalid("a Droid request needs a factory-droid model route"));
@@ -674,6 +675,7 @@ fn derived_request(input: &DroidRequest<'_>, family: Family) -> ModelRequest {
         model: ModelRoute::Api {
             family,
             model: Box::from(request.model.id()),
+            provider: None,
         },
         system: Arc::from(droid_system(&request.system)),
         tools: Arc::clone(&request.tools),

@@ -873,7 +873,17 @@ fn encode_model(
         ModelRoute::Api { model, .. } if model.is_empty() => {
             return Err(EncodeError::EmptyModel);
         }
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api {
+            provider: Some(provider),
+            ..
+        } if provider.is_empty() => {
+            return Err(EncodeError::EmptyProvider);
+        }
+        ModelRoute::Api {
+            family,
+            model,
+            provider,
+        } => {
             return encode_json(
                 &ModelWire {
                     r#type: "model",
@@ -882,6 +892,7 @@ fn encode_model(
                     at: TsWire(&entry.at),
                     api: *family,
                     model: model.as_ref(),
+                    provider: provider.as_deref(),
                 },
                 out,
             );

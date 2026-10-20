@@ -160,6 +160,10 @@ pub(super) struct ModelWire<'a> {
     pub(super) at: TsWire<'a>,
     pub(super) api: Family,
     pub(super) model: &'a str,
+    /// The configured provider id, written only when the route names one so
+    /// provider-less records keep their exact bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<&'a str>,
 }
 
 #[derive(Serialize)]

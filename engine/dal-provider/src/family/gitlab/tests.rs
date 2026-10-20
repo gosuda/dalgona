@@ -32,6 +32,7 @@ fn request(model: &str, context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GitLab,
             model: model.into(),
+            provider: None,
         },
         system: "Be terse.".into(),
         tools: vec![dal_core::ModelToolSpec {
@@ -127,6 +128,53 @@ fn route_table_maps_aliases_prefixes_and_default() {
 }
 
 #[test]
+fn anthropic_prefixes_include_their_trailing_dash() {
+    // The Anthropic route is a prefix match, so the prefix itself is on it,
+    // the bare family word one character short is not, and neither is a
+    // longer word, another family, another case, or a leading extra.
+    for (model, route) in [
+        ("claude-opus-", ProxyRoute::Anthropic),
+        ("claude-opus", ProxyRoute::Completions),
+        ("claude-opusx", ProxyRoute::Completions),
+        ("duo-chat-haiku-", ProxyRoute::Anthropic),
+        ("duo-chat-haiku", ProxyRoute::Completions),
+        ("claude-fable-5", ProxyRoute::Completions),
+        ("Claude-Opus-4", ProxyRoute::Completions),
+        ("xclaude-opus-4", ProxyRoute::Completions),
+    ] {
+        assert_eq!(proxy_route(model), route, "{model:?}");
+    }
+}
+
+#[test]
+fn responses_ids_match_exactly() {
+    // A Responses id is an exact match: a longer id that merely starts with
+    // it, a padded id, and another case all stay on chat completions.
+    for (model, route) in [
+        ("gpt-5.2-codex", ProxyRoute::Responses),
+        ("gpt-5.2-codex-mini", ProxyRoute::Completions),
+        ("gpt-5-codex ", ProxyRoute::Completions),
+        ("GPT-5-CODEX", ProxyRoute::Completions),
+    ] {
+        assert_eq!(proxy_route(model), route, "{model:?}");
+    }
+}
+
+#[test]
+fn aliases_rewrite_only_on_an_exact_match() {
+    // A near miss passes through untouched instead of reaching another
+    // alias's upstream id.
+    for id in [
+        "duo-chat-opus-4-6-x",
+        "duo-chat-opus-4",
+        "Duo-Chat-Opus-4-6",
+        " duo-chat-opus-4-6",
+    ] {
+        assert_eq!(upstream_model(id), id, "{id:?}");
+    }
+}
+
+#[test]
 fn anthropic_route_uses_the_oauth_wire_shape() {
     let request = request("duo-chat-sonnet-4-6", vec![user("hi")]);
     let thinking = enabled_plan();
@@ -217,7 +265,13 @@ fn completions_route_rejects_foreign_thinking_and_routes() {
         notices: Vec::new(),
     };
     let input = proxy_request(&request, &anthropic_thinking, &grant, SessionId::new_v7());
-    assert!(build_proxy(&input).is_err());
+    match build_proxy(&input) {
+        Err(ProviderError::InvalidRequest { message }) => {
+            assert!(message.contains("thinking plan"), "{message}");
+        }
+        Err(other) => panic!("a foreign thinking plan is an invalid request, got {other:?}"),
+        Ok(_) => panic!("a chat-completions route must refuse an Anthropic thinking plan"),
+    }
 }
 
 /// An assistant message the journal recorded for the alias route: the source
@@ -314,9 +368,37 @@ fn grant_parsing_validates_token_and_headers() {
         grant.headers,
         vec![(String::from("x-a"), String::from("b"))]
     );
-    assert!(parse_direct_access(br#"{"headers":{}}"#).is_err());
-    assert!(parse_direct_access(br#"{"token":"t","headers":{"x-a":1}}"#).is_err());
-    assert!(parse_direct_access(br"not json").is_err());
+    // The edges of the accepted shape: an empty header object is a grant, and
+    // members the grant does not use are ignored.
+    let bare = parse_direct_access(br#"{"token":"t","headers":{},"expires_at":1}"#).unwrap();
+    assert_eq!(bare.token.as_ref(), "t");
+    assert_eq!(bare.headers, Vec::<(String, String)>::new());
+    // Every malformed shape is the one named refusal, never a bearer built
+    // from an empty token or a header from a non-string value.
+    let malformed: [&[u8]; 11] = [
+        br#"{"headers":{}}"#,
+        br#"{"token":"","headers":{}}"#,
+        br#"{"token":5,"headers":{}}"#,
+        br#"{"token":"t"}"#,
+        br#"{"token":"t","headers":null}"#,
+        br#"{"token":"t","headers":[]}"#,
+        br#"{"token":"t","headers":{"x-a":1}}"#,
+        br#"{"token":"t","headers":{"x-a":null}}"#,
+        br"not json",
+        br"",
+        br"[]",
+    ];
+    for body in malformed {
+        match parse_direct_access(body) {
+            Err(ProviderError::InvalidRequest { message }) => assert!(
+                message.contains("direct access"),
+                "{message} for {}",
+                String::from_utf8_lossy(body)
+            ),
+            Err(other) => panic!("{other:?} for {}", String::from_utf8_lossy(body)),
+            Ok(_) => panic!("accepted {}", String::from_utf8_lossy(body)),
+        }
+    }
 }
 
 #[test]

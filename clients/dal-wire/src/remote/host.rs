@@ -168,26 +168,7 @@ impl RemoteHost {
     /// Returns [`WireError`] when the call fails or a row does not decode.
     pub async fn models(&self) -> Result<Vec<RemoteModel>, WireError> {
         let result = self.shared.call("models/list", sonic_rs::json!({})).await?;
-        rows(&result, "models")?
-            .iter()
-            .map(|row| {
-                let context_window = match row.get("contextWindow") {
-                    None => None,
-                    Some(value) => Some(
-                        value
-                            .as_u64()
-                            .and_then(|window| u32::try_from(window).ok())
-                            .ok_or_else(|| malformed("contextWindow"))?,
-                    ),
-                };
-                Ok(RemoteModel {
-                    id: string(row, "id")?.to_owned(),
-                    provider: string(row, "provider")?.to_owned(),
-                    name: string(row, "name")?.to_owned(),
-                    context_window,
-                })
-            })
-            .collect()
+        rows(&result, "models")?.iter().map(model_row).collect()
     }
 
     /// Reads every provider's sign-in state through `auth/status`.
@@ -413,10 +394,206 @@ impl Drop for RemoteHostSubscription {
     }
 }
 
+/// Decodes one `models/list` row.
+///
+/// `route` and `reference` are additive members: an absent member means the
+/// server predates it and the row decodes with `None`, which keeps the row
+/// usable under the old selection rules. A member that is present but of the
+/// wrong shape (`null`, a non-string reference, a route that does not decode)
+/// is refused, never read as absent.
+fn model_row(row: &Value) -> Result<RemoteModel, WireError> {
+    let context_window = match row.get("contextWindow") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|window| u32::try_from(window).ok())
+                .ok_or_else(|| malformed("contextWindow"))?,
+        ),
+    };
+    let route = match row.get("route") {
+        None => None,
+        Some(value) => Some(decode::<ModelRoute>(value, "route")?),
+    };
+    let reference = match row.get("reference") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| malformed("reference"))?
+                .to_owned(),
+        ),
+    };
+    Ok(RemoteModel {
+        id: string(row, "id")?.to_owned(),
+        provider: string(row, "provider")?.to_owned(),
+        name: string(row, "name")?.to_owned(),
+        context_window,
+        route,
+        reference,
+    })
+}
+
 /// Reads one required array member.
 fn rows<'a>(result: &'a Value, name: &str) -> Result<&'a sonic_rs::Array, WireError> {
     result
         .get(name)
         .and_then(|value| value.as_array())
         .ok_or_else(|| malformed(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use dal_core::{Family, ModelRoute};
+    use sonic_rs::Value;
+
+    use super::model_row;
+    use crate::error::WireError;
+    use crate::remote::RemoteModel;
+
+    /// A `models/list` row with the legacy members and `members` appended.
+    fn row(members: &str) -> Value {
+        let text = format!(
+            r#"{{"id":"gpt-4o","provider":"openai","name":"GPT-4o","contextWindow":128000{members}}}"#
+        );
+        sonic_rs::from_str(&text).expect("row json")
+    }
+
+    fn legacy(route: Option<ModelRoute>, reference: Option<&str>) -> RemoteModel {
+        RemoteModel {
+            id: "gpt-4o".into(),
+            provider: "openai".into(),
+            name: "GPT-4o".into(),
+            context_window: Some(128_000),
+            route,
+            reference: reference.map(str::to_owned),
+        }
+    }
+
+    /// Asserts that `members` makes the row a refused `-32700` protocol error
+    /// naming `what`.
+    #[track_caller]
+    fn refused(members: &str, what: &str) {
+        match model_row(&row(members)) {
+            Err(WireError::Protocol {
+                code: -32700,
+                message,
+            }) => assert!(
+                message.starts_with(&format!("remote frame has an invalid {what}")),
+                "{members}: {message}"
+            ),
+            other => panic!("{members} must be refused as an invalid {what}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_from_a_server_that_predates_routes_decodes_without_them() {
+        let decoded = model_row(&row("")).expect("an old row decodes");
+        assert_eq!(decoded, legacy(None, None));
+    }
+
+    #[test]
+    fn a_current_row_decodes_its_route_and_reference() {
+        let members = concat!(
+            r#","route":{"kind":"api","family":"openai_responses","#,
+            r#""model":"gpt-4o","provider":"openrouter"},"reference":"openrouter/gpt-4o""#,
+        );
+        let route = ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: Some("openrouter".into()),
+        };
+        assert_eq!(
+            model_row(&row(members)).expect("a current row decodes"),
+            legacy(Some(route), Some("openrouter/gpt-4o"))
+        );
+        let synthetic = r#","route":{"kind":"synthetic","id":"acme/fast"},"reference":"acme/fast""#;
+        assert_eq!(
+            model_row(&row(synthetic)).expect("a synthetic row decodes"),
+            legacy(
+                Some(ModelRoute::Synthetic {
+                    id: "acme/fast".into(),
+                }),
+                Some("acme/fast"),
+            )
+        );
+    }
+
+    #[test]
+    fn a_route_that_names_no_provider_decodes_without_one() {
+        let members = r#","route":{"kind":"api","family":"openai_chat","model":"gpt-4o"}"#;
+        let route = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: None,
+        };
+        assert_eq!(
+            model_row(&row(members)).expect("a provider-less route decodes"),
+            legacy(Some(route), None)
+        );
+    }
+
+    #[test]
+    fn each_additive_member_decodes_without_the_other() {
+        let route = r#","route":{"kind":"harness","id":"dalgon/normal"}"#;
+        assert_eq!(
+            model_row(&row(route)).expect("a route alone decodes"),
+            legacy(
+                Some(ModelRoute::Harness {
+                    id: "dalgon/normal".into(),
+                }),
+                None,
+            )
+        );
+        assert_eq!(
+            model_row(&row(r#","reference":"openai/gpt-4o""#)).expect("a reference decodes"),
+            legacy(None, Some("openai/gpt-4o"))
+        );
+    }
+
+    #[test]
+    fn a_present_route_that_does_not_decode_is_refused_not_read_as_absent() {
+        let bad = [
+            "null",
+            r#""openai/gpt-4o""#,
+            "7",
+            "{}",
+            r#"{"kind":"mystery","id":"acme/fast"}"#,
+            r#"{"kind":"api","family":"openai_chat"}"#,
+            r#"{"kind":"api","family":"no_such_family","model":"gpt-4o"}"#,
+            r#"{"kind":"api","family":"openai_chat","model":"gpt-4o","provider":""}"#,
+            r#"{"kind":"api","family":"openai_chat","model":"gpt-4o","provider":7}"#,
+            r#"{"kind":"synthetic","id":"NotValid"}"#,
+            r#"{"kind":"harness","id":"dalgon/other"}"#,
+        ];
+        for route in bad {
+            refused(&format!(r#","route":{route}"#), "route");
+        }
+    }
+
+    #[test]
+    fn a_present_reference_that_is_not_a_string_is_refused_not_read_as_absent() {
+        for reference in ["null", "7", "true", r#"["openai/gpt-4o"]"#, r#"{"a":1}"#] {
+            refused(&format!(r#","reference":{reference}"#), "reference");
+        }
+    }
+
+    #[test]
+    fn the_legacy_members_stay_required() {
+        for (text, what) in [
+            (r#"{"provider":"openai","name":"GPT-4o"}"#, "id"),
+            (r#"{"id":"gpt-4o","name":"GPT-4o"}"#, "provider"),
+            (r#"{"id":"gpt-4o","provider":"openai"}"#, "name"),
+        ] {
+            let value: Value = sonic_rs::from_str(text).expect("row json");
+            assert!(
+                matches!(
+                    model_row(&value),
+                    Err(WireError::Protocol { message, .. })
+                        if message == format!("remote frame has an invalid {what}")
+                ),
+                "{text} is refused as an invalid {what}"
+            );
+        }
+    }
 }

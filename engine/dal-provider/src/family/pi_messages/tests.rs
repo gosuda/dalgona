@@ -29,6 +29,7 @@ fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest
         model: ModelRoute::Api {
             family: Family::PiMessages,
             model: "balanced".into(),
+            provider: None,
         },
         system: "You are a helpful assistant.".into(),
         tools: tools.into(),
@@ -551,4 +552,94 @@ fn different_model_replay_is_omitted_while_content_survives() {
     assert!(!text.contains("thinkingSignature"));
     assert!(text.contains(r#""model":"cheap""#));
     assert!(text.contains(r#""api":"pi-messages""#));
+}
+
+#[test]
+fn done_reasons_map_to_stop_reasons_and_open_calls_promote_a_plain_stop() {
+    let call = [
+        r#"{"type":"toolcall_start","contentIndex":0,"id":"c","toolName":"read"}"#,
+        r#"{"type":"toolcall_delta","contentIndex":0,"delta":"{}"}"#,
+    ];
+    let stop_of = |reason: Option<&str>, with_call: bool| {
+        let done = match reason {
+            Some(reason) => {
+                format!(r#"{{"type":"done","reason":"{reason}","usage":{{"input":1,"output":1}}}}"#)
+            }
+            None => String::from(r#"{"type":"done","usage":{"input":1,"output":1}}"#),
+        };
+        let mut datas: Vec<&str> = Vec::new();
+        if with_call {
+            datas.extend(call);
+        }
+        datas.push(done.as_str());
+        let (events, error) = run(&datas);
+        assert!(error.is_none(), "{reason:?}: {error:?}");
+        match events.last() {
+            Some(StreamEvent::Stop { reason }) => reason.clone(),
+            other => panic!("{reason:?}: the last event is not a stop: {other:?}"),
+        }
+    };
+    for (reason, with_call, expected) in [
+        (Some("stop"), false, StopReason::EndTurn),
+        (None, false, StopReason::EndTurn),
+        // A plain stop that carries a call is a tool turn.
+        (Some("stop"), true, StopReason::ToolUse),
+        (None, true, StopReason::ToolUse),
+        (Some("toolUse"), true, StopReason::ToolUse),
+        (Some("length"), false, StopReason::MaxTokens),
+        (Some("length"), true, StopReason::MaxTokens),
+        // Anything the decoder has no name for is kept as written.
+        (
+            Some("content_filter"),
+            false,
+            StopReason::Other("content_filter".into()),
+        ),
+        (Some("STOP"), false, StopReason::Other("STOP".into())),
+        (Some("stop "), true, StopReason::Other("stop ".into())),
+    ] {
+        assert_eq!(
+            stop_of(reason, with_call),
+            expected,
+            "{reason:?} {with_call}"
+        );
+    }
+}
+
+#[test]
+fn hostile_usage_counters_saturate_instead_of_wrapping_or_underflowing() {
+    let usage_of = |counters: &str| {
+        let done = format!(r#"{{"type":"done","reason":"stop","usage":{counters}}}"#);
+        let (events, error) = run(&[done.as_str()]);
+        assert!(error.is_none(), "{counters}: {error:?}");
+        events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .expect("a finished response carries one usage")
+    };
+    // The three input counters sum past the largest count: it sticks there.
+    let overflow = usage_of(
+        r#"{"input":18446744073709551615,"cacheRead":5,"cacheWrite":7,"output":3,"reasoning":9}"#,
+    );
+    assert_eq!(overflow.input_tokens, u64::MAX);
+    assert_eq!(overflow.cached_input_tokens, 5);
+    assert_eq!(overflow.cache_write_tokens, 7);
+    // Reasoning above, at, and one below the output count.
+    for (output, reasoning, expected) in [(3_u64, 9_u64, 0_u64), (9, 9, 0), (10, 9, 1)] {
+        let usage = usage_of(&format!(
+            r#"{{"input":1,"output":{output},"reasoning":{reasoning}}}"#
+        ));
+        assert_eq!(
+            (usage.output_tokens, usage.reasoning_tokens),
+            (expected, Some(reasoning)),
+            "output {output}, reasoning {reasoning}"
+        );
+    }
+    // A negative cost is no measurement.
+    assert_eq!(
+        usage_of(r#"{"input":1,"output":1,"cost":{"total":-0.5}}"#).cost_usd,
+        None
+    );
 }
