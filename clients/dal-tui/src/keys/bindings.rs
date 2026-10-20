@@ -94,10 +94,40 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Dialog,
+        action: Action::DialogFocusRight,
+        label: "Next action",
+        default: key(KeyCode::Tab, NONE),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Dialog,
         action: Action::DialogActivate,
         label: "Activate action",
         default: key(KeyCode::Enter, NONE),
         legacy: Some(key(KeyCode::Enter, NONE)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogFocusLeft,
+        label: "Previous action",
+        // Legacy Shift+Tab arrives as CSI Z (BackTab); kitty CSI-u 9;2u
+        // arrives as Tab + SHIFT.
+        default: key(KeyCode::BackTab, NONE),
+        legacy: Some(key(KeyCode::Tab, SHIFT)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogScrollUp,
+        label: "Scroll up",
+        default: key(KeyCode::PageUp, NONE),
+        legacy: Some(key(KeyCode::PageUp, NONE)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogScrollDown,
+        label: "Scroll down",
+        default: key(KeyCode::PageDown, NONE),
+        legacy: Some(key(KeyCode::PageDown, NONE)),
     },
     Binding {
         owner: Owner::Picker,

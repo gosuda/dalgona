@@ -325,7 +325,10 @@ pub struct DialogUi {
     text_mode: bool,
     expanded: bool,
     scroll: usize,
-    empty_hint: bool,
+    /// Focused answer verb on a button dialog (approval, grant, confirm).
+    /// `None` until the kind is known so the conservative verb takes focus:
+    /// deny for approvals and grants, no for confirmations.
+    action_focus: Option<usize>,
     active_id: Option<String>,
     arming: Arming,
     /// When the shown request arrived; the countdown starts here.
@@ -410,7 +413,6 @@ impl DialogUi {
         let live = self.armed() && !self.queue.keys_disabled();
         if live && accepts_text {
             self.input.push_str(&String::from_utf8_lossy(bytes));
-            self.empty_hint = false;
         }
     }
 
@@ -431,11 +433,12 @@ impl DialogUi {
         }
         let id = request.id;
         let control_shortcut = key.modifiers == KeyModifiers::CONTROL
-            && matches!(
-                (&request.question, key.code),
-                (Question::Select { .. }, KeyCode::Char('o'))
-                    | (Question::Text { .. }, KeyCode::Char('j'))
-            );
+            && match (&request.question, key.code) {
+                (Question::Select { .. }, KeyCode::Char('o')) => true,
+                (Question::Select { .. }, KeyCode::Char('j')) => self.text_mode,
+                (Question::Text { .. }, KeyCode::Char('j')) => true,
+                _ => false,
+            };
         if key.modifiers != KeyModifiers::NONE
             && key.modifiers != KeyModifiers::SHIFT
             && !control_shortcut
@@ -446,6 +449,39 @@ impl DialogUi {
         let answer = self.question_answer(&question, key);
         let answer = answer?;
         self.queue.mark_answered(id).then_some((id, answer))
+    }
+
+    /// Normalizes a key for the binding table: an uppercase ASCII letter
+    /// resolves as the unmodified letter so `Y` answers like `y`, whether the
+    /// terminal reports Shift (kitty) or only the uppercase character (the
+    /// legacy decoder, or Caps Lock); Shift+Tab arriving as kitty `BackTab`
+    /// resolves like the legacy unmodified `CSI Z`, and the dialog owner
+    /// alone sees the key.
+    fn resolve(&self, key: crate::keys::Key) -> Option<crate::keys::Action> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if let KeyCode::Char(ch) = key.code
+            && ch.is_ascii_uppercase()
+            && (key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE)
+        {
+            let plain =
+                crate::keys::Key::new(KeyCode::Char(ch.to_ascii_lowercase()), KeyModifiers::NONE);
+            return crate::keys::resolve_in(plain, false, &[crate::keys::Owner::Dialog]);
+        }
+        if key.code == KeyCode::BackTab {
+            let plain = crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::NONE);
+            return crate::keys::resolve_in(plain, false, &[crate::keys::Owner::Dialog]);
+        }
+        crate::keys::resolve_in(key, false, &[crate::keys::Owner::Dialog])
+    }
+
+    /// Focus moves one step on a button row, wrapping in both directions.
+    fn move_focus(&mut self, count: usize, forward: bool) {
+        let focused = self.action_focus.unwrap_or(0);
+        self.action_focus = Some(if forward {
+            (focused + 1) % count
+        } else {
+            (focused + count - 1) % count
+        });
     }
 
     /// One key on the free-text row of a `text` question. Enter submits; a
@@ -493,9 +529,10 @@ impl DialogUi {
                 crate::composer::pop_grapheme(&mut self.input);
                 FreeText::Editing
             }
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && !ch.is_control() =>
+            {
                 self.input.push(ch);
-                self.empty_hint = false;
                 FreeText::Editing
             }
             _ => FreeText::Ignored,
@@ -504,93 +541,160 @@ impl DialogUi {
 
     /// Maps one key to an answer for the shown question kind, mutating only
     /// dialog-local focus, checked set, scroll, and input buffer.
+    ///
+    /// Esc is matched by key code first because the table's Esc row is the
+    /// approval `n deny` alias: the same physical key declines an approval
+    /// but dismisses an ask. Every other bound key resolves through the
+    /// dialog owner of the binding table, so the documented Left, Right,
+    /// Tab, Shift+Tab, and Enter-activate paths reach every kind with a
+    /// focusable row.
     fn question_answer(&mut self, question: &Question, key: crate::keys::Key) -> Option<Answer> {
+        use crate::keys::Action;
         use crossterm::event::{KeyCode, KeyModifiers};
         match question {
-            Question::Approval { .. } | Question::Grant { .. } => match key.code {
-                KeyCode::Char('y' | 'Y') => Some(Answer::Approve),
-                KeyCode::Char('a' | 'A') => Some(Answer::ApproveForSession),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(Answer::Decline),
-                KeyCode::Char('v' | 'V') => {
-                    self.expanded = !self.expanded;
-                    None
+            Question::Approval { .. } | Question::Grant { .. } => {
+                const VERBS: usize = 3; // allow once, allow session, deny
+                if key.code == KeyCode::Esc {
+                    return Some(Answer::Decline);
                 }
-                KeyCode::PageDown => {
-                    self.scroll = self.scroll.saturating_add(1);
-                    None
-                }
-                KeyCode::PageUp => {
-                    self.scroll = self.scroll.saturating_sub(1);
-                    None
-                }
-                _ => None,
-            },
-            Question::Select { options, multi, .. } => {
-                if self.text_mode {
-                    return self.other_row_key(key);
-                }
-                // Focus reaches every offered option plus the always-present
-                // Other row; arrows and tab move with wrap.
-                let rows = options.len() + 1;
-                match key.code {
-                    KeyCode::Esc => Some(Answer::Cancel),
-                    KeyCode::Up => {
-                        self.focused = (self.focused + rows - 1) % rows;
-                        None
-                    }
-                    KeyCode::Down | KeyCode::Tab => {
-                        self.focused = (self.focused + 1) % rows;
-                        None
-                    }
-                    KeyCode::Char(' ') if *multi && self.focused < options.len() => {
-                        if !self.checked.insert(self.focused) {
-                            self.checked.remove(&self.focused);
-                        }
-                        None
-                    }
-                    KeyCode::Char(' ') if self.focused < options.len() => options
-                        .get(self.focused)
-                        .map(|option| select_single(&option.label)),
-                    KeyCode::Enter if self.focused == options.len() => {
-                        // The Other escape opens the in-dialog text row.
-                        self.text_mode = true;
-                        None
-                    }
-                    KeyCode::Enter if *multi => {
-                        let labels: Vec<&str> = self
-                            .checked
-                            .iter()
-                            .filter_map(|index| options.get(*index))
-                            .map(|option| option.label.as_ref())
-                            .collect();
-                        Some(select_multi(&labels))
-                    }
-                    KeyCode::Enter => options
-                        .get(self.focused)
-                        .map(|option| select_single(&option.label)),
-                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.action_focus.get_or_insert(VERBS - 1);
+                match self.resolve(key) {
+                    Some(Action::ApprovalAllowOnce) => Some(Answer::Approve),
+                    Some(Action::ApprovalAllowSession) => Some(Answer::ApproveForSession),
+                    Some(Action::ApprovalDeny) => Some(Answer::Decline),
+                    Some(Action::ApprovalView) => {
                         self.expanded = !self.expanded;
                         None
                     }
-                    KeyCode::PageDown => {
-                        self.expanded = true;
+                    Some(Action::DialogFocusLeft) | Some(Action::AskMoveUp) => {
+                        self.move_focus(VERBS, false);
+                        None
+                    }
+                    Some(Action::DialogFocusRight) | Some(Action::AskMoveDown) => {
+                        self.move_focus(VERBS, true);
+                        None
+                    }
+                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => {
+                        Some(match self.action_focus.unwrap_or(VERBS - 1) {
+                            0 => Answer::Approve,
+                            1 => Answer::ApproveForSession,
+                            _ => Answer::Decline,
+                        })
+                    }
+                    Some(Action::DialogScrollDown) => {
                         self.scroll = self.scroll.saturating_add(1);
                         None
                     }
-                    KeyCode::PageUp => {
+                    Some(Action::DialogScrollUp) => {
                         self.scroll = self.scroll.saturating_sub(1);
                         None
                     }
                     _ => None,
                 }
             }
+            Question::Select { options, multi, .. } => {
+                if self.text_mode {
+                    return self.other_row_key(key);
+                }
+                // Focus reaches every offered option plus the always-present
+                // Other row; arrows and tab move with wrap in both
+                // directions through the binding table.
+                let rows = options.len() + 1;
+                if key.code == KeyCode::Esc {
+                    return Some(Answer::Cancel);
+                }
+                match self.resolve(key) {
+                    Some(Action::AskMoveUp) | Some(Action::DialogFocusLeft) => {
+                        self.focused = (self.focused + rows - 1) % rows;
+                        None
+                    }
+                    Some(Action::AskMoveDown) | Some(Action::DialogFocusRight) => {
+                        self.focused = (self.focused + 1) % rows;
+                        None
+                    }
+                    Some(Action::AskToggle) if self.focused < options.len() => {
+                        if *multi {
+                            if !self.checked.insert(self.focused) {
+                                self.checked.remove(&self.focused);
+                            }
+                            None
+                        } else {
+                            options
+                                .get(self.focused)
+                                .map(|option| select_single(&option.label))
+                        }
+                    }
+                    Some(Action::AskSubmit) | Some(Action::DialogActivate)
+                        if self.focused == options.len() =>
+                    {
+                        // The Other escape opens the in-dialog text row.
+                        self.text_mode = true;
+                        None
+                    }
+                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => {
+                        if *multi {
+                            let labels: Vec<&str> = self
+                                .checked
+                                .iter()
+                                .filter_map(|index| options.get(*index))
+                                .map(|option| option.label.as_ref())
+                                .collect();
+                            Some(select_multi(&labels))
+                        } else {
+                            options
+                                .get(self.focused)
+                                .map(|option| select_single(&option.label))
+                        }
+                    }
+                    Some(Action::DialogScrollDown) => {
+                        self.expanded = true;
+                        self.scroll = self.scroll.saturating_add(1);
+                        None
+                    }
+                    Some(Action::DialogScrollUp) => {
+                        self.scroll = self.scroll.saturating_sub(1);
+                        None
+                    }
+                    _ => {
+                        // Ctrl+O toggles the preview; it is a CONTROL
+                        // shortcut outside the plain-key table.
+                        if key.code == KeyCode::Char('o')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            self.expanded = !self.expanded;
+                        }
+                        None
+                    }
+                }
+            }
             Question::Text { .. } => self.text_row_key(key),
-            Question::Confirm { .. } => match key.code {
-                KeyCode::Char('y' | 'Y') => Some(confirm_answer('y')),
-                KeyCode::Char('n' | 'N') => Some(confirm_answer('n')),
-                KeyCode::Esc => Some(Answer::Cancel),
-                _ => None,
-            },
+            Question::Confirm { .. } => {
+                if key.code == KeyCode::Esc {
+                    return Some(Answer::Cancel);
+                }
+                const VERBS: usize = 2; // yes, no
+                self.action_focus.get_or_insert(VERBS - 1);
+                match self.resolve(key) {
+                    Some(Action::ApprovalAllowOnce) => Some(confirm_answer('y')),
+                    Some(Action::ApprovalDeny) => Some(confirm_answer('n')),
+                    Some(Action::DialogFocusLeft) | Some(Action::AskMoveUp) => {
+                        self.move_focus(VERBS, false);
+                        None
+                    }
+                    Some(Action::DialogFocusRight) | Some(Action::AskMoveDown) => {
+                        self.move_focus(VERBS, true);
+                        None
+                    }
+                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => Some(confirm_answer(
+                        if self.action_focus.unwrap_or(VERBS - 1) == 0 {
+                            'y'
+                        } else {
+                            'n'
+                        },
+                    )),
+                    _ => None,
+                }
+            }
             _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
         }
     }
@@ -604,12 +708,16 @@ impl DialogUi {
             mode,
             DiagramSettings::default(),
             &RenderCache::default(),
+            true,
         )
         .into_iter()
         .map(|row| row.text)
         .collect()
     }
 
+    /// `kitty` is the terminal's keyboard encoding: hints name shift+enter
+    /// when it is active and ctrl+j otherwise, matching what each terminal
+    /// actually delivers.
     pub(crate) fn rendered_rows(
         &self,
         width: usize,
@@ -617,6 +725,7 @@ impl DialogUi {
         mode: crate::WidthMode,
         settings: DiagramSettings,
         cache: &RenderCache,
+        kitty: bool,
     ) -> Vec<RenderRow> {
         let Some((request, waiting)) = self.queue.shown() else {
             return Vec::new();
@@ -624,7 +733,16 @@ impl DialogUi {
         let mut title = dialog_title(&request.question);
         if waiting > 0 {
             use std::fmt::Write as _;
-            let _ = write!(title, " · {waiting} more waiting");
+            let count = u64::try_from(waiting).unwrap_or(u64::MAX);
+            let _ = write!(
+                title,
+                " · {}",
+                crate::copy::render(
+                    crate::copy::ids::REQUEST_MORE,
+                    &[("n", &count.to_string())],
+                    count,
+                )
+            );
         }
         // The countdown slot at the 1 s cadence the frame loop drives; the
         // dialog never dismisses itself, resolution closes it. A question
@@ -643,12 +761,41 @@ impl DialogUi {
             })
             .collect::<Vec<_>>();
         rows.truncate(height.saturating_sub(2).max(1));
-        let (mut body, pinned) = self.body_parts(&request.question, width, mode, settings, cache);
-        let actions = self.actions(&request.question);
+        let (mut body, mut pinned) =
+            self.body_parts(&request.question, width, mode, settings, cache);
+        let actions_row = self.actions_row(&request.question, kitty, width, mode);
         let visible = height.saturating_sub(rows.len() + 1).max(1);
         // Pinned rows (the choices of a selection) stay on screen; only the
-        // rows above them scroll.
-        let room = visible.saturating_sub(pinned.len()).max(1);
+        // rows above them scroll. A select with more choices than rows
+        // keeps a window centered on the focused choice; the last pinned
+        // row is the always-present Other action, so it is popped before
+        // the window and restored after, never counted off-screen.
+        let mut other = pinned.pop();
+        // One slot for the Other row, and one for the scrollable body when
+        // it has rows (a preview or the open Other text row), come off the
+        // option window's budget. A select with neither has no body to
+        // reserve for, so its choices take every row left.
+        let body_slot = usize::from(!body.is_empty());
+        if self.text_mode && visible == 1 {
+            // The typed text is what the user acts on: with one row left it
+            // keeps that row, not the Other label.
+            other = None;
+        }
+        let mut option_cap = visible.saturating_sub(usize::from(other.is_some()) + body_slot);
+        if option_cap == 0 && self.focused < pinned.len() {
+            // No row is left for a choice. Enter answers the focused one, so
+            // it takes Other's row rather than painting nowhere; Other
+            // paints again as soon as focus reaches it.
+            other = None;
+            option_cap = 1;
+        }
+        let mut pinned = window_pinned(pinned, self.focused, option_cap);
+        if let Some(other) = other {
+            pinned.push(other);
+        }
+        // Pinned rows outrank the body: with no row left over, the preview
+        // paints none rather than pushing the block past its height.
+        let room = visible.saturating_sub(pinned.len());
         let hidden = body.len().saturating_sub(room);
         let scroll = if self.expanded {
             self.scroll.min(hidden)
@@ -658,14 +805,19 @@ impl DialogUi {
         if hidden > 0 && !self.expanded {
             let shown = room.saturating_sub(1);
             body.truncate(shown);
+            let count = u64::try_from(hidden + 1).unwrap_or(u64::MAX);
             body.push(RenderRow::new(
-                format!("... {} more lines · pgdn", hidden + 1),
+                crate::copy::render(
+                    crate::copy::ids::DIALOG_BODY_MORE,
+                    &[("n", &count.to_string())],
+                    count,
+                ),
                 Role::Dim,
             ));
         }
         rows.extend(body.into_iter().skip(scroll).take(room));
         rows.extend(pinned);
-        rows.push(RenderRow::new(actions, Role::Text));
+        rows.push(actions_row);
         rows.into_iter()
             .map(|row| row.clipped(width, mode))
             .collect()
@@ -682,7 +834,7 @@ impl DialogUi {
         cache: &RenderCache,
     ) -> Vec<RenderRow> {
         if self.text_mode {
-            return vec![RenderRow::new(format!("> {}", self.input), Role::Text)];
+            return input_rows(&self.input, None);
         }
         preview
             .iter()
@@ -700,7 +852,8 @@ impl DialogUi {
     }
 
     /// The pinned rows of a select question: one per option plus the
-    /// always-present Other action.
+    /// always-present Other action. The focused row paints in the theme's
+    /// selection reverse video on top of its `>` marker.
     fn select_pinned(&self, options: &[dal_core::Choice], multi: bool) -> Vec<RenderRow> {
         let mut pinned: Vec<RenderRow> = options
             .iter()
@@ -714,18 +867,22 @@ impl DialogUi {
                     .as_deref()
                     .map(|text| format!(" - {}", crate::width::escape(text)))
                     .unwrap_or_default();
-                RenderRow::new(
+                let mut row = RenderRow::new(
                     format!(
                         "{} {marker} {}{description}",
                         if index == self.focused { ">" } else { " " },
-                        option.label
+                        crate::width::escape(&option.label)
                     ),
                     Role::Text,
-                )
+                );
+                if index == self.focused && !self.text_mode {
+                    row.selected.push(0..row.text.len());
+                }
+                row
             })
             .collect();
         let marker = if multi { "[ ]" } else { "( )" };
-        pinned.push(RenderRow::new(
+        let mut other = RenderRow::new(
             format!(
                 "{} {marker} {}",
                 if self.focused == options.len() && !self.text_mode {
@@ -736,7 +893,11 @@ impl DialogUi {
                 crate::copy::ids::ASK_OTHER_ACTION
             ),
             Role::Text,
-        ));
+        );
+        if self.focused == options.len() && !self.text_mode {
+            other.selected.push(0..other.text.len());
+        }
+        pinned.push(other);
         pinned
     }
 
@@ -795,63 +956,149 @@ impl DialogUi {
                 pinned.extend(self.select_pinned(options, *multi));
                 self.select_body(preview.as_ref(), width, mode, settings, cache)
             }
-            Question::Text { placeholder, .. } => {
-                vec![RenderRow::new(
-                    format!(
-                        "> {}",
-                        if self.input.is_empty() {
-                            placeholder.as_deref().unwrap_or("")
-                        } else {
-                            &self.input
-                        }
-                    ),
-                    Role::Text,
-                )]
-            }
+            Question::Text { placeholder, .. } => input_rows(&self.input, placeholder.as_deref()),
             Question::Confirm { .. } => vec![RenderRow::new("[y] Yes   [n] No", Role::Text)],
             _ => vec![RenderRow::new(
                 "This question type is not supported here. Answer it from another client.",
                 Role::Text,
             )],
         };
-        if self.empty_hint {
-            rows.push(RenderRow::new(
-                crate::copy::ids::ASK_EMPTY_TEXT,
-                Role::Warning,
-            ));
-        }
         if rows.is_empty() && pinned.is_empty() {
             rows.push(RenderRow::new(String::new(), Role::Text));
         }
         (rows, pinned)
     }
 
-    fn actions(&self, question: &Question) -> String {
+    /// The fail-closed actions row, folded to the columns it gets.
+    ///
+    /// Segments drop in priority order — preview and courtesy affordances
+    /// first — and the deny or dismiss cue carries the lowest number, so a
+    /// narrow approval still shows how to say no. On a dialog with answer
+    /// verbs the focused verb paints the selection range; the focused verb
+    /// defaults to the conservative answer (deny, no).
+    fn actions_row(
+        &self,
+        question: &Question,
+        kitty: bool,
+        width: usize,
+        mode: crate::WidthMode,
+    ) -> RenderRow {
+        use crate::copy::ids;
         let approving = matches!(question, Question::Approval { .. } | Question::Grant { .. });
-        if approving && self.queue.keys_disabled() {
-            return "Waiting for the request to settle...".to_owned();
+        if self.queue.keys_disabled() {
+            return RenderRow::new(
+                "Waiting for the request to settle...".to_owned(),
+                Role::Text,
+            );
         }
         if !self.armed() {
             let esc = if approving {
-                crate::copy::ids::APPROVAL_ESC_DENIES
+                ids::APPROVAL_ESC_DENIES
             } else {
                 "esc dismiss"
             };
-            return format!("{esc} · {}", crate::copy::ids::DIALOG_ARMING);
+            let (text, _) = fold_hint_ranges(
+                [esc, ids::DIALOG_ARMING]
+                    .into_iter()
+                    .zip([0_i16, 1])
+                    .collect(),
+                width,
+                mode,
+            );
+            return RenderRow::new(text, Role::Text);
         }
-        match question {
-            Question::Approval { .. } | Question::Grant { .. } => format!(
-                "{} · v view · {}",
-                crate::copy::ids::DIALOG_ACTIONS_SHORT,
-                crate::copy::ids::APPROVAL_ESC_DENIES
+        // `focus` counts only focusable verbs: the leading segments of a
+        // button row. The focused verb folds last — below even the esc
+        // cue — so Enter never activates a verb the row does not show.
+        let (segments, focusable, focus): (Vec<(&str, i16)>, usize, usize) = match question {
+            Question::Approval { .. } | Question::Grant { .. } => (
+                ids::DIALOG_ACTIONS_SHORT
+                    .split(" · ")
+                    .chain(["v view", ids::APPROVAL_ESC_DENIES])
+                    .zip([3_i16, 2, 1, 4, 0])
+                    .collect(),
+                3_usize,
+                self.action_focus.unwrap_or(2),
             ),
-            Question::Select { .. } if self.text_mode => crate::copy::ids::ASK_HINT_TEXT.to_owned(),
-            Question::Select { multi: true, .. } => crate::copy::ids::ASK_HINT_MULTI.to_owned(),
-            Question::Select { .. } => crate::copy::ids::ASK_HINT_SINGLE.to_owned(),
-            Question::Text { .. } => crate::copy::ids::ASK_HINT_TEXT.to_owned(),
-            Question::Confirm { .. } => crate::copy::ids::ASK_HINT_CONFIRM.to_owned(),
-            _ => "esc dismiss".to_owned(),
+            Question::Select { .. } if self.text_mode => {
+                return RenderRow::new(self.text_hint(kitty, width, mode), Role::Text);
+            }
+            Question::Select { multi: true, .. } => (
+                ids::ASK_HINT_MULTI
+                    .split(" · ")
+                    .zip([3_i16, 2, 1, 0])
+                    .collect(),
+                0,
+                0,
+            ),
+            Question::Select { .. } => (
+                ids::ASK_HINT_SINGLE
+                    .split(" · ")
+                    .zip([2_i16, 1, 0])
+                    .collect(),
+                0,
+                0,
+            ),
+            Question::Text { .. } => {
+                return RenderRow::new(self.text_hint(kitty, width, mode), Role::Text);
+            }
+            Question::Confirm { .. } => (
+                ids::ASK_HINT_CONFIRM
+                    .split(" · ")
+                    .zip([2_i16, 1, 0])
+                    .collect(),
+                2_usize,
+                self.action_focus.unwrap_or(1),
+            ),
+            _ => return RenderRow::new("esc dismiss".to_owned(), Role::Text),
+        };
+        // Demote only a real focused verb: a row without focusable verbs
+        // keeps every segment's listed priority, so esc dismiss still
+        // outlives the move cues.
+        let focus = focus.min(focusable.saturating_sub(1));
+        let segments: Vec<(&str, i16)> = segments
+            .into_iter()
+            .enumerate()
+            .map(|(index, (segment, priority))| {
+                (
+                    segment,
+                    if focusable > 0 && index == focus {
+                        -1
+                    } else {
+                        priority
+                    },
+                )
+            })
+            .collect();
+        let (text, ranges) = fold_hint_ranges(segments, width, mode);
+        let mut row = RenderRow::new(text, Role::Text);
+        if focusable > 0
+            && let Some((_, range)) = ranges.iter().find(|(index, _)| *index == focus)
+        {
+            row.selected.push(range.clone());
         }
+        row
+    }
+
+    /// The free-text actions row. The newline segment names the chord the
+    /// terminal's keyboard encoding actually delivers: shift+enter under
+    /// kitty keys, ctrl+j elsewhere.
+    fn text_hint(&self, kitty: bool, width: usize, mode: crate::WidthMode) -> String {
+        use crate::copy::ids;
+        let newline = if kitty {
+            ids::HINT_NEWLINE
+        } else {
+            ids::HINT_NEWLINE_LEGACY
+        };
+        fold_hint_ranges(
+            ["enter submit", newline, "esc dismiss"]
+                .into_iter()
+                .zip([1_i16, 2, 0])
+                .collect(),
+            width,
+            mode,
+        )
+        .0
     }
 
     fn reset_on_change(&mut self) {
@@ -869,10 +1116,126 @@ impl DialogUi {
         self.text_mode = false;
         self.expanded = false;
         self.scroll = 0;
-        self.empty_hint = false;
+        self.action_focus = None;
         self.arming = Arming::Fresh;
         self.opened_at = self.now.or_else(|| Some(Instant::now()));
     }
+}
+
+/// Joins `segments` with the ` · ` separator, dropping the
+/// highest-priority-numbered entries first until the row fits `width`
+/// cells, and reports each surviving segment's byte range keyed by its
+/// original position so a focused verb can paint its selection. The lowest
+/// number folds last; the deny or dismiss cue (and the focused verb, which
+/// the caller demotes below it) survives to the end, and the 12-cell
+/// minimum floor always leaves room for it.
+fn fold_hint_ranges(
+    segments: Vec<(&str, i16)>,
+    width: usize,
+    mode: crate::WidthMode,
+) -> (String, Vec<(usize, std::ops::Range<usize>)>) {
+    let mut kept: Vec<(usize, &str, i16)> = segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, (segment, priority))| (index, segment, priority))
+        .collect();
+    let fits = |kept: &[(usize, &str, i16)]| {
+        crate::width::width(
+            &kept
+                .iter()
+                .map(|(_, segment, _)| *segment)
+                .collect::<Vec<_>>()
+                .join(" · "),
+            mode,
+        ) <= width
+    };
+    while kept.len() > 1 && !fits(&kept) {
+        let index = kept
+            .iter()
+            .enumerate()
+            .rev()
+            .max_by_key(|(_, (_, _, priority))| *priority)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        kept.remove(index);
+    }
+    let mut text = String::new();
+    let mut ranges = Vec::with_capacity(kept.len());
+    for (index, segment, _) in &kept {
+        if !text.is_empty() {
+            text.push_str(" · ");
+        }
+        ranges.push((*index, text.len()..text.len() + segment.len()));
+        text.push_str(segment);
+    }
+    (text, ranges)
+}
+
+/// Keeps at most `cap` of the pinned choice rows, centered on the
+/// `focused` row, which is never scrolled out. Hidden options keep their
+/// keys — arrows still reach them — and one `... n more` slot at either
+/// end counts what the window hides.
+fn window_pinned(mut pinned: Vec<RenderRow>, focused: usize, cap: usize) -> Vec<RenderRow> {
+    if pinned.len() <= cap {
+        return pinned;
+    }
+    let focused = focused.min(pinned.len() - 1);
+    if cap < 3 {
+        // No room for count rows: a tight window on the focused row.
+        let start = focused.saturating_sub(cap / 2).min(pinned.len() - cap);
+        return pinned.drain(start..start + cap).collect();
+    }
+    // Center the focus, then trade one slot per hidden side for the row
+    // that counts it.
+    let mut start = focused.saturating_sub(cap / 2);
+    let mut end = (start + cap).min(pinned.len());
+    start = end.saturating_sub(cap);
+    if start > 0 {
+        start += 1;
+    }
+    if end < pinned.len() {
+        end -= 1;
+    }
+    end = end.max(focused + 1);
+    start = start.min(focused);
+    let above = start;
+    let below = pinned.len() - end;
+    let mut out: Vec<RenderRow> = Vec::with_capacity(cap);
+    if above > 0 {
+        out.push(RenderRow::new(format!("... {above} more"), Role::Dim));
+    }
+    out.extend(pinned.drain(start..end));
+    if below > 0 {
+        out.push(RenderRow::new(format!("... {below} more"), Role::Dim));
+    }
+    out
+}
+
+/// The rows of the shared free-text buffer: one `> ` input row per line,
+/// continuation lines indented under it. Control characters are escaped so
+/// pasted bytes can never write terminal commands into the live block; the
+/// buffer itself keeps the raw text that the answer submits.
+fn input_rows(input: &str, placeholder: Option<&str>) -> Vec<RenderRow> {
+    if input.is_empty() {
+        return vec![RenderRow::new(
+            format!("> {}", crate::width::escape(placeholder.unwrap_or(""))),
+            Role::Text,
+        )];
+    }
+    input
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            RenderRow::new(
+                format!(
+                    "{}{}",
+                    if index == 0 { "> " } else { "  " },
+                    crate::width::escape(line)
+                ),
+                Role::Text,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -930,6 +1293,7 @@ mod tests {
                 crate::WidthMode::Narrow,
                 DiagramSettings::default(),
                 &RenderCache::default(),
+                true,
             )
             .into_iter()
             .last()
@@ -1138,6 +1502,7 @@ mod tests {
             crate::WidthMode::Narrow,
             DiagramSettings::default(),
             &cache,
+            true,
         );
         assert!(off.iter().any(|row| row.text.contains("graph TD")));
         assert_eq!(cache.renders(), 0);
@@ -1149,6 +1514,7 @@ mod tests {
             crate::WidthMode::Narrow,
             DiagramSettings { enabled: true },
             &cache,
+            true,
         );
         assert!(
             on.iter()
@@ -1184,6 +1550,7 @@ mod tests {
             crate::WidthMode::Narrow,
             DiagramSettings { enabled: true },
             &cache,
+            true,
         );
 
         assert!(rows.iter().any(|row| row.text.contains("graph TD; A-->B")));
@@ -1265,6 +1632,7 @@ mod tests {
                 crate::WidthMode::Narrow,
                 DiagramSettings::default(),
                 &RenderCache::default(),
+                true,
             )
         };
         let actions = render(40).pop().expect("actions row").text;
@@ -1307,6 +1675,7 @@ mod tests {
             crate::WidthMode::Narrow,
             DiagramSettings::default(),
             &RenderCache::default(),
+            true,
         );
         assert_eq!(rows[0].text, "first line is long enough");
         assert_eq!(rows[1].text, "second line stays separate");
@@ -1353,6 +1722,7 @@ mod tests {
                 crate::WidthMode::Narrow,
                 DiagramSettings::default(),
                 &RenderCache::default(),
+                true,
             )
             .into_iter()
             .map(|row| row.text)
@@ -1672,5 +2042,631 @@ mod tests {
         dialog.tick(start + Duration::from_secs(90));
         let rows = dialog.rows(80, 20, crate::WidthMode::Narrow);
         assert!(rows.iter().any(|row| row.contains("1m left")), "{rows:?}");
+    }
+
+    /// The narrow approval fold keeps both deny cues longest: `v view`,
+    /// then `y allow`, then `a session` drop in that order, `esc denies`
+    /// outlives the unfocused verbs, and the focused `n deny` — the
+    /// conservative default — is the last segment standing so Enter never
+    /// activates a verb the row no longer shows.
+    #[test]
+    fn a_narrow_approval_keeps_the_deny_cues_longest() {
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(dal_core::RequestId::new_v7()));
+        arm(&mut dialog);
+        let action_row = |width: usize| {
+            dialog
+                .rendered_rows(
+                    width,
+                    12,
+                    crate::WidthMode::Narrow,
+                    DiagramSettings::default(),
+                    &RenderCache::default(),
+                    true,
+                )
+                .into_iter()
+                .last()
+                .map(|row| row.text)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            action_row(60),
+            "y allow · a session · n deny · v view · esc denies"
+        );
+        assert_eq!(action_row(41), "y allow · a session · n deny · esc denies");
+        assert_eq!(action_row(31), "a session · n deny · esc denies");
+        assert_eq!(action_row(19), "n deny · esc denies");
+        assert_eq!(action_row(12), "n deny");
+    }
+
+    /// While the keys are locked the arming notice folds before the deny
+    /// cue does: a narrow dialog still shows that esc ends it.
+    #[test]
+    fn an_unarmed_narrow_dialog_keeps_its_deny_cue() {
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(dal_core::RequestId::new_v7()));
+        dialog.tick(Instant::now());
+        let action_row = |width: usize| {
+            dialog
+                .rendered_rows(
+                    width,
+                    12,
+                    crate::WidthMode::Narrow,
+                    DiagramSettings::default(),
+                    &RenderCache::default(),
+                    true,
+                )
+                .into_iter()
+                .last()
+                .map(|row| row.text)
+                .unwrap_or_default()
+        };
+        assert_eq!(action_row(60), "esc denies · answer keys ready in a moment");
+        assert_eq!(action_row(12), "esc denies");
+    }
+
+    /// The focused choice paints the theme's selection range over the whole
+    /// row on top of its `>` marker; moving focus moves the range.
+    #[test]
+    fn the_focused_option_paints_the_selection_range() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options: vec![
+                    Choice {
+                        label: "Alpha".into(),
+                        description: None,
+                    },
+                    Choice {
+                        label: "Beta".into(),
+                        description: None,
+                    },
+                ],
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        let focused = |dialog: &super::DialogUi| {
+            dialog
+                .rendered_rows(
+                    60,
+                    10,
+                    crate::WidthMode::Narrow,
+                    DiagramSettings::default(),
+                    &RenderCache::default(),
+                    true,
+                )
+                .into_iter()
+                .filter(|row| !row.selected.is_empty())
+                .map(|row| row.text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(focused(&dialog), ["> (*) Alpha"]);
+        press(&mut dialog, KeyCode::Down);
+        assert_eq!(focused(&dialog), ["> (*) Beta"]);
+        press(&mut dialog, KeyCode::Down);
+        assert_eq!(focused(&dialog), ["> ( ) Other"]);
+    }
+
+    /// A select whose choices outnumber the rows keeps a window around the
+    /// focus. At every height down to the title, one row and the actions,
+    /// the block stays inside the height, spends all of it while choices
+    /// are hidden and paints exactly one focused row: the choice or Other
+    /// that Enter answers. Other stays on screen whenever a row is left
+    /// beside the focused choice, and once a row is left for it, the
+    /// window's end counts name every hidden choice.
+    #[test]
+    fn more_choices_than_rows_window_the_pinned_block() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        const CHOICES: usize = 7;
+        let options = (1..=CHOICES)
+            .map(|index| Choice {
+                label: format!("Option {index}").into(),
+                description: None,
+            })
+            .collect();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options,
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        // Focus walks every choice, then Other, one Down at a time.
+        for focus in 0..=CHOICES {
+            let label = if focus == CHOICES {
+                "( ) Other".to_owned()
+            } else {
+                format!("(*) Option {}", focus + 1)
+            };
+            for height in 3..=12 {
+                let rows = dialog.rows(60, height, crate::WidthMode::Narrow);
+                let at = format!("focus {focus}, height {height}: {rows:?}");
+                assert!(rows.len() <= height, "{at}");
+                assert_eq!(rows.first().map(String::as_str), Some("pick"), "{at}");
+                assert!(
+                    rows.last().is_some_and(|row| row.contains("esc dismiss")),
+                    "{at}"
+                );
+                let focused: Vec<&str> = rows
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|row| row.starts_with("> "))
+                    .collect();
+                assert_eq!(focused, [format!("> {label}").as_str()], "{at}");
+                // Three rows hold the title, the focused row and the actions:
+                // beside a focused choice there is no row left for Other.
+                if height > 3 || focus == CHOICES {
+                    assert!(rows.iter().any(|row| row.ends_with("( ) Other")), "{at}");
+                }
+                let shown = rows.iter().filter(|row| row.contains("Option ")).count();
+                if shown < CHOICES {
+                    assert_eq!(rows.len(), height, "no row sits unused: {at}");
+                }
+                // Four rows leave one choice row and five leave two, with no
+                // room to count the rest; from six the ends carry counts.
+                if height >= 6 {
+                    let counted: usize = rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.strip_prefix("... ")?
+                                .strip_suffix(" more")?
+                                .parse::<usize>()
+                                .ok()
+                        })
+                        .sum();
+                    assert_eq!(shown + counted, CHOICES, "{at}");
+                }
+            }
+            press(&mut dialog, KeyCode::Down);
+        }
+    }
+
+    /// A clipped preview never costs the focused row its place nor pushes
+    /// the block past its height: with only a few rows left, what Enter
+    /// answers outranks the preview's rows, which paint none at three.
+    #[test]
+    fn a_tight_preview_select_keeps_the_focused_row_on_screen() {
+        use crossterm::event::KeyCode;
+
+        let mut dialog = select_with_preview();
+        arm(&mut dialog);
+        for label in [
+            "> (*) SQLite - Embedded, zero config",
+            "> (*) Postgres",
+            "> ( ) Other",
+        ] {
+            for height in 3..=7 {
+                let rows = select_rows(&dialog, height);
+                let focused: Vec<&str> = rows
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|row| row.starts_with("> "))
+                    .collect();
+                assert_eq!(focused, [label], "height {height}: {rows:?}");
+                assert!(rows.len() <= height, "height {height}: {rows:?}");
+            }
+            press(&mut dialog, KeyCode::Down);
+        }
+    }
+
+    /// While the Other text row is open, the typed text stays on screen and
+    /// inside the height: at three rows it keeps the one row left, ahead of
+    /// the Other label.
+    #[test]
+    fn the_open_other_row_keeps_the_typed_text_on_screen() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let options = (1..=7)
+            .map(|index| Choice {
+                label: format!("Option {index}").into(),
+                description: None,
+            })
+            .collect();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options,
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        for _ in 0..7 {
+            press(&mut dialog, KeyCode::Down);
+        }
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        press(&mut dialog, KeyCode::Char('a'));
+        press(&mut dialog, KeyCode::Char('b'));
+        for height in 3..=8 {
+            let rows = dialog.rows(60, height, crate::WidthMode::Narrow);
+            assert!(rows.len() <= height, "height {height}: {rows:?}");
+            assert_eq!(
+                rows.first().map(String::as_str),
+                Some("pick"),
+                "height {height}: {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row == "> ab"),
+                "height {height}: {rows:?}"
+            );
+        }
+    }
+
+    /// Pasted bytes carry the answer but can never write terminal commands:
+    /// the rendered row shows controls escaped while the submitted payload
+    /// keeps them raw.
+    #[test]
+    fn pasted_control_bytes_render_escaped_and_submit_raw() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let id = RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id,
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "say".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        dialog.paste(b"a\x1b[2Kb");
+        let rows = dialog.rows(60, 10, crate::WidthMode::Narrow);
+        assert!(
+            rows.iter().any(|row| row.contains("a\\u{1b}[2Kb")),
+            "{rows:?}"
+        );
+        let Some((answered, Answer::Value(payload))) = press(&mut dialog, KeyCode::Enter) else {
+            panic!("the paste answers");
+        };
+        assert_eq!(answered, id);
+        assert_eq!(payload.as_str(), r#"{"text":"a\u001b[2Kb"}"#);
+    }
+
+    /// Ctrl+J is the legacy newline chord: it reaches the open Other text
+    /// row of a select the same as a text question.
+    #[test]
+    fn ctrl_j_adds_a_newline_row_inside_the_other_escape() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let id = RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id,
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options: vec![Choice {
+                    label: "Alpha".into(),
+                    description: None,
+                }],
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        press(&mut dialog, KeyCode::Tab);
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        press(&mut dialog, KeyCode::Char('a'));
+        let newline = crate::keys::Key::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert!(dialog.key(newline).is_none());
+        press(&mut dialog, KeyCode::Char('b'));
+        let rows = dialog.rows(60, 10, crate::WidthMode::Narrow);
+        assert!(rows.iter().any(|row| row.contains("> a")), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("  b")), "{rows:?}");
+        let Some((answered, Answer::Value(payload))) = press(&mut dialog, KeyCode::Enter) else {
+            panic!("the two-line Other text answers");
+        };
+        assert_eq!(answered, id);
+        assert_eq!(payload.as_str(), r#"{"selected":["a\nb"]}"#);
+    }
+
+    /// Host-supplied choice labels render escaped: control bytes can never
+    /// reach the terminal through the label.
+    #[test]
+    fn a_host_label_renders_escaped() {
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options: vec![Choice {
+                    label: "bad\u{1b}[2Klabel".into(),
+                    description: None,
+                }],
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        let rows = dialog.rows(60, 10, crate::WidthMode::Narrow);
+        assert!(
+            rows.iter().any(|row| row.contains("bad\\u{1b}[2Klabel")),
+            "{rows:?}"
+        );
+    }
+
+    /// The legacy newline chord renders the legacy hint; kitty terminals
+    /// name shift+enter.
+    #[test]
+    fn the_text_hint_names_the_newline_chord_the_terminal_delivers() {
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "say".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        let last = |kitty: bool| {
+            dialog
+                .rendered_rows(
+                    60,
+                    10,
+                    crate::WidthMode::Narrow,
+                    DiagramSettings::default(),
+                    &RenderCache::default(),
+                    kitty,
+                )
+                .into_iter()
+                .last()
+                .map(|row| row.text)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            last(true),
+            "enter submit · shift+enter newline · esc dismiss"
+        );
+        assert_eq!(last(false), "enter submit · ctrl+j newline · esc dismiss");
+    }
+
+    /// The action table owns the dialog's armed keys: Enter activates the
+    /// focused verb, which defaults to the conservative deny.
+    #[test]
+    fn enter_activates_the_focused_deny_verb() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::Decline)) if answered == id
+        ));
+    }
+
+    /// Tab and Shift+Tab move the focused verb around the three answer
+    /// verbs and wrap at both ends: the view cue is not focusable, so
+    /// Right from deny wraps to allow-once and Left from deny lands on
+    /// allow-session.
+    #[test]
+    fn tab_and_arrows_move_the_focused_verb_around_the_approval() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        // Tab is focus-forward: deny wraps to allow-once.
+        press(&mut dialog, KeyCode::Tab);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::Approve)) if answered == id
+        ));
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        // Left steps backwards: deny → session, then deny again.
+        press(&mut dialog, KeyCode::Left);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::ApproveForSession)) if answered == id
+        ));
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        // Shift+Tab arrives as BackTab (legacy CSI Z carries no modifiers;
+        // kitty marks it SHIFT — resolve normalizes both).
+        dialog.key(crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::ApproveForSession)) if answered == id
+        ));
+    }
+
+    /// A direct letter still answers without moving focus first, and a
+    /// modifier over a plain key is ignored — a shifted `y` resolves to
+    /// the allow verb.
+    #[test]
+    fn shifted_letters_and_direct_keys_still_answer() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        let Some((answered, answer)) = dialog.key(crate::keys::Key::new(
+            KeyCode::Char('Y'),
+            KeyModifiers::SHIFT,
+        )) else {
+            panic!("shifted y reaches the allow binding");
+        };
+        assert_eq!(answered, id);
+        assert_eq!(answer, Answer::Approve);
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        arm(&mut dialog);
+        assert!(matches!(
+            dialog.key(crate::keys::Key::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL,
+            )),
+            None
+        ));
+    }
+
+    /// Esc answers before the table sees it: an armed approval declines,
+    /// a non-approval kind cancels.
+    #[test]
+    fn esc_answers_before_the_table_sees_it() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Owner, Question, Request};
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id,
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Confirm {
+                text: "really?".into(),
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Esc),
+            Some((answered, Answer::Cancel)) if answered == id
+        ));
+    }
+
+    /// The confirm dialog's focused verb defaults to `n`: Enter says no
+    /// and a Left step wraps to `y`.
+    #[test]
+    fn a_confirm_focuses_no_by_default() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Confirm {
+                text: "really?".into(),
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        let Some((answered, Answer::Value(first))) = press(&mut dialog, KeyCode::Enter) else {
+            panic!("enter activates the focused no");
+        };
+        assert_eq!(answered, id);
+        assert_eq!(first.as_str(), "false");
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Confirm {
+                text: "really?".into(),
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        press(&mut dialog, KeyCode::Left);
+        let Some((answered, Answer::Value(second))) = press(&mut dialog, KeyCode::Enter) else {
+            panic!("left wraps focus onto yes");
+        };
+        assert_eq!(answered, id);
+        assert_eq!(second.as_str(), "true");
+    }
+
+    /// While the arming delay is open the focused verb cannot be moved
+    /// and Enter stays inert.
+    #[test]
+    fn the_arming_delay_covers_focus_and_activate() {
+        use crossterm::event::KeyCode;
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(dal_core::RequestId::new_v7()));
+        dialog.tick(Instant::now());
+        assert!(press(&mut dialog, KeyCode::Tab).is_none());
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        assert!(press(&mut dialog, KeyCode::Left).is_none());
+    }
+
+    /// An uppercase answer letter answers an approval like its lowercase
+    /// form whether the terminal reports Shift or only the uppercase
+    /// character: the legacy decoder and Caps Lock send no modifier, and the
+    /// committed dialog matched `Y`, `A`, `N`, and `V` either way.
+    #[test]
+    fn uppercase_answer_letters_answer_an_approval_with_or_without_shift() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            for (letter, expected) in [
+                ('Y', Answer::Approve),
+                ('A', Answer::ApproveForSession),
+                ('N', Answer::Decline),
+            ] {
+                let id = dal_core::RequestId::new_v7();
+                let mut dialog = super::DialogUi::default();
+                dialog.opened(approval(id));
+                arm(&mut dialog);
+                let answered = dialog.key(crate::keys::Key::new(KeyCode::Char(letter), modifiers));
+                assert!(
+                    matches!(&answered, Some((who, answer)) if *who == id && *answer == expected),
+                    "{letter:?} {modifiers:?} answers {expected:?}, got {answered:?}"
+                );
+            }
+        }
     }
 }

@@ -1783,12 +1783,14 @@ mod tests {
             timeout: std::time::Duration::from_secs(30),
             default: dal_core::Answer::Decline,
         }]);
+        let state = crate::term::TermState::new();
         let rows = dialog.rendered_rows(
             80,
             24,
             crate::WidthMode::Narrow,
             crate::diagram::DiagramSettings::default(),
             &crate::diagram::RenderCache::default(),
+            state.kitty(),
         );
         assert_ne!(rows.len(), 0, "the dialog renders rows");
         let mut output = Vec::new();

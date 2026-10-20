@@ -23,11 +23,14 @@ mod support;
 #[path = "support/vt.rs"]
 mod vt;
 
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use pty::{PtyProcess, dalgon_command_with_fixture, shell_quote, wait_for_path};
 use support::TestDir;
-use vt::VtRecorder;
+use vt::{FollowedScreen, VtRecorder};
 
 #[test]
 fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -43,15 +46,19 @@ fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut command = dalgon_command_with_fixture(dir.path(), &fixture)?;
     command.args(["--screen", "inline", "--approval", "ask"]);
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
+    let mut screen = FollowedScreen::new(100, 30);
     terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
         Duration::from_secs(10),
     )?;
     terminal.write(b"run a long command\r")?;
-    terminal.wait_for(
-        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
-        Duration::from_secs(10),
-    )?;
+    terminal
+        .wait_until(
+            "the armed approval answer keys",
+            Duration::from_secs(10),
+            |output| screen.shows(output, dal_tui::copy::ids::DIALOG_ACTIONS_SHORT),
+        )
+        .map_err(|error| format!("{error}\nscreen:\n{}", screen.visible()))?;
     terminal.write(b"y")?;
     wait_for_path(&started, Duration::from_secs(5), "by the approved exec")?;
     terminal.wait_for(
@@ -59,6 +66,21 @@ fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
         Duration::from_secs(5),
     )?;
 
+    // The approval dialog can still be open here: the host runs the approved
+    // exec (so the `started` file exists) before the client drains the
+    // resolution delivery that closes the dialog. While it is open it owns
+    // every key, so a quit sent now is swallowed instead of arming the
+    // cancellation below. Wait for the dialog to close first.
+    let dialog_gone_by = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !screen.shows(terminal.output(), dal_tui::copy::ids::DIALOG_ACTIONS_SHORT) {
+            break;
+        }
+        if Instant::now() >= dialog_gone_by {
+            return Err("the approval dialog stayed open after the turn started".into());
+        }
+        terminal.collect_for(Duration::from_millis(200))?;
+    }
     terminal.write(b"\x04")?;
     terminal.wait_for(
         dal_tui::copy::ids::TURN_CANCELLED.as_bytes(),
@@ -96,7 +118,7 @@ fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let _first_output_byte = terminal.output().first().unwrap();
+    assert_eq!(terminal.terminal_restore_problem()?, None);
     Ok(())
 }
 

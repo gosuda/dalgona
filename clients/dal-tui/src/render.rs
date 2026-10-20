@@ -328,7 +328,8 @@ fn paint_fullscreen_selection(
 /// The rows the interactive tail takes in place of the composer, if any.
 fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<usize> {
     if input.dialog.is_open() {
-        Some(6)
+        // Six content rows plus the DESIGN dialog boundary's two blanks.
+        Some(8)
     } else if input.screen == Screen::Inline
         && let Some(view) = input.live.expanded()
     {
@@ -529,13 +530,30 @@ fn overlay_rows(
     bottom: &mut Vec<RenderRow>,
 ) {
     if input.dialog.is_open() {
-        bottom.extend(input.dialog.rendered_rows(
+        // DESIGN.md dialog boundary: one blank row above and below the
+        // dialog. The blanks come out of the overlay budget — rows outside
+        // it would overflow the region — so they only paint once the budget
+        // still leaves the dialog three content rows: its title, the row
+        // Enter answers, and its actions. Below that the content rows win
+        // over the chrome.
+        let bordered = budget.overlay >= 5;
+        let mut rows = input.dialog.rendered_rows(
             w,
-            budget.overlay,
+            if bordered {
+                budget.overlay - 2
+            } else {
+                budget.overlay
+            },
             mode,
             input.diagram_settings,
             input.diagram_cache,
-        ));
+            input.kitty_keyboard,
+        );
+        if bordered {
+            rows.insert(0, RenderRow::plain(String::new(), Role::Text));
+            rows.push(RenderRow::plain(String::new(), Role::Text));
+        }
+        bottom.extend(rows);
     } else if input.screen == Screen::Inline
         && let Some(view) = input.live.expanded()
     {
@@ -2534,5 +2552,104 @@ mod tests {
                 .any(|text| text.contains("[ ]") || text.contains("[x]")),
             "no check markers on a single picker: {texts:?}"
         );
+    }
+
+    /// An open select keeps its title, the row Enter answers and its actions
+    /// inside the region at every supported terminal height. The dialog's
+    /// boundary blanks only paint once three content rows remain, so a
+    /// four-row overlay carries four rows of content, not a bordered pair.
+    #[test]
+    fn an_open_select_stays_inside_the_region_at_every_supported_height() {
+        use crate::frame::{RegionBudget, RegionRequest};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let view = scroll_path_view(scroll_path_tool_entry(), scroll_path_reasoning_entry());
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        let mut dialog = crate::dialog::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options: (1..=7)
+                    .map(|index| Choice {
+                        label: format!("Option {index}").into(),
+                        description: None,
+                    })
+                    .collect(),
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Cancel,
+        });
+        let start = std::time::Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + crate::dialog::ARM_DELAY);
+        for focus in 0..=7 {
+            let focused = if focus == 7 {
+                "> ( ) Other".to_owned()
+            } else {
+                format!("> (*) Option {}", focus + 1)
+            };
+            for height in 8..=14 {
+                let cap = RegionBudget::allocate(
+                    80,
+                    height,
+                    RegionRequest {
+                        overlay: Some(8),
+                        ..RegionRequest::default()
+                    },
+                )
+                .cap;
+                let input = expanded_frame(
+                    &view,
+                    &live,
+                    &transcript,
+                    &viewport,
+                    &opts,
+                    &theme,
+                    &dialog,
+                    &cache,
+                );
+                let rows = super::frame_rows(input, 80, height);
+                let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+                let at = format!("focus {focus}, height {height}: {texts:?}");
+                assert!(rows.len() <= cap, "{at}");
+                assert_eq!(
+                    texts.iter().filter(|text| **text == "pick").count(),
+                    1,
+                    "{at}"
+                );
+                assert_eq!(
+                    texts.iter().filter(|text| **text == focused).count(),
+                    1,
+                    "{at}"
+                );
+                assert_eq!(
+                    texts.iter().filter(|text| text.starts_with("> ")).count(),
+                    1,
+                    "{at}"
+                );
+                assert!(
+                    texts.iter().any(|text| text.contains("esc dismiss")),
+                    "{at}"
+                );
+            }
+            dialog.key(crate::keys::Key::new(KeyCode::Down, KeyModifiers::NONE));
+        }
     }
 }
