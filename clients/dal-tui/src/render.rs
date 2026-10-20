@@ -538,16 +538,15 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
             }
             // Multi-select rows carry the check marker the request dialogs
             // use ([x]/[ ]); single-select rows keep the plain gutter.
-            let check = picker
-                .is_multi()
-                .then(|| {
-                    if picker.is_checked(index) {
-                        "[x] "
-                    } else {
-                        "[ ] "
-                    }
-                })
-                .unwrap_or_default();
+            let check = if picker.is_multi() {
+                if picker.is_checked(index) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else {
+                ""
+            };
             middle.push(option_row(
                 format!(
                     "{} {check}{}",
@@ -1353,7 +1352,7 @@ pub(crate) fn entry_rows_timed(
                         ));
                     }
                     Block::Reasoning { .. } => {
-                        rows.push(RenderRow::new(collapsed_thinking_text(), Role::Dim))
+                        rows.push(RenderRow::new(collapsed_thinking_text(), Role::Dim));
                     }
                     // The call settles into one card from its result entry.
                     Block::ToolCall { .. } => {}
@@ -1799,10 +1798,9 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
         // DESIGN.md Diagrams: border dim, text text, edge accent, edge label
         // dim, title accent and bold.
         let (role, bold) = match cell.role {
-            ArtRole::Border => (Role::Dim, false),
             ArtRole::Text => (Role::Text, false),
             ArtRole::Edge => (Role::Accent, false),
-            ArtRole::EdgeLabel => (Role::Dim, false),
+            ArtRole::Border | ArtRole::EdgeLabel => (Role::Dim, false),
             ArtRole::Title => (Role::Accent, true),
         };
         if let Some(span) = row.spans.last_mut()
@@ -2325,7 +2323,8 @@ mod tests {
         );
     }
 
-    /// A `FrameInput` over `live` with one committed `entry` in the view.
+    /// A `FrameInput` over `live` with one committed `entry` in the view,
+    /// optionally carrying `picker` (the transcript overlay picker).
     fn expanded_frame<'a>(
         view: &'a dal_core::View,
         live: &'a crate::live::Live,
@@ -2335,6 +2334,7 @@ mod tests {
         theme: &'a crate::theme::ResolvedTheme,
         dialog: &'a crate::dialog::DialogUi,
         cache: &'a RenderCache,
+        picker: Option<&'a crate::picker::PickerUi>,
     ) -> super::FrameInput<'a> {
         super::FrameInput {
             view,
@@ -2346,7 +2346,7 @@ mod tests {
             popup: &[],
             live,
             dialog,
-            picker: None,
+            picker,
             help: None,
             signin: None,
             transcript,
@@ -2531,6 +2531,7 @@ mod tests {
                     &theme,
                     &dialog,
                     &cache,
+                    None,
                 ),
                 80,
                 24,
@@ -2579,6 +2580,40 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         live.close_expand();
+    }
+
+    fn picker_over_scroll_path_rows(picker: &crate::picker::PickerUi) -> Vec<super::RenderRow> {
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        super::frame_rows(
+            expanded_frame(
+                &view,
+                &live,
+                &transcript,
+                &viewport,
+                &opts,
+                &theme,
+                &dialog,
+                &cache,
+                Some(picker),
+            ),
+            80,
+            10,
+        )
     }
 
     #[test]
@@ -2649,44 +2684,7 @@ mod tests {
         assert_eq!(budget.overlay, 5);
         assert_eq!(budget.cap, 6);
 
-        let tool_entry = scroll_path_tool_entry();
-        let reasoning_entry = scroll_path_reasoning_entry();
-        let view = scroll_path_view(tool_entry, reasoning_entry);
-        let (_runtime, opts) = scroll_path_opts();
-        let theme = crate::theme::load(
-            &crate::ThemeRequest::Palette,
-            crate::ColorMode::Never,
-            None,
-            None,
-        )
-        .unwrap();
-        let dialog = crate::dialog::DialogUi::default();
-        let transcript = Transcript::default();
-        let viewport = crate::screen::fullscreen::Viewport::following();
-        let cache = RenderCache::default();
-        let live = crate::live::Live::default();
-        let input = super::FrameInput {
-            view: &view,
-            screen: crate::Screen::Inline,
-            composer: "",
-            cursor: 0,
-            exit_draft: None,
-            branch: None,
-            popup: &[],
-            live: &live,
-            dialog: &dialog,
-            picker: Some(&picker),
-            help: None,
-            signin: None,
-            transcript: &transcript,
-            viewport: &viewport,
-            opts: &opts,
-            kitty_keyboard: false,
-            theme: &theme,
-            diagram_settings: DiagramSettings::default(),
-            diagram_cache: &cache,
-        };
-        let rows = super::frame_rows(input, 80, 10);
+        let rows = picker_over_scroll_path_rows(&picker);
         assert!(
             rows.len() <= budget.cap,
             "shrunk live block must not exceed its cap: {} > {}",
@@ -2857,7 +2855,10 @@ mod tests {
         assert!(
             rows.iter()
                 .filter(|row| !row.selected.is_empty())
-                .all(|row| row.selected == vec![0..row.text.len()]),
+                .all(|row| {
+                    matches!(row.selected.as_slice(), [range]
+                        if range.start == 0 && range.end == row.text.len())
+                }),
             "reverse video still covers the whole focused row"
         );
 
@@ -2913,6 +2914,7 @@ mod tests {
                 &theme,
                 &dialog,
                 &cache,
+                None,
             );
             input.exit_draft = Some(choice);
             let rows = super::frame_rows(input, 80, 24);
@@ -2940,6 +2942,7 @@ mod tests {
             &theme,
             &dialog,
             &cache,
+            None,
         );
         input.exit_draft = Some(crate::dialog::DraftChoice::Discard);
         let narrow = super::frame_rows(input, 20, 10);
@@ -3025,6 +3028,7 @@ mod tests {
                     &theme,
                     &dialog,
                     &cache,
+                    None,
                 );
                 let rows = super::frame_rows(input, 80, height);
                 let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();

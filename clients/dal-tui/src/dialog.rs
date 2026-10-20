@@ -168,10 +168,6 @@ impl DraftConfirm {
         use crate::keys::{Action, Owner, resolve_in};
         use crossterm::event::{KeyCode, KeyModifiers};
         match (key.code, key.modifiers) {
-            (KeyCode::Esc, KeyModifiers::NONE) => {
-                self.focused = DraftChoice::Keep;
-                Some(DraftChoice::Keep)
-            }
             // Plain text reaches the decoder as the character itself, an
             // uppercase letter included and with no modifier; a terminal that
             // reports Shift as well is accepted too, so `y`, `Y`, `n`, and `N`
@@ -181,7 +177,7 @@ impl DraftConfirm {
                 self.focused = DraftChoice::Discard;
                 Some(DraftChoice::Discard)
             }
-            (KeyCode::Char('n'), KeyModifiers::NONE)
+            (KeyCode::Esc | KeyCode::Char('n'), KeyModifiers::NONE)
             | (KeyCode::Char('N'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.focused = DraftChoice::Keep;
                 Some(DraftChoice::Keep)
@@ -189,7 +185,7 @@ impl DraftConfirm {
             (KeyCode::BackTab, _) => {
                 let plain = crate::keys::Key::new(KeyCode::BackTab, KeyModifiers::NONE);
                 match resolve_in(plain, false, &[Owner::Dialog]) {
-                    Some(Action::DialogFocusLeft) | Some(Action::DialogFocusRight) => {
+                    Some(Action::DialogFocusLeft | Action::DialogFocusRight) => {
                         self.focused = match self.focused {
                             DraftChoice::Discard => DraftChoice::Keep,
                             DraftChoice::Keep => DraftChoice::Discard,
@@ -200,14 +196,14 @@ impl DraftConfirm {
                 }
             }
             _ => match resolve_in(key, false, &[Owner::Dialog]) {
-                Some(Action::DialogFocusLeft) | Some(Action::DialogFocusRight) => {
+                Some(Action::DialogFocusLeft | Action::DialogFocusRight) => {
                     self.focused = match self.focused {
                         DraftChoice::Discard => DraftChoice::Keep,
                         DraftChoice::Keep => DraftChoice::Discard,
                     };
                     None
                 }
-                Some(Action::DialogActivate) | Some(Action::AskSubmit) => Some(self.focused),
+                Some(Action::DialogActivate | Action::AskSubmit) => Some(self.focused),
                 _ => None,
             },
         }
@@ -524,9 +520,9 @@ impl DialogUi {
         let id = request.id;
         let control_shortcut = key.modifiers == KeyModifiers::CONTROL
             && match (&request.question, key.code) {
-                (Question::Select { .. }, KeyCode::Char('o')) => true,
                 (Question::Select { .. }, KeyCode::Char('j')) => self.text_mode,
-                (Question::Text { .. }, KeyCode::Char('j')) => true,
+                (Question::Select { .. }, KeyCode::Char('o'))
+                | (Question::Text { .. }, KeyCode::Char('j')) => true,
                 _ => false,
             };
         if key.modifiers != KeyModifiers::NONE
@@ -547,7 +543,7 @@ impl DialogUi {
     /// legacy decoder, or Caps Lock); Shift+Tab arriving as kitty `BackTab`
     /// resolves like the legacy unmodified `CSI Z`, and the dialog owner
     /// alone sees the key.
-    fn resolve(&self, key: crate::keys::Key) -> Option<crate::keys::Action> {
+    fn resolve(key: crate::keys::Key) -> Option<crate::keys::Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if let KeyCode::Char(ch) = key.code
             && ch.is_ascii_uppercase()
@@ -639,153 +635,165 @@ impl DialogUi {
     /// Tab, Shift+Tab, and Enter-activate paths reach every kind with a
     /// focusable row.
     fn question_answer(&mut self, question: &Question, key: crate::keys::Key) -> Option<Answer> {
+        use crossterm::event::KeyCode;
+        match question {
+            Question::Approval { .. } | Question::Grant { .. } => self.approval_key(key),
+            Question::Select { options, multi, .. } => self.select_key(options, *multi, key),
+            Question::Text { .. } => self.text_row_key(key),
+            Question::Confirm { .. } => self.confirm_key(key),
+            _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
+        }
+    }
+
+    fn approval_key(&mut self, key: crate::keys::Key) -> Option<Answer> {
+        use crate::keys::Action;
+        use crossterm::event::KeyCode;
+        const VERBS: usize = 3; // allow once, allow session, deny
+        if key.code == KeyCode::Esc {
+            return Some(Answer::Decline);
+        }
+        self.action_focus.get_or_insert(VERBS - 1);
+        match Self::resolve(key) {
+            Some(Action::ApprovalAllowOnce) => Some(Answer::Approve),
+            Some(Action::ApprovalAllowSession) => Some(Answer::ApproveForSession),
+            Some(Action::ApprovalDeny) => Some(Answer::Decline),
+            Some(Action::ApprovalView) => {
+                self.expanded = !self.expanded;
+                None
+            }
+            Some(Action::DialogFocusLeft | Action::AskMoveUp) => {
+                self.move_focus(VERBS, false);
+                None
+            }
+            Some(Action::DialogFocusRight | Action::AskMoveDown) => {
+                self.move_focus(VERBS, true);
+                None
+            }
+            Some(Action::AskSubmit | Action::DialogActivate) => {
+                Some(match self.action_focus.unwrap_or(VERBS - 1) {
+                    0 => Answer::Approve,
+                    1 => Answer::ApproveForSession,
+                    _ => Answer::Decline,
+                })
+            }
+            Some(Action::DialogScrollDown) => {
+                self.scroll = self.scroll.saturating_add(1);
+                None
+            }
+            Some(Action::DialogScrollUp) => {
+                self.scroll = self.scroll.saturating_sub(1);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn select_key(
+        &mut self,
+        options: &[dal_core::Choice],
+        multi: bool,
+        key: crate::keys::Key,
+    ) -> Option<Answer> {
         use crate::keys::Action;
         use crossterm::event::{KeyCode, KeyModifiers};
-        match question {
-            Question::Approval { .. } | Question::Grant { .. } => {
-                const VERBS: usize = 3; // allow once, allow session, deny
-                if key.code == KeyCode::Esc {
-                    return Some(Answer::Decline);
-                }
-                self.action_focus.get_or_insert(VERBS - 1);
-                match self.resolve(key) {
-                    Some(Action::ApprovalAllowOnce) => Some(Answer::Approve),
-                    Some(Action::ApprovalAllowSession) => Some(Answer::ApproveForSession),
-                    Some(Action::ApprovalDeny) => Some(Answer::Decline),
-                    Some(Action::ApprovalView) => {
-                        self.expanded = !self.expanded;
-                        None
+        if self.text_mode {
+            return self.other_row_key(key);
+        }
+        // Focus reaches every offered option plus the always-present
+        // Other row; arrows and tab move with wrap in both
+        // directions through the binding table.
+        let rows = options.len() + 1;
+        if key.code == KeyCode::Esc {
+            return Some(Answer::Cancel);
+        }
+        match Self::resolve(key) {
+            Some(Action::AskMoveUp | Action::DialogFocusLeft) => {
+                self.focused = (self.focused + rows - 1) % rows;
+                None
+            }
+            Some(Action::AskMoveDown | Action::DialogFocusRight) => {
+                self.focused = (self.focused + 1) % rows;
+                None
+            }
+            Some(Action::AskToggle) if self.focused < options.len() => {
+                if multi {
+                    if !self.checked.insert(self.focused) {
+                        self.checked.remove(&self.focused);
                     }
-                    Some(Action::DialogFocusLeft) | Some(Action::AskMoveUp) => {
-                        self.move_focus(VERBS, false);
-                        None
-                    }
-                    Some(Action::DialogFocusRight) | Some(Action::AskMoveDown) => {
-                        self.move_focus(VERBS, true);
-                        None
-                    }
-                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => {
-                        Some(match self.action_focus.unwrap_or(VERBS - 1) {
-                            0 => Answer::Approve,
-                            1 => Answer::ApproveForSession,
-                            _ => Answer::Decline,
-                        })
-                    }
-                    Some(Action::DialogScrollDown) => {
-                        self.scroll = self.scroll.saturating_add(1);
-                        None
-                    }
-                    Some(Action::DialogScrollUp) => {
-                        self.scroll = self.scroll.saturating_sub(1);
-                        None
-                    }
-                    _ => None,
+                    None
+                } else {
+                    options
+                        .get(self.focused)
+                        .map(|option| select_single(&option.label))
                 }
             }
-            Question::Select { options, multi, .. } => {
-                if self.text_mode {
-                    return self.other_row_key(key);
-                }
-                // Focus reaches every offered option plus the always-present
-                // Other row; arrows and tab move with wrap in both
-                // directions through the binding table.
-                let rows = options.len() + 1;
-                if key.code == KeyCode::Esc {
-                    return Some(Answer::Cancel);
-                }
-                match self.resolve(key) {
-                    Some(Action::AskMoveUp) | Some(Action::DialogFocusLeft) => {
-                        self.focused = (self.focused + rows - 1) % rows;
-                        None
-                    }
-                    Some(Action::AskMoveDown) | Some(Action::DialogFocusRight) => {
-                        self.focused = (self.focused + 1) % rows;
-                        None
-                    }
-                    Some(Action::AskToggle) if self.focused < options.len() => {
-                        if *multi {
-                            if !self.checked.insert(self.focused) {
-                                self.checked.remove(&self.focused);
-                            }
-                            None
-                        } else {
-                            options
-                                .get(self.focused)
-                                .map(|option| select_single(&option.label))
-                        }
-                    }
-                    Some(Action::AskSubmit) | Some(Action::DialogActivate)
-                        if self.focused == options.len() =>
-                    {
-                        // The Other escape opens the in-dialog text row.
-                        self.text_mode = true;
-                        None
-                    }
-                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => {
-                        if *multi {
-                            let labels: Vec<&str> = self
-                                .checked
-                                .iter()
-                                .filter_map(|index| options.get(*index))
-                                .map(|option| option.label.as_ref())
-                                .collect();
-                            Some(select_multi(&labels))
-                        } else {
-                            options
-                                .get(self.focused)
-                                .map(|option| select_single(&option.label))
-                        }
-                    }
-                    Some(Action::DialogScrollDown) => {
-                        self.expanded = true;
-                        self.scroll = self.scroll.saturating_add(1);
-                        None
-                    }
-                    Some(Action::DialogScrollUp) => {
-                        self.scroll = self.scroll.saturating_sub(1);
-                        None
-                    }
-                    _ => {
-                        // Ctrl+O toggles the preview; it is a CONTROL
-                        // shortcut outside the plain-key table.
-                        if key.code == KeyCode::Char('o')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            self.expanded = !self.expanded;
-                        }
-                        None
-                    }
+            Some(Action::AskSubmit | Action::DialogActivate) if self.focused == options.len() => {
+                // The Other escape opens the in-dialog text row.
+                self.text_mode = true;
+                None
+            }
+            Some(Action::AskSubmit | Action::DialogActivate) => {
+                if multi {
+                    let labels: Vec<&str> = self
+                        .checked
+                        .iter()
+                        .filter_map(|index| options.get(*index))
+                        .map(|option| option.label.as_ref())
+                        .collect();
+                    Some(select_multi(&labels))
+                } else {
+                    options
+                        .get(self.focused)
+                        .map(|option| select_single(&option.label))
                 }
             }
-            Question::Text { .. } => self.text_row_key(key),
-            Question::Confirm { .. } => {
-                if key.code == KeyCode::Esc {
-                    return Some(Answer::Cancel);
-                }
-                const VERBS: usize = 2; // yes, no
-                self.action_focus.get_or_insert(VERBS - 1);
-                match self.resolve(key) {
-                    Some(Action::ApprovalAllowOnce) => Some(confirm_answer('y')),
-                    Some(Action::ApprovalDeny) => Some(confirm_answer('n')),
-                    Some(Action::DialogFocusLeft) | Some(Action::AskMoveUp) => {
-                        self.move_focus(VERBS, false);
-                        None
-                    }
-                    Some(Action::DialogFocusRight) | Some(Action::AskMoveDown) => {
-                        self.move_focus(VERBS, true);
-                        None
-                    }
-                    Some(Action::AskSubmit) | Some(Action::DialogActivate) => Some(confirm_answer(
-                        if self.action_focus.unwrap_or(VERBS - 1) == 0 {
-                            'y'
-                        } else {
-                            'n'
-                        },
-                    )),
-                    _ => None,
-                }
+            Some(Action::DialogScrollDown) => {
+                self.expanded = true;
+                self.scroll = self.scroll.saturating_add(1);
+                None
             }
-            _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
+            Some(Action::DialogScrollUp) => {
+                self.scroll = self.scroll.saturating_sub(1);
+                None
+            }
+            _ => {
+                // Ctrl+O toggles the preview; it is a CONTROL
+                // shortcut outside the plain-key table.
+                if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.expanded = !self.expanded;
+                }
+                None
+            }
+        }
+    }
+
+    fn confirm_key(&mut self, key: crate::keys::Key) -> Option<Answer> {
+        use crate::keys::Action;
+        use crossterm::event::KeyCode;
+        const VERBS: usize = 2; // yes, no
+        if key.code == KeyCode::Esc {
+            return Some(Answer::Cancel);
+        }
+        self.action_focus.get_or_insert(VERBS - 1);
+        match Self::resolve(key) {
+            Some(Action::ApprovalAllowOnce) => Some(confirm_answer('y')),
+            Some(Action::ApprovalDeny) => Some(confirm_answer('n')),
+            Some(Action::DialogFocusLeft | Action::AskMoveUp) => {
+                self.move_focus(VERBS, false);
+                None
+            }
+            Some(Action::DialogFocusRight | Action::AskMoveDown) => {
+                self.move_focus(VERBS, true);
+                None
+            }
+            Some(Action::AskSubmit | Action::DialogActivate) => Some(confirm_answer(
+                if self.action_focus.unwrap_or(VERBS - 1) == 0 {
+                    'y'
+                } else {
+                    'n'
+                },
+            )),
+            _ => None,
         }
     }
 
@@ -1111,7 +1119,7 @@ impl DialogUi {
                 self.action_focus.unwrap_or(2),
             ),
             Question::Select { .. } if self.text_mode => {
-                return RenderRow::new(self.text_hint(kitty, width, mode), Role::Text);
+                return RenderRow::new(Self::text_hint(kitty, width, mode), Role::Text);
             }
             Question::Select { multi: true, .. } => (
                 ids::ASK_HINT_MULTI
@@ -1130,7 +1138,7 @@ impl DialogUi {
                 0,
             ),
             Question::Text { .. } => {
-                return RenderRow::new(self.text_hint(kitty, width, mode), Role::Text);
+                return RenderRow::new(Self::text_hint(kitty, width, mode), Role::Text);
             }
             Question::Confirm { .. } => (
                 ids::ASK_HINT_CONFIRM
@@ -1173,7 +1181,7 @@ impl DialogUi {
     /// The free-text actions row. The newline segment names the chord the
     /// terminal's keyboard encoding actually delivers: shift+enter under
     /// kitty keys, ctrl+j elsewhere.
-    fn text_hint(&self, kitty: bool, width: usize, mode: crate::WidthMode) -> String {
+    fn text_hint(kitty: bool, width: usize, mode: crate::WidthMode) -> String {
         use crate::copy::ids;
         let newline = if kitty {
             ids::HINT_NEWLINE
@@ -1245,8 +1253,7 @@ fn fold_hint_ranges(
             .enumerate()
             .rev()
             .max_by_key(|(_, (_, _, priority))| *priority)
-            .map(|(index, _)| index)
-            .unwrap_or(0);
+            .map_or(0, |(index, _)| index);
         kept.remove(index);
     }
     let mut text = String::new();
@@ -2639,13 +2646,14 @@ mod tests {
         let mut dialog = super::DialogUi::default();
         dialog.opened(approval(id));
         arm(&mut dialog);
-        assert!(matches!(
-            dialog.key(crate::keys::Key::new(
-                KeyCode::Char('y'),
-                KeyModifiers::CONTROL,
-            )),
-            None
-        ));
+        assert!(
+            dialog
+                .key(crate::keys::Key::new(
+                    KeyCode::Char('y'),
+                    KeyModifiers::CONTROL,
+                ))
+                .is_none()
+        );
     }
 
     /// Esc answers before the table sees it: an armed approval declines,

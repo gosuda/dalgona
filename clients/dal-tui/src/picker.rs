@@ -633,8 +633,7 @@ pub(crate) fn history_picker(entries: &[EntryView], filter: &str) -> PickerUi {
             }
             let preview = text.lines().next().unwrap_or("");
             Some(PickerOption {
-                label: crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow)
-                    .to_string(),
+                label: crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow),
                 action: PickerAction::SetDraft(text.into()),
             })
         })
@@ -776,14 +775,14 @@ mod tests {
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished", "openai/gpt-6"])
+                if ids.iter().map(AsRef::as_ref).eq(["anthropic/vanished", "openai/gpt-6"])
         ));
         // Uncheck the listed row only: the missing id is still committed.
         assert_eq!(picker.toggle_selected(), Some(false));
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished"])
+                if ids.iter().map(AsRef::as_ref).eq(["anthropic/vanished"])
         ));
         // Uncheck the missing row too: the scope clears.
         picker.move_selection(true);
@@ -1076,7 +1075,7 @@ mod picker_tests {
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(|id| id.as_ref()).eq(["openai/gpt-6"])
+                if ids.iter().map(AsRef::as_ref).eq(["openai/gpt-6"])
         ));
         // Checking nothing submits the empty scope, which clears it.
         picker.toggle_selected();
@@ -1107,7 +1106,7 @@ mod picker_tests {
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(|id| id.as_ref()).eq(["openai/gpt-6"])
+                if ids.iter().map(AsRef::as_ref).eq(["openai/gpt-6"])
         ));
     }
 

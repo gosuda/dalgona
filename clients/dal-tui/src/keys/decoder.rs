@@ -443,6 +443,23 @@ fn control_key(byte: u8) -> Option<Key> {
     }
 }
 
+fn is_prefix(bytes: &[u8], marker: &[u8]) -> bool {
+    bytes.len() < marker.len() && marker.starts_with(bytes)
+}
+
+fn find_bytes(bytes: &[u8], marker: &[u8]) -> Option<usize> {
+    bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+}
+
+fn marker_prefix_suffix(bytes: &[u8], marker: &[u8]) -> usize {
+    (1..=bytes.len().min(marker.len().saturating_sub(1)))
+        .rev()
+        .find(|length| bytes.ends_with(&marker[..*length]))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InputEvent, KeyDecoder};
@@ -695,21 +712,4 @@ mod tests {
             expect_action(bytes, &picker, Action::PickerToggle);
         }
     }
-}
-
-fn is_prefix(bytes: &[u8], marker: &[u8]) -> bool {
-    bytes.len() < marker.len() && marker.starts_with(bytes)
-}
-
-fn find_bytes(bytes: &[u8], marker: &[u8]) -> Option<usize> {
-    bytes
-        .windows(marker.len())
-        .position(|window| window == marker)
-}
-
-fn marker_prefix_suffix(bytes: &[u8], marker: &[u8]) -> usize {
-    (1..=bytes.len().min(marker.len().saturating_sub(1)))
-        .rev()
-        .find(|length| bytes.ends_with(&marker[..*length]))
-        .unwrap_or(0)
 }

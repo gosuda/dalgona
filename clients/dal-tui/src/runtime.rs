@@ -831,9 +831,7 @@ fn cancel_active<A: TuiAgent>(
         scope: CancelScope::Turn(turn),
     })) {
         return match opts.rt.block_on(agent.view(snapshot_page())) {
-            Ok(view)
-                if !matches!(view.turn, TurnState::Running { turn: active } if active == turn) =>
-            {
+            Ok(view) if !matches!(view.turn, TurnState::Running { turn: active } if active == turn) => {
                 Ok(())
             }
             _ => Err(error),
@@ -1118,6 +1116,8 @@ fn enter_interface_modes(
         .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))
 }
 
+type RunLoopOutcome<H> = (TuiExit, Option<TurnId>, Vec<String>, Option<H>);
+
 fn run_loop<A, H, M, S>(
     io: &dyn TermIo,
     opts: &TuiOptions,
@@ -1129,7 +1129,7 @@ fn run_loop<A, H, M, S>(
     save_diagrams: &mut S,
     view: dal_core::View,
     ephemeral: bool,
-) -> Result<(TuiExit, Option<TurnId>, Vec<String>, Option<H::Agent>), TuiError>
+) -> Result<RunLoopOutcome<H::Agent>, TuiError>
 where
     A: TuiAgent,
     H: TuiHost,
@@ -1176,8 +1176,7 @@ where
                 event,
                 probe.kitty_keyboard,
                 opts.screen,
-                term_width,
-                term_height,
+                (term_width, term_height),
             );
         }
         surfaces.flush_answers(opts, agent);
@@ -1766,7 +1765,7 @@ impl Surfaces {
                         self.scoped_models_choice(opts, agent, &filter, model_source)
                     }
                     Chooser::Session => self.session_choice(opts, host, &filter),
-                    _ => {
+                    Chooser::Thinking => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
                         None
@@ -2361,8 +2360,7 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &parser.finish(),
                 opts.screen,
-                probe_width,
-                probe_height,
+                (probe_width, probe_height),
             );
             break;
         }
@@ -2394,8 +2392,7 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &keys,
                 opts.screen,
-                probe_width,
-                probe_height,
+                (probe_width, probe_height),
             );
             // A key event requests an immediate frame that bypasses the batch.
             surfaces.paint(io, state, painter, opts, palette)?;
@@ -2413,8 +2410,7 @@ fn probe_terminal(
                 surfaces.diagram_settings,
                 &held,
                 opts.screen,
-                probe_width,
-                probe_height,
+                (probe_width, probe_height),
             );
             break;
         }
@@ -2435,16 +2431,14 @@ fn apply_type_ahead_at(
     diagrams: crate::diagram::DiagramSettings,
     bytes: &[u8],
     screen: crate::Screen,
-    width: u16,
-    height: u16,
+    size: (u16, u16),
 ) {
     if bytes.is_empty() {
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
         apply_event_at(
-            session, dialog, transcript, live, entries, diagrams, event, false, screen, width,
-            height,
+            session, dialog, transcript, live, entries, diagrams, event, false, screen, size,
         );
     }
 }
@@ -2667,11 +2661,11 @@ fn apply_event_at(
     event: InputEvent,
     kitty: bool,
     screen: crate::Screen,
-    width: u16,
-    height: u16,
+    size: (u16, u16),
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    let (width, height) = size;
     if crate::render::below_floor(width, height) {
         let interrupt = matches!(
             &event,
@@ -3010,8 +3004,7 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
         (KeyCode::Char('d'), KeyModifiers::NONE) if filter_empty => {
             apply_picker_delete_key(session, live);
         }
-        (KeyCode::Char(character), KeyModifiers::NONE)
-        | (KeyCode::Char(character), KeyModifiers::SHIFT) => {
+        (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
             picker.add_filter_char(character);
         }
         _ => {}
@@ -3378,8 +3371,7 @@ mod tests {
             InputEvent::Key(key),
             false,
             crate::Screen::Inline,
-            80,
-            24,
+            (80, 24),
         );
     }
 
@@ -3481,7 +3473,7 @@ mod tests {
         // No candidates: Tab inserts two spaces, the documented fallback.
         session.composer.set("plain text");
         session.update_popup();
-        assert!(session.candidates.is_empty());
+        assert_eq!(session.candidates, [] as [crate::popup::Candidate; 0]);
         apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(session.composer.text(), "plain text  ");
     }
@@ -4138,7 +4130,9 @@ mod tests {
         match action {
             crate::picker::PickerAction::Command(dal_core::Command::SetScopedModels(ids)) => {
                 assert!(
-                    ids.iter().map(|id| id.as_ref()).eq(["anthropic/vanished"]),
+                    ids.iter()
+                        .map(std::convert::AsRef::as_ref)
+                        .eq(["anthropic/vanished"]),
                     "the untouched missing id is still committed, got {ids:?}"
                 );
             }
@@ -4458,8 +4452,7 @@ mod tests {
             InputEvent::Paste(b"ignored paste".to_vec()),
             false,
             crate::Screen::Inline,
-            80,
-            24,
+            (80, 24),
         );
         assert!(
             session.help.is_some(),
@@ -4737,8 +4730,7 @@ mod tests {
                 InputEvent::Key(key),
                 false,
                 crate::Screen::Fullscreen,
-                80,
-                24,
+                (80, 24),
             );
         }
 
@@ -4817,8 +4809,7 @@ mod tests {
                     InputEvent::Key(shift(code)),
                     false,
                     crate::Screen::Inline,
-                    80,
-                    24,
+                    (80, 24),
                 );
             }
             assert!(
@@ -4840,8 +4831,7 @@ mod tests {
                 InputEvent::Key(control_c()),
                 false,
                 crate::Screen::Inline,
-                80,
-                24,
+                (80, 24),
             );
             assert_eq!(session.pending_copies, []);
             assert!(matches!(
@@ -4921,76 +4911,70 @@ mod tests {
         }
     }
 
-    #[test]
-    fn floored_surface_drops_blind_keys_until_resized_back() {
-        use crate::dialog::DialogUi;
-        use crate::keys::{InputEvent, Key};
-        use crossterm::event::{KeyCode, KeyModifiers};
+    fn floored_char_key(c: char) -> crate::keys::Key {
+        crate::keys::Key::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
 
-        fn char_key(c: char) -> Key {
-            Key::new(KeyCode::Char(c), KeyModifiers::NONE)
-        }
-
-        fn approval(id: dal_core::RequestId) -> dal_core::Request {
-            dal_core::Request {
-                id,
-                turn: None,
-                owner: dal_core::Owner::Core,
-                question: dal_core::Question::Approval {
-                    tool: "exec".into(),
-                    preview: dal_core::Preview {
-                        title: "command".into(),
-                        body: "echo hi".into(),
-                        digest: None,
-                    },
-                    grant: None,
-                    call: None,
+    fn floored_approval(id: dal_core::RequestId) -> dal_core::Request {
+        dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "echo hi".into(),
+                    digest: None,
                 },
-                timeout: std::time::Duration::from_secs(30),
-                default: dal_core::Answer::Decline,
-            }
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Decline,
         }
+    }
 
-        fn apply_at(
-            session: &mut Session,
-            dialog: &mut DialogUi,
-            event: InputEvent,
-            width: u16,
-            height: u16,
-        ) {
-            super::apply_event_at(
-                session,
-                dialog,
-                &crate::transcript::Transcript::default(),
-                &mut crate::live::Live::default(),
-                &[],
-                crate::diagram::DiagramSettings::default(),
-                event,
-                false,
-                crate::Screen::Inline,
-                width,
-                height,
-            );
-        }
+    fn floored_apply_at(
+        session: &mut Session,
+        dialog: &mut crate::dialog::DialogUi,
+        event: crate::keys::InputEvent,
+        size: (u16, u16),
+    ) {
+        super::apply_event_at(
+            session,
+            dialog,
+            &crate::transcript::Transcript::default(),
+            &mut crate::live::Live::default(),
+            &[],
+            crate::diagram::DiagramSettings::default(),
+            event,
+            false,
+            crate::Screen::Inline,
+            size,
+        );
+    }
 
-        assert!(crate::render::below_floor(20, 5));
-        assert!(!crate::render::below_floor(80, 24));
+    fn check_floored_approval_flow() {
+        use crate::dialog::DialogUi;
+        use crate::keys::InputEvent;
 
         let mut session = Session::default();
         let mut dialog = DialogUi::default();
         let id = dal_core::RequestId::new_v7();
-        dialog.opened(approval(id));
+        dialog.opened(floored_approval(id));
         let start = std::time::Instant::now();
         dialog.tick(start);
         dialog.tick(start + crate::dialog::ARM_DELAY);
         assert!(dialog.armed());
-
-        apply_at(
+        floored_apply_at(
             &mut session,
             &mut dialog,
-            InputEvent::Key(char_key('y')),
-            20,
-            5,
+            InputEvent::Key(floored_char_key('y')),
+            (20, 5),
         );
         assert!(
             session.pending_answers.is_empty(),
@@ -5001,13 +4985,11 @@ mod tests {
             !dialog.awaiting_resolution(),
             "no answer may latch while floored"
         );
-
-        apply_at(
+        floored_apply_at(
             &mut session,
             &mut dialog,
-            InputEvent::Key(char_key('y')),
-            80,
-            24,
+            InputEvent::Key(floored_char_key('y')),
+            (80, 24),
         );
         assert_eq!(session.pending_answers.len(), 1);
         assert!(
@@ -5018,18 +5000,23 @@ mod tests {
             "resize back re-arms the still-open approval: {:?}",
             session.pending_answers
         );
+    }
+
+    fn check_floored_picker_flow() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut picker_session = Session {
             picker: Some(crate::picker::model_picker_failed("")),
             ..Session::default()
         };
         let mut no_dialog = DialogUi::default();
-        apply_at(
+        floored_apply_at(
             &mut picker_session,
             &mut no_dialog,
             InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
-            20,
-            5,
+            (20, 5),
         );
         assert!(
             picker_session.pending_commands.is_empty(),
@@ -5039,57 +5026,74 @@ mod tests {
             picker_session.picker.is_some(),
             "the unseen picker stays open"
         );
-        apply_at(
+        floored_apply_at(
             &mut picker_session,
             &mut no_dialog,
             InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
-            80,
-            24,
+            (80, 24),
         );
+    }
+
+    fn check_floored_composer_flow() {
+        use crate::dialog::DialogUi;
+        use crate::keys::InputEvent;
 
         let mut type_session = Session::default();
         let mut type_dialog = DialogUi::default();
-        apply_at(
+        floored_apply_at(
             &mut type_session,
             &mut type_dialog,
-            InputEvent::Key(char_key('x')),
-            20,
-            5,
+            InputEvent::Key(floored_char_key('x')),
+            (20, 5),
         );
         assert_eq!(
             type_session.composer.text(),
             "",
             "composer typing below the floor must not mutate the draft"
         );
-        apply_at(
+        floored_apply_at(
             &mut type_session,
             &mut type_dialog,
             InputEvent::Paste(b"x".to_vec()),
-            20,
-            5,
+            (20, 5),
         );
         assert_eq!(
             type_session.composer.text(),
             "",
             "paste below the floor must not reach the composer"
         );
+    }
+
+    fn check_floored_interrupt_flow() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut interrupt_session = Session {
             picker: Some(crate::picker::model_picker_failed("")),
             ..Session::default()
         };
         let mut interrupt_dialog = DialogUi::default();
-        apply_at(
+        floored_apply_at(
             &mut interrupt_session,
             &mut interrupt_dialog,
             InputEvent::Key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            20,
-            5,
+            (20, 5),
         );
         assert!(
             interrupt_session.picker.is_none(),
             "Ctrl+C stays the interrupt path while floored"
         );
+    }
+
+    #[test]
+    fn floored_surface_drops_blind_keys_until_resized_back() {
+        assert!(crate::render::below_floor(20, 5));
+        assert!(!crate::render::below_floor(80, 24));
+        check_floored_approval_flow();
+        check_floored_picker_flow();
+        check_floored_composer_flow();
+        check_floored_interrupt_flow();
     }
 }
 
@@ -5499,7 +5503,7 @@ mod panic_hook_tests {
 
         restorers.remove(&first);
         restorers.remove(&second);
-        assert!(restored(&restorers).is_empty());
+        assert_eq!(restored(&restorers), [] as [bool; 0]);
         assert_eq!(Arc::strong_count(&second), 1);
     }
 
@@ -6120,7 +6124,7 @@ mod loop_tests {
             .accept_reply(Reply::Front(dal_core::FrontAction::Resume {
                 session: resume_summary(target),
             }));
-        assert!(rows.is_empty());
+        assert_eq!(rows, [] as [String; 0]);
         assert!(!rig.surfaces.session.quit, "arming a resume never quits");
         assert!(
             !rig.surfaces.request_quit(),
@@ -6184,7 +6188,7 @@ mod loop_tests {
         let host = resume_host(Vec::new());
         assert!(rig.surfaces.open_armed_resume(&rig.opts, &host).is_some());
         assert!(rig.surfaces.session.resume_target.is_none());
-        assert!(rig.surfaces.live.notices().is_empty());
+        assert_eq!(rig.surfaces.live.notices(), []);
     }
 
     /// When the listing cannot be re-read after a delete, the picker keeps its
@@ -6964,7 +6968,7 @@ mod loop_tests {
             Some(crate::picker::PickerAction::Command(Command::SetScopedModels(ids)))
                 if ids
                     .iter()
-                    .map(|id| id.as_ref())
+                    .map(std::convert::AsRef::as_ref)
                     .eq(["anthropic/opus-4", "anthropic/vanished"])
         ));
         assert_eq!(
@@ -7133,8 +7137,7 @@ mod loop_tests {
             crate::keys::InputEvent::Key(key),
             false,
             Screen::Inline,
-            80,
-            24,
+            (80, 24),
         );
     }
 
