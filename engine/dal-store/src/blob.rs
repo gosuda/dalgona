@@ -278,28 +278,39 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// Reads a blob. `Gone` when the session directory is absent, `NotFound` when only the digest is.
 ///
 /// # Errors
-/// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
+/// Returns [`BlobError::Gone`], [`BlobError::NotFound`], [`BlobError::TooLarge`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
-    let path = session_dir.join("blobs").join(id.to_string());
-    match crate::private::open_private_file(&path).and_then(|mut file| {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }) {
-        Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
-        Ok(_) => Err(io_blob(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("blob {id} does not match its digest; the file is damaged"),
-        ))),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            match fs::metadata(session_dir) {
-                Ok(_) => Err(BlobError::NotFound { id: *id }),
-                Err(session) if session.kind() == io::ErrorKind::NotFound => Err(BlobError::Gone),
-                Err(session) => Err(io_blob(session)),
-            }
-        }
-        Err(source) => Err(io_blob(source)),
+    let blobs = session_dir.join("blobs");
+    let file = crate::private::open_private_file(&blobs.join(id.to_string()))
+        .map_err(|source| missing_source(&blobs, id, source))?;
+    let bytes = read_capped(file)?;
+    if BlobId::from_bytes(&bytes) == *id {
+        return Ok(bytes);
     }
+    Err(io_blob(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("blob {id} does not match its digest; the file is damaged"),
+    )))
+}
+
+/// Reads an open blob file whole. A file past the blob cap is damaged or
+/// planted: it is refused before any read, and a file grown since the stat is
+/// refused after one byte over the cap, so a hostile file cannot drive an
+/// unbounded allocation.
+fn read_capped(file: File) -> Result<Vec<u8>, BlobError> {
+    let length = file.metadata().map_err(io_blob)?.len();
+    if length > MAX_BLOB {
+        return Err(BlobError::TooLarge { bytes: length });
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    file.take(MAX_BLOB.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_blob)?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if read > MAX_BLOB {
+        return Err(BlobError::TooLarge { bytes: read });
+    }
+    Ok(bytes)
 }
 
 /// Hard-links or copies each named digest from the source blob directory into
@@ -928,6 +939,25 @@ mod tests {
         ));
         fs::remove_dir_all(&session).expect("delete session");
         assert!(matches!(read(&session, &id), Err(BlobError::Gone)));
+    }
+
+    #[test]
+    fn read_refuses_a_file_past_the_blob_cap_without_reading_it() {
+        let temp = TestDir::new();
+        let session = temp.0.join("session");
+        let blobs = session.join("blobs");
+        fs::create_dir_all(&blobs).expect("create session blobs");
+        let id = BlobId::from_bytes(b"planted");
+        let planted = File::create(blobs.join(id.to_string())).expect("create planted blob");
+        planted
+            .set_len(MAX_BLOB + 1)
+            .expect("extend planted blob past the cap");
+        drop(planted);
+
+        assert!(matches!(
+            read(&session, &id),
+            Err(BlobError::TooLarge { bytes }) if bytes == MAX_BLOB + 1
+        ));
     }
 
     #[test]

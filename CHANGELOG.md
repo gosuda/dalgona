@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Send stored text blobs in requests. A turn whose context held a text blob,
+  such as a long pasted letter, failed with "blob ... was not read from the
+  session store before the request"; the request builder now reads text
+  blobs back as inline text, as it already did for images. An absent blob or
+  a blob that is not valid UTF-8 fails the turn before any request is sent and
+  names the blob.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
   absent when the starter supplied none), it survives settlement and the job

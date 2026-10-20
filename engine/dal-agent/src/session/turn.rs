@@ -105,9 +105,9 @@ pub(crate) async fn model_ready(
 
 /// Opens one provider stream for a model request.
 ///
-/// Stored images are read back into the request first, so a registered
-/// model, the scripted provider, and a live provider all receive inline
-/// bytes. Scripted providers then bypass the catalog; live providers
+/// Stored images and stored text are read back into the request first, so a
+/// registered model, the scripted provider, and a live provider all receive
+/// inline content. Scripted providers then bypass the catalog; live providers
 /// resolve through one catalog fetch. Hydration and open failures return a
 /// stream yielding the single error, so callers handle transport and
 /// content uniformly.
@@ -116,7 +116,7 @@ pub(crate) async fn infer_stream(
     mut req: ModelRequest,
     cancel: &CancellationToken,
 ) -> EventStream {
-    if let Err(error) = hydrate_images(deps, &mut req, cancel).await {
+    if let Err(error) = hydrate_blobs(deps, &mut req, cancel).await {
         return failed(error);
     }
     if let Some(found) = crate::ext::synthetic::find_route(&deps.host.shared, &req.model) {
@@ -134,20 +134,21 @@ fn failed(error: ProviderError) -> EventStream {
     EventStream::new(futures::stream::iter(items), || {})
 }
 
-/// Replaces every stored image of the request context with its bytes.
+/// Replaces every stored image and stored text of the request context with
+/// its content.
 ///
-/// The session store moves an image of 16 KiB or more out of the journal,
-/// and the projection then names it by digest. Neither a provider nor a
-/// registered model can read the store, so this is where those references
-/// become inline images again, before any route is chosen. Order, media
-/// types, and every other part are unchanged. A request that names no
-/// stored image is left as it is: nothing is cloned, and inline images are
-/// never copied.
+/// The session store moves an image or a text part of 16 KiB or more out of
+/// the journal, and the projection then names it by digest. Neither a
+/// provider nor a registered model can read the store, so this is where those
+/// references become inline images and inline text again, before any route is
+/// chosen. Order, media types, and every other part are unchanged. A request
+/// that names no stored image or text is left as it is: nothing is cloned, and
+/// inline parts are never copied.
 ///
-/// A blob that is absent, unreadable, from a session that is not open, or
-/// not the recorded length refuses the request: the image is never
-/// skipped, and nothing is sent without it.
-async fn hydrate_images(
+/// A blob that is absent, unreadable, from a session that is not open, not
+/// the recorded length, or (for text) not UTF-8 refuses the request: the part
+/// is never skipped, and nothing is sent without it.
+async fn hydrate_blobs(
     deps: &RequestDeps,
     req: &mut ModelRequest,
     cancel: &CancellationToken,
@@ -156,7 +157,7 @@ async fn hydrate_images(
         .context
         .iter()
         .flat_map(|item| parts(item).iter())
-        .find_map(stored_image)
+        .find_map(stored_blob)
     else {
         return Ok(());
     };
@@ -178,7 +179,29 @@ async fn hydrate_images(
     Ok(())
 }
 
-/// Replaces `part` with the stored bytes when it names a stored image.
+#[derive(Clone, Copy)]
+enum Stored {
+    Image,
+    Text,
+}
+
+impl Stored {
+    fn of(mime: &str) -> Option<Self> {
+        mime.starts_with("image/")
+            .then_some(Self::Image)
+            .or_else(|| mime.starts_with("text/").then_some(Self::Text))
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Text => "text",
+        }
+    }
+}
+
+/// Replaces `part` with the stored content when it names a stored image or
+/// stored text.
 async fn hydrate_part(
     handle: &SessionHandle,
     part: &mut Part,
@@ -192,21 +215,32 @@ async fn hydrate_part(
     else {
         return Ok(());
     };
-    if !mime.starts_with("image/") {
+    let Some(stored) = Stored::of(mime) else {
         return Ok(());
-    }
-    let bytes = read_image(handle, *blob_id, *recorded, cancel).await?;
-    *part = Part::Image {
-        mime: std::mem::take(mime),
-        bytes,
+    };
+    let id = *blob_id;
+    let bytes = read_blob(handle, id, *recorded, stored, cancel).await?;
+    *part = match stored {
+        Stored::Image => Part::Image {
+            mime: std::mem::take(mime),
+            bytes,
+        },
+        Stored::Text => {
+            let text = String::from_utf8(bytes.into_vec()).map_err(|_| {
+                fatal(format!(
+                    "text blob {id} is not valid UTF-8; the text was not sent."
+                ))
+            })?;
+            Part::Text { text: text.into() }
+        }
     };
     Ok(())
 }
 
-/// The digest behind a part that names a stored image.
-fn stored_image(part: &Part) -> Option<BlobId> {
+/// The digest behind a part that names a stored image or stored text.
+fn stored_blob(part: &Part) -> Option<BlobId> {
     match part {
-        Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => Some(*blob_id),
+        Part::Blob { blob_id, mime, .. } if Stored::of(mime).is_some() => Some(*blob_id),
         Part::Blob { .. } | Part::Text { .. } | Part::Image { .. } => None,
     }
 }
@@ -237,18 +271,20 @@ fn session_handle(deps: &RequestDeps) -> Option<SessionHandle> {
         .map(|entry| entry.handle.clone())
 }
 
-/// Reads one stored image through the session actor.
+/// Reads one stored blob through the session actor.
 ///
 /// A cancelled request stops waiting at once. An absent digest is the typed
 /// unresolved-blob refusal; every other failure, and a stored length that
 /// differs from the journal's record, is a fatal inference failure naming
 /// the blob.
-async fn read_image(
+async fn read_blob(
     handle: &SessionHandle,
     id: BlobId,
     recorded: u64,
+    stored: Stored,
     cancel: &CancellationToken,
 ) -> Result<Box<[u8]>, ProviderError> {
+    let noun = stored.noun();
     let read = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(cancelled()),
@@ -259,12 +295,12 @@ async fn read_image(
             Ok(bytes.into_boxed_slice())
         }
         Ok(bytes) => Err(fatal(format!(
-            "image blob {id} holds {} bytes but its journal part records {recorded}; the image was not sent.",
+            "{noun} blob {id} holds {} bytes but its journal part records {recorded}; the {noun} was not sent.",
             bytes.len()
         ))),
         Err(AgentError::BlobNotFound { .. }) => Err(ProviderError::UnresolvedBlob { blob_id: id }),
         Err(error) => Err(fatal(format!(
-            "image blob {id} could not be read from the session store: {error}"
+            "{noun} blob {id} could not be read from the session store: {error}"
         ))),
     }
 }

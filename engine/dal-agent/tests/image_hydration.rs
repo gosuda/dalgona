@@ -1,10 +1,13 @@
-//! Stored images return to the provider request as inline bytes.
+//! Stored images and stored text return to the provider request as inline
+//! content.
 //!
 //! Images of 16 KiB or more leave the journal for the session blob store.
 //! The request boundary in `session::turn` reads them back before any
 //! route runs, so reopened, forked, and cloned sessions submit the same
 //! bytes the live turn sent. Absent, damaged, or misrecorded blobs refuse
-//! the turn instead of sending a partial request.
+//! the turn instead of sending a partial request. A text part of 16 KiB or
+//! more spills the same way and returns as inline text; a text blob that is
+//! absent, damaged, misrecorded, unreadable, or not UTF-8 refuses the turn too.
 #![expect(clippy::expect_used, reason = "test assertions abort on failure")]
 #![expect(clippy::panic, reason = "test assertions abort on failure")]
 use std::collections::BTreeMap;
@@ -462,6 +465,62 @@ async fn reopened_session_resends_spilled_images_inline() {
     host.shutdown(Duration::from_secs(1)).await;
 }
 
+/// The spill boundary from below: an image one byte under the threshold
+/// stays inline in the journal while one exactly at it leaves for the blob
+/// store, and the provider receives both byte for byte.
+#[tokio::test]
+async fn an_image_one_byte_below_the_threshold_stays_inline() {
+    let rig = rig();
+    let below = image_bytes(ContentLimits::INLINE_BYTES - 1, 5);
+    let at = image_bytes(ContentLimits::INLINE_BYTES, 6);
+    let host = start_host(&rig).await;
+    let agent = open_new(&host, &rig.workspace).await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+
+    let (turn, _) = prompt(
+        &agent,
+        vec![
+            Part::Text {
+                text: "boundary".into(),
+            },
+            Part::Image {
+                mime: "image/png".into(),
+                bytes: below.clone().into_boxed_slice(),
+            },
+            Part::Image {
+                mime: "image/jpeg".into(),
+                bytes: at.clone().into_boxed_slice(),
+            },
+        ],
+    )
+    .await;
+    let outcome = wait_end(&mut subscription, turn).await;
+    assert_eq!(outcome.stop, Stop::EndTurn);
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(&at)).is_some(),
+        "an image exactly at the threshold spills to the blob store"
+    );
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(&below)).is_none(),
+        "an image one byte under the threshold stays inline"
+    );
+    assert_eq!(
+        seen_of(&rig.requests.first()),
+        vec![
+            Seen::Text("boundary".to_owned()),
+            Seen::Image {
+                mime: "image/png".to_owned(),
+                bytes: below,
+            },
+            Seen::Image {
+                mime: "image/jpeg".to_owned(),
+                bytes: at,
+            },
+        ]
+    );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
 #[tokio::test]
 async fn restarted_host_resends_spilled_images_inline() {
     let rig = rig();
@@ -732,6 +791,263 @@ async fn misrecorded_blob_length_refuses_the_turn_without_sending() {
         outcome.notices
     );
     host.shutdown(Duration::from_secs(1)).await;
+}
+
+/// Text fixtures: above the spill threshold, exactly on it, and inline. Each
+/// is a distinct letter so a swapped or truncated part cannot match.
+struct Texts {
+    big: String,
+    edge: String,
+    below: String,
+    small: String,
+}
+
+fn texts() -> Texts {
+    Texts {
+        big: "B".repeat(20_000),
+        edge: "E".repeat(ContentLimits::INLINE_BYTES),
+        below: "b".repeat(ContentLimits::INLINE_BYTES - 1),
+        small: "s".repeat(64),
+    }
+}
+
+/// Seeds one resumable session whose first user entry carries `parts`.
+async fn seed_user_parts(data: &Path, workspace: &Workspace, parts: Vec<JournalPart>) -> SessionId {
+    let session = SessionId::new_v7();
+    let store = Store::new(data.to_path_buf(), workspace.clone(), JournalProduct::Dal);
+    let mut journal = store.create_session(session);
+    journal
+        .append(vec![user_record(1, None, parts)])
+        .await
+        .expect("seed user entry");
+    journal.close().await.expect("close seeded session");
+    session
+}
+
+#[tokio::test]
+async fn reopened_session_resends_spilled_text_inline() {
+    let rig = rig();
+    let text = texts();
+    let id = seed_user_parts(
+        &rig.data,
+        &rig.workspace,
+        vec![
+            JournalPart::Text {
+                text: text.big.clone().into(),
+            },
+            JournalPart::Text {
+                text: text.edge.clone().into(),
+            },
+            JournalPart::Text {
+                text: text.below.clone().into(),
+            },
+            JournalPart::Text {
+                text: text.small.clone().into(),
+            },
+        ],
+    )
+    .await;
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(text.big.as_bytes())).is_some(),
+        "the 20 KB text spills to the blob store"
+    );
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(text.edge.as_bytes())).is_some(),
+        "the threshold text spills to the blob store"
+    );
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(text.below.as_bytes())).is_none(),
+        "text one byte under the threshold stays inline"
+    );
+    assert!(
+        blob_file(&rig.data, BlobId::from_bytes(text.small.as_bytes())).is_none(),
+        "the small text stays inline"
+    );
+
+    let host = start_host(&rig).await;
+    let agent = resume(&host, &rig.workspace, id).await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    let (turn, _) = prompt(&agent, vec![Part::Text { text: "go".into() }]).await;
+    let outcome = wait_end(&mut subscription, turn).await;
+    assert_eq!(outcome.stop, Stop::EndTurn, "{:?}", outcome.notices);
+    assert_eq!(rig.requests.len(), 1);
+    assert_eq!(
+        seen_of(&rig.requests.first()),
+        vec![
+            Seen::Text(text.big),
+            Seen::Text(text.edge),
+            Seen::Text(text.below),
+            Seen::Text(text.small),
+            Seen::Text("go".to_owned()),
+        ],
+        "every spilled text part reaches the model as the text the user sent"
+    );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+/// Seeds a session whose only user entry names a text blob holding `bytes`.
+async fn seed_text_blob(data: &Path, workspace: &Workspace, bytes: &[u8]) -> (SessionId, BlobId) {
+    seed_text_blob_recording(data, workspace, bytes, blob_len(bytes)).await
+}
+
+/// Seeds a text blob entry whose journal part records `recorded` bytes.
+async fn seed_text_blob_recording(
+    data: &Path,
+    workspace: &Workspace,
+    bytes: &[u8],
+    recorded: u64,
+) -> (SessionId, BlobId) {
+    seed_blob_part(data, workspace, bytes, |blob| JournalPart::TextBlob {
+        blob: blob.into(),
+        bytes: recorded,
+    })
+    .await
+}
+
+/// Seeds a session whose only user entry is the part `part` builds for the
+/// published digest of `bytes`.
+async fn seed_blob_part(
+    data: &Path,
+    workspace: &Workspace,
+    bytes: &[u8],
+    part: impl FnOnce(&str) -> JournalPart,
+) -> (SessionId, BlobId) {
+    let session = SessionId::new_v7();
+    let store = Store::new(data.to_path_buf(), workspace.clone(), JournalProduct::Dal);
+    let mut journal = store.create_session(session);
+    journal
+        .append(vec![user_record(
+            1,
+            None,
+            vec![JournalPart::Text {
+                text: "seed".into(),
+            }],
+        )])
+        .await
+        .expect("seed first user");
+    let published = journal.put_blob(bytes.to_vec()).expect("publish text blob");
+    assert_eq!(published, BlobId::from_bytes(bytes));
+    journal
+        .append(vec![user_record(
+            2,
+            Some(entry_id(1)),
+            vec![part(&published.to_string())],
+        )])
+        .await
+        .expect("seed text blob entry");
+    journal.close().await.expect("close seeded session");
+    (session, published)
+}
+
+/// Resumes `id` and sends one more prompt: the turn must fail naming `blob`
+/// and no provider request may leave.
+async fn assert_text_refusal(rig: &Rig, id: SessionId, blob: BlobId) {
+    let host = start_host(rig).await;
+    let agent = resume(&host, &rig.workspace, id).await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    let (turn, _) = prompt(&agent, vec![Part::Text { text: "go".into() }]).await;
+    let outcome = wait_end(&mut subscription, turn).await;
+    assert_eq!(outcome.stop, Stop::Failed);
+    assert!(
+        rig.requests.is_empty(),
+        "no request leaves with an unusable text blob"
+    );
+    assert!(
+        outcome
+            .notices
+            .iter()
+            .any(|(kind, text)| kind.as_str() == "turn.failed" && text.contains(&blob.to_string())),
+        "the failure names the blob: {:?}",
+        outcome.notices
+    );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn absent_text_blob_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let text = "T".repeat(20_000);
+    let (id, missing) = seed_text_blob(&rig.data, &rig.workspace, text.as_bytes()).await;
+    let path = blob_file(&rig.data, missing).expect("published text blob file");
+    std::fs::remove_file(&path).expect("delete text blob");
+
+    assert_text_refusal(&rig, id, missing).await;
+}
+
+#[tokio::test]
+async fn misrecorded_text_blob_length_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let text = "M".repeat(20_000);
+    let recorded = blob_len(text.as_bytes()) + 100;
+    let (id, blob) =
+        seed_text_blob_recording(&rig.data, &rig.workspace, text.as_bytes(), recorded).await;
+
+    assert_text_refusal(&rig, id, blob).await;
+}
+
+#[tokio::test]
+async fn corrupt_text_blob_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let text = "C".repeat(20_000);
+    let (id, damaged) = seed_text_blob(&rig.data, &rig.workspace, text.as_bytes()).await;
+    let path = blob_file(&rig.data, damaged).expect("published text blob file");
+    std::fs::remove_file(&path).expect("remove damaged text blob");
+    std::fs::write(&path, "D".repeat(text.len())).expect("write same-length damaged text");
+
+    assert_text_refusal(&rig, id, damaged).await;
+}
+
+#[tokio::test]
+async fn unreadable_text_blob_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let text = "U".repeat(20_000);
+    let (id, blob) = seed_text_blob(&rig.data, &rig.workspace, text.as_bytes()).await;
+    let path = blob_file(&rig.data, blob).expect("published text blob file");
+    std::fs::remove_file(&path).expect("remove text blob");
+    std::fs::create_dir(&path).expect("replace text blob with a directory");
+
+    assert_text_refusal(&rig, id, blob).await;
+}
+
+#[tokio::test]
+async fn text_blob_that_is_not_utf8_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let (id, damaged) = seed_text_blob(&rig.data, &rig.workspace, &vec![0xff; 20_000]).await;
+
+    assert_text_refusal(&rig, id, damaged).await;
+}
+
+#[tokio::test]
+async fn text_blobs_of_any_text_media_type_resend_inline() {
+    for mime in ["text/markdown", "text/plain; charset=utf-8"] {
+        let rig = rig();
+        let text = "m".repeat(20_000);
+        let (id, _) = seed_blob_part(&rig.data, &rig.workspace, text.as_bytes(), |blob| {
+            JournalPart::Blob {
+                mime: mime.into(),
+                blob: blob.into(),
+                bytes: blob_len(text.as_bytes()),
+            }
+        })
+        .await;
+
+        let host = start_host(&rig).await;
+        let agent = resume(&host, &rig.workspace, id).await;
+        let mut subscription = agent.subscribe(None).expect("subscribe");
+        let (turn, _) = prompt(&agent, vec![Part::Text { text: "go".into() }]).await;
+        let outcome = wait_end(&mut subscription, turn).await;
+        assert_eq!(outcome.stop, Stop::EndTurn, "{mime}: {:?}", outcome.notices);
+        assert_eq!(
+            seen_of(&rig.requests.first()),
+            vec![
+                Seen::Text("seed".to_owned()),
+                Seen::Text(text),
+                Seen::Text("go".to_owned()),
+            ],
+            "{mime} reaches the model as inline text"
+        );
+        host.shutdown(Duration::from_secs(1)).await;
+    }
 }
 
 /// Seeds dropped, kept, compaction, and latest entries carrying images.
