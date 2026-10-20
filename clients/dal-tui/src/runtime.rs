@@ -1222,6 +1222,22 @@ impl Surfaces {
             }
         }
     }
+
+    /// Folds one sequenced update into the live region, then the view,
+    /// transcript, dialog, and session: the one path the loop's drain takes.
+    fn absorb_update<A: TuiAgent>(
+        &mut self,
+        opts: &TuiOptions,
+        agent: &A,
+        update: &dal_core::Update,
+    ) -> Result<(), TuiError> {
+        self.live.apply_update(update);
+
+        self.view.r#gen = update.r#gen;
+        self.view.seq = update.seq;
+        self.apply_update(opts, agent, update)
+    }
+
     /// Applies one update's kind to view, transcript, dialog, and session.
     fn apply_update<A: TuiAgent>(
         &mut self,
@@ -1232,10 +1248,8 @@ impl Surfaces {
         match &update.kind {
             UpdateKind::Tree(delta) => {
                 for entry in &delta.added {
-                    // The result entry lands before its settle update, so the
-                    // card takes the time elapsed since the call started.
                     if let dal_core::EntryKind::ToolResult { call, .. } = &entry.kind
-                        && let Some(duration) = self.live.tool_elapsed(call.as_str())
+                        && let Some(duration) = self.live.release_tool(call.as_str())
                     {
                         self.transcript.note_tool_duration(call.as_str(), duration);
                     }
@@ -1323,13 +1337,7 @@ impl Surfaces {
     ) -> Result<(), TuiError> {
         while let Ok(delivery) = pump.deliveries.try_recv() {
             match delivery? {
-                TuiDelivery::Update(update) => {
-                    self.live.apply_update(&update);
-
-                    self.view.r#gen = update.r#gen;
-                    self.view.seq = update.seq;
-                    self.apply_update(opts, agent, &update)?;
-                }
+                TuiDelivery::Update(update) => self.absorb_update(opts, agent, &update)?,
                 TuiDelivery::Resync(snapshot) => {
                     let remote_repaint = snapshot.is_some();
                     let fresh = match snapshot {
@@ -4592,6 +4600,30 @@ mod loop_tests {
         }
     }
 
+    /// The options every loop test runs under: an inline, plain-colour terminal.
+    fn options(rt: tokio::runtime::Handle) -> TuiOptions {
+        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        TuiOptions {
+            session: SessionRef::Ephemeral { workspace },
+            screen: Screen::Inline,
+            theme_request: ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "vi".into(),
+            color: ColorMode::Never,
+            binary: "dalgon",
+            env: EnvFacts {
+                stdin_tty: true,
+                term: Some("xterm-256color".to_owned()),
+                width_mode: WidthMode::Narrow,
+                ..EnvFacts::default()
+            },
+            rt,
+        }
+    }
+
     /// Runs the terminal loop against the fake host and returns what the host saw.
     fn drive(script: Vec<Chunk>, run_entered: Arc<AtomicBool>) -> Vec<String> {
         static ONE_LOOP_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -4669,4 +4701,345 @@ mod loop_tests {
             "the first prompt survives the probe and the second carries no reply bytes"
         );
     }
+
+    /// A session whose journal the test appends to: `view` answers with every
+    /// entry appended so far, as the host does after the same updates.
+    #[derive(Clone, Default)]
+    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>);
+
+    impl TuiAgent for Ledger {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            let mut view = idle_view();
+            view.entries.items = self.0.lock().expect("ledger").clone();
+            std::future::ready(Ok(view))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    /// The loop's surfaces over a ledger agent. Updates enter through the same
+    /// `absorb_update` the drain takes; a result lands in the ledger first, so
+    /// the turn-end snapshot holds exactly the entries the updates announced.
+    struct Rig {
+        surfaces: super::Surfaces,
+        agent: Ledger,
+        opts: TuiOptions,
+        seq: u64,
+        entries: u64,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let opts = options(runtime.handle().clone());
+            let diagram_cache = crate::diagram::RenderCache::default();
+            let surfaces = super::Surfaces {
+                view: idle_view(),
+                session: super::Session::default(),
+                dialog: crate::dialog::DialogUi::default(),
+                live: crate::live::Live::default(),
+                transcript: crate::transcript::Transcript::default(),
+                columns: 80,
+                diagram_settings: crate::diagram::DiagramSettings::default(),
+                diagram_generation: diagram_cache.generation(),
+                diagram_cache,
+                branch: None,
+            };
+            Self {
+                surfaces,
+                agent: Ledger::default(),
+                opts,
+                seq: 0,
+                entries: 0,
+                _runtime: runtime,
+            }
+        }
+
+        fn feed(&mut self, kind: dal_core::UpdateKind) {
+            self.seq += 1;
+            let update = dal_core::Update {
+                r#gen: Gen::new(NonZeroU64::MIN),
+                seq: Seq::new(NonZeroU64::new(self.seq).expect("the counter starts at one")),
+                kind,
+            };
+            self.surfaces
+                .absorb_update(&self.opts, &self.agent, &update)
+                .expect("the update folds");
+        }
+
+        fn start(&mut self, call: &str, tool: &str) {
+            self.feed(dal_core::UpdateKind::ToolStarted {
+                call: dal_core::CallId::new(call),
+                tool: tool.into(),
+                args: dal_core::RawJson::null(),
+            });
+        }
+
+        fn settle(&mut self, call: &str, elapsed_ms: Option<u64>) {
+            self.feed(dal_core::UpdateKind::ToolSettled {
+                call: dal_core::CallId::new(call),
+                outcome: dal_core::ToolOutcomeView {
+                    is_error: false,
+                    text: "settled".into(),
+                    images: Vec::new(),
+                    elapsed_ms,
+                },
+            });
+        }
+
+        /// Journals the call's result entry, summarised as `out-{call}`, and
+        /// announces it the way the fold does: as a tree delta.
+        fn result(&mut self, call: &str, tool: &str, elapsed_ms: Option<u64>) {
+            self.entries += 1;
+            let id = dal_core::EntryId::new(
+                NonZeroU64::new(self.entries).expect("the counter starts at one"),
+            );
+            let entry = dal_core::EntryView {
+                id,
+                parent: None,
+                kind: dal_core::EntryKind::ToolResult {
+                    call: dal_core::CallId::new(call),
+                    name: tool.into(),
+                    error: false,
+                    parts: vec![dal_core::JournalPart::Text {
+                        text: format!("out-{call}").into(),
+                    }],
+                    changes: Vec::new(),
+                    elapsed_ms,
+                },
+            };
+            self.agent.0.lock().expect("ledger").push(entry.clone());
+            self.feed(dal_core::UpdateKind::Tree(dal_core::TreeDelta {
+                added: vec![entry],
+                leaf: Some(id),
+            }));
+        }
+
+        fn end(&mut self, stop: dal_core::Stop) {
+            self.feed(dal_core::UpdateKind::TurnEnded {
+                turn: dal_core::TurnId::new(NonZeroU64::MIN),
+                stop,
+            });
+        }
+
+        fn tracked(&self) -> (usize, usize) {
+            self.surfaces.live.tracked_tools()
+        }
+
+        fn rows(&self) -> Vec<String> {
+            self.surfaces.transcript.rows().to_vec()
+        }
+
+        fn duration(&self, call: &str) -> Option<Duration> {
+            self.surfaces.transcript.tool_duration(call)
+        }
+
+        /// The committed rows that name this call's result.
+        fn rows_of(&self, call: &str) -> Vec<String> {
+            let summary = format!("out-{call}");
+            self.rows()
+                .into_iter()
+                .filter(|row| row.contains(&summary))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_result_before_its_settle_hands_off_timing_and_releases_the_card() {
+        let mut rig = Rig::new();
+        rig.start("call-1", "exec");
+        assert_eq!(rig.tracked(), (1, 1));
+        assert_eq!(rig.surfaces.live.running_tool_rows(), ["working  exec"]);
+
+        // The result entry lands first, carrying the engine's own figure.
+        rig.result("call-1", "exec", Some(40));
+        assert_eq!(rig.tracked(), (0, 0), "the commit releases the live card");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+        let measured = rig
+            .duration("call-1")
+            .expect("the elapsed time moved to the transcript with the release");
+        let committed = rig.rows();
+        let card = rig.rows_of("call-1");
+        assert_eq!(card.len(), 1, "{committed:?}");
+        assert!(card[0].contains(&crate::copy::dur(measured)), "{card:?}");
+
+        // The settle that trails it finds no card: nothing revives, and the
+        // duration and rows the transcript holds do not move.
+        rig.settle("call-1", Some(3_600_000));
+        assert_eq!(rig.tracked(), (0, 0));
+        assert_eq!(rig.surfaces.live.activity(), None);
+        assert_eq!(rig.duration("call-1"), Some(measured));
+        assert_eq!(rig.rows(), committed);
+    }
+
+    #[test]
+    fn a_settle_before_its_result_commits_the_settled_timing_then_releases() {
+        let mut rig = Rig::new();
+        rig.start("call-1", "exec");
+        rig.settle("call-1", Some(1500));
+        assert_eq!(rig.tracked(), (1, 1), "the card waits for its result entry");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+
+        // The entry carries no figure, so the transcript's own record is the
+        // only source of the settled card's duration.
+        rig.result("call-1", "exec", None);
+        assert_eq!(rig.tracked(), (0, 0));
+        let settled = Duration::from_millis(1500);
+        assert_eq!(rig.duration("call-1"), Some(settled));
+        let card = rig.rows_of("call-1");
+        assert_eq!(card.len(), 1);
+        assert!(card[0].contains(&crate::copy::dur(settled)), "{card:?}");
+    }
+
+    #[test]
+    fn a_result_releases_only_its_own_call_while_siblings_keep_working() {
+        let mut rig = Rig::new();
+        rig.start("read-1", "read");
+        rig.start("exec-1", "exec");
+        rig.start("grep-1", "grep");
+
+        rig.result("exec-1", "exec", Some(9));
+        assert_eq!(rig.tracked(), (2, 2));
+        assert_eq!(
+            rig.surfaces.live.running_tool_rows(),
+            ["working  read", "working  grep"]
+        );
+        assert_eq!(
+            rig.surfaces.live.activity(),
+            Some(crate::copy::ids::STATE_WORKING)
+        );
+        assert!(rig.duration("exec-1").is_some());
+        assert_eq!(
+            rig.duration("read-1"),
+            None,
+            "a working call has no history yet"
+        );
+
+        rig.settle("exec-1", Some(9));
+        assert_eq!(
+            rig.tracked(),
+            (2, 2),
+            "a trailing settle touches no sibling"
+        );
+        rig.result("read-1", "read", Some(4));
+        rig.result("grep-1", "grep", Some(5));
+        assert_eq!(rig.tracked(), (0, 0));
+        assert_eq!(rig.surfaces.live.activity(), None);
+    }
+
+    #[test]
+    fn a_cancelled_turn_releases_unanswered_calls_and_keeps_every_completed_row() {
+        let mut rig = Rig::new();
+        rig.start("done", "read");
+        rig.start("lost", "exec");
+        rig.start("also-lost", "grep");
+        rig.result("done", "read", Some(3));
+        let committed = rig.rows();
+        assert_eq!(rig.tracked(), (2, 2));
+
+        rig.end(dal_core::Stop::Cancelled);
+        assert_eq!(rig.tracked(), (0, 0), "no card outlives its turn");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+        assert_eq!(rig.surfaces.live.activity(), None);
+        assert_eq!(rig.rows(), committed, "the turn end repaints nothing");
+        assert!(rig.duration("done").is_some());
+        assert_eq!(rig.duration("lost"), None);
+        assert_eq!(rig.duration("also-lost"), None);
+        assert_eq!(rig.rows_of("done").len(), 1);
+
+        // A trailing update for a released leftover stays inert.
+        rig.settle("lost", Some(1));
+        assert_eq!(rig.tracked(), (0, 0));
+    }
+
+    #[test]
+    fn many_turns_leave_the_live_region_empty_and_the_transcript_whole() {
+        let mut rig = Rig::new();
+        let mut completed = Vec::new();
+        let mut lost = Vec::new();
+        let mut previous: Vec<String> = Vec::new();
+        for turn in 0..120_u64 {
+            let first = format!("turn{turn}-first");
+            let second = format!("turn{turn}-second");
+            let cancelled = turn.is_multiple_of(4);
+            rig.start(&first, "read");
+            rig.start(&second, "exec");
+            if cancelled {
+                let stray = format!("turn{turn}-lost");
+                rig.start(&stray, "grep");
+                lost.push(stray);
+            }
+            if turn.is_multiple_of(2) {
+                rig.result(&first, "read", None);
+                rig.result(&second, "exec", Some(2));
+                rig.settle(&first, Some(11));
+                rig.settle(&second, Some(12));
+            } else {
+                rig.settle(&first, Some(11));
+                rig.settle(&second, Some(12));
+                rig.result(&first, "read", None);
+                rig.result(&second, "exec", Some(2));
+            }
+            rig.end(if cancelled {
+                dal_core::Stop::Cancelled
+            } else {
+                dal_core::Stop::EndTurn
+            });
+            assert_eq!(rig.tracked(), (0, 0), "turn {turn} left live tool state");
+            assert_eq!(rig.surfaces.live.activity(), None);
+            completed.extend([first, second]);
+
+            // Settled rows only ever append: nothing earlier is repainted.
+            let rows = rig.rows();
+            assert!(rows.starts_with(&previous), "turn {turn} rewrote history");
+            previous = rows;
+        }
+        for call in &completed {
+            let duration = rig
+                .duration(call)
+                .expect("a completed call keeps its timing");
+            let card = rig.rows_of(call);
+            assert_eq!(card.len(), 1, "{call}: {card:?}");
+            assert!(
+                card[0].contains(&crate::copy::dur(duration)),
+                "{call}: {card:?}"
+            );
+        }
+        for call in &lost {
+            assert_eq!(rig.duration(call), None, "{call} never had a result");
+            assert_eq!(rig.rows_of(call).len(), 0);
+        }
+    }
+
 }

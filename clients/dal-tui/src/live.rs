@@ -23,7 +23,8 @@ pub enum BlockState {
     Open,
     /// Content final; renders at full height before commit.
     Settling,
-    /// Bytes frozen; never repainted.
+    /// Bytes frozen; never repainted. No live tool card holds this state: a
+    /// turn end releases its cards instead of keeping them settled.
     Settled,
 }
 
@@ -285,11 +286,8 @@ impl Live {
                     self.notices.push(line);
                 }
                 self.assistant_open = false;
-                // No tool outlives its turn: a card whose settle update never came
-                // (a cancelled call) must not keep a `working` row.
-                for card in self.tool_cards.values_mut() {
-                    card.state = BlockState::Settled;
-                }
+                self.tool_cards.clear();
+                self.tool_order.clear();
                 true
             }
             UpdateKind::JobStarted { job } => self.jobs.insert(*job),
@@ -393,10 +391,33 @@ impl Live {
 
     /// Returns how long the tool call `call` has run: the settled duration, or
     /// the time since it started when its settle update has not arrived yet.
+    /// Reading leaves the card in place; the crate's `release_tool` takes it.
     #[must_use]
     pub fn tool_elapsed(&self, call: &str) -> Option<Duration> {
         let card = self.tool_cards.get(call)?;
         Some(card.duration.unwrap_or_else(|| card.started.elapsed()))
+    }
+
+    /// Releases the card of the tool call `call` once its result entry is
+    /// committed, returning how long the call ran: the settled duration, or the
+    /// time since it started when its settle update has not arrived yet.
+    ///
+    /// The card is gone once this returns, so the caller keeps the duration in
+    /// the transcript in the same step. A settle or progress update that lands
+    /// after the release finds no card and changes nothing. `None` means no
+    /// card was live for the call.
+    #[must_use]
+    pub(crate) fn release_tool(&mut self, call: &str) -> Option<Duration> {
+        let card = self.tool_cards.remove(call)?;
+        self.tool_order.retain(|id| id != call);
+        Some(card.duration.unwrap_or_else(|| card.started.elapsed()))
+    }
+
+    /// How many tool calls still hold a live card, and how many hold a slot in
+    /// the row order; the two agree whenever the live region is consistent.
+    #[cfg(test)]
+    pub(crate) fn tracked_tools(&self) -> (usize, usize) {
+        (self.tool_cards.len(), self.tool_order.len())
     }
 
     /// Returns running tool cards and their latest bounded progress.
@@ -689,6 +710,249 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_tools_elapsed_time_leaves_its_card_in_place() {
+        let mut live = Live::default();
+        assert_eq!(live.tool_elapsed("call-1"), None);
+        assert!(live.apply_update(&tool_started(1, "call-1", "exec")));
+        assert!(live.tool_elapsed("call-1").is_some());
+        assert_eq!(live.tracked_tools(), (1, 1), "a read takes nothing");
+        assert!(live.apply_update(&tool_settled(2, "call-1", Some(1500))));
+        assert_eq!(
+            live.tool_elapsed("call-1"),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(live.tracked_tools(), (1, 1));
+        assert_eq!(
+            live.release_tool("call-1"),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(live.tool_elapsed("call-1"), None, "nothing left to read");
+    }
+
+    fn tool_update(seq: u64, kind: UpdateKind) -> Update {
+        Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind,
+        }
+    }
+
+    fn tool_started(seq: u64, call: &str, tool: &str) -> Update {
+        tool_update(
+            seq,
+            UpdateKind::ToolStarted {
+                call: dal_core::CallId::new(call),
+                tool: tool.into(),
+                args: dal_core::RawJson::null(),
+            },
+        )
+    }
+
+    fn tool_settled(seq: u64, call: &str, elapsed_ms: Option<u64>) -> Update {
+        tool_update(
+            seq,
+            UpdateKind::ToolSettled {
+                call: dal_core::CallId::new(call),
+                outcome: dal_core::ToolOutcomeView {
+                    is_error: false,
+                    text: "done".into(),
+                    images: Vec::new(),
+                    elapsed_ms,
+                },
+            },
+        )
+    }
+
+    fn turn_ended(seq: u64, stop: dal_core::Stop) -> Update {
+        tool_update(
+            seq,
+            UpdateKind::TurnEnded {
+                turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
+                stop,
+            },
+        )
+    }
+
+    #[test]
+    fn a_released_tool_hands_back_its_settled_timing_and_no_late_update_revives_it() {
+        let mut live = Live::default();
+        assert!(live.apply_update(&tool_started(1, "call-1", "exec")));
+        assert_eq!(live.tracked_tools(), (1, 1));
+        assert_eq!(live.running_tool_rows(), ["working  exec"]);
+
+        // Settled before its result entry lands: the card waits for the
+        // result, no longer working, holding the engine's own duration.
+        assert!(live.apply_update(&tool_settled(2, "call-1", Some(1500))));
+        assert_eq!(live.tracked_tools(), (1, 1));
+        assert_eq!(live.running_tool_rows().len(), 0);
+        assert_eq!(live.activity(), None);
+
+        assert_eq!(
+            live.release_tool("call-1"),
+            Some(Duration::from_millis(1500)),
+            "the settled duration travels to the transcript with the release"
+        );
+        assert_eq!(live.tracked_tools(), (0, 0));
+        assert_eq!(live.release_tool("call-1"), None, "a release happens once");
+
+        let progress = tool_update(
+            3,
+            UpdateKind::ToolProgress {
+                call: dal_core::CallId::new("call-1"),
+                tail: "late".into(),
+            },
+        );
+        assert!(
+            !live.apply_update(&progress),
+            "progress for a released card"
+        );
+        assert!(
+            !live.apply_update(&tool_settled(4, "call-1", Some(9))),
+            "a settle that trails its result finds no card"
+        );
+        assert_eq!(live.tracked_tools(), (0, 0));
+        assert_eq!(live.running_tool_rows().len(), 0);
+        assert_eq!(live.activity(), None);
+    }
+
+    #[test]
+    fn a_result_before_its_settle_releases_the_card_with_the_elapsed_since_start() {
+        let mut live = Live::default();
+        assert!(live.apply_update(&tool_started(1, "call-1", "exec")));
+        let elapsed = live
+            .release_tool("call-1")
+            .expect("a running card has an elapsed time");
+        // The trailing settle names a far larger engine duration; it must
+        // neither revive the card nor change what the release handed back.
+        let engine = Duration::from_secs(3600);
+        assert!(elapsed < engine);
+        assert!(!live.apply_update(&tool_settled(2, "call-1", Some(3_600_000))));
+        assert_eq!(live.tracked_tools(), (0, 0));
+        assert_eq!(live.release_tool("call-1"), None);
+    }
+
+    #[test]
+    fn releasing_one_tool_leaves_its_active_siblings_running_in_order() {
+        let mut live = Live::default();
+        for (seq, call, tool) in [(1, "a", "read"), (2, "b", "exec"), (3, "c", "grep")] {
+            assert!(live.apply_update(&tool_started(seq, call, tool)));
+        }
+        assert!(live.release_tool("b").is_some());
+        assert_eq!(live.tracked_tools(), (2, 2));
+        assert_eq!(live.running_tool_rows(), ["working  read", "working  grep"]);
+        assert_eq!(live.activity(), Some(crate::copy::ids::STATE_WORKING));
+
+        let progress = tool_update(
+            4,
+            UpdateKind::ToolProgress {
+                call: dal_core::CallId::new("c"),
+                tail: "scanning".into(),
+            },
+        );
+        assert!(live.apply_update(&progress));
+        assert_eq!(
+            live.running_tool_rows(),
+            ["working  read", "working  grep · scanning"]
+        );
+
+        assert!(live.release_tool("a").is_some());
+        assert_eq!(live.running_tool_rows(), ["working  grep · scanning"]);
+        assert!(live.release_tool("c").is_some());
+        assert_eq!(live.tracked_tools(), (0, 0));
+        assert_eq!(live.activity(), None);
+    }
+
+    #[test]
+    fn a_restarted_call_id_after_its_release_is_a_fresh_card() {
+        let mut live = Live::default();
+        assert!(live.apply_update(&tool_started(1, "call-1", "read")));
+        assert!(live.release_tool("call-1").is_some());
+        assert!(live.apply_update(&tool_started(2, "call-1", "exec")));
+        assert_eq!(live.tracked_tools(), (1, 1));
+        assert_eq!(live.running_tool_rows(), ["working  exec"]);
+    }
+
+    #[test]
+    fn a_turn_end_releases_every_card_whose_result_never_came() {
+        let mut live = Live::default();
+        assert!(live.apply_update(&tool_started(1, "settled", "read")));
+        assert!(live.apply_update(&tool_settled(2, "settled", Some(5))));
+        assert!(live.apply_update(&tool_started(3, "running", "exec")));
+        assert_eq!(live.tracked_tools(), (2, 2));
+
+        assert!(live.apply_update(&turn_ended(4, dal_core::Stop::Cancelled)));
+        assert_eq!(live.tracked_tools(), (0, 0));
+        assert_eq!(live.running_tool_rows().len(), 0);
+        assert_eq!(live.activity(), None);
+        assert_eq!(live.release_tool("running"), None);
+        assert!(
+            live.notices()
+                .iter()
+                .any(|notice| notice == crate::copy::ids::TURN_CANCELLED),
+            "releasing cards keeps the turn-end notice"
+        );
+
+        // The next turn starts from an empty region, whatever the stop was.
+        assert!(live.apply_update(&tool_started(5, "next", "exec")));
+        assert_eq!(live.tracked_tools(), (1, 1));
+        assert!(live.apply_update(&turn_ended(6, dal_core::Stop::Failed)));
+        assert_eq!(live.tracked_tools(), (0, 0));
+    }
+
+    #[test]
+    fn live_tool_state_returns_to_empty_after_every_one_of_many_turns() {
+        let mut live = Live::default();
+        let mut seq = 0;
+        let mut next = || {
+            seq += 1;
+            seq
+        };
+        for turn in 0..300_u64 {
+            let first = format!("t{turn}-a");
+            let second = format!("t{turn}-b");
+            let lost = format!("t{turn}-lost");
+            // Every third turn streams a call that is cancelled before any
+            // result entry exists for it.
+            let cancelled = turn.is_multiple_of(3);
+            assert!(live.apply_update(&tool_started(next(), &first, "read")));
+            assert!(live.apply_update(&tool_started(next(), &second, "exec")));
+            if cancelled {
+                assert!(live.apply_update(&tool_started(next(), &lost, "grep")));
+            }
+            // Alternate which of the two orders the engine's updates can take
+            // for the same call: result then settle, or settle then result.
+            if turn.is_multiple_of(2) {
+                assert!(live.release_tool(&first).is_some());
+                assert!(!live.apply_update(&tool_settled(next(), &first, Some(7))));
+            } else {
+                assert!(live.apply_update(&tool_settled(next(), &first, Some(7))));
+                assert_eq!(live.release_tool(&first), Some(Duration::from_millis(7)));
+            }
+            // The siblings keep their cards whichever call just went.
+            let siblings = if cancelled { 2 } else { 1 };
+            assert_eq!(live.tracked_tools(), (siblings, siblings));
+            assert_eq!(
+                live.running_tool_rows().first().map(String::as_str),
+                Some("working  exec")
+            );
+            assert!(live.release_tool(&second).is_some());
+
+            let stop = if cancelled {
+                dal_core::Stop::Cancelled
+            } else {
+                dal_core::Stop::EndTurn
+            };
+            assert!(live.apply_update(&turn_ended(next(), stop)));
+            assert_eq!(
+                live.tracked_tools(),
+                (0, 0),
+                "turn {turn} left live tool state behind"
+            );
+            assert_eq!(live.activity(), None);
+        }
+    }
+
+    #[test]
     fn a_cancelled_turn_leaves_no_working_row() {
         let mut live = super::Live::default();
         let update = |seq: u64, kind| Update {
@@ -714,6 +978,11 @@ mod tests {
         )));
         assert_eq!(live.running_tool_rows().len(), 0);
         assert_eq!(live.activity(), None);
+        assert_eq!(
+            live.tracked_tools(),
+            (0, 0),
+            "the cancelled call is released"
+        );
     }
 
     #[test]
