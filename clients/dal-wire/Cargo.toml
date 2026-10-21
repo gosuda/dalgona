@@ -29,7 +29,7 @@ url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
-interprocess = { version = "=2.4.5", features = ["tokio"] }
+interprocess = { version = "=2.4.6", features = ["tokio"] }
 windows-sys.workspace = true
 
 [dev-dependencies]
