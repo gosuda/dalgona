@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Verify WebSocket TLS with the platform certificate verifier instead of the
+  bundled WebSocket root list. `wss` connections now trust the same system
+  roots and chain checks as HTTPS requests; a verifier that cannot start
+  fails the connect with a transport error that names the missing system CA
+  certificates. Plain `ws` connections are unchanged.
 - Refuse a piped API key that holds a line break or other control character.
   `login PROVIDER --api-key` forgave only the key's trailing line ending, so
   a multi-line input was saved as one key, reported as saved, and then failed

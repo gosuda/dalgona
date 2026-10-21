@@ -227,8 +227,10 @@ pub(crate) struct HostState {
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
-    /// Host-owned cleanup tails for sessions cancelled before registry activation.
-    pub(crate) opening_tasks: SessionTasks,
+    /// Host-owned teardown tails: sessions cancelled before registry
+    /// activation, and closes that must finish after their caller stops
+    /// waiting.
+    pub(crate) session_teardowns: SessionTasks,
 }
 
 /// One live subscriber channel plus its coalescing state.

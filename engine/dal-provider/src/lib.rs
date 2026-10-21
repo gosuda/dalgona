@@ -47,8 +47,8 @@ pub use family::anthropic::supports_tool_search;
 pub use http::{
     BODY_LIMIT, COMPACT_TIMEOUT, CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, NON_STREAM_TOTAL_TIMEOUT,
     OAUTH_TIMEOUT, RESPONSE_HEADER_TIMEOUT, STREAM_IDLE_TIMEOUT, USAGE_TIMEOUT, WS_MESSAGE_LIMIT,
-    build_client, build_client_http2_prior_knowledge, build_client_no_redirect, check_base_url,
-    endpoint, read_body, send, user_agent,
+    WebSocketTlsError, build_client, build_client_http2_prior_knowledge, build_client_no_redirect,
+    check_base_url, endpoint, read_body, send, user_agent, websocket_connector,
 };
 pub use provider::{
     AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,

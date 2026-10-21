@@ -2,7 +2,7 @@
 
 `dalgon serve` starts an HTTP server on your machine. The server routes OpenAI-style and Anthropic-style requests to the models you signed in to. It can also run the full dal agent behind the same address. With `--a2a`, it serves the agent-to-agent surface too.
 
-Use it to give a script, a tool, or a second machine one endpoint for your dal sign-in. The server binds to loopback and needs no token by default. `--public` listens wider and requires a token from `dalgon serve token`.
+Use it to give a script, a tool, or a second machine one endpoint for your dal sign-in. The server binds to loopback and needs no token by default. `--public` listens on all interfaces and requires a token from `dalgon serve token`. An address from `--bind` or `serve.bind` replaces the all-interfaces address.
 
 ## Start the server
 
@@ -80,13 +80,13 @@ Create a token. The command prints the token once and stores it in `serve.token`
 dalgon serve token
 ```
 
-Start the server with `--public`. It then listens on all interfaces and requires the token.
+Start the server with `--public`. It then listens on all interfaces and requires the token. When `--bind` or `serve.bind` names an address, the server binds that address instead, and `--bind` wins over `serve.bind`. `--public` still requires the token.
 
 ```sh
 dalgon serve --public
 ```
 
-The server prints a warning to standard error and a listen line to standard output:
+With the default address, the server prints a warning to standard error and a listen line to standard output:
 
 ```text
 dalgon: warning: --public serves 0.0.0.0:7437 over plain HTTP; the serve token crosses the network in plain text.

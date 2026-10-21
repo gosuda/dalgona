@@ -346,6 +346,39 @@ fn model_route_provider_rejections_keep_the_provider_key_shape() {
     }
 }
 
+#[test]
+fn serve_bind_provenance_follows_the_key_not_the_value() {
+    let defaults = load(ConfigProduct::Dalgon, "").expect("built-in defaults");
+    assert!(
+        !defaults.serve_bind_explicit(),
+        "an absent serve.bind is not explicit"
+    );
+
+    // The documented default, spelled by the user: still explicit.
+    let spelled = load(ConfigProduct::Dalgon, "[serve]\nbind = \"127.0.0.1\"\n")
+        .expect("spelled default loads");
+    assert_eq!(spelled.serve().bind.as_ref(), "127.0.0.1");
+    assert!(spelled.serve_bind_explicit());
+
+    // A different explicit value: explicit, and the value survives.
+    let other =
+        load(ConfigProduct::Dalgon, "[serve]\nbind = \"localhost\"\n").expect("other bind loads");
+    assert_eq!(other.serve().bind.as_ref(), "localhost");
+    assert!(other.serve_bind_explicit());
+
+    // A layer that sets other serve keys leaves bind implicit.
+    let untouched =
+        load(ConfigProduct::Dalgon, "[serve]\nport = 8000\n").expect("port-only serve loads");
+    assert_eq!(untouched.serve().bind.as_ref(), "127.0.0.1");
+    assert!(!untouched.serve_bind_explicit());
+
+    // The value reaches the effective configuration unchanged.
+    let wide =
+        load(ConfigProduct::Dalgon, "[serve]\nbind = \"0.0.0.0\"\n").expect("wide bind loads");
+    assert_eq!(wide.serve().bind.as_ref(), "0.0.0.0");
+    assert!(wide.serve_bind_explicit());
+}
+
 const MODEL_USER: &str = "# keep me\nmode = \"normal\"\nmodel = \"old/model\"\n[model_route]\nkind = \"api\"\nfamily = \"openai_chat\"\nmodel = \"old\"\n[serve]\nbind = \"127.0.0.1\"\n";
 
 #[test]

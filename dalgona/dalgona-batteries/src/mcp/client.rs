@@ -1823,8 +1823,8 @@ mod tests {
             skill: "test".into(),
             server: "fixture".into(),
         };
-        let endpoint =
-            dal_core::ext::McpEndpoint::parse("http://127.0.0.1:9/mcp").expect("fixture endpoint");
+        let endpoint = dal_core::ext::McpEndpoint::parse("https://mcp.example.invalid/mcp")
+            .expect("fixture endpoint");
         let instance = Instance::new(
             key,
             Arc::new(dal_core::ext::McpServerDecl::Http { endpoint }),

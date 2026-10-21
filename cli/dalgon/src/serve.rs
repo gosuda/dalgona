@@ -553,6 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn explicit_loopback_bind_stays_loopback_under_public() {
+        // The user configured the default spelling: `--public` must not
+        // widen it, because the key, not the value, marks the choice.
+        let configured = config("127.0.0.1", true);
+        let public = ServeArgs {
+            public: true,
+            ..ServeArgs::default()
+        };
+        assert_eq!(resolve_bind(&public, &configured), "127.0.0.1");
+    }
+
+    #[test]
     fn public_bind_precedence_and_loopback_refusal() {
         let defaults = config("127.0.0.1", false);
         assert_eq!(resolve_bind(&ServeArgs::default(), &defaults), "127.0.0.1");

@@ -13,8 +13,8 @@ use dal_core::{
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use super::support::{
-    Rig, Rpc, assert_error, assert_invalid_params, gate_step, result, rig, rig_with_extensions,
-    text_step, tool_step,
+    Rig, Rpc, assert_error, assert_invalid_params, gate_step, result, rig, rig_with_env,
+    rig_with_extensions, text_step, tool_step,
 };
 use crate::serve_acp;
 use crate::transport::MemoryTransport;
@@ -72,6 +72,50 @@ async fn new_session(acp: &mut Rpc, id: i64, cwd: &str) -> String {
         .as_str()
         .expect("session id")
         .to_owned()
+}
+
+#[tokio::test]
+async fn acp_prompt_passes_with_ambient_bedrock_aws_chain_credentials() {
+    let rig = rig_with_env(
+        &[text_step(&["Hel", "lo"], 10, 5)],
+        "bedrock/anthropic.claude-test",
+        "[providers.bedrock]\napi = \"bedrock\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\"\nkey_env = \"AWS_BEARER_TOKEN_BEDROCK\"\n",
+        &[
+            ("AWS_ACCESS_KEY_ID", "test-key"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret"),
+            ("AWS_EC2_METADATA_DISABLED", "true"),
+        ],
+    )
+    .await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 1).await;
+        let session = new_session(&mut acp, 2, &ws).await;
+        acp.send(3, "session/prompt", prompt_params(&session, "hi"))
+            .await;
+        let mut chunks = String::new();
+        let reply = loop {
+            let frame = acp.next().await;
+            if frame["id"].as_i64() == Some(3) {
+                break frame;
+            }
+            if update_kind(&frame) == Some("agent_message_chunk") {
+                chunks.push_str(
+                    frame["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .expect("chunk text"),
+                );
+            }
+        };
+        assert_eq!(chunks, "Hello", "{reply}");
+        assert_eq!(
+            result(&reply)["stopReason"].as_str(),
+            Some("end_turn"),
+            "{reply}"
+        );
+        acp.assert_quiet(Duration::from_millis(200)).await;
+    })
+    .await;
 }
 
 fn prompt_params(session: &str, text: &str) -> Value {

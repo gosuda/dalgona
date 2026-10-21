@@ -90,10 +90,14 @@ impl Ladder {
     /// abandoned. The close is awaited to completion, because dropping it
     /// would detach a provider credential write that can still commit after
     /// the host is gone. The close grace handed to the host is what is left
-    /// of the one deadline.
-    pub(crate) async fn close_host(self, host: Host) -> Closed {
+    /// of the one deadline. The subscription is the one the run phase used,
+    /// so a second signal cannot fall between two registrations.
+    pub(crate) async fn close_host(
+        self,
+        host: Host,
+        signals: &mut crate::edge::ShutdownSignals,
+    ) -> Closed {
         let until = tokio::time::Instant::now() + self.grace_left_at(Instant::now());
-        let mut signals = crate::edge::ShutdownSignals::register();
         let (quiet, skipped_by) = tokio::select! {
             biased;
             code = signals.next() => (false, Some(code)),
@@ -191,6 +195,11 @@ mod tests {
     use super::{ExitKind, GRACE, Ladder, RUNTIME_STOP, TOTAL, status};
     use crate::log::FLUSH_DEADLINE;
 
+    #[cfg(unix)]
+    use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
+    #[cfg(unix)]
+    use dal_core::ServiceSet;
+
     #[test]
     fn every_phase_budget_is_the_time_left_on_one_clock() {
         let began = Instant::now();
@@ -234,5 +243,102 @@ mod tests {
         assert_eq!(status(ExitKind::Signal(2)), 130);
         assert_eq!(status(ExitKind::Signal(13)), 141);
         assert_eq!(status(ExitKind::Signal(15)), 143);
+    }
+
+    /// A host with a busy extension status, so `close_host` parks in its
+    /// quiet wait until a signal arrives.
+    #[cfg(unix)]
+    async fn busy_host() -> (tempfile::TempDir, dal_agent::Host) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        let config = dal_core::Config::load(
+            dal_core::ConfigProduct::Dalgon,
+            &data,
+            "",
+            Some("model = \"openai/gpt-6-luna\"\n"),
+        )
+        .expect("config");
+        let extension = ExtensionBuilder::new("focus", "0.1.0", ServiceSet::default())
+            .expect("builder")
+            .status_kind("focus", busy_status())
+            .build()
+            .expect("extension");
+        let product = dal_agent::Product {
+            name: "dal",
+            data_root: data,
+            defaults: "",
+            extensions: vec![extension],
+            bundled: Vec::new(),
+        };
+        let env = dal_agent::Env {
+            vars: std::collections::BTreeMap::from([(
+                std::ffi::OsString::from("OPENAI_API_KEY"),
+                std::ffi::OsString::from("sk-test"),
+            )]),
+            cwd: tmp.path().to_path_buf(),
+            sandbox_helper: None,
+        };
+        let host = dal_agent::Host::start(product, config, env)
+            .await
+            .expect("host");
+        // The busy status kind lives on an open session: without a session
+        // the host is trivially quiet and the close never parks.
+        let workspace = tmp.path().join("w");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        host.open(
+            dal_agent::SessionRef::Ephemeral {
+                workspace: dal_core::Workspace::new(workspace).expect("workspace"),
+            },
+            dal_core::ClientId::new("cli"),
+        )
+        .await
+        .expect("open");
+        (tmp, host)
+    }
+
+    /// A status poll that always reports busy, so the host never goes quiet.
+    #[cfg(unix)]
+    fn busy_status() -> std::sync::Arc<dyn StatusPoll> {
+        struct Busy;
+        impl StatusPoll for Busy {
+            fn snapshot(&self, _cx: &StatusCx) -> StatusSnapshot {
+                StatusSnapshot {
+                    quiet: false,
+                    text: None,
+                }
+            }
+        }
+        std::sync::Arc::new(Busy)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_host_records_a_second_signal_on_the_shared_subscription() {
+        let (tmp, host) = busy_host().await;
+        let mut signals = crate::edge::ShutdownSignals::register();
+        // The first status plays the run-phase role: the run observes it and
+        // starts the ladder, exactly as `drive` would. The same subscription
+        // then passes to the close phase.
+        signals.enqueue(143);
+        let first = signals.next().await;
+        assert_eq!(first, 143, "the run phase observes the first SIGTERM");
+        let ladder = Ladder {
+            began: Instant::now(),
+        };
+        // The second status arrives while `drive` has returned and the close
+        // phase is about to wait: exactly the gap the ladder must cover. It
+        // is queued on the one subscription the close receives, so the close
+        // records it; the pre-fix code registered a fresh subscription here,
+        // saw nothing, and waited out the quiet clock instead.
+        signals.enqueue(143);
+        let closed = ladder.close_host(host.clone(), &mut signals).await;
+        assert_eq!(
+            closed.skipped_by,
+            Some(143),
+            "the second signal during close must decide the exit status"
+        );
+        drop(host);
+        drop(tmp);
     }
 }

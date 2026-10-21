@@ -24,7 +24,7 @@ Each session is a journal. A record counts as saved only after dal syncs it to d
 
 ## Context you control
 
-dal builds the system prompt from parts you control (`AGENTS.md` files, `SYSTEM.md`, skills, rules, plugin sections). `dal://prompt` lists them. See [The system prompt](prompt.md). Compaction starts by default at 85 percent of the context window. Long, stable text can go out as an image. The exact text stays readable at `letter://<id>`.
+dal builds the system prompt from parts you control (skills, rules, plugin sections). `AGENTS.md` files and `SYSTEM.md` do not reach the model. `dal://prompt` lists the parts that reach the model. See [The system prompt](prompt.md). Compaction starts by default at 85 percent of the context window. Long, stable text can go out as an image. The exact text stays readable at `letter://<id>`.
 
 ## Tools and approval
 

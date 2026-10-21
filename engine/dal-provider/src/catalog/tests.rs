@@ -3,7 +3,10 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -1896,7 +1899,8 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
 #[tokio::test]
 async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_window() {
     let directory = TestDir::new();
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = provider(
         "openai-codex",
         Family::Codex,
@@ -2232,7 +2236,8 @@ async fn codex_model_fetch_sends_account_and_originator() {
 #[tokio::test]
 async fn codex_model_fetch_with_an_api_key_is_refused_before_any_request() {
     let directory = TestDir::new();
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = provider(
         "openai-codex",
         Family::Codex,
@@ -2261,7 +2266,8 @@ async fn codex_model_fetch_with_an_api_key_is_refused_before_any_request() {
 #[tokio::test]
 async fn codex_model_fetch_without_an_account_id_fails_before_any_request() {
     let directory = TestDir::new();
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = provider(
         "openai-codex",
         Family::Codex,
@@ -2331,9 +2337,55 @@ impl Drop for TestDir {
     }
 }
 
-fn closed_loopback_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback port");
-    listener.local_addr().expect("read loopback port").port()
+struct RefusedLoopback {
+    port: u16,
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RefusedLoopback {
+    fn bind() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback port");
+        let port = listener.local_addr().expect("read loopback port").port();
+        listener
+            .set_nonblocking(true)
+            .expect("make refusal listener nonblocking");
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&done);
+        let thread = std::thread::spawn(move || while !refuse_loopback_once(&listener, &stop) {});
+        Self {
+            port,
+            done,
+            thread: Some(thread),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+fn refuse_loopback_once(listener: &TcpListener, stop: &AtomicBool) -> bool {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            drop(stream);
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            std::thread::sleep(Duration::from_millis(5));
+            stop.load(Ordering::Acquire)
+        }
+        Err(_) => stop.load(Ordering::Acquire),
+    }
+}
+
+impl Drop for RefusedLoopback {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[test]
@@ -2661,7 +2713,8 @@ async fn devin_fetch_posts_unary_discovery_without_http_auth() {
 #[tokio::test]
 async fn devin_fetch_without_an_api_key_is_refused_before_any_request() {
     let directory = TestDir::new();
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = provider(
         "my-devin",
         Family::Devin,
@@ -4268,7 +4321,8 @@ async fn gemini_fetch_with_a_rejected_status_falls_back_typed() {
 
 #[tokio::test]
 async fn gemini_fetch_without_a_usable_key_is_refused_before_any_request() {
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = gemini_provider(&format!("http://127.0.0.1:{port}/v1beta"));
     let client = reqwest::Client::new();
     for credential in [Credential::None, gemini_key(""), gemini_key("  \t")] {
@@ -4527,7 +4581,8 @@ async fn stale_derived_cache_without_billing_refreshes_through_typed_fallback() 
         br#"{"version":1,"entries":[{"provider":"openai-codex","id":"stale-model","display":"Stale Model","hidden":false,"context_window":null,"max_output":null,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false}]}"#,
     )
     .expect("restore stale derived cache");
-    let port = closed_loopback_port();
+    let refused = RefusedLoopback::bind();
+    let port = refused.port();
     let provider = provider(
         "openai-codex",
         Family::Codex,

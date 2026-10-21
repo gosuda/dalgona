@@ -55,6 +55,60 @@ pub enum Family {
     PiMessages,
 }
 
+impl Family {
+    /// Every family, in declaration order.
+    pub const ALL: [Self; 16] = [
+        Self::Chat,
+        Self::Responses,
+        Self::Codex,
+        Self::Anthropic,
+        Self::Bedrock,
+        Self::Cursor,
+        Self::Devin,
+        Self::Droid,
+        Self::GitLab,
+        Self::GoogleGenerativeAi,
+        Self::GoogleVertex,
+        Self::GoogleGeminiCli,
+        Self::GoogleAntigravity,
+        Self::Mistral,
+        Self::Ollama,
+        Self::PiMessages,
+    ];
+
+    /// The prefix of a family-qualified model reference, as in
+    /// `openai-chat/<model>`.
+    #[must_use]
+    pub const fn route_prefix(self) -> &'static str {
+        match self {
+            Self::Chat => "openai-chat",
+            Self::Responses => "openai-responses",
+            Self::Codex => "openai-codex",
+            Self::Anthropic => "anthropic",
+            Self::Bedrock => "bedrock",
+            Self::Cursor => "cursor",
+            Self::Devin => "devin",
+            Self::Droid => "droid",
+            Self::GitLab => "gitlab",
+            Self::GoogleGenerativeAi => "google-generative-ai",
+            Self::GoogleVertex => "google-vertex",
+            Self::GoogleGeminiCli => "google-gemini-cli",
+            Self::GoogleAntigravity => "google-antigravity",
+            Self::Mistral => "mistral",
+            Self::Ollama => "ollama",
+            Self::PiMessages => "radius",
+        }
+    }
+
+    /// The family whose [`route_prefix`](Self::route_prefix) is `prefix`.
+    #[must_use]
+    pub fn from_route_prefix(prefix: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|family| family.route_prefix() == prefix)
+    }
+}
+
 /// The provider API family and exact model that produced an assistant message.
 ///
 /// Replay adapters use this source to decide whether opaque reasoning payloads
@@ -269,27 +323,7 @@ impl ModelRoute {
     #[must_use]
     pub fn family_qualified_reference(&self) -> String {
         match self {
-            Self::Api { family, model, .. } => {
-                let prefix = match family {
-                    Family::Chat => "openai-chat",
-                    Family::Responses => "openai-responses",
-                    Family::Codex => "openai-codex",
-                    Family::Anthropic => "anthropic",
-                    Family::Bedrock => "bedrock",
-                    Family::Cursor => "cursor",
-                    Family::Devin => "devin",
-                    Family::Droid => "droid",
-                    Family::GitLab => "gitlab",
-                    Family::GoogleGenerativeAi => "google-generative-ai",
-                    Family::GoogleVertex => "google-vertex",
-                    Family::GoogleGeminiCli => "google-gemini-cli",
-                    Family::GoogleAntigravity => "google-antigravity",
-                    Family::Mistral => "mistral",
-                    Family::Ollama => "ollama",
-                    Family::PiMessages => "radius",
-                };
-                format!("{prefix}/{model}")
-            }
+            Self::Api { family, model, .. } => format!("{}/{model}", family.route_prefix()),
             Self::Synthetic { id } | Self::Harness { id } => id.to_string(),
         }
     }

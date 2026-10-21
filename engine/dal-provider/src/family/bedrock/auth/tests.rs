@@ -414,6 +414,7 @@ async fn bearer_env_short_circuits_the_chain() {
     match auth {
         BedrockAuth::Bearer(token) => assert_eq!(token.expose(), "CANARY-bearer-token-0004"),
         BedrockAuth::SigV4(_) => panic!("bearer must bypass SigV4"),
+        BedrockAuth::None => panic!("a bearer source must never resolve unsigned"),
     }
 }
 
@@ -462,6 +463,37 @@ async fn empty_bearer_env_counts_as_unset() {
         .await
         .expect_err("no source");
     assert!(matches!(error, ProviderError::NoCredentials { .. }));
+}
+
+#[tokio::test]
+async fn auth_none_entry_resolves_no_credential_source() {
+    let dir = TestDir::new("auth-none");
+    let env = snapshot(
+        &dir,
+        &[("AWS_BEARER_TOKEN_BEDROCK", "CANARY-env-bearer-0007")],
+    );
+    let resolver_instance = resolver(env, dir.path());
+    let auth_path = dir.path().join("auth.json");
+    crate::store_api_key(auth_path, "openai", String::from("CANARY-stored-key-0008"))
+        .await
+        .expect("store");
+    let store = AuthStore::load(dir.path().join("auth.json")).expect("load");
+    let mut none_entry = entry("openai");
+    none_entry.auth = AuthStyle::None;
+    let auth = resolver_instance
+        .resolve_bedrock_auth(
+            &none_entry,
+            &store,
+            &options(None, "us-east-1"),
+            &cancel(),
+            deadline(),
+        )
+        .await
+        .expect("auth none resolves unsigned without reading any source");
+    assert!(
+        matches!(auth, BedrockAuth::None),
+        "auth=none must short-circuit before bearer and chain: {auth:?}"
+    );
 }
 
 // ---------- chain precedence and profiles ----------

@@ -355,8 +355,10 @@ async fn run_headless(
     };
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
+    let mut signals = edge::ShutdownSignals::register();
     let outcome = dispatch::drive(
         &stop,
+        &mut signals,
         print::run_print(agent, options, &mut stdout, &mut stderr),
     )
     .await;

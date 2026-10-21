@@ -43,10 +43,10 @@ The helper is Landlock on Linux through `dalgon __sandbox`, Seatbelt on macOS, a
 
 | platform | error text | fix |
 |---|---|---|
-| Linux | `sandbox = "on" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI <n>.` | Use Linux 6.1 or newer, or turn the sandbox off. |
-| macOS | `sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.` | Restore `/usr/bin/sandbox-exec`, or turn the sandbox off. |
+| Linux | `sandbox = true needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI <n>.` | Use Linux 6.1 or newer, or turn the sandbox off. |
+| macOS | `sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.` | Restore `/usr/bin/sandbox-exec`. Every command launch uses it, so turning the sandbox off does not help. |
 
-In `dal.toml`, `sandbox` is `true` or `false`, not a string. Some error texts say `"on"` or `"off"`. Read them as `true` and `false`.
+In `dal.toml`, `sandbox` is `true` or `false`, not a string.
 
 On Windows the backend matches the read-open model as far as DACL editing safely reaches. The per-run `dalgon.sandbox.<guid>` container reads and executes wherever system ACLs already permit application containers (`ALL APPLICATION PACKAGES`). It also reads and executes in the launch directory and every `PATH` directory. Each writable root's ancestors get traverse access only (POSIX `+x` parity). The container resolves through them. It cannot list or read sibling files. A failed grant there fails the launch. A partially installed read policy is worse than none. Drive roots are never touched. An inheritable ACE on a drive root would propagate to every file on the volume. Writes stay under the granted roots, which get full control.
 

@@ -23,7 +23,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -697,11 +697,18 @@ async fn connect(
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MESSAGE_LIMIT))
         .max_frame_size(Some(WS_MESSAGE_LIMIT));
+    let connector = match url.scheme() {
+        "wss" => Some(
+            http::websocket_connector()
+                .map_err(|error| transport_failure(family, &error.to_string()))?,
+        ),
+        _ => None,
+    };
     let connected = tokio::select! {
         () = cancel.cancelled() => return Err(cancel_failure(family)),
         connected = timeout(
             http::RESPONSE_HEADER_TIMEOUT,
-            connect_async_with_config(request, Some(config), false),
+            connect_async_tls_with_config(request, Some(config), false, connector),
         ) => connected,
     };
     let (socket, response) = match connected {

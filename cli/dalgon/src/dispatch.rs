@@ -8,7 +8,6 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use dal_agent::{Env, GrantStore, Host, Product};
-use dal_core::SERVE_DEFAULT_BIND;
 use dal_core::{ClientId, Config, Name, Origin};
 use tokio_util::sync::CancellationToken;
 
@@ -55,13 +54,17 @@ pub(crate) use models::run as models;
 /// second signal arrives while draining. Dropping the future closes the
 /// listener without waiting out the grace period. `future` must not own the
 /// host close: that step runs after this returns, inside the ladder, and is
-/// never abandoned.
-pub(crate) async fn drive<Fut>(stop: &CancellationToken, future: Fut) -> Result<Fut::Output, u8>
+/// never abandoned. The caller keeps the subscription alive across the close
+/// phase, so a second signal during it is still observed.
+pub(crate) async fn drive<Fut>(
+    stop: &CancellationToken,
+    signals: &mut edge::ShutdownSignals,
+    future: Fut,
+) -> Result<Fut::Output, u8>
 where
     Fut: Future,
 {
     tokio::pin!(future);
-    let mut signals = edge::ShutdownSignals::register();
     let mut signalled = false;
     loop {
         tokio::select! {
@@ -136,7 +139,7 @@ pub(crate) async fn serve(
     }
     let serve_config = serve::ServeConfig {
         bind: core_serve.bind.to_string(),
-        bind_was_explicit: core_serve.bind.as_ref() != SERVE_DEFAULT_BIND,
+        bind_was_explicit: config.serve_bind_explicit(),
         port: core_serve.port,
         token_file: core_serve.token_file.clone(),
         approval: cli.approval.map_or(core_serve.approval, map_approval),
@@ -170,6 +173,7 @@ pub(crate) async fn serve(
         Err(error) => return host_exit(&error, &data_root),
     };
     let stop = CancellationToken::new();
+    let mut signals = edge::ShutdownSignals::register();
     let snapshot = edge::terminal_snapshot();
     let closing = host.clone();
     let run = serve::ServeRun {
@@ -179,7 +183,7 @@ pub(crate) async fn serve(
         data_root,
         stop: stop.clone(),
     };
-    let outcome = run_server(&stop, run, &snapshot).await;
+    let outcome = run_server(&stop, &mut signals, run, &snapshot).await;
     // The host always closes, and the close always runs to completion: only
     // the quiet poll is ever abandoned, so a durable provider credential write
     // is never detached. A second signal already seen by `drive` skips the
@@ -189,7 +193,7 @@ pub(crate) async fn serve(
     let closed = if outcome.is_err() {
         ladder.close_host_after_quiet_wait(closing).await
     } else {
-        ladder.close_host(closing).await
+        ladder.close_host(closing, &mut signals).await
     };
     let code = match outcome {
         Ok(Ok(code)) => code,
@@ -204,6 +208,7 @@ pub(crate) async fn serve(
 /// write diagnostics.
 async fn run_server(
     stop: &CancellationToken,
+    signals: &mut edge::ShutdownSignals,
     run: serve::ServeRun,
     snapshot: &edge::TerminalSnapshot,
 ) -> Result<Result<ExitCode, serve::ServeCommandError>, u8> {
@@ -213,6 +218,7 @@ async fn run_server(
     let mut err = stderr.lock();
     drive(
         stop,
+        signals,
         serve::run(
             run,
             &mut out,

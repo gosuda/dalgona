@@ -109,7 +109,7 @@ impl Host {
                 next_login: std::sync::atomic::AtomicU64::new(1),
                 shared,
                 attached: std::sync::Mutex::default(),
-                opening_tasks: crate::session::tasks::SessionTasks::new(),
+                session_teardowns: crate::session::tasks::SessionTasks::new(),
             }),
         };
         {

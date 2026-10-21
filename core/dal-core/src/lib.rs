@@ -30,7 +30,7 @@ pub use config::{
     AgentsConfig, ApprovalMode, AskConfig, AskTimeoutClamp, ClampSide, Config, ConfigError,
     ConfigOverrides, ConfigProduct, EditStyleInput, GuardBands, GuardCheckMode, GuardPolicies,
     GuardSection, JudgeMode, Mode, ModeProjection, PROMPT_DIAGRAMS, PluginLimits, RulesConfig,
-    SERVE_DEFAULT_BIND, Screen, ServeConfig, TuiConfig,
+    Screen, ServeConfig, TuiConfig,
 };
 pub use content::{ContentError, ContentLimits, Part};
 pub use ext::{

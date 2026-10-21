@@ -173,6 +173,35 @@ fn providers_sharing_a_family_and_model_list_one_router_id_naming_no_provider() 
     }
 }
 
+#[test]
+fn new_family_catalog_rows_list_api_ids_and_requests_resolve_them() {
+    let catalog = [
+        info(api(Family::Ollama, "llama3", "ollama-local")),
+        info(api(Family::Mistral, "mistral-small", "mistral")),
+    ];
+    let ids = listed_ids(&BTreeMap::new(), &catalog);
+    assert!(ids.contains(&"ollama/llama3".to_owned()), "{ids:?}");
+    assert!(ids.contains(&"mistral/mistral-small".to_owned()), "{ids:?}");
+    let options = options(&[]);
+    for (id, family, native, row) in [
+        ("ollama/llama3", Family::Ollama, "llama3", &catalog[0]),
+        (
+            "mistral/mistral-small",
+            Family::Mistral,
+            "mistral-small",
+            &catalog[1],
+        ),
+    ] {
+        let ResolvedModel::Route(route) =
+            resolve_model(&options, id).unwrap_or_else(|error| panic!("{id}: {error:?}"))
+        else {
+            panic!("{id} did not resolve to a route");
+        };
+        assert_eq!(route, api_without_provider(family, native), "{id}");
+        assert!(route.same_model(&row.route), "{id} left its catalog row");
+    }
+}
+
 fn api_without_provider(family: Family, model: &str) -> ModelRoute {
     ModelRoute::Api {
         family,
@@ -202,6 +231,41 @@ fn unlisted_spellings_are_model_not_found() {
         assert_eq!(fail.status, 400);
         assert_eq!(fail.code, "model_not_found");
         assert_eq!(fail.message, format!(r#"model "{id}" was not found"#));
+    }
+}
+
+#[test]
+fn every_family_prefix_round_trips_through_the_wire_id() {
+    const FAMILIES: [Family; 16] = [
+        Family::Chat,
+        Family::Responses,
+        Family::Codex,
+        Family::Anthropic,
+        Family::Bedrock,
+        Family::Cursor,
+        Family::Devin,
+        Family::Droid,
+        Family::GitLab,
+        Family::GoogleGenerativeAi,
+        Family::GoogleVertex,
+        Family::GoogleGeminiCli,
+        Family::GoogleAntigravity,
+        Family::Mistral,
+        Family::Ollama,
+        Family::PiMessages,
+    ];
+    let options = options(&[]);
+    for route in FAMILIES {
+        let native = "native/model";
+        let expected = api_without_provider(route, native);
+        let id = route_id(&expected);
+        let ResolvedModel::Route(parsed) =
+            resolve_model(&options, &id).unwrap_or_else(|error| panic!("{id}: {error:?}"))
+        else {
+            panic!("{id} did not resolve to a route");
+        };
+        assert_eq!(parsed, expected, "{id} parsed to a different route");
+        assert_eq!(route_id(&parsed), id, "{id} does not re-render");
     }
 }
 
