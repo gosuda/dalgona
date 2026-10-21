@@ -104,30 +104,24 @@ fn dalgona_native_archive_has_only_binaries_metadata_and_man_pages() -> support:
     if !archive.is_file() {
         return Err(format!("cargo-dist produced no {archive_name} archive").into());
     }
-    let listing = support::run_command(Command::new("tar").arg("-tf").arg(archive))?;
+    let zip = archive
+        .extension()
+        .is_some_and(|extension| extension == "zip");
+    let tool = if zip { "unzip" } else { "tar" };
+    let flag = if zip { "-l" } else { "-tf" };
+    let listing = support::run_command(Command::new(tool).arg(flag).arg(archive))
+        .map_err(|error| format!("cannot list {} with `{tool}`: {error}", archive.display()))?;
     assert!(
         listing.status.success(),
         "{}",
         String::from_utf8_lossy(&listing.stderr)
     );
     let listed = String::from_utf8(listing.stdout)?;
-    // Tar members hang under dalgona-{target}/; the Windows zip is flat.
-    // Directory headers carry a trailing slash on every tar flavor, so
-    // normalize before comparing: the packaged shape is identical.
-    let root = format!("dalgona-{target}/");
-    let members: BTreeSet<String> = listed
-        .lines()
-        .map(|line| line.trim_end_matches('/'))
-        .filter_map(|line| {
-            if windows {
-                (!line.is_empty()).then(|| line.to_owned())
-            } else {
-                line.strip_prefix(root.as_str())
-                    .filter(|member| !member.is_empty())
-                    .map(ToOwned::to_owned)
-            }
-        })
-        .collect();
+    let members = if zip {
+        zip_members(&listed)
+    } else {
+        tar_members(&listed, &format!("dalgona-{target}/"))
+    };
     let exe = if windows { ".exe" } else { "" };
     let mut expected = BTreeSet::from([
         format!("dalgona{exe}"),
@@ -152,6 +146,49 @@ fn dalgona_native_archive_has_only_binaries_metadata_and_man_pages() -> support:
     Ok(())
 }
 
+/// Collects the member names of a tar archive under `root`. Tar members hang
+/// under `dalgona-{target}/` and directory headers carry a trailing slash on
+/// every flavor, so normalization happens before comparing.
+fn tar_members(listed: &str, root: &str) -> BTreeSet<String> {
+    listed
+        .lines()
+        .map(|line| line.trim_end_matches('/'))
+        .filter_map(|line| {
+            line.strip_prefix(root)
+                .filter(|member| !member.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+/// Collects the member names of a flat zip from `unzip -l`, which frames each
+/// entry in `Length Date Time Name` columns inside a header and a summary
+/// footer.
+fn zip_members(listed: &str) -> BTreeSet<String> {
+    listed
+        .lines()
+        .map(|line| line.trim_end_matches('/'))
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("Archive:")
+                || trimmed.starts_with("Length")
+                || trimmed.chars().all(|cell| cell == '-' || cell == ' ')
+                || trimmed.ends_with(" file")
+                || trimmed.ends_with(" files")
+            {
+                return None;
+            }
+            let name = trimmed
+                .split_whitespace()
+                .skip(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +206,50 @@ mod tests {
             "the manifest scrape must agree with cargo metadata"
         );
         Ok(())
+    }
+
+    #[test]
+    fn tar_members_strip_the_target_root_and_drop_directories() {
+        let listed = "dalgona-aarch64-apple-darwin/\n\
+                      dalgona-aarch64-apple-darwin/dalgona\n\
+                      dalgona-aarch64-apple-darwin/dg\n\
+                      dalgona-aarch64-apple-darwin/README.md\n\
+                      dalgona-aarch64-apple-darwin/man/\n\
+                      dalgona-aarch64-apple-darwin/man/dalgona.1\n\
+                      stray-other-root/dalgona\n";
+        let members = tar_members(listed, "dalgona-aarch64-apple-darwin/");
+        assert_eq!(
+            members,
+            BTreeSet::from([
+                "dalgona".to_owned(),
+                "dg".to_owned(),
+                "README.md".to_owned(),
+                "man".to_owned(),
+                "man/dalgona.1".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn zip_members_skip_the_unzip_framing_and_take_the_name_column() {
+        let listed = "Archive:  target/distrib/dalgona-aarch64-pc-windows-msvc.zip\n\
+                      \x20 Length      Date    Time    Name\n\
+                      ---------  ---------- -----   ----\n\
+                      \x20   123456  2026-10-21 10:00   dalgona.exe\n\
+                      \x20     2048  2026-10-21 10:00   dg.exe\n\
+                      \x20     4096  2026-10-21 10:00   README.md\n\
+                      \x20     1024  2026-10-21 10:00   man/dalgona.1\n\
+                      ---------                     -------\n\
+                      \x20   130624                     4 files\n";
+        let members = zip_members(listed);
+        assert_eq!(
+            members,
+            BTreeSet::from([
+                "dalgona.exe".to_owned(),
+                "dg.exe".to_owned(),
+                "README.md".to_owned(),
+                "man/dalgona.1".to_owned(),
+            ])
+        );
     }
 }

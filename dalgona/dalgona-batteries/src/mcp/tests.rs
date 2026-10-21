@@ -914,12 +914,19 @@ fn request_content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-async fn read_http_request(socket: &mut TcpStream) -> HttpRequest {
+/// Reads one request from a loopback fixture connection.
+///
+/// Returns `None` when the peer vanishes before sending a complete request.
+/// The loopback port also receives stray non-MCP connections (a localhost
+/// prober issuing `GET /`), which must not fail the fixture.
+async fn read_http_request(socket: &mut TcpStream) -> Option<HttpRequest> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
     let header_end = loop {
         let count = socket.read(&mut buffer).await.expect("read HTTP request");
-        assert_ne!(count, 0, "HTTP client closed before request headers");
+        if count == 0 {
+            return None;
+        }
         request.extend_from_slice(&buffer[..count]);
         if let Some(end) = find_header_end(&request) {
             break end;
@@ -932,16 +939,37 @@ async fn read_http_request(socket: &mut TcpStream) -> HttpRequest {
             .read(&mut buffer)
             .await
             .expect("read HTTP request body");
-        assert_ne!(count, 0, "HTTP client closed before request body");
+        if count == 0 {
+            return None;
+        }
         request.extend_from_slice(&buffer[..count]);
     }
     let body = String::from_utf8(request[header_end..total].to_vec()).expect("UTF-8 MCP body");
     let method = header_value(&headers, "mcp-method").unwrap_or_default();
-    HttpRequest {
+    Some(HttpRequest {
         headers,
         body,
         method,
-    }
+    })
+}
+
+/// Whether a loopback connection carries a real MCP call: a POST with the
+/// caller header the client always sends. Anything else is a stray probe.
+fn is_mcp_request(request: &HttpRequest) -> bool {
+    request
+        .headers
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("POST "))
+        && !request.method.is_empty()
+}
+
+/// Refuses a stray non-MCP connection without consuming the fixture's
+/// request budget. The write is best-effort: probes vanish.
+async fn refuse_probe(socket: &mut TcpStream) {
+    let _ = socket
+        .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await;
 }
 
 fn rpc_result(id: u64, result: &str) -> String {
@@ -1073,9 +1101,15 @@ async fn start_http_fixture(
     let address = listener.local_addr().expect("loopback address");
     let task = tokio::spawn(async move {
         let mut requests = Vec::with_capacity(expected_requests);
-        for _ in 0..expected_requests {
+        while requests.len() < expected_requests {
             let (mut socket, _) = listener.accept().await.expect("accept MCP request");
-            let request = read_http_request(&mut socket).await;
+            let Some(request) = read_http_request(&mut socket).await else {
+                continue;
+            };
+            if !is_mcp_request(&request) {
+                refuse_probe(&mut socket).await;
+                continue;
+            }
             let reply = http_reply(scenario, &request);
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -1105,6 +1139,69 @@ async fn finish_http_fixture(server: JoinHandle<Vec<HttpRequest>>) -> Vec<HttpRe
         .await
         .expect("HTTP fixture finishes within its request budget")
         .expect("HTTP fixture task completes")
+}
+
+/// A localhost prober issuing `GET /` (or vanishing without sending) must
+/// not fail the loopback fixture: probes are refused without consuming the
+/// request budget, and the real MCP call that follows is recorded in order.
+#[tokio::test]
+async fn loopback_http_fixture_refuses_stray_probes_without_consuming_budget() {
+    let (_declaration, url, server) = start_http_fixture(1, HttpScenario::PageCap).await;
+    let host = url.host_str().expect("loopback host");
+    let port = url.port().expect("loopback port");
+    // Probe one: a bare `GET /`, like a localhost port prober sends.
+    let mut probe = TcpStream::connect((host, port))
+        .await
+        .expect("probe connects");
+    probe
+        .write_all(b"GET / HTTP/1.1\r\nHost: probe\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("probe writes");
+    let mut refusal = Vec::new();
+    probe
+        .read_to_end(&mut refusal)
+        .await
+        .expect("probe is refused");
+    assert!(
+        refusal.starts_with(b"HTTP/1.1 404"),
+        "stray probes are refused: {}",
+        String::from_utf8_lossy(&refusal)
+    );
+    // Probe two: connect and vanish without sending anything.
+    drop(
+        TcpStream::connect((host, port))
+            .await
+            .expect("closer connects"),
+    );
+    // The real call still lands as request one.
+    let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#;
+    let post_text = format!(
+        "POST / HTTP/1.1\r\nHost: client\r\nContent-Type: application/json\r\nContent-Length: {}\r\nMcp-Method: tools/list\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut client = TcpStream::connect((host, port))
+        .await
+        .expect("client connects");
+    client
+        .write_all(post_text.as_bytes())
+        .await
+        .expect("client writes");
+    let mut answer = Vec::new();
+    client.read_to_end(&mut answer).await.expect("client reads");
+    assert!(
+        answer.starts_with(b"HTTP/1.1 200 OK"),
+        "real calls are served: {}",
+        String::from_utf8_lossy(&answer)
+    );
+    let requests = finish_http_fixture(server).await;
+    assert_eq!(requests.len(), 1, "only the real call counts");
+    assert_eq!(requests[0].method, "tools/list");
+    assert!(
+        requests[0].body.contains(r#""id":7"#),
+        "{}",
+        requests[0].body
+    );
 }
 
 /// Internal HTTP protocol proof with real Host services and tool publication.
@@ -2425,7 +2522,13 @@ async fn start_recording_http(
         async move {
             loop {
                 let (mut socket, _) = listener.accept().await.expect("accept MCP request");
-                let request = read_http_request(&mut socket).await;
+                let Some(request) = read_http_request(&mut socket).await else {
+                    continue;
+                };
+                if !is_mcp_request(&request) {
+                    refuse_probe(&mut socket).await;
+                    continue;
+                }
                 let hang = hang_calls && request.method == "tools/call";
                 let reply = if hang {
                     None
