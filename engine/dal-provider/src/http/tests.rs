@@ -14,6 +14,25 @@ fn url(text: &str) -> Url {
     Url::parse(text).unwrap()
 }
 
+#[test]
+fn websocket_tls_connector_builds_once_and_names_the_fix() {
+    let first = crate::http::websocket_connector();
+    let second = crate::http::websocket_connector();
+    match (first, second) {
+        (Ok(first), Ok(second)) => match (first, second) {
+            (tokio_tungstenite::Connector::Rustls(a), tokio_tungstenite::Connector::Rustls(b)) => {
+                assert!(std::sync::Arc::ptr_eq(&a, &b));
+            }
+            _ => panic!("expected two Rustls connectors"),
+        },
+        (Err(first), Err(second)) => {
+            assert!(first.to_string().contains("system CA certificates"));
+            assert_eq!(first.to_string(), second.to_string());
+        }
+        _ => panic!("connector must settle the same way twice"),
+    }
+}
+
 fn transport_reason(error: ProviderError) -> String {
     match error {
         ProviderError::Transport {

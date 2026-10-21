@@ -206,19 +206,32 @@ impl WebSocketTransport {
     where
         R: IntoClientRequest + Unpin,
     {
-        let (socket, _) =
-            tokio_tungstenite::connect_async_with_config(request, Some(frame_cap_config()), false)
-                .await
-                .map_err(|error| match &error {
-                    WsError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
-                        tracing::debug!(
-                            status = %response.status(),
-                            "websocket upgrade denied; not retrying"
-                        );
-                        WireError::Auth
-                    }
-                    _ => WireError::Transport(format!("websocket connect failed: {error}")),
-                })?;
+        let request = request
+            .into_client_request()
+            .map_err(|error| WireError::Transport(format!("websocket connect failed: {error}")))?;
+        let connector = match request.uri().scheme_str() {
+            Some("wss") => Some(dal_provider::websocket_connector().map_err(|error| {
+                WireError::Transport(format!("websocket TLS setup failed: {error}"))
+            })?),
+            _ => None,
+        };
+        let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(frame_cap_config()),
+            false,
+            connector,
+        )
+        .await
+        .map_err(|error| match &error {
+            WsError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
+                tracing::debug!(
+                    status = %response.status(),
+                    "websocket upgrade denied; not retrying"
+                );
+                WireError::Auth
+            }
+            _ => WireError::Transport(format!("websocket connect failed: {error}")),
+        })?;
         let (sink, stream) = socket.split();
         Ok(Self::halves(Box::pin(stream), Box::pin(sink)))
     }

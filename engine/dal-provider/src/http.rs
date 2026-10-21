@@ -24,12 +24,14 @@ use std::error::Error;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use dal_core::Family;
 use futures::future::{Either, select};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue, USER_AGENT};
+use rustls_platform_verifier::BuilderVerifierExt;
+use tokio_tungstenite::Connector;
 use url::{Host, Url};
 
 use crate::error::{LimitError, ProviderError};
@@ -204,6 +206,50 @@ pub fn build_client_no_redirect() -> reqwest::Client {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("the reqwest TLS backend initializes")
+}
+
+/// The WebSocket client could not start TLS, so no `wss` connection can open.
+///
+/// The platform certificate verifier failed to initialize; on Linux that means
+/// the system holds no readable CA certificates. Install the system CA bundle
+/// (for example the `ca-certificates` package) and restart the process: the
+/// outcome of the first attempt is kept for the life of the process.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error(
+    "WebSocket TLS is unavailable: the platform certificate verifier did not start ({0}); install the system CA certificates and restart"
+)]
+pub struct WebSocketTlsError(rustls::Error);
+
+static WEBSOCKET_TLS: LazyLock<Result<Arc<rustls::ClientConfig>, WebSocketTlsError>> =
+    LazyLock::new(|| {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .and_then(BuilderVerifierExt::with_platform_verifier)
+            .map_err(WebSocketTlsError)?
+            .with_no_client_auth();
+        Ok(Arc::new(config))
+    });
+
+/// The TLS connector dal-provider WebSocket clients pass to
+/// `tokio_tungstenite::connect_async_tls_with_config`.
+///
+/// It verifies servers with the platform certificate verifier, the verifier
+/// [`build_client`]'s reqwest uses, so HTTP and WebSocket requests trust the
+/// same roots and apply the same chain checks. The configuration offers no
+/// ALPN protocol and no client certificate. It is built on first use and shared
+/// by every connect afterwards. Passing it explicitly keeps
+/// `tokio-tungstenite` from loading its own root store.
+///
+/// # Errors
+///
+/// [`WebSocketTlsError`] when the platform verifier cannot start. The failure
+/// is kept; later calls return it again.
+pub fn websocket_connector() -> Result<Connector, WebSocketTlsError> {
+    WEBSOCKET_TLS
+        .as_ref()
+        .map(|config| Connector::Rustls(Arc::clone(config)))
+        .map_err(Clone::clone)
 }
 
 /// A [`build_client`] client built on first use.
