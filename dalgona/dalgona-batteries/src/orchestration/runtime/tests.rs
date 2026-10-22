@@ -5839,6 +5839,7 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
             // A one-column `M file.txt` is not a line git emits, and salvage
             // refuses a malformed status read by design.
             script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+            script.run_outputs.push_back(Ok(output("H file.txt\0")));
             script
                 .run_outputs
                 .push_back(Ok(output(format!("delta {n}").as_str())));
@@ -5875,6 +5876,7 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
             "--untracked-files=all",
             "--ignored",
         ]));
+        expected.push(words(&["git", "-C", dir.as_str(), "ls-files", "-v", "-z"]));
         expected.push(words(&[
             "git",
             "-C",
@@ -5999,6 +6001,7 @@ fn assert_reopened_salvage(
                 "--untracked-files=all",
                 "--ignored"
             ]),
+            words(&["git", "-C", dir_text, "ls-files", "-v", "-z"]),
             words(&[
                 "git",
                 "-C",
@@ -6137,6 +6140,7 @@ fn script_status_tree(script: &mut Script, top: &str, dir_text: &str) {
         format!("worktree {dir_text}\nHEAD deadbeef\n").as_str(),
     )));
     script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+    script.run_outputs.push_back(Ok(output("H file.txt\0")));
     script.run_outputs.push_back(Ok(output("delta")));
     script.run_outputs.push_back(Ok(output("file.txt\0")));
 }
@@ -6301,6 +6305,7 @@ async fn open_salvage_keeps_the_tree_when_its_delta_cannot_be_read() -> TestResu
             .run_outputs
             .push_back(Ok(output(format!("worktree {lost_text}\n").as_str())));
         script.run_outputs.push_back(Ok(output(" M f\n")));
+        script.run_outputs.push_back(Ok(output("H f\0")));
         script
             .run_outputs
             .push_back(Ok(failed_output("fatal: not a git repository")));
@@ -6309,7 +6314,7 @@ async fn open_salvage_keeps_the_tree_when_its_delta_cannot_be_read() -> TestResu
     let script = fixture.script();
     assert_eq!(
         script.run_requests.len(),
-        4,
+        5,
         "a failed net diff stops before remove and prune: {:?}",
         argv_words(&script.run_requests)
     );
@@ -6336,6 +6341,92 @@ async fn open_salvage_keeps_the_tree_when_its_delta_cannot_be_read() -> TestResu
             .any(|request| request.argv.iter().any(|word| word == "apply")),
         "salvage never merges"
     );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_salvage_leaves_trees_with_hidden_index_flags() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-hidden-top";
+    let first = JobId::new_v7();
+    let second = JobId::new_v7();
+    let first_dir = salvage_dir(&data, fixture.session, first);
+    let second_dir = salvage_dir(&data, fixture.session, second);
+    for task in [first, second] {
+        salvage_receipt(&data, fixture.session, task);
+    }
+    let mut ordered = [first, second];
+    ordered.sort_by_key(std::string::ToString::to_string);
+    let dir_text = |task: JobId| {
+        data.join("worktrees")
+            .join(fixture.session.to_string())
+            .join(task.to_string())
+            .display()
+            .to_string()
+    };
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        for task in ordered {
+            script.jobs.push(salvage_job(
+                task,
+                JobStateView::Done(dal_core::JobOutcome::Lost),
+            ));
+        }
+        let mut listing = String::new();
+        for task in [first, second] {
+            listing.push_str("worktree ");
+            listing.push_str(&dir_text(task));
+            listing.push('\n');
+        }
+        listing.push_str("HEAD deadbeef\n");
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(listing.as_str())));
+        for task in ordered {
+            script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+            if task == ordered[0] {
+                script.run_outputs.push_back(Ok(output("h file.txt\0")));
+            } else {
+                script.run_outputs.push_back(Ok(output("S file.txt\0")));
+            }
+        }
+    }
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert!(
+        script.artifacts.is_empty(),
+        "a hidden-flag tree saves nothing: {:?}",
+        script.artifacts
+    );
+    assert!(
+        !script.run_requests.iter().any(|request| request
+            .argv
+            .iter()
+            .any(|word| word == "remove" || word == "prune" || word == "apply")),
+        "a hidden-flag tree is never removed, pruned, or merged: {:?}",
+        argv_words(&script.run_requests)
+    );
+    for task in [first, second] {
+        let dir = data
+            .join("worktrees")
+            .join(fixture.session.to_string())
+            .join(task.to_string());
+        assert!(dir.is_dir(), "the hidden-flag tree stays in place: {dir:?}");
+    }
+    assert_eq!(script.notices.len(), 1);
+    let text = &script.notices[0].text;
+    for task in [first, second] {
+        assert!(
+            text.contains(task.to_string().as_str()),
+            "the notice names the hidden-flag tree: {text}"
+        );
+    }
+    assert!(
+        text.contains("assume-unchanged or skip-worktree"),
+        "the notice names why the trees stayed: {text}"
+    );
+    assert!(first_dir.is_dir() && second_dir.is_dir());
     let _ = std::fs::remove_dir_all(&data);
     Ok(())
 }
@@ -6534,6 +6625,7 @@ async fn open_salvage_leaves_a_tree_in_the_durable_held_set() -> TestResult {
             format!("worktree {held_text}\nworktree {lost_text}\n").as_str(),
         )));
         script.run_outputs.push_back(Ok(output(" M f.txt\n")));
+        script.run_outputs.push_back(Ok(output("H f.txt\0")));
         script.run_outputs.push_back(Ok(output("lost delta")));
         script.run_outputs.push_back(Ok(output("f.txt\0")));
         script.run_outputs.push_back(Ok(output("")));
@@ -6703,6 +6795,7 @@ fn assert_only_plain_tree_salvaged(
                 "--untracked-files=all",
                 "--ignored"
             ]),
+            words(&["git", "-C", plain_text, "ls-files", "-v", "-z"]),
             words(&[
                 "git",
                 "-C",
@@ -6762,6 +6855,7 @@ async fn open_salvage_leaves_a_tree_marked_by_a_retained_record() -> TestResult 
             format!("worktree {marked_text}\nworktree {plain_text}\n").as_str(),
         )));
         script.run_outputs.push_back(Ok(output(" M f.txt\n")));
+        script.run_outputs.push_back(Ok(output("H f.txt\0")));
         script.run_outputs.push_back(Ok(output("plain delta")));
         script.run_outputs.push_back(Ok(output("f.txt\0")));
         script.run_outputs.push_back(Ok(output("")));
@@ -6945,6 +7039,32 @@ fn salvage_status_class_reports_only_untracked_and_ignored_entries() {
         None,
         "a one-column entry is not a line git emits"
     );
+}
+
+#[test]
+fn salvage_hidden_flags_reports_only_assume_unchanged_and_skip_worktree() {
+    assert_eq!(super::salvage_has_hidden_flags(b""), Some(false));
+    assert_eq!(
+        super::salvage_has_hidden_flags(b"H file.txt\0"),
+        Some(false)
+    );
+    assert_eq!(
+        super::salvage_has_hidden_flags(b"H a\0M b\0R c\0C d\0K e\0? f\0U g\0"),
+        Some(false)
+    );
+    assert_eq!(super::salvage_has_hidden_flags(b"h file.txt\0"), Some(true));
+    assert_eq!(super::salvage_has_hidden_flags(b"S file.txt\0"), Some(true));
+    assert_eq!(
+        super::salvage_has_hidden_flags(b"H ok\0h hidden\0"),
+        Some(true)
+    );
+    assert_eq!(
+        super::salvage_has_hidden_flags(b"H a\nwith\nnewline\0"),
+        Some(false)
+    );
+    assert_eq!(super::salvage_has_hidden_flags(b"bogus"), None);
+    assert_eq!(super::salvage_has_hidden_flags(b"X file\0"), None);
+    assert_eq!(super::salvage_has_hidden_flags(b"H\0"), None);
 }
 
 /// The net patch must carry original bytes: a configured textconv driver or

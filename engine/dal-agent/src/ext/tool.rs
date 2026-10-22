@@ -397,6 +397,11 @@ pub(crate) trait ToolCxRuntime: Send + Sync + 'static {
     ) -> Result<Proc, ToolError>;
     /// Parks a spawned child as a background job and returns its identity.
     fn detach(&self, proc: Proc) -> JobId;
+    /// Parks a spawned child with the surviving job label and returns its identity.
+    fn detach_labeled(&self, proc: Proc, label: &str) -> JobId {
+        let _ = label;
+        self.detach(proc)
+    }
     /// Resolves one `scheme://` URI to its page text.
     fn resolve(
         &self,
@@ -642,6 +647,12 @@ impl ToolCx<'_> {
     #[must_use]
     pub fn detach(self, proc: Proc) -> JobId {
         self.rt.detach(proc)
+    }
+
+    /// Parks a spawned child with the surviving job label and returns its identity.
+    #[must_use]
+    pub fn detach_labeled(self, proc: Proc, label: &str) -> JobId {
+        self.rt.detach_labeled(proc, label)
     }
 
     /// Borrows the host-minted caller needed for [`Services`] scoping.

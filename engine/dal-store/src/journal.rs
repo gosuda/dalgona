@@ -1672,9 +1672,9 @@ impl UsageTotal {
             offset,
             "turn usage total overflows",
         )?;
-        if let Some(reasoning) = usage.reasoning_tokens {
+        if let (Some(current), Some(reasoning)) = (total.reasoning_tokens, usage.reasoning_tokens) {
             total.reasoning_tokens = Some(checked_total(
-                total.reasoning_tokens.unwrap_or_default(),
+                current,
                 reasoning,
                 offset,
                 "turn usage total overflows",
@@ -1692,20 +1692,27 @@ impl UsageTotal {
             if !premium.is_finite() || premium < 0.0 {
                 return Err(damaged(offset, "turn usage premium is invalid"));
             }
-            let premium_total = total.premium_requests.unwrap_or_default() + premium;
-            if !premium_total.is_finite() {
-                return Err(damaged(offset, "turn usage premium total overflows"));
+            if let Some(current) = total.premium_requests {
+                let premium_total = current + premium;
+                if !premium_total.is_finite() {
+                    return Err(damaged(offset, "turn usage premium total overflows"));
+                }
+                total.premium_requests = Some(premium_total);
             }
-            total.premium_requests = Some(premium_total);
         } else {
             total.premium_requests = None;
         }
         if let Some(cost) = usage.cost_usd {
-            let cost_total = total.cost_usd.unwrap_or_default() + cost;
-            if !cost_total.is_finite() {
+            if !cost.is_finite() {
                 return Err(damaged(offset, "turn usage cost total overflows"));
             }
-            total.cost_usd = Some(cost_total);
+            if let Some(current) = total.cost_usd {
+                let cost_total = current + cost;
+                if !cost_total.is_finite() {
+                    return Err(damaged(offset, "turn usage cost total overflows"));
+                }
+                total.cost_usd = Some(cost_total);
+            }
         } else {
             total.cost_usd = None;
         }
@@ -2680,6 +2687,156 @@ mod tests {
             usage.expect("usage-bearing records total").premium_requests,
             None,
             "one unmeasured contributor leaves the turn unknown, never a partial sum"
+        );
+    }
+
+    #[test]
+    fn turn_totals_unknown_first_premium_stays_none() {
+        let records = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, None),
+            ),
+            (
+                1,
+                assistant_record_with_premium(
+                    2,
+                    Some(entry_id(1)),
+                    &[("two", "echo")],
+                    4,
+                    Some(2.0),
+                ),
+            ),
+        ];
+        let (usage, _) = turn_totals(&records).expect("mixed premiums total");
+        assert_eq!(
+            usage.expect("usage-bearing records total").premium_requests,
+            None,
+            "an unmeasured first contributor leaves the turn unknown, never a later partial sum"
+        );
+    }
+
+    fn usage_with(reasoning: Option<u64>, premium: Option<f64>, cost: Option<f64>) -> Usage {
+        Usage {
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: reasoning,
+            cache_write_tokens: 0,
+            premium_requests: premium,
+            cost_usd: cost,
+        }
+    }
+
+    fn total_for(usages: &[Usage]) -> Usage {
+        let mut total = UsageTotal::default();
+        for (offset, usage) in usages.iter().copied().enumerate() {
+            let line = u64::try_from(offset).expect("test offset fits");
+            total.add(usage, line).expect("valid test usage");
+        }
+        total.finish().expect("usage-bearing totals")
+    }
+
+    #[test]
+    fn turn_totals_resurrected_optionals_stay_none() {
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(2.0)),
+            ])
+            .premium_requests,
+            Some(3.0)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), None, Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), None, Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), None, Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            Some(3)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(None, Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(None, Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(None, Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            Some(3.0)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), None),
+            ])
+            .cost_usd,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), None),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), None),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            None
         );
     }
 

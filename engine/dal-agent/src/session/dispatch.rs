@@ -1239,6 +1239,10 @@ impl ToolCxRuntime for CallRuntime {
     }
 
     fn detach(&self, proc: Proc) -> JobId {
+        self.detach_labeled(proc, self.tool.as_str())
+    }
+
+    fn detach_labeled(&self, proc: Proc, label: &str) -> JobId {
         let job = proc.job_id();
         // A parked child never publishes again: the dispatch loop settles
         // this call without the child, and detached output belongs to the
@@ -1248,7 +1252,7 @@ impl ToolCxRuntime for CallRuntime {
             jobs: Arc::clone(&self.jobs),
             ledger: Arc::clone(&self.ledger),
             call: self.call.clone(),
-            tool: self.tool.clone(),
+            label: label.into(),
             proc,
         };
         self.tasks.spawn(async move { park.run().await });
@@ -2544,8 +2548,8 @@ struct ParkDetached {
     ledger: Arc<Mutex<GrantLedger>>,
     /// The detaching call.
     call: CallId,
-    /// The detaching tool.
-    tool: Name,
+    /// The surviving job label.
+    label: Box<str>,
     /// The detached child.
     proc: Proc,
 }
@@ -2557,7 +2561,7 @@ impl ParkDetached {
             jobs,
             ledger,
             call,
-            tool,
+            label,
             proc,
         } = self;
         // Every park entry arrives stripped: a parked child never publishes
@@ -2590,7 +2594,7 @@ impl ParkDetached {
         }
         drop(ledger);
         let cancel = CancellationToken::new();
-        let record = crate::jobs::JobRecord::new(job, tool.as_str(), log_path, cancel.clone());
+        let record = crate::jobs::JobRecord::new(job, label, log_path, cancel.clone());
         let mut table = jobs.lock().await;
         if table.reserve(record).is_err() || table.adopt_detached(job).is_err() {
             return;

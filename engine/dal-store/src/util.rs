@@ -164,7 +164,13 @@ pub(crate) fn create_private_dir_all_durable(floor: &Path, path: &Path) -> Resul
     }
     let floor_parent = floor
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| {
+            if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            }
+        })
         .ok_or_else(|| StoreError::Invalid {
             reason: format!(
                 "durable directory floor {} has no parent to sync",
@@ -185,7 +191,13 @@ pub(crate) fn create_private_dir_all_durable(floor: &Path, path: &Path) -> Resul
         }
         cursor = cursor
             .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| {
+                if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                }
+            })
             .ok_or_else(|| StoreError::Invalid {
                 reason: format!(
                     "durable directory {} escaped its floor {}",
@@ -513,6 +525,27 @@ mod tests {
             !target.exists(),
             "no directory is created when the floor parent is missing"
         );
+    }
+
+    #[test]
+    fn durable_creation_syncs_single_component_relative_floor_through_cwd() {
+        let floor = PathBuf::from(format!(
+            "dal-store-util-relative-{}-{}",
+            std::process::id(),
+            random_hex()
+        ));
+        let target = floor.join("sessions").join("session");
+        let result = create_private_dir_all_durable(&floor, &target);
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&floor);
+            panic!(
+                "single-component relative floor syncs through the current directory, got {error:?}"
+            );
+        }
+        let durable = target.is_dir();
+        let _ = fs::remove_dir_all(&floor);
+        assert!(durable);
+        assert!(!floor.exists());
     }
 
     #[test]

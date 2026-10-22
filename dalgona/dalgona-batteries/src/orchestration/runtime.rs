@@ -3108,6 +3108,36 @@ fn salvage_argv_status(dir: &str) -> Vec<String> {
     ]
 }
 
+fn salvage_argv_hidden_flags(dir: &str) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "ls-files".to_owned(),
+        "-v".to_owned(),
+        "-z".to_owned(),
+    ]
+}
+
+fn salvage_has_hidden_flags(stdout: &[u8]) -> Option<bool> {
+    let mut hidden = false;
+    for record in stdout.split(|byte| *byte == b'\0') {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 3 || record[1] != b' ' {
+            return None;
+        }
+        let tag = record[0];
+        if tag == b'h' || tag == b'S' {
+            hidden = true;
+        } else if !matches!(tag, b'H' | b'M' | b'R' | b'C' | b'K' | b'?' | b'U') {
+            return None;
+        }
+    }
+    Some(hidden)
+}
+
 fn salvage_argv_net_diff(dir: &str, base: &str) -> Vec<String> {
     vec![
         "git".to_owned(),
@@ -3460,6 +3490,28 @@ async fn salvage_open_worktrees(
         if untracked {
             left.push(format!(
                 "{task} left at {dir_text}: the worktree holds untracked files; left for hand recovery"
+            ));
+            continue;
+        }
+        let hidden = git(services, caller, &dir, salvage_argv_hidden_flags(&dir_text)).await;
+        let hidden = match hidden {
+            Ok(hidden) if complete(&hidden) => hidden,
+            _ => {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree index flags could not be read"
+                ));
+                continue;
+            }
+        };
+        let Some(hidden) = salvage_has_hidden_flags(&hidden.stdout_prefix) else {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree index flags were not valid; left in place"
+            ));
+            continue;
+        };
+        if hidden {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree holds assume-unchanged or skip-worktree files; left for hand recovery"
             ));
             continue;
         }
