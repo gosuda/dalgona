@@ -551,8 +551,6 @@ async fn absent_tools_and_instructions_leave_no_section_or_separator() {
     assert_eq!(system, expected);
 }
 
-/// The ten static sections one owner registers, in canonical render order,
-/// each carrying its own marker line.
 fn single_owner_sections() -> [(PromptOrder, &'static str); 10] {
     [
         (PromptOrder::Identity, "SECTION-IDENTITY\n"),
@@ -568,22 +566,31 @@ fn single_owner_sections() -> [(PromptOrder, &'static str); 10] {
     ]
 }
 
-/// Builds one extension that registers `sections` in the order given.
-fn single_owner_extension(
-    sections: impl IntoIterator<Item = (PromptOrder, &'static str)>,
-) -> Extension {
+fn single_owner_extension_impl(reversed: bool) -> Extension {
+    let mut sections = single_owner_sections();
+    if reversed {
+        sections.reverse();
+    }
     let mut builder =
         ExtensionBuilder::new("single-owner", "0.1.0", ServiceSet::EMPTY).expect("fixture builder");
-    for (order, text) in sections {
-        builder = builder.prompt_section(PromptSection::static_text(order, text.into()));
+    for (order, body) in sections {
+        builder = builder.prompt_section(PromptSection::static_text(order, body.into()));
     }
     builder.build().expect("fixture extension")
 }
 
+fn reverse_single_owner_extension() -> Extension {
+    single_owner_extension_impl(true)
+}
+
+fn forward_single_owner_extension() -> Extension {
+    single_owner_extension_impl(false)
+}
+
 #[tokio::test]
 async fn prompt_sections_under_single_owner_render_in_deterministic_order() {
-    let reverse_owner = single_owner_extension(single_owner_sections().into_iter().rev());
-    let forward_owner = single_owner_extension(single_owner_sections());
+    let reverse_owner = reverse_single_owner_extension();
+    let forward_owner = forward_single_owner_extension();
 
     let reverse_system = assembled(vec![reverse_owner]).await;
     let forward_system = assembled(vec![forward_owner]).await;
