@@ -81,18 +81,12 @@ pub mod ids {
     pub const THINKING_COLLAPSED: &str = "Thinking {dur} · ctrl+o to show reasoning";
     /// Expanded reasoning header.
     pub const THINKING_OPEN: &str = "Thinking · {n} step|s · {dur} · ctrl+o to hide";
-    /// Remaining reasoning count.
-    pub const THINKING_MORE: &str = "... {n} more step|s";
     /// Successful settled tool card.
     pub const TOOL_OK: &str = "ok  {name} {summary} · {dur}";
     /// Failed settled tool card.
     pub const TOOL_FAILED: &str = "failed  {name} · {reason} · {dur}";
-    /// Tool expansion hint.
-    pub const TOOL_EXPAND: &str = "ctrl+o expands";
     /// Tool collapse hint.
     pub const TOOL_COLLAPSE: &str = "ctrl+o collapses";
-    /// Truncated tool output footer.
-    pub const TOOL_MORE: &str = "... {n} more line|s in the full output";
     /// Patch summary header.
     pub const DIFF_HEADER: &str = "patch {path} · +{add} -{del}";
     /// Truncated diff footer.
@@ -287,6 +281,11 @@ pub mod ids {
     pub const FORK_PICKER_TITLE: &str = "Pick a user message to fork from";
     /// Picker key guide.
     pub const PICKER_HINT: &str = "↑/↓ move · type to filter · enter confirm · esc cancel";
+    /// Scoped-model picker title.
+    pub const SCOPED_MODELS_TITLE: &str =
+        "Pick the models /model lists · space checks · enter applies";
+    /// Prompt-history picker title.
+    pub const HISTORY_PICKER_TITLE: &str = "Pick a past prompt · enter loads it as the draft";
     /// Empty picker notice.
     pub const PICKER_EMPTY: &str = "No choices are available.";
     /// Unsupported picker notice.
@@ -388,6 +387,12 @@ pub mod ids {
     pub const NARROW_ROWS: &str = "dalgon needs at least 8 rows";
     /// Minimum terminal width notice.
     pub const NARROW_COLS: &str = "dalgon needs at least 12 columns";
+    /// Minimum usable height in rows; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_ROWS: u16 = 8;
+    /// Minimum usable width in columns; below this the frame shows only the
+    /// narrow warning plus status and input admission fails closed.
+    pub const MIN_COLS: u16 = 12;
     /// Plugin notice prefix.
     pub const NOTICE_PLUGIN: &str = "note: {text}";
     /// Large paste notice.
@@ -442,13 +447,9 @@ pub const DECK: &[(&str, &str)] = &[
     ("state.retrying", ids::STATE_RETRYING),
     ("state.waiting", ids::STATE_WAITING),
     ("thinking.collapsed", ids::THINKING_COLLAPSED),
-    ("thinking.open", ids::THINKING_OPEN),
-    ("thinking.more", ids::THINKING_MORE),
     ("tool.ok", ids::TOOL_OK),
     ("tool.failed", ids::TOOL_FAILED),
-    ("tool.expand", ids::TOOL_EXPAND),
     ("tool.collapse", ids::TOOL_COLLAPSE),
-    ("tool.more", ids::TOOL_MORE),
     ("diff.header", ids::DIFF_HEADER),
     ("diff.more", ids::DIFF_MORE),
     ("agents.header", ids::AGENTS_HEADER),
@@ -539,6 +540,8 @@ pub const DECK: &[(&str, &str)] = &[
     ("tree.leaf", ids::TREE_LEAF),
     ("picker.fork.title", ids::FORK_PICKER_TITLE),
     ("picker.hint", ids::PICKER_HINT),
+    ("picker.scopedModels.title", ids::SCOPED_MODELS_TITLE),
+    ("picker.history.title", ids::HISTORY_PICKER_TITLE),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
     ("picker.login.title", ids::LOGIN_PICKER_TITLE),

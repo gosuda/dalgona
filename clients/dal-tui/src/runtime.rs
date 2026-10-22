@@ -26,13 +26,6 @@ use crate::term::{ReplyParser, TermIo, TermState, restore, startup_probe};
 use crate::transcript::Transcript;
 use crate::{TuiError, TuiExit, TuiOptions};
 
-/// Draft-quit confirmation owned by the composer state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExitDialog {
-    /// The user typed `/quit` with a non-empty draft.
-    DiscardDraft,
-}
-
 const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Renders the outcome note for a request this client showed.
@@ -75,7 +68,10 @@ fn resolution_notice(
 )]
 struct Session {
     composer: Composer,
-    dialog: Option<ExitDialog>,
+    /// The draft-discard question, while it owns the composer and hint rows.
+    /// Focus starts on the conservative `Keep` verb; a blind Enter never
+    /// throws the draft away.
+    dialog: Option<crate::dialog::DraftConfirm>,
     quit: bool,
     overlay: bool,
     /// Fullscreen transcript viewport: follow, frozen scroll window, search.
@@ -93,6 +89,17 @@ struct Session {
     commands: std::sync::Arc<[dal_core::CommandSpec]>,
     popup: Vec<String>,
     candidates: Vec<crate::popup::Candidate>,
+    /// The draft the completion ring started from; every Tab/Shift+Tab
+    /// applies a candidate to this base, so the ring never compounds
+    /// prefixes. `None` once the draft changes or no candidates exist.
+    popup_base: Option<String>,
+    /// The draft the ring last wrote. Any user edit that diverges from this
+    /// ends the ring, so the next Tab starts a fresh base instead of
+    /// compounding the previous result.
+    popup_last: String,
+    /// The candidate the ring most recently accepted; the next Tab steps
+    /// from here and wraps in both directions.
+    popup_index: usize,
     picker: Option<PickerUi>,
     /// The F1 key-table overlay, while it owns the composer and hint rows.
     help: Option<HelpUi>,
@@ -103,6 +110,13 @@ struct Session {
     cancel_deadline: Option<std::time::Instant>,
     /// The one `Run` command still executing off this thread.
     inflight: Option<InflightRun>,
+    /// Set when Ctrl+Z asked the loop to park the terminal and raise SIGTSTP.
+    suspend: bool,
+    /// Set when Ctrl+G asked the loop to run the external editor on a
+    /// temp copy of the draft.
+    external_edit: bool,
+    /// Set when Ctrl+L asked the loop to rewrite the whole live block.
+    clear_region: bool,
     /// The blob read worker serving the open expand view, for structured
     /// cancellation and a clean join at teardown.
     blob_load: Option<BlobReadWork>,
@@ -179,9 +193,23 @@ impl Session {
     }
 
     fn update_popup(&mut self) {
+        // While a ring is live, any user edit diverges from the ring's own
+        // output: end the ring so the next Tab starts a fresh one.
+        if self.popup_base.is_some() && self.composer.text() != self.popup_last {
+            self.popup_base = None;
+            self.popup_index = 0;
+            self.popup_last.clear();
+        }
         self.popup.clear();
         self.candidates.clear();
-        match crate::popup::complete_draft(&self.commands, self.composer.text()) {
+        // While a ring is live the draft is the ring's own output, which no
+        // longer completes names (`/mode ` is an argument draft), so the
+        // candidates stay those of the base the ring started from.
+        let draft = match &self.popup_base {
+            Some(base) => base.as_str(),
+            None => self.composer.text(),
+        };
+        match crate::popup::complete_draft(&self.commands, draft) {
             crate::popup::DraftCompletion::Names(candidates) => {
                 self.candidates = candidates.into_iter().take(5).collect();
                 self.popup.extend(self.candidates.iter().map(|item| {
@@ -204,16 +232,12 @@ impl Session {
         }
     }
 
-    fn answer_dialog(&mut self, key: char) {
-        match key {
-            'y' | 'Y' => {
-                self.quit = true;
-                self.dialog = None;
-                self.composer.clear();
-            }
-            'n' | 'N' => self.dialog = None,
-            _ => {}
-        }
+    /// The discard-draft dialog resolved to `Discard`: the draft goes and
+    /// the loop quits. `Keep` answers leave the draft and session alone.
+    fn discard_draft(&mut self) {
+        self.quit = true;
+        self.dialog = None;
+        self.composer.clear();
     }
 
     fn interrupt(&mut self) {
@@ -296,7 +320,9 @@ impl Session {
                 if self.composer.text().trim().is_empty() {
                     self.quit = true;
                 } else {
-                    self.dialog = Some(ExitDialog::DiscardDraft);
+                    // Focus starts on Keep: a blind Enter keeps the draft,
+                    // and Esc lands on the same conservative verb.
+                    self.dialog = Some(crate::dialog::DraftConfirm::default());
                 }
                 Vec::new()
             }
@@ -547,26 +573,37 @@ where
         }
     };
 
-    let outcome = run_loop(
-        io,
-        opts,
-        &state,
-        &agent,
-        &mut pump,
-        CommandContext {
-            specs: commands,
-            model_source,
-            host: host.clone(),
-        },
-        save_diagrams,
-        view,
-    );
+    // Catch a panic from the loop so the guard is dropped while this thread is
+    // *not* unwinding: `PanicHookGuard::drop` calls `take_hook`/`set_hook`,
+    // which panic on a panicking thread and would abort the process with a
+    // secondary panic inside a destructor. Restore the terminal and the
+    // previous hook first, then resume the original panic unchanged.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_loop(
+            io,
+            opts,
+            &state,
+            &agent,
+            &mut pump,
+            CommandContext {
+                specs: commands,
+                model_source,
+                host: host.clone(),
+            },
+            save_diagrams,
+            view,
+        )
+    }));
     restore(
         &state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     drop(hook);
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
     let running = outcome
         .as_ref()
         .ok()
@@ -590,6 +627,12 @@ where
 }
 
 /// Cancels a turn that outlived the loop, then reports it on inline screens.
+///
+/// `run_loop` parked the caret on the last row of the live block with
+/// `Painter::rest_below_block`, so a leading CRLF steps below the block
+/// without moving to or erasing the first terminal row (which can hold
+/// committed transcript or prior shell output) and leaves the caret ready
+/// for `write_exit`.
 fn cancel_active<A: TuiAgent>(
     opts: &TuiOptions,
     agent: &A,
@@ -597,26 +640,25 @@ fn cancel_active<A: TuiAgent>(
     pump: &mut Pump<A::Subscription>,
     running: Option<TurnId>,
 ) -> Result<(), TuiError> {
-    if let Some(turn) = running
-        && opts
-            .rt
-            .block_on(agent.submit(Command::Cancel {
-                scope: CancelScope::Turn(turn),
-            }))
-            .is_ok()
+    let Some(turn) = running else {
+        return Ok(());
+    };
+    if opts
+        .rt
+        .block_on(agent.submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        }))
+        .is_err()
     {
-        let cancelled = wait_for_cancelled(pump, turn, Duration::from_secs(3));
-        if cancelled && !matches!(opts.screen, crate::Screen::Fullscreen) {
-            io.write(
-                format!(
-                    "\x1b[{};1H\x1b[2K{}\x1b[0m\r\n",
-                    1,
-                    crate::copy::ids::TURN_CANCELLED
-                )
-                .as_bytes(),
-            )
+        return Ok(());
+    }
+    let cancelled = wait_for_cancelled(pump, turn, Duration::from_secs(3));
+    if cancelled && !matches!(opts.screen, crate::Screen::Fullscreen) {
+        let mut line = Vec::from([0x0d, 0x0a]);
+        line.extend_from_slice(crate::copy::ids::TURN_CANCELLED.as_bytes());
+        line.extend_from_slice(b"\x1b[0m");
+        io.write(&line)
             .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
-        }
     }
     Ok(())
 }
@@ -852,37 +894,26 @@ where
         boot(io, opts, state, agent, specs, view)?;
     let mut resolution_poll = Instant::now();
     loop {
-        if io.shutdown_code().is_some() {
+        let Some((events, term_width, term_height)) = poll_input(io, &mut decoder, &mut surfaces)?
+        else {
             break;
-        }
-        let bytes = io
-            .read(Duration::from_millis(33))
-            .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
-        if io.take_resize()
-            && let Ok((width, _)) = io.size()
-        {
-            surfaces.columns = width;
-        }
-        if io.shutdown_code().is_some() {
-            break;
-        }
-        let now = Instant::now();
-        let events = if bytes.is_empty() {
-            decoder.tick(now)
-        } else {
-            decoder.feed(&bytes, now)
         };
+        let now = Instant::now();
         for event in events {
-            apply_event(
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+            apply_event_at(
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: term_width,
+                    height: term_height,
+                },
                 event,
                 probe.kitty_keyboard,
-                opts.screen,
             );
         }
         surfaces.flush_answers(opts, agent);
@@ -895,12 +926,29 @@ where
         }
         surfaces.poll_signin(opts, io, &mut model_source);
         poll_model_retry(&mut surfaces.session, &mut model_source);
+        if surfaces.session.external_edit {
+            surfaces.session.external_edit = false;
+            run_external_editor(opts, io, state, &mut surfaces);
+        }
+        if surfaces.session.suspend {
+            surfaces.session.suspend = false;
+            suspend_and_continue(io, state, opts, &theme, &mut painter, &mut surfaces)?;
+        }
+        if std::mem::take(&mut surfaces.session.clear_region) {
+            repaint_live_region(io, state, opts, &theme, &mut painter, &mut surfaces)?;
+        }
         surfaces.write_copies(io);
         surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
-        surfaces.dialog.tick(Instant::now());
+        // The arming clock runs only while the dialog can be painted: a
+        // floored frame shows no dialog, so no key may arm off an unseen
+        // question. Skipping the tick keeps a floored dialog in `Shown`
+        // until resize re-arms it through the normal delay.
+        if !crate::render::below_floor(term_width, term_height) {
+            surfaces.dialog.tick(Instant::now());
+        }
         if surfaces.request_quit() {
             break;
         }
@@ -916,6 +964,54 @@ where
         }
     }
 
+    finish_run(io, opts, &mut painter, surfaces)
+}
+
+/// Reads one input batch, advancing the decoder and the tracked columns.
+/// Returns `None` once shutdown is requested so the loop breaks.
+fn poll_input(
+    io: &dyn TermIo,
+    decoder: &mut KeyDecoder,
+    surfaces: &mut Surfaces,
+) -> Result<Option<(Vec<InputEvent>, u16, u16)>, TuiError> {
+    if io.shutdown_code().is_some() {
+        return Ok(None);
+    }
+    let bytes = io
+        .read(Duration::from_millis(33))
+        .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
+    if io.take_resize()
+        && let Ok((width, _)) = io.size()
+    {
+        surfaces.columns = width;
+    }
+    if io.shutdown_code().is_some() {
+        return Ok(None);
+    }
+    let now = Instant::now();
+    let events = if bytes.is_empty() {
+        decoder.tick(now)
+    } else {
+        decoder.feed(&bytes, now)
+    };
+    let (term_width, term_height) = io.size().unwrap_or((80, 24));
+    Ok(Some((events, term_width, term_height)))
+}
+
+/// Moves the caret below the live block on inline exit, then collects the
+/// exit line from the finished surfaces.
+fn finish_run(
+    io: &dyn TermIo,
+    opts: &TuiOptions,
+    painter: &mut Painter,
+    surfaces: Surfaces,
+) -> Result<(TuiExit, Option<TurnId>, Vec<String>), TuiError> {
+    // The caret rests hidden at the block top while the composer is empty;
+    // the exit line continues from the caret, so move it below the block
+    // first or the line overwrites a block row (a notice, the composer).
+    if opts.screen == crate::Screen::Inline {
+        painter.rest_below_block(io)?;
+    }
     Ok(surfaces.finish(opts))
 }
 
@@ -1137,7 +1233,11 @@ impl Surfaces {
                 screen: opts.screen,
                 composer: self.session.composer.text(),
                 cursor: self.session.composer.cursor(),
-                exit_draft: self.session.dialog.is_some(),
+                exit_draft: self
+                    .session
+                    .dialog
+                    .as_ref()
+                    .map(crate::dialog::DraftConfirm::focused),
                 branch: self.branch.as_deref(),
                 popup: &self.session.popup,
                 live: &self.live,
@@ -1161,10 +1261,30 @@ impl Surfaces {
     fn flush_answers<A: TuiAgent>(&mut self, opts: &TuiOptions, agent: &A) {
         for (id, answer) in std::mem::take(&mut self.session.pending_answers) {
             if let Err(error) = opts.rt.block_on(agent.answer(id, answer)) {
-                self.live.notice(format!("note: {error}"));
+                // A losing answer or a dead host surfaces as an error with
+                // the deck's notice prefix; `request.lost` text is the
+                // host's own message, never a silent drop.
+                self.live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}"));
             }
         }
     }
+
+    /// Folds one sequenced update into the live region, then the view,
+    /// transcript, dialog, and session: the one path the loop's drain takes.
+    fn absorb_update<A: TuiAgent>(
+        &mut self,
+        opts: &TuiOptions,
+        agent: &A,
+        update: &dal_core::Update,
+    ) -> Result<(), TuiError> {
+        self.live.apply_update(update);
+
+        self.view.r#gen = update.r#gen;
+        self.view.seq = update.seq;
+        self.apply_update(opts, agent, update)
+    }
+
     /// Applies one update's kind to view, transcript, dialog, and session.
     fn apply_update<A: TuiAgent>(
         &mut self,
@@ -1175,10 +1295,8 @@ impl Surfaces {
         match &update.kind {
             UpdateKind::Tree(delta) => {
                 for entry in &delta.added {
-                    // The result entry lands before its settle update, so the
-                    // card takes the time elapsed since the call started.
                     if let dal_core::EntryKind::ToolResult { call, .. } = &entry.kind
-                        && let Some(duration) = self.live.tool_elapsed(call.as_str())
+                        && let Some(duration) = self.live.release_tool(call.as_str())
                     {
                         self.transcript.note_tool_duration(call.as_str(), duration);
                     }
@@ -1266,13 +1384,7 @@ impl Surfaces {
     ) -> Result<(), TuiError> {
         while let Ok(delivery) = pump.deliveries.try_recv() {
             match delivery? {
-                TuiDelivery::Update(update) => {
-                    self.live.apply_update(&update);
-
-                    self.view.r#gen = update.r#gen;
-                    self.view.seq = update.seq;
-                    self.apply_update(opts, agent, &update)?;
-                }
+                TuiDelivery::Update(update) => self.absorb_update(opts, agent, &update)?,
                 TuiDelivery::Resync(snapshot) => {
                     let remote_repaint = snapshot.is_some();
                     let fresh = match snapshot {
@@ -1339,9 +1451,10 @@ impl Surfaces {
             if let Command::Run { .. } = command {
                 match start_run(&opts.rt, agent, command) {
                     Ok(settled) => self.session.inflight = Some(settled),
-                    Err(error) => self
-                        .live
-                        .notice(format!("note: cannot start the command: {error}")),
+                    Err(error) => self.live.notice_as(
+                        crate::theme::Role::Error,
+                        format!("note: cannot start the command: {error}"),
+                    ),
                 }
                 continue;
             }
@@ -1367,7 +1480,10 @@ impl Surfaces {
         let submit_reply = match submit_reply {
             Ok(submit_reply) => submit_reply,
             Err(error) => {
-                self.live.notice(error.to_string());
+                // Command and prompt failures keep the notice prefix and the
+                // error role so the row reads as a failure, never dim text.
+                self.live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}"));
                 return Ok(());
             }
         };
@@ -1464,10 +1580,13 @@ impl Surfaces {
         self.session.picker = None;
         let methods = signin::offered_methods(provider);
         self.session.signin = if methods.is_empty() {
-            self.live.notice(format!(
-                "Unknown provider \"{}\".",
-                crate::width::escape(provider)
-            ));
+            self.live.notice_as(
+                crate::theme::Role::Error,
+                format!(
+                    "note: unknown provider \"{}\".",
+                    crate::width::escape(provider)
+                ),
+            );
             None
         } else if methods.len() == 1 {
             Some(if methods[0] == Method::ApiKey {
@@ -1555,18 +1674,23 @@ impl Surfaces {
 
         for text in std::mem::take(&mut self.session.pending_copies) {
             let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-            let notice = match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
+            match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
                 Ok(()) => {
                     let count = text.chars().count();
-                    crate::copy::render(
+                    let notice = crate::copy::render(
                         crate::copy::ids::COPY_DONE,
                         &[("n", &count.to_string())],
                         u64::try_from(count).unwrap_or(u64::MAX),
-                    )
+                    );
+                    self.live.notice(notice);
                 }
-                Err(_) => crate::copy::ids::COPY_FAILED.to_owned(),
-            };
-            self.live.notice(notice);
+                Err(_) => {
+                    // A refused clipboard write is a failure the user asked
+                    // for, so it carries the error role, not dim text.
+                    self.live
+                        .notice_as(crate::theme::Role::Error, crate::copy::ids::COPY_FAILED);
+                }
+            }
         }
     }
 
@@ -1592,7 +1716,9 @@ impl Surfaces {
             if save == dal_core::command::Save::SessionAndDefault {
                 match save_diagrams(enabled) {
                     Ok(()) => self.live.notice("diagram setting saved to dal.toml"),
-                    Err(error) => self.live.notice(error.to_string()),
+                    Err(error) => self
+                        .live
+                        .notice_as(crate::theme::Role::Error, format!("note: {error}")),
                 }
             } else {
                 self.live.notice(if enabled {
@@ -1792,16 +1918,21 @@ fn probe_terminal(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &parser.finish(),
-                opts.screen,
             );
             break;
         }
@@ -1822,32 +1953,42 @@ fn probe_terminal(
             probe.background_luminance = next.background_luminance;
         }
         if !keys.is_empty() {
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &keys,
-                opts.screen,
             );
             // A key event requests an immediate frame that bypasses the batch.
             surfaces.paint(io, state, painter, opts, palette)?;
         }
         if probe.da1 {
             let held = parser.finish();
-            apply_type_ahead(
+            let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
+            apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &held,
-                opts.screen,
             );
             break;
         }
@@ -1855,25 +1996,57 @@ fn probe_terminal(
     Ok(probe)
 }
 
-/// Decodes terminal bytes into key events and applies them to the session.
-/// Probe-window bytes predate the kitty switch, so they decode as legacy.
-fn apply_type_ahead(
-    decoder: &mut KeyDecoder,
-    session: &mut Session,
-    dialog: &mut DialogUi,
-    transcript: &Transcript,
-    live: &mut Live,
-    entries: &[dal_core::EntryView],
+/// The surfaces one input event acts on, plus the screen geometry it was
+/// measured at. Bundling these keeps the event entry points under the
+/// argument-count lint without changing what any event can touch.
+struct EventTarget<'a> {
+    session: &'a mut Session,
+    dialog: &'a mut DialogUi,
+    transcript: &'a Transcript,
+    live: &'a mut Live,
+    entries: &'a [dal_core::EntryView],
     diagrams: crate::diagram::DiagramSettings,
-    bytes: &[u8],
     screen: crate::Screen,
+    width: u16,
+    height: u16,
+}
+
+/// Decodes terminal bytes into key events and applies them at the current
+/// terminal size, so startup type-ahead below the usable floor fails closed
+/// exactly like main-loop input: only Ctrl+C is admitted.
+fn apply_type_ahead_at(
+    decoder: &mut KeyDecoder,
+    EventTarget {
+        session,
+        dialog,
+        transcript,
+        live,
+        entries,
+        diagrams,
+        screen,
+        width,
+        height,
+    }: EventTarget<'_>,
+    bytes: &[u8],
 ) {
     if bytes.is_empty() {
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
-        apply_event(
-            session, dialog, transcript, live, entries, diagrams, event, false, screen,
+        apply_event_at(
+            EventTarget {
+                session: &mut *session,
+                dialog: &mut *dialog,
+                transcript,
+                live: &mut *live,
+                entries,
+                diagrams,
+                screen,
+                width,
+                height,
+            },
+            event,
+            false,
         );
     }
 }
@@ -2079,18 +2252,41 @@ fn apply_viewport_action(
     true
 }
 
-fn apply_event(
-    session: &mut Session,
-    dialog: &mut DialogUi,
-    transcript: &Transcript,
-    live: &mut Live,
-    entries: &[dal_core::EntryView],
-    diagrams: crate::diagram::DiagramSettings,
+/// Applies one input event at the current terminal size. While the surface
+/// is below the usable floor the frame shows only the narrow warning plus
+/// status, so admission fails closed: every key but Ctrl+C (and every paste)
+/// is dropped before any dialog, picker, sign-in, help, overlay, expand,
+/// search, or composer state can change. Ctrl+C still reaches
+/// `interrupt_or_dismiss` so a floored loop stays interruptible; resize back
+/// to a usable size re-arms every surface with its state intact.
+fn apply_event_at(
+    EventTarget {
+        session,
+        dialog,
+        transcript,
+        live,
+        entries,
+        diagrams,
+        screen,
+        width,
+        height,
+    }: EventTarget<'_>,
     event: InputEvent,
     kitty: bool,
-    screen: crate::Screen,
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    if crate::render::below_floor(width, height) {
+        let interrupt = matches!(
+            &event,
+            InputEvent::Key(key)
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers == KeyModifiers::CONTROL
+        );
+        if !interrupt {
+            return;
+        }
+    }
 
     let InputEvent::Key(key) = event else {
         if let InputEvent::Paste(bytes) = event {
@@ -2117,13 +2313,15 @@ fn apply_event(
         session.interrupt_or_dismiss(live, transcript);
         return;
     }
-    if let Some(ExitDialog::DiscardDraft) = session.dialog {
-        match key.code {
-            KeyCode::Char(choice) if key.modifiers == KeyModifiers::NONE => {
-                session.answer_dialog(choice);
+    if let Some(mut confirm) = session.dialog.take() {
+        match confirm.key(key) {
+            Some(crate::dialog::DraftChoice::Discard) => session.discard_draft(),
+            Some(crate::dialog::DraftChoice::Keep) => {
+                // An answered Keep closes the question; the draft and
+                // session stay exactly as they were.
+                session.dialog = None;
             }
-            KeyCode::Esc => session.dialog = None,
-            _ => {}
+            None => session.dialog = Some(confirm),
         }
         return;
     }
@@ -2138,7 +2336,7 @@ fn apply_event(
         return;
     }
     if session.picker.is_some() {
-        apply_picker_key(session, key);
+        apply_picker_key(session, live, key);
         return;
     }
     if session.help.is_some() {
@@ -2199,6 +2397,56 @@ fn apply_expand_key(live: &mut Live, key: crate::keys::Key, kitty: bool) {
     }
 }
 
+/// Steps the completion ring: Tab on no candidates keeps its two-space
+/// contract. The first Tab of a fresh ring pins the base draft and takes
+/// the top candidate (Shift+Tab the bottom); every later press steps the
+/// ring from the last accepted index off that untouched base, so cycling
+/// never compounds prefixes and wraps both ways. `update_popup` ends a ring
+/// whose draft diverged from its own output, so an edit starts a fresh one.
+fn accept_cycle_completion(session: &mut Session, key: crate::keys::Key) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let backward = key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+    session.viewport.clear_selection();
+    let count = session.candidates.len();
+    if count == 0 {
+        // No candidates: Tab keeps its plain-text contract of two
+        // spaces, matching the documented empty-popup behavior.
+        session.popup_base = None;
+        session.popup_index = 0;
+        session.popup_last.clear();
+        session.composer.insert("  ");
+        return;
+    }
+    // A fresh ring has accepted nothing: forward enters one step before
+    // the first candidate, backward one step after the last (the seam
+    // before the first). A live ring steps from the last accepted index.
+    let (base, from) = match session.popup_base.take() {
+        Some(base) => (base, session.popup_index),
+        None => (
+            session.composer.text().to_owned(),
+            if backward { 0 } else { count - 1 },
+        ),
+    };
+    let step = if backward {
+        crate::popup::cycle_prev
+    } else {
+        crate::popup::cycle_next
+    };
+    let (index, draft) = step(&base, &session.candidates, from);
+    if count == 1 {
+        // The args hint shows for the accepted command and a second Tab
+        // inserts its two spaces, as before the ring existed.
+        session.popup_index = 0;
+        session.popup_last.clear();
+    } else {
+        session.popup_base = Some(base);
+        session.popup_last.clone_from(&draft);
+        session.popup_index = index;
+    }
+    session.composer.set(&draft);
+}
+
 fn apply_composer_action(
     session: &mut Session,
     transcript: &Transcript,
@@ -2231,16 +2479,18 @@ fn apply_composer_action(
             session.viewport.clear_selection();
             session.composer.insert("\n");
         }
-        Some(Action::AcceptCycleCompletion) => {
-            session.viewport.clear_selection();
-            if let Some(candidate) = session.candidates.first() {
-                let completed = crate::popup::accept(session.composer.text(), candidate);
-                session.composer.set(&completed);
-            } else {
-                session.composer.insert("  ");
-            }
-        }
+        Some(Action::AcceptCycleCompletion) => accept_cycle_completion(session, key),
         Some(Action::Help) => session.help = Some(HelpUi::default()),
+        // Ctrl+Z parks the terminal through the same restore the exit path
+        // uses, then raises SIGTSTP; the loop's resume path re-enters the
+        // recorded modes and repaints. Windows leaves the key unbound.
+        Some(Action::Suspend) => session.suspend = true,
+        // Ctrl+G edits the draft in the configured editor; the loop runs the
+        // child between frames so a blocked editor never starves the pump.
+        Some(Action::ExternalEditor) => session.external_edit = true,
+        // Ctrl+L clears the live region: the next paint rewrites the whole
+        // block, which also repairs any rows a bidi payload mangled.
+        Some(Action::ClearRegion) => session.clear_region = true,
         Some(Action::ExpandCollapse) => {
             let opened = entries.iter().rev().find_map(|entry| {
                 crate::render::expanded_card(entry, diagrams).map(|card| {
@@ -2277,6 +2527,22 @@ fn apply_composer_action(
             session.viewport.clear_selection();
             session.composer.move_down();
         }
+        // Ctrl+Up / Ctrl+Down walk the submitted prompts at the boundary,
+        // the same entries Up/Down walk, without moving the caret mid-draft.
+        Some(Action::PrevPrompt) => {
+            session.viewport.clear_selection();
+            session.composer.history_prev();
+        }
+        Some(Action::NextPrompt) => {
+            session.viewport.clear_selection();
+            session.composer.history_next();
+        }
+        // Ctrl+R searches prompt history: the picker lists every submitted
+        // user message, and Enter loads the row into the composer draft.
+        Some(Action::HistorySearch) => {
+            session.viewport.clear_selection();
+            session.picker = Some(crate::picker::history_picker(entries, ""));
+        }
         None if key.code == KeyCode::Backspace => {
             session.viewport.clear_selection();
             session.composer.backspace();
@@ -2295,14 +2561,89 @@ fn apply_composer_action(
     }
 }
 
+/// Applies a picker chord without consuming plain text in an active filter.
+fn step_picker_table(
+    picker: &mut PickerUi,
+    table_action: Option<Action>,
+    key: crate::keys::Key,
+) -> bool {
+    let command_key = picker.filter().is_empty()
+        || key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+        || key.code == crossterm::event::KeyCode::Char('\0');
+    match table_action {
+        Some(Action::PickerToggle) if command_key => {
+            picker.toggle_selected();
+        }
+        Some(Action::PickerMoveUp) if command_key => {
+            picker.move_selection(false);
+        }
+        Some(Action::PickerMoveDown) if command_key => {
+            picker.move_selection(true);
+        }
+        Some(Action::PickerPageUp) => {
+            let step = picker.visible_range().len().max(1);
+            for _ in 0..step {
+                picker.move_selection(false);
+            }
+        }
+        Some(Action::PickerPageDown) => {
+            let step = picker.visible_range().len().max(1);
+            for _ in 0..step {
+                picker.move_selection(true);
+            }
+        }
+        Some(Action::PickerFirst) => {
+            let count = picker.visible_len();
+            for _ in 0..count {
+                if picker.is_selected(0) {
+                    break;
+                }
+                picker.move_selection(false);
+            }
+        }
+        Some(Action::PickerLast) => {
+            let last = picker.visible_len().saturating_sub(1);
+            for _ in 0..picker.visible_len() {
+                if picker.is_selected(last) {
+                    break;
+                }
+                picker.move_selection(true);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Picker keys: Esc dismisses, Enter activates the focused option, and
-/// arrows plus plain characters drive selection and filter text.
-fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
+/// characters edit the filter. While the filter is empty the `j`/`k` move
+/// keys, `d`, and Space take their documented filter-free meanings: move,
+/// delete the focused row, and toggle a multi picker row. On a non-empty
+/// filter every unmodified character stays filter text, and Space keeps
+/// its contract of toggling only when Ctrl+Space (0x00) arrives.
+/// PageUp/PageDown/Home/End and the Ctrl+P/N/B/F chords resolve through
+/// the key table in both states, so bound picker keys never go
+/// runtime-dead. `resolve_in` is mode-agnostic, so the kitty argument is
+fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Key) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    match key.code {
-        KeyCode::Esc => session.picker = None,
-        KeyCode::Enter => {
+    let Some(picker) = session.picker.as_mut() else {
+        return;
+    };
+    let table_action = resolve_in(key, false, &[Owner::Picker]);
+    // The empty filter admits the documented plain-letter keys before the
+    // filter-text arm; a non-empty filter sends every unmodified character
+    // to the query, and Ctrl+Space (0x00) toggles from either state.
+    let filter_empty = picker.filter().is_empty();
+    if step_picker_table(picker, table_action, key) {
+        return;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => session.picker = None,
+        (KeyCode::Enter, _) => {
             match session
                 .picker
                 .as_mut()
@@ -2322,6 +2663,13 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                         .push(FrontRequest::StartMethod { provider, method });
                     session.picker = None;
                 }
+                Some(PickerAction::SetDraft(text)) => {
+                    // History recall: the row's message becomes the draft.
+                    session.composer.set(&text);
+                    session.popup_base = None;
+                    session.popup_index = 0;
+                    session.picker = None;
+                }
                 Some(PickerAction::SetDiagrams { enabled, save }) => {
                     session.pending_diagram_settings.push((enabled, save));
                 }
@@ -2331,32 +2679,173 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                 Some(_) | None => session.picker = None,
             }
         }
-        KeyCode::Up => {
-            if let Some(picker) = &mut session.picker {
-                picker.move_selection(false);
-            }
+        (KeyCode::Up, _) => picker.move_selection(false),
+        (KeyCode::Down, _) => picker.move_selection(true),
+        (KeyCode::Backspace, _) => picker.remove_filter_char(),
+        (KeyCode::Char('r'), KeyModifiers::NONE) => apply_model_retry_key(session),
+        (KeyCode::Char(' '), KeyModifiers::NONE) if filter_empty => {
+            // picker.rs owns the contract: toggle_selected is a no-op on a
+            // single picker, so unmodified Space never joins the filter on
+            // an empty query and never invents a check where none exists.
+            picker.toggle_selected();
         }
-        KeyCode::Down => {
-            if let Some(picker) = &mut session.picker {
-                picker.move_selection(true);
-            }
+        (KeyCode::Char('j'), KeyModifiers::NONE) if filter_empty => {
+            picker.move_selection(true);
         }
-        KeyCode::Backspace => {
-            if let Some(picker) = &mut session.picker {
-                picker.remove_filter_char();
-            }
+        (KeyCode::Char('k'), KeyModifiers::NONE) if filter_empty => {
+            picker.move_selection(false);
         }
-        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
-            apply_model_retry_key(session);
+        (KeyCode::Char('d'), KeyModifiers::NONE) if filter_empty => {
+            // The delete row contract names the resume picker; no resume
+            // picker exists in this client, and dal_core::Command carries
+            // no delete/session-removal operation, so the seam is missing
+            // rather than the key being dead: name it instead of guessing.
+            live.notice_as(
+                crate::theme::Role::Error,
+                "note: deleting a picker row is not supported in this terminal yet",
+            );
         }
-        KeyCode::Char(character)
-            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-        {
-            if let Some(picker) = &mut session.picker {
-                picker.add_filter_char(character);
-            }
+        (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            picker.add_filter_char(character);
         }
         _ => {}
+    }
+}
+
+/// Suspends the process on POSIX (decision `suspend-restores-terminal`):
+/// writes the recorded restore bytes, leaves raw mode, and raises SIGTSTP
+/// through the terminal seam. `raise_tstp` is a no-op on Windows, so the
+/// key stays inert there instead of parking the terminal permanently. On
+/// return (SIGCONT) raw mode re-enters, the same modes push again in the
+/// same order, and the repaint that follows rewrites the live block at the
+/// measured caret row.
+fn suspend_and_continue(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    theme: &ResolvedTheme,
+    painter: &mut Painter,
+    surfaces: &mut Surfaces,
+) -> Result<(), TuiError> {
+    let saved = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let restore = crate::term::restore_bytes(&saved);
+    io.write(&restore)
+        .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
+    io.disable_raw();
+    io.raise_tstp();
+    reenter_modes(io, state, opts, &saved)
+        .map_err(|message| crate::term::terminal_error(&message))?;
+    // Repaint in place: the restore left the screen outside the painter's
+    // damage model, so this frame rewrites the whole live block.
+    surfaces.paint(io, state, painter, opts, theme)
+}
+
+/// Ctrl+L: clear the live region by repainting it in full. The live block
+/// holds only transient rows, so a whole-block repaint is cheap, and it
+/// also repairs any rows a bidi payload mangled.
+fn repaint_live_region(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    theme: &ResolvedTheme,
+    painter: &mut Painter,
+    surfaces: &mut Surfaces,
+) -> Result<(), TuiError> {
+    surfaces.paint(io, state, painter, opts, theme)
+}
+
+/// Re-enters raw mode and pushes every recorded terminal mode again, in
+/// the startup order, after the terminal was restored for a child process.
+fn reenter_modes(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    saved: &TermState,
+) -> Result<(), String> {
+    io.enable_raw()
+        .map_err(|error| format!("cannot re-enter raw mode: {error}"))?;
+    {
+        let mut modes = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        modes.set_raw(true);
+        modes.set_paste(true);
+    }
+    io.write(b"\x1b[?2004h")
+        .map_err(|error| format!("cannot re-enter bracketed paste: {error}"))?;
+    if opts.screen == crate::Screen::Fullscreen {
+        io.write(b"\x1b[?1049h\x1b[?25l")
+            .map_err(|error| format!("cannot re-enter the alternate screen: {error}"))?;
+    }
+    if saved.kitty() {
+        io.write(b"\x1b[>1u")
+            .map_err(|error| format!("cannot re-enter kitty keyboard: {error}"))?;
+    }
+    if saved.grapheme() {
+        io.write(b"\x1b[?2027h")
+            .map_err(|error| format!("cannot re-enter grapheme mode: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Runs the configured external editor on a temp copy of the draft and
+/// reads the result back into the composer (decision `external-editor-temp`
+/// of the TUI behavior part). A nonzero exit or an unwritable temp file
+/// leaves the draft untouched and surfaces an error notice; a successful
+/// exit replaces the draft, checkpoints undo, and puts the caret at the
+/// end. The terminal restores before the child runs and re-enters the
+/// recorded modes after, exactly like the suspend path.
+fn run_external_editor(
+    opts: &TuiOptions,
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    surfaces: &mut Surfaces,
+) {
+    let saved = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let restore = crate::term::restore_bytes(&saved);
+    let run = (|| -> Result<Option<String>, String> {
+        let mut tmp = tempfile::NamedTempFile::new()
+            .map_err(|error| format!("cannot create a temp file for the editor: {error}"))?;
+        std::io::Write::write_all(&mut tmp, surfaces.session.composer.text().as_bytes())
+            .map_err(|error| format!("cannot write the draft: {error}"))?;
+        let path = tmp.path().to_path_buf();
+        io.write(&restore)
+            .map_err(|error| format!("cannot restore the terminal: {error}"))?;
+        io.disable_raw();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the external editor is the terminal client's own process edge"
+        )]
+        let outcome = {
+            let mut command = std::process::Command::new(opts.editor.as_ref());
+            command.arg(&path);
+            command
+                .status()
+                .map_err(|error| format!("cannot start the editor: {error}"))
+        };
+        // The terminal re-enters its modes whether or not the child ran, so
+        // a missing editor never leaves the interface parked in cooked mode.
+        reenter_modes(io, state, opts, &saved)?;
+        let status = outcome?;
+        if !status.success() {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|error| format!("cannot read the edited draft: {error}"))
+    })();
+    match run {
+        Ok(Some(text)) => surfaces.session.composer.set(&text),
+        Ok(None) => {}
+        Err(message) => surfaces
+            .live
+            .notice_as(crate::theme::Role::Error, format!("note: {message}")),
     }
 }
 
@@ -2406,7 +2895,7 @@ where
 mod tests {
     use std::num::NonZeroU64;
 
-    use super::{ExitDialog, Session, apply_event, poll_model_retry};
+    use super::{EventTarget, Session, apply_event_at, poll_model_retry};
 
     /// A resolution that names `core` and the default deny answer: the shape
     /// every deadline resolution has, so no cause can be read off it.
@@ -2456,19 +2945,46 @@ mod tests {
 
     /// Applies one key to a fresh dialog, live region, and transcript on the
     /// inline screen.
-    fn apply_key(session: &mut Session, key: crate::keys::Key) {
+    fn apply_key(session: &mut Session, key: crate::keys::Key) -> crate::live::Live {
         use crate::keys::InputEvent;
 
-        apply_event(
-            session,
-            &mut crate::dialog::DialogUi::default(),
-            &crate::transcript::Transcript::default(),
-            &mut crate::live::Live::default(),
-            &[],
-            crate::diagram::DiagramSettings::default(),
+        let mut live = crate::live::Live::default();
+        apply_event_at(
+            EventTarget {
+                session,
+                dialog: &mut crate::dialog::DialogUi::default(),
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut live,
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width: 80,
+                height: 24,
+            },
             InputEvent::Key(key),
             false,
-            crate::Screen::Inline,
+        );
+        live
+    }
+
+    #[test]
+    fn the_exit_draft_frame_input_names_the_focused_verb() {
+        let mut session = Session {
+            composer: crate::composer::Composer::default(),
+            ..Session::default()
+        };
+        session.composer.set("draft");
+        session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
+        let confirm = session.dialog.as_ref().expect("the question opened");
+        assert_eq!(
+            Some(confirm.focused()),
+            Some(crate::dialog::DraftChoice::Keep),
+            "the frame input names the focused verb for the highlight"
+        );
+        let no_dialog = Session::default();
+        assert!(
+            no_dialog.dialog.is_none(),
+            "no question, no exit-draft rows"
         );
     }
 
@@ -2498,6 +3014,153 @@ mod tests {
                 "{chooser:?} must render no rows"
             );
         }
+    }
+
+    #[test]
+    fn tab_cycles_completion_candidates_and_shift_tab_walks_back() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let commands: Vec<dal_core::CommandSpec> = ["model", "mode", "moth"]
+            .into_iter()
+            .map(|name| dal_core::CommandSpec {
+                name: dal_core::CommandName::parse(name).unwrap(),
+                summary: format!("{name} summary").into(),
+                args_hint: None,
+            })
+            .collect();
+        let mut session = Session {
+            commands: commands.into(),
+            ..Session::default()
+        };
+        session.composer.set("/m");
+        session.update_popup();
+        assert_eq!(session.candidates.len(), 3);
+
+        // Candidates rank by name, whatever order the host listed them in:
+        // mode, model, moth. The first Tab takes the top one, and each press
+        // after it steps the same ring off the same `/m` base.
+        let tab = Key::new(KeyCode::Tab, KeyModifiers::NONE);
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/mode ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/model ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/moth ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/mode ", "Tab wraps past the last");
+        // Shift+Tab arrives as BackTab from a legacy terminal and as Tab plus
+        // Shift under kitty; both walk back, wrapping past the first.
+        apply_key(&mut session, Key::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/moth ");
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(session.composer.text(), "/model ");
+        apply_key(&mut session, tab);
+        assert_eq!(session.composer.text(), "/moth ", "the ring turns around");
+        // A fresh ring entered with Shift+Tab starts at the last candidate.
+        session.composer.set("/m");
+        session.update_popup();
+        apply_key(&mut session, Key::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "/moth ");
+        // No candidates: Tab inserts two spaces, the documented fallback.
+        session.composer.set("plain text");
+        session.update_popup();
+        assert_eq!(
+            session.candidates,
+            [] as [crate::popup::Candidate; 0],
+            "plain text must leave no completion candidates"
+        );
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "plain text  ");
+    }
+
+    #[test]
+    fn history_picker_enter_loads_the_message_into_the_draft() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let entries = vec![dal_core::EntryView {
+            id: dal_core::EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: dal_core::EntryKind::User {
+                parts: vec![dal_core::JournalPart::Text {
+                    text: "fix the parser".into(),
+                }],
+            },
+        }];
+        let mut session = Session {
+            picker: Some(crate::picker::history_picker(&entries, "")),
+            ..Session::default()
+        };
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(session.composer.text(), "fix the parser");
+        assert!(session.picker.is_none());
+        // The completion ring state reset, so a later Tab starts fresh.
+        assert_eq!(session.popup_base, None);
+        assert_eq!(session.popup_index, 0);
+    }
+
+    #[test]
+    fn control_up_down_recall_prompts_and_control_r_opens_history() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut session = Session::default();
+        session.composer.set("first");
+        session.submit_line("first");
+        session.composer.set("second");
+        session.submit_line("second");
+
+        apply_key(&mut session, Key::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "second");
+        apply_key(&mut session, Key::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "first");
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(session.composer.text(), "second");
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(
+            session.composer.text(),
+            "",
+            "past the newest, the draft returns"
+        );
+
+        // A submitted line leaves the composer empty; the draft Ctrl+R must
+        // preserve is the one typed after it, which was never submitted.
+        session.submit_line("typed draft");
+        session.composer.set("another draft");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            session.composer.text(),
+            "another draft",
+            "the unsent draft survives the search"
+        );
+        // The picker renders no rows without journal entries, but the
+        // surface opens; Enter on a row loads it back into the draft.
+        assert!(session.picker.is_some(), "Ctrl+R opens the history picker");
+    }
+
+    #[test]
+    fn control_l_sets_the_clear_region_flag_and_recalls_nothing() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut session = Session::default();
+        session.composer.set("draft stays");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+        assert!(session.clear_region, "Ctrl+L arms the repaint");
+        assert_eq!(
+            session.composer.text(),
+            "draft stays",
+            "Ctrl+L never edits the draft"
+        );
+        assert_eq!(session.pending_commands, []);
+        assert_eq!(session.pending_answers, []);
     }
 
     #[test]
@@ -2573,6 +3236,158 @@ mod tests {
     }
 
     #[test]
+    fn empty_filter_routes_j_k_space_and_d_before_filter_text() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let rows = vec![
+            crate::picker::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            crate::picker::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::scoped_models_picker(rows, &[], "")),
+            ..Session::default()
+        };
+        // j moves down on the empty filter instead of joining the query.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_selected(1)),
+            "j moves on the empty filter"
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("")
+        );
+        // Space toggles the focused row on a multi picker.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_checked(1)),
+            "space checks the focused row"
+        );
+        // k moves back up.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_selected(0)),
+            "k moves on the empty filter"
+        );
+        // d names the missing delete seam instead of filtering.
+        let live = apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(
+            session.picker.as_ref().is_some(),
+            "d never dismisses the picker"
+        );
+        assert!(
+            live.notices().iter().any(|row| {
+                row.role == crate::theme::Role::Error && row.text.starts_with("note:")
+            }),
+            "d reports the missing delete seam"
+        );
+    }
+
+    #[test]
+    fn populated_filter_letters_join_text_and_control_keys_navigate() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let rows = vec![
+            crate::picker::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            crate::picker::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::scoped_models_picker(rows, &[], "")),
+            ..Session::default()
+        };
+        // Once the filter holds text, plain letters join the query again.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("g")
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("gp")
+        );
+        // Ctrl+Space (0x00) toggles from a non-empty filter.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_checked(0)),
+            "ctrl+space toggles while the filter holds text"
+        );
+        for character in ['j', 'k', ' '] {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("gpjk ")
+        );
+        let picker = session.picker.as_mut().expect("picker stays open");
+        while !picker.filter().is_empty() {
+            picker.remove_filter_char();
+        }
+        for (character, selected) in [('n', 1), ('p', 0)] {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+            );
+            assert!(
+                session
+                    .picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.is_selected(selected))
+            );
+        }
+    }
+
+    #[test]
     fn settings_picker_updates_local_state_and_queues_config_saves() {
         use crate::keys::Key;
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -2606,6 +3421,9 @@ mod tests {
 
     #[test]
     fn quit_with_draft_requires_confirmation() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
         let mut composer = crate::composer::Composer::default();
         composer.set("rewrite the query");
         let mut session = Session {
@@ -2613,14 +3431,34 @@ mod tests {
             ..Session::default()
         };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
-        assert_eq!(session.dialog, Some(ExitDialog::DiscardDraft));
+        assert!(
+            session.dialog.is_some(),
+            "a non-empty draft asks before quitting"
+        );
         assert!(!session.quit);
-        session.answer_dialog('n');
-        assert_eq!(session.dialog, None);
+
+        // A blind Enter keeps the draft: the conservative verb holds focus.
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(session.dialog.is_none());
         assert!(!session.quit);
         assert_eq!(session.composer.text(), "rewrite the query");
+
+        // Esc answers Keep too, so a panicked Esc never throws work away.
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
-        session.answer_dialog('y');
+        apply_key(&mut session, Key::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(session.dialog.is_none());
+        assert!(!session.quit);
+        assert_eq!(session.composer.text(), "rewrite the query");
+
+        // Tab and Shift+Tab move the focus without answering; Enter on the
+        // focused verb activates it.
+        session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
+        apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            session.dialog.is_some(),
+            "focus moves never answer the question"
+        );
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(session.quit);
         assert_eq!(session.composer.text(), "");
     }
@@ -2735,16 +3573,20 @@ mod tests {
         ] {
             apply_key(&mut session, key);
         }
-        apply_event(
-            &mut session,
-            &mut crate::dialog::DialogUi::default(),
-            &crate::transcript::Transcript::default(),
-            &mut crate::live::Live::default(),
-            &[],
-            crate::diagram::DiagramSettings::default(),
+        apply_event_at(
+            EventTarget {
+                session: &mut session,
+                dialog: &mut crate::dialog::DialogUi::default(),
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut crate::live::Live::default(),
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width: 80,
+                height: 24,
+            },
             InputEvent::Paste(b"ignored paste".to_vec()),
             false,
-            crate::Screen::Inline,
         );
         assert!(
             session.help.is_some(),
@@ -2989,7 +3831,7 @@ mod tests {
     mod fullscreen_selection {
         use std::num::NonZeroU64;
 
-        use super::{Session, apply_event};
+        use super::{EventTarget, Session, apply_event_at};
         use crate::dialog::DialogUi;
         use crate::keys::{InputEvent, Key};
         use crate::transcript::Transcript;
@@ -3010,16 +3852,20 @@ mod tests {
             transcript: &Transcript,
             key: Key,
         ) {
-            apply_event(
-                session,
-                dialog,
-                transcript,
-                &mut crate::live::Live::default(),
-                &[],
-                crate::diagram::DiagramSettings::default(),
+            apply_event_at(
+                EventTarget {
+                    session,
+                    dialog,
+                    transcript,
+                    live: &mut crate::live::Live::default(),
+                    entries: &[],
+                    diagrams: crate::diagram::DiagramSettings::default(),
+                    screen: crate::Screen::Fullscreen,
+                    width: 80,
+                    height: 24,
+                },
                 InputEvent::Key(key),
                 false,
-                crate::Screen::Fullscreen,
             );
         }
 
@@ -3088,16 +3934,20 @@ mod tests {
             let transcript = transcript();
             let mut dialog = DialogUi::default();
             for code in [KeyCode::Up, KeyCode::Left, KeyCode::Down, KeyCode::Right] {
-                apply_event(
-                    &mut session,
-                    &mut dialog,
-                    &transcript,
-                    &mut crate::live::Live::default(),
-                    &[],
-                    crate::diagram::DiagramSettings::default(),
+                apply_event_at(
+                    EventTarget {
+                        session: &mut session,
+                        dialog: &mut dialog,
+                        transcript: &transcript,
+                        live: &mut crate::live::Live::default(),
+                        entries: &[],
+                        diagrams: crate::diagram::DiagramSettings::default(),
+                        screen: crate::Screen::Inline,
+                        width: 80,
+                        height: 24,
+                    },
                     InputEvent::Key(shift(code)),
                     false,
-                    crate::Screen::Inline,
                 );
             }
             assert!(
@@ -3109,16 +3959,20 @@ mod tests {
                 "",
                 "no stray text reaches the composer"
             );
-            apply_event(
-                &mut session,
-                &mut dialog,
-                &transcript,
-                &mut crate::live::Live::default(),
-                &[],
-                crate::diagram::DiagramSettings::default(),
+            apply_event_at(
+                EventTarget {
+                    session: &mut session,
+                    dialog: &mut dialog,
+                    transcript: &transcript,
+                    live: &mut crate::live::Live::default(),
+                    entries: &[],
+                    diagrams: crate::diagram::DiagramSettings::default(),
+                    screen: crate::Screen::Inline,
+                    width: 80,
+                    height: 24,
+                },
                 InputEvent::Key(control_c()),
                 false,
-                crate::Screen::Inline,
             );
             assert_eq!(session.pending_copies, []);
             assert!(matches!(
@@ -3197,6 +4051,193 @@ mod tests {
             );
         }
     }
+
+    /// A single unmodified character key for the floored-surface tests.
+    fn char_key(c: char) -> crate::keys::Key {
+        crate::keys::Key::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// An armed approval request so floored keys have a dialog to miss.
+    fn approval(id: dal_core::RequestId) -> dal_core::Request {
+        dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "echo hi".into(),
+                    digest: None,
+                },
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Decline,
+        }
+    }
+
+    /// Applies one event at `width`x`height` on the inline screen with
+    /// fresh live, transcript, and diagram state.
+    fn apply_at(
+        session: &mut Session,
+        dialog: &mut crate::dialog::DialogUi,
+        event: crate::keys::InputEvent,
+        width: u16,
+        height: u16,
+    ) {
+        super::apply_event_at(
+            super::EventTarget {
+                session,
+                dialog,
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut crate::live::Live::default(),
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width,
+                height,
+            },
+            event,
+            false,
+        );
+    }
+
+    #[test]
+    fn floored_surface_drops_blind_dialog_and_picker_keys() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        assert!(crate::render::below_floor(20, 5));
+        assert!(!crate::render::below_floor(80, 24));
+
+        let mut session = Session::default();
+        let mut dialog = DialogUi::default();
+        let id = dal_core::RequestId::new_v7();
+        dialog.opened(approval(id));
+        let start = std::time::Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + crate::dialog::ARM_DELAY);
+        assert!(dialog.armed());
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            20,
+            5,
+        );
+        assert!(
+            session.pending_answers.is_empty(),
+            "a blind `y` below the floor must not approve"
+        );
+        assert!(dialog.is_open(), "the unseen question stays open");
+        assert!(
+            !dialog.awaiting_resolution(),
+            "no answer may latch while floored"
+        );
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            80,
+            24,
+        );
+        assert_eq!(session.pending_answers.len(), 1);
+        assert!(
+            matches!(
+                &session.pending_answers[0],
+                (answered, dal_core::Answer::Approve) if *answered == id
+            ),
+            "resize back re-arms the still-open approval: {:?}",
+            session.pending_answers
+        );
+
+        let mut picker_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut no_dialog = DialogUi::default();
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            20,
+            5,
+        );
+        assert!(
+            picker_session.pending_commands.is_empty(),
+            "picker Enter below the floor must not activate"
+        );
+        assert!(
+            picker_session.picker.is_some(),
+            "the unseen picker stays open"
+        );
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            80,
+            24,
+        );
+    }
+
+    #[test]
+    fn floored_surface_drops_blind_typing_but_keeps_interrupt() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut type_session = Session::default();
+        let mut type_dialog = DialogUi::default();
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Key(char_key('x')),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "composer typing below the floor must not mutate the draft"
+        );
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Paste(b"x".to_vec()),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "paste below the floor must not reach the composer"
+        );
+
+        let mut interrupt_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut interrupt_dialog = DialogUi::default();
+        apply_at(
+            &mut interrupt_session,
+            &mut interrupt_dialog,
+            InputEvent::Key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            20,
+            5,
+        );
+        assert!(
+            interrupt_session.picker.is_none(),
+            "Ctrl+C stays the interrupt path while floored"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3273,42 +4314,32 @@ mod exit_line_tests {
         String::from_utf8(bytes).expect("exit line is UTF-8")
     }
 
-    /// Returns the `-r` argument the exit line offers: the text between the
-    /// `-r` flag and the end of the offer. Assertions see the resume argument,
-    /// never the surrounding sentence.
-    fn resume_arg(name: Option<&str>) -> String {
-        const FLAG: &str = " -r ";
-        const TAIL: &str = " to resume";
-        let line = exit_output(name);
-        let start = line.rfind(FLAG).expect("exit line offers -r") + FLAG.len();
-        let rest = &line[start..];
-        let end = rest.find(TAIL).expect("offer ends after the argument");
-        rest[..end].to_owned()
-    }
-
-    /// A bare name resumes as itself.
+    /// A named session resumes by the token `/name` prints for the same name:
+    /// bare, double-quoted for spaces and apostrophes, or the session id.
     #[test]
-    fn exit_line_offers_a_bare_name_itself() {
-        assert_eq!(resume_arg(Some("demo")), "demo");
+    fn exit_line_resume_hint_is_the_resume_token() {
+        for (name, hint) in [
+            ("demo", "demo"),
+            ("my-session_1.x", "my-session_1.x"),
+            ("my session", "\"my session\""),
+            ("o'brien", "\"o'brien\""),
+            ("a $b", SESSION),
+            ("demo$(calc)", SESSION),
+            ("foo\"; calc #", SESSION),
+        ] {
+            let line = format!(
+                "\r\ndal: session \"{name}\" saved · 1 message · run dal -r {hint} to resume\r\n"
+            );
+            assert_eq!(exit_output(Some(name)), line, "name {name:?}");
+        }
     }
 
-    /// A name with a space resumes as one double-quoted argument.
-    #[test]
-    fn exit_line_quotes_a_spaced_name_into_one_argument() {
-        assert_eq!(resume_arg(Some("my session")), "\"my session\"");
-    }
-
-    /// A name the shell would expand resumes by session id instead.
-    #[test]
-    fn exit_line_offers_the_session_id_for_an_unsafe_name() {
-        assert_eq!(resume_arg(Some("a $b")), SESSION);
-        assert_eq!(resume_arg(Some("demo$(calc)")), SESSION);
-    }
-
-    /// An unnamed session resumes by session id.
     #[test]
     fn exit_line_of_an_unnamed_session_resumes_by_id() {
-        assert_eq!(resume_arg(None), SESSION);
+        let line = format!(
+            "\r\ndal: session \"{SESSION}\" saved · 1 message · run dal -r {SESSION} to resume\r\n"
+        );
+        assert_eq!(exit_output(None), line);
     }
 }
 
@@ -3893,7 +4924,6 @@ mod loop_tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
-                scoped_models: None,
             },
             open: Vec::new(),
             changes: Vec::new(),
@@ -4041,6 +5071,30 @@ mod loop_tests {
         }
     }
 
+    /// The options every loop test runs under: an inline, plain-colour terminal.
+    fn options(rt: tokio::runtime::Handle) -> TuiOptions {
+        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        TuiOptions {
+            session: SessionRef::Ephemeral { workspace },
+            screen: Screen::Inline,
+            theme_request: ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "vi".into(),
+            color: ColorMode::Never,
+            binary: "dalgon",
+            env: EnvFacts {
+                stdin_tty: true,
+                term: Some("xterm-256color".to_owned()),
+                width_mode: WidthMode::Narrow,
+                ..EnvFacts::default()
+            },
+            rt,
+        }
+    }
+
     /// Runs the terminal loop against the fake host and returns what the host saw.
     fn drive(script: Vec<Chunk>, run_entered: Arc<AtomicBool>) -> Vec<String> {
         static ONE_LOOP_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -4058,26 +5112,7 @@ mod loop_tests {
                 run_entered,
             },
         };
-        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
-        let opts = TuiOptions {
-            session: SessionRef::Ephemeral { workspace },
-            screen: Screen::Inline,
-            theme_request: ThemeRequest::Palette,
-            default_model: None,
-            images: false,
-            diagrams: false,
-            motion: false,
-            editor: "vi".into(),
-            color: ColorMode::Never,
-            binary: "dalgon",
-            env: EnvFacts {
-                stdin_tty: true,
-                term: Some("xterm-256color".to_owned()),
-                width_mode: WidthMode::Narrow,
-                ..EnvFacts::default()
-            },
-            rt: runtime.handle().clone(),
-        };
+        let opts = options(runtime.handle().clone());
         let terminal = ScriptedTerminal {
             chunks: Mutex::new(script.into()),
         };
@@ -4117,5 +5152,532 @@ mod loop_tests {
             ["prompt:hello", "prompt:world", "host:close"],
             "the first prompt survives the probe and the second carries no reply bytes"
         );
+    }
+
+    /// A session whose journal the test appends to: `view` answers with every
+    /// entry appended so far, as the host does after the same updates.
+    #[derive(Clone, Default)]
+    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>);
+
+    impl TuiAgent for Ledger {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            let mut view = idle_view();
+            view.entries.items = self.0.lock().expect("ledger").clone();
+            std::future::ready(Ok(view))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    /// The loop's surfaces over a ledger agent. Updates enter through the same
+    /// `absorb_update` the drain takes; a result lands in the ledger first, so
+    /// the turn-end snapshot holds exactly the entries the updates announced.
+    struct Rig {
+        surfaces: super::Surfaces,
+        agent: Ledger,
+        opts: TuiOptions,
+        seq: u64,
+        entries: u64,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let opts = options(runtime.handle().clone());
+            let diagram_cache = crate::diagram::RenderCache::default();
+            let surfaces = super::Surfaces {
+                view: idle_view(),
+                session: super::Session::default(),
+                dialog: crate::dialog::DialogUi::default(),
+                live: crate::live::Live::default(),
+                transcript: crate::transcript::Transcript::default(),
+                columns: 80,
+                diagram_settings: crate::diagram::DiagramSettings::default(),
+                diagram_generation: diagram_cache.generation(),
+                diagram_cache,
+                branch: None,
+            };
+            Self {
+                surfaces,
+                agent: Ledger::default(),
+                opts,
+                seq: 0,
+                entries: 0,
+                _runtime: runtime,
+            }
+        }
+
+        fn feed(&mut self, kind: dal_core::UpdateKind) {
+            self.seq += 1;
+            let update = dal_core::Update {
+                r#gen: Gen::new(NonZeroU64::MIN),
+                seq: Seq::new(NonZeroU64::new(self.seq).expect("the counter starts at one")),
+                kind,
+            };
+            self.surfaces
+                .absorb_update(&self.opts, &self.agent, &update)
+                .expect("the update folds");
+        }
+
+        fn start(&mut self, call: &str, tool: &str) {
+            self.feed(dal_core::UpdateKind::ToolStarted {
+                call: dal_core::CallId::new(call),
+                tool: tool.into(),
+                args: dal_core::RawJson::null(),
+            });
+        }
+
+        fn settle(&mut self, call: &str, elapsed_ms: Option<u64>) {
+            self.feed(dal_core::UpdateKind::ToolSettled {
+                call: dal_core::CallId::new(call),
+                outcome: dal_core::ToolOutcomeView {
+                    is_error: false,
+                    text: "settled".into(),
+                    images: Vec::new(),
+                    elapsed_ms,
+                },
+            });
+        }
+
+        /// Journals the call's result entry, summarised as `out-{call}`, and
+        /// announces it the way the fold does: as a tree delta.
+        fn result(&mut self, call: &str, tool: &str, elapsed_ms: Option<u64>) {
+            self.entries += 1;
+            let id = dal_core::EntryId::new(
+                NonZeroU64::new(self.entries).expect("the counter starts at one"),
+            );
+            let entry = dal_core::EntryView {
+                id,
+                parent: None,
+                kind: dal_core::EntryKind::ToolResult {
+                    call: dal_core::CallId::new(call),
+                    name: tool.into(),
+                    error: false,
+                    parts: vec![dal_core::JournalPart::Text {
+                        text: format!("out-{call}").into(),
+                    }],
+                    changes: Vec::new(),
+                    elapsed_ms,
+                },
+            };
+            self.agent.0.lock().expect("ledger").push(entry.clone());
+            self.feed(dal_core::UpdateKind::Tree(dal_core::TreeDelta {
+                added: vec![entry],
+                leaf: Some(id),
+            }));
+        }
+
+        fn end(&mut self, stop: dal_core::Stop) {
+            self.feed(dal_core::UpdateKind::TurnEnded {
+                turn: dal_core::TurnId::new(NonZeroU64::MIN),
+                stop,
+            });
+        }
+
+        fn tracked(&self) -> (usize, usize) {
+            self.surfaces.live.tracked_tools()
+        }
+
+        fn rows(&self) -> Vec<String> {
+            self.surfaces.transcript.rows().to_vec()
+        }
+
+        fn duration(&self, call: &str) -> Option<Duration> {
+            self.surfaces.transcript.tool_duration(call)
+        }
+
+        /// The committed rows that name this call's result.
+        fn rows_of(&self, call: &str) -> Vec<String> {
+            let summary = format!("out-{call}");
+            self.rows()
+                .into_iter()
+                .filter(|row| row.contains(&summary))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_result_before_its_settle_hands_off_timing_and_releases_the_card() {
+        let mut rig = Rig::new();
+        rig.start("call-1", "exec");
+        assert_eq!(rig.tracked(), (1, 1));
+        assert_eq!(rig.surfaces.live.running_tool_rows(), ["working  exec"]);
+
+        // The result entry lands first, carrying the engine's own figure.
+        rig.result("call-1", "exec", Some(40));
+        assert_eq!(rig.tracked(), (0, 0), "the commit releases the live card");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+        let measured = rig
+            .duration("call-1")
+            .expect("the elapsed time moved to the transcript with the release");
+        let committed = rig.rows();
+        let card = rig.rows_of("call-1");
+        assert_eq!(card.len(), 1, "{committed:?}");
+        assert!(card[0].contains(&crate::copy::dur(measured)), "{card:?}");
+
+        // The settle that trails it finds no card: nothing revives, and the
+        // duration and rows the transcript holds do not move.
+        rig.settle("call-1", Some(3_600_000));
+        assert_eq!(rig.tracked(), (0, 0));
+        assert_eq!(rig.surfaces.live.activity(), None);
+        assert_eq!(rig.duration("call-1"), Some(measured));
+        assert_eq!(rig.rows(), committed);
+    }
+
+    #[test]
+    fn a_settle_before_its_result_commits_the_settled_timing_then_releases() {
+        let mut rig = Rig::new();
+        rig.start("call-1", "exec");
+        rig.settle("call-1", Some(1500));
+        assert_eq!(rig.tracked(), (1, 1), "the card waits for its result entry");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+
+        // The entry carries no figure, so the transcript's own record is the
+        // only source of the settled card's duration.
+        rig.result("call-1", "exec", None);
+        assert_eq!(rig.tracked(), (0, 0));
+        let settled = Duration::from_millis(1500);
+        assert_eq!(rig.duration("call-1"), Some(settled));
+        let card = rig.rows_of("call-1");
+        assert_eq!(card.len(), 1);
+        assert!(card[0].contains(&crate::copy::dur(settled)), "{card:?}");
+    }
+
+    #[test]
+    fn a_result_releases_only_its_own_call_while_siblings_keep_working() {
+        let mut rig = Rig::new();
+        rig.start("read-1", "read");
+        rig.start("exec-1", "exec");
+        rig.start("grep-1", "grep");
+
+        rig.result("exec-1", "exec", Some(9));
+        assert_eq!(rig.tracked(), (2, 2));
+        assert_eq!(
+            rig.surfaces.live.running_tool_rows(),
+            ["working  read", "working  grep"]
+        );
+        assert_eq!(
+            rig.surfaces.live.activity(),
+            Some(crate::copy::ids::STATE_WORKING)
+        );
+        assert!(rig.duration("exec-1").is_some());
+        assert_eq!(
+            rig.duration("read-1"),
+            None,
+            "a working call has no history yet"
+        );
+
+        rig.settle("exec-1", Some(9));
+        assert_eq!(
+            rig.tracked(),
+            (2, 2),
+            "a trailing settle touches no sibling"
+        );
+        rig.result("read-1", "read", Some(4));
+        rig.result("grep-1", "grep", Some(5));
+        assert_eq!(rig.tracked(), (0, 0));
+        assert_eq!(rig.surfaces.live.activity(), None);
+    }
+
+    #[test]
+    fn a_cancelled_turn_releases_unanswered_calls_and_keeps_every_completed_row() {
+        let mut rig = Rig::new();
+        rig.start("done", "read");
+        rig.start("lost", "exec");
+        rig.start("also-lost", "grep");
+        rig.result("done", "read", Some(3));
+        let committed = rig.rows();
+        assert_eq!(rig.tracked(), (2, 2));
+
+        rig.end(dal_core::Stop::Cancelled);
+        assert_eq!(rig.tracked(), (0, 0), "no card outlives its turn");
+        assert_eq!(rig.surfaces.live.running_tool_rows().len(), 0);
+        assert_eq!(rig.surfaces.live.activity(), None);
+        assert_eq!(rig.rows(), committed, "the turn end repaints nothing");
+        assert!(rig.duration("done").is_some());
+        assert_eq!(rig.duration("lost"), None);
+        assert_eq!(rig.duration("also-lost"), None);
+        assert_eq!(rig.rows_of("done").len(), 1);
+
+        // A trailing update for a released leftover stays inert.
+        rig.settle("lost", Some(1));
+        assert_eq!(rig.tracked(), (0, 0));
+    }
+
+    #[test]
+    fn many_turns_leave_the_live_region_empty_and_the_transcript_whole() {
+        let mut rig = Rig::new();
+        let mut completed = Vec::new();
+        let mut lost = Vec::new();
+        let mut previous: Vec<String> = Vec::new();
+        for turn in 0..120_u64 {
+            let first = format!("turn{turn}-first");
+            let second = format!("turn{turn}-second");
+            let cancelled = turn.is_multiple_of(4);
+            rig.start(&first, "read");
+            rig.start(&second, "exec");
+            if cancelled {
+                let stray = format!("turn{turn}-lost");
+                rig.start(&stray, "grep");
+                lost.push(stray);
+            }
+            if turn.is_multiple_of(2) {
+                rig.result(&first, "read", None);
+                rig.result(&second, "exec", Some(2));
+                rig.settle(&first, Some(11));
+                rig.settle(&second, Some(12));
+            } else {
+                rig.settle(&first, Some(11));
+                rig.settle(&second, Some(12));
+                rig.result(&first, "read", None);
+                rig.result(&second, "exec", Some(2));
+            }
+            rig.end(if cancelled {
+                dal_core::Stop::Cancelled
+            } else {
+                dal_core::Stop::EndTurn
+            });
+            assert_eq!(rig.tracked(), (0, 0), "turn {turn} left live tool state");
+            assert_eq!(rig.surfaces.live.activity(), None);
+            completed.extend([first, second]);
+
+            // Settled rows only ever append: nothing earlier is repainted.
+            let rows = rig.rows();
+            assert!(rows.starts_with(&previous), "turn {turn} rewrote history");
+            previous = rows;
+        }
+        for call in &completed {
+            let duration = rig
+                .duration(call)
+                .expect("a completed call keeps its timing");
+            let card = rig.rows_of(call);
+            assert_eq!(card.len(), 1, "{call}: {card:?}");
+            assert!(
+                card[0].contains(&crate::copy::dur(duration)),
+                "{call}: {card:?}"
+            );
+        }
+        for call in &lost {
+            assert_eq!(rig.duration(call), None, "{call} never had a result");
+            assert_eq!(rig.rows_of(call).len(), 0);
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailingAnswerAgent;
+
+    impl TuiAgent for FailingAnswerAgent {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(Ok(idle_view()))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Err(TuiError::Agent(
+                dal_agent::AgentError::AlreadyResolved {
+                    id,
+                    by: ClientId::new("rpc-1"),
+                },
+            )))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    /// Exercises the production `Surfaces` methods that emit error notices —
+    /// `flush_answers`, `fold_submit_reply`, `begin_login`, and
+    /// `apply_diagram_updates` — and asserts `Role::Error` plus the `note:`
+    /// prefix on each, while informational diagram toggles stay `Role::Dim`.
+    #[test]
+    fn runtime_error_paths_emit_error_role_notices_with_the_note_prefix() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut models = || Ok(Vec::new());
+
+        // The contract is the role and the word prefix; the rest of each
+        // text is the failing error's own message, which this crate neither
+        // owns nor pins.
+        let is_error_note = |row: &crate::live::NoticeRow| {
+            row.role == crate::theme::Role::Error && row.text.starts_with("note: ")
+        };
+
+        let lost_id = RequestId::new_v7();
+        rig.surfaces
+            .session
+            .pending_answers
+            .push((lost_id, Answer::Approve));
+        rig.surfaces.flush_answers(&rig.opts, &FailingAnswerAgent);
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(is_error_note(&notices[0]), "{notices:?}");
+
+        let closed = dal_agent::AgentError::SessionClosed {
+            id: SessionId::new_v7(),
+        };
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &mut models,
+                Err(TuiError::Agent(closed)),
+            )
+            .expect("submit error folds into a notice");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(is_error_note(&notices[1]), "{notices:?}");
+
+        rig.surfaces.begin_login(&rig.opts, &host, "nonexistent");
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        assert!(is_error_note(&notices[2]), "{notices:?}");
+        assert!(
+            notices[2].text.contains("nonexistent"),
+            "the notice names the provider it refused: {notices:?}"
+        );
+
+        let mut painter = crate::screen::driver::Painter::default();
+        let probe = crate::term::Probe::default();
+        let mut fail_save =
+            |_enabled: bool| Err(TuiError::Terminal("disk is read-only".to_owned()));
+        rig.surfaces.session.pending_diagram_settings = vec![
+            (true, dal_core::command::Save::SessionOnly),
+            (true, dal_core::command::Save::SessionAndDefault),
+        ];
+        rig.surfaces
+            .apply_diagram_updates(&rig.opts, &mut painter, &probe, &mut fail_save);
+        let tail = rig.surfaces.live.notices();
+        let last = tail.last().expect("failed save pushed a notice");
+        assert!(is_error_note(last), "{tail:?}");
+        assert!(
+            last.text.contains("disk is read-only"),
+            "the notice carries the cause of the failed save: {tail:?}"
+        );
+        assert!(
+            tail.iter().any(|row| {
+                row.role == crate::theme::Role::Dim
+                    && row.text == "diagram rendering enabled for this session"
+            }),
+            "session-only diagram toggle stays informational: {tail:?}"
+        );
+    }
+
+    /// A refused OSC 52 clipboard write is a failure the user asked for: the
+    /// `COPY_FAILED` row carries `Role::Error`; a successful copy stays `Dim`.
+    #[test]
+    fn a_refused_clipboard_write_is_an_error_notice() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct Flaky {
+            fail_after: usize,
+            writes: AtomicUsize,
+        }
+
+        impl TermIo for Flaky {
+            fn enable_raw(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn disable_raw(&self) {}
+            fn size(&self) -> std::io::Result<(u16, u16)> {
+                Ok((80, 24))
+            }
+            fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+                let index = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+                if index > self.fail_after {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "the terminal refused the selection",
+                    ));
+                }
+                Ok(())
+            }
+            fn read(&self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+            fn raise_tstp(&self) {}
+        }
+
+        let mut rig = Rig::new();
+        rig.surfaces.session.pending_copies = vec!["first".into(), "second".into()];
+        let io = Flaky {
+            fail_after: 1,
+            writes: AtomicUsize::new(0),
+        };
+        rig.surfaces.write_copies(&io);
+
+        let roles: Vec<crate::theme::Role> = rig
+            .surfaces
+            .live
+            .notices()
+            .iter()
+            .map(|row| row.role)
+            .collect();
+        assert_eq!(
+            roles,
+            [crate::theme::Role::Dim, crate::theme::Role::Error],
+            "a successful copy stays dim; a refused clipboard write is an error: {roles:?}"
+        );
+        assert_eq!(
+            rig.surfaces.live.notices()[1].text,
+            crate::copy::ids::COPY_FAILED
+        );
+        assert_eq!(io.writes.load(Ordering::SeqCst), 2);
     }
 }
