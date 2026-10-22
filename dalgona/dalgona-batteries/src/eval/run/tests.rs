@@ -155,10 +155,10 @@ const SLOW_CHECK: &str = "def slow(r, w):\n    total = 0\n    for i in range(200
 
 #[tokio::test]
 async fn a_check_that_outlives_the_run_budget_fails_its_case() {
-    let slow = pack(SLOW_CHECK);
-    let cell = super::Slot {
+    let slow_pack = pack(SLOW_CHECK);
+    let slot = super::Slot {
         pack: "p",
-        case: &slow.cases[0],
+        case: &slow_pack.cases[0],
         arm: ArmName::Defaults,
         repeat: 1,
     };
@@ -172,9 +172,9 @@ async fn a_check_that_outlives_the_run_budget_fails_its_case() {
     // arm converges on Timeout.
     let deadline = tokio::time::Instant::now();
     let (line, interrupted) = super::score(
-        &slow,
+        &slow_pack,
         0,
-        &cell,
+        &slot,
         output(),
         &workspace,
         deadline,
@@ -193,10 +193,10 @@ async fn a_check_that_outlives_the_run_budget_fails_its_case() {
 
 #[tokio::test]
 async fn an_interrupt_during_the_check_skips_the_run_and_releases_the_workspace() {
-    let slow = pack(SLOW_CHECK);
-    let cell = super::Slot {
+    let slow_pack = pack(SLOW_CHECK);
+    let slot = super::Slot {
         pack: "p",
-        case: &slow.cases[0],
+        case: &slow_pack.cases[0],
         arm: ArmName::Defaults,
         repeat: 1,
     };
@@ -208,8 +208,16 @@ async fn an_interrupt_during_the_check_skips_the_run_and_releases_the_workspace(
     // Only the cancel arm can be ready: the stop signal is already fired, so
     // the evaluator ends the check on its first stop check.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    let (line, interrupted) =
-        super::score(&slow, 0, &cell, output(), &workspace, deadline, &cancel).await;
+    let (line, interrupted) = super::score(
+        &slow_pack,
+        0,
+        &slot,
+        output(),
+        &workspace,
+        deadline,
+        &cancel,
+    )
+    .await;
     assert!(interrupted);
     assert_eq!(line.status, Status::Skipped);
     assert_eq!(line.reason.as_deref(), Some(INTERRUPTED));
