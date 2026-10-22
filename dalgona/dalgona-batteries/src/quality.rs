@@ -547,9 +547,31 @@ impl ObserveHook<dal_core::ext::SessionEnd> for SessionEndHook {
     }
 }
 
+/// Whether the repetitive-turns lane reports for a session: it runs only when
+/// its lane flag runs. Sessions without recorded flags (outside a normal
+/// session open) fall back to the caller-supplied default, which the turn-end
+/// hook builds from the extension-level switch exactly like the watcher
+/// factory default.
+fn turns_lane_runs(recorded: Option<LaneFlags>, fallback: LaneFlags) -> bool {
+    recorded.unwrap_or(fallback).turns
+}
+
 struct TurnEndHook {
     shared: Arc<Shared>,
     findings: FindingsHandle,
+    detectors_enabled: bool,
+}
+
+impl TurnEndHook {
+    /// Flags for a session whose setup has not recorded anything, which
+    /// happens only outside a normal session open.
+    fn default_flags(&self) -> LaneFlags {
+        if self.detectors_enabled {
+            LaneFlags::enabled()
+        } else {
+            LaneFlags::held()
+        }
+    }
 }
 
 impl ObserveHook<dal_core::ext::TurnEnd> for TurnEndHook {
@@ -559,9 +581,17 @@ impl ObserveHook<dal_core::ext::TurnEnd> for TurnEndHook {
         cx: HookCx,
     ) -> BoxFuture<'static, Result<(), HookError>> {
         let taken = self.shared.take_turn(input.turn, cx.session);
-        let commit_fire = taken
-            .as_ref()
-            .and_then(|state| self.shared.commit_history(cx.session, &state.text));
+        // A held turns lane neither advances the streak nor reports: the
+        // streaming lanes already stand down via their watcher flags, and the
+        // turn-level lane must stand down the same way.
+        let runs = turns_lane_runs(self.shared.lane_flags(cx.session), self.default_flags());
+        let commit_fire = if runs {
+            taken
+                .as_ref()
+                .and_then(|state| self.shared.commit_history(cx.session, &state.text))
+        } else {
+            None
+        };
         let (fires, truncated) = taken
             .map(|state| (state.fires, state.truncated))
             .unwrap_or_default();
@@ -1044,6 +1074,7 @@ pub fn quality(
     let builder = builder.on_turn_end(TurnEndHook {
         shared: Arc::clone(&shared),
         findings,
+        detectors_enabled: cfg.detectors_enabled,
     });
     let builder = builder.session_setup(QualitySetup {
         shared: Arc::clone(&shared),
@@ -1092,6 +1123,119 @@ mod tests {
         assert!(flags.collapse);
         assert!(!flags.leak);
         assert!(!flags.turns);
+    }
+
+    async fn settle_turn_text(
+        shared: &Arc<Shared>,
+        services: &Arc<crate::work::support::FakeServices>,
+        session: SessionId,
+        flags: LaneFlags,
+        detectors_enabled: bool,
+        text: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let turn = TurnId::new(std::num::NonZeroU64::MIN);
+        shared.insert_turn(turn, session);
+        shared.push_text(turn, text.to_owned());
+        shared.set_lane_flags(session, flags);
+        let dynamic: Arc<dyn dal_agent::ext::Services> = services.clone();
+        let guard = dal_tools::guard::guard_extension(dal_tools::guard::GuardConfig::disabled())?;
+        TurnEndHook {
+            shared: Arc::clone(shared),
+            findings: guard.findings,
+            detectors_enabled,
+        }
+        .call(
+            dal_core::ext::TurnEnd {
+                turn,
+                stop: dal_core::Stop::EndTurn,
+                overflowed: false,
+            },
+            HookCx::for_test(dynamic, session, Some(turn)),
+        )
+        .await?;
+        Ok(services.all_bodies("rule_fired"))
+    }
+
+    fn streak_reported(bodies: &[String]) -> bool {
+        bodies.iter().any(|body| body.contains("repetitive-turns"))
+    }
+
+    #[tokio::test]
+    async fn held_turns_lane_neither_advances_nor_reports() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let first = "the quick brown fox jumps over the lazy dog near the river bank today";
+        let second = "the quick brown fox jumps over the lazy dog near the river bank today!";
+        let third = "the quick brown fox jumps over the lazy dog near the river bank today?";
+        let session = SessionId::new_v7();
+        let shared = Arc::new(Shared::default());
+        shared.insert_history(
+            session,
+            repetitive_turns::TurnHistory::restore(&[first.to_owned(), second.to_owned()]),
+        );
+        let services = Arc::new(crate::work::support::FakeServices::default());
+        let held = lane_flags_from(
+            true,
+            true,
+            &disabled_names(&["repetitive-turns"]),
+            [false; 3],
+        );
+        let bodies = settle_turn_text(&shared, &services, session, held, true, third).await?;
+        assert!(
+            !streak_reported(&bodies),
+            "a held turns lane reports nothing: {bodies:?}"
+        );
+        assert!(
+            shared.commit_history(session, third).is_some(),
+            "the held turn must not advance the streak"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_end_lookup_uses_the_recorded_session_flags()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let first = "the quick brown fox jumps over the lazy dog near the river bank today";
+        let second = "the quick brown fox jumps over the lazy dog near the river bank today!";
+        let third = "the quick brown fox jumps over the lazy dog near the river bank today?";
+        let session = SessionId::new_v7();
+        let shared = Arc::new(Shared::default());
+        shared.insert_history(
+            session,
+            repetitive_turns::TurnHistory::restore(&[first.to_owned(), second.to_owned()]),
+        );
+        let services = Arc::new(crate::work::support::FakeServices::default());
+        let bodies = settle_turn_text(
+            &shared,
+            &services,
+            session,
+            LaneFlags::enabled(),
+            false,
+            third,
+        )
+        .await?;
+        assert!(
+            streak_reported(&bodies),
+            "recorded running flags report under a held extension fallback: {bodies:?}"
+        );
+        let session = SessionId::new_v7();
+        let shared = Arc::new(Shared::default());
+        shared.insert_history(
+            session,
+            repetitive_turns::TurnHistory::restore(&[first.to_owned(), second.to_owned()]),
+        );
+        let services = Arc::new(crate::work::support::FakeServices::default());
+        let held = lane_flags_from(
+            true,
+            true,
+            &disabled_names(&["repetitive-turns"]),
+            [false; 3],
+        );
+        let bodies = settle_turn_text(&shared, &services, session, held, true, third).await?;
+        assert!(
+            !streak_reported(&bodies),
+            "recorded held flags stay silent under an enabled extension fallback: {bodies:?}"
+        );
+        Ok(())
     }
 
     #[test]

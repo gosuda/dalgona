@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Keep held quality lanes from advancing repetition history or reporting findings.
+  Apply each session's recorded lane settings before extension defaults.
 - Cancel and join the blocking render worker when history compaction times
   out before reporting the timeout.
 - Cooperatively cancel dropped history runs at checkpoints so workers stop
