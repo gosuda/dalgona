@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Preserve cache-write prices when regenerating the model catalog.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
   absent when the starter supplied none), it survives settlement and the job

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn, Union
+from typing import NoReturn, TypeGuard, Union
 
 PRICE_SOURCE: str = "models.dev"
 PRICE_SOURCE_URL: str = "https://models.dev/api.json"
@@ -37,7 +37,6 @@ JSONValue = Union[bool, int, float, Decimal, str, None, "list[JSONValue]", "dict
 class UpdatePricesError(Exception):
     """Fatal input error carrying its exact user-facing message."""
 
-
 @dataclass(frozen=True)
 class PriceTier:
     size: int
@@ -53,11 +52,12 @@ class PriceRow:
     model: str
     input: float | None
     cached_input: float | None
+    cache_write: float | None
     output: float | None
     reasoning: float | None
     tiers: tuple[PriceTier, ...]
 
-def _valid_number(value: JSONValue) -> bool:
+def _valid_number(value: JSONValue) -> TypeGuard[int | float | Decimal]:
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
@@ -157,20 +157,21 @@ def parse_tiers(cost: dict[str, JSONValue]) -> tuple[PriceTier, ...]:
 def parse_cost(
     record: JSONValue,
 ) -> tuple[
-    tuple[float | None, float | None, float | None, float | None],
+    tuple[float | None, float | None, float | None, float | None, float | None],
     tuple[PriceTier, ...],
 ]:
     if not isinstance(record, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     cost: JSONValue = record.get("cost")
     if cost is None:
-        return (None, None, None, None), ()
+        return (None, None, None, None, None), ()
     if not isinstance(cost, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     return (
         (
             parse_rate(cost.get("input")),
             parse_rate(cost.get("cache_read")),
+            parse_rate(cost.get("cache_write")),
             parse_rate(cost.get("output")),
             parse_rate(cost.get("reasoning")),
         ),
@@ -313,6 +314,7 @@ def render(
                 f"        model: {rust_string(row.model)},",
                 f"        input: {render_rate(row.input)},",
                 f"        cached_input: {render_rate(row.cached_input)},",
+                f"        cache_write: {render_rate(row.cache_write)},",
                 f"        output: {render_rate(row.output)},",
                 f"        reasoning: {render_rate(row.reasoning)},",
                 "    },",
