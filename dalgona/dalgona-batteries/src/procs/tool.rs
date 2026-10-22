@@ -13,8 +13,7 @@ use regex_automata::meta::Regex;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Object, Value};
 
 use super::text::{
-    TERMINAL_ROWS, command_text, escaped_prefix, finish_grep, list_line, matching_lines,
-    state_matches,
+    TERMINAL_ROWS, escaped_prefix, finish_grep, list_line, matching_lines, state_matches,
 };
 use crate::text::normalize_ws;
 
@@ -296,16 +295,11 @@ async fn jobs_list(
 }
 
 /// Whether the job passes the `query` substring and `status` phase filters.
-/// The query reads the label and the starter's full command text, line
-/// breaks included, never the 80-character display cut; it copies nothing.
+/// The jobs service exposes one label per job, which for an exec job carries
+/// the command text, so both filters read it.
 fn keep(job: &JobStatus, query: &str, status: Option<&str>) -> bool {
     let status_ok = status.is_none_or(|wanted| state_matches(&job.state, wanted));
-    let query_ok = query.is_empty()
-        || job.label.contains(query)
-        || job
-            .command
-            .as_deref()
-            .is_some_and(|command| command.contains(query));
+    let query_ok = query.is_empty() || job.label.contains(query);
     status_ok && query_ok
 }
 
@@ -333,10 +327,7 @@ fn render_list(jobs: &[JobStatus], args: &ProcsArgs) -> String {
     live.into_iter()
         .chain(terminal)
         .take(args.limit())
-        .map(|job| {
-            let command = command_text(job);
-            list_line(job, now, &command)
-        })
+        .map(|job| list_line(job, now, &job.label))
         .collect::<Vec<_>>()
         .join("\n")
 }
