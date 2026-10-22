@@ -38,6 +38,11 @@ target/
 .aider.input.history
 .outline/
 .omp/
+# Session-owned campaign artifacts (XTerm captures, local state, session artifacts)
+.XTerm*
+XTerm*
+.local/
+/local/
 
 # === IDE / EDITOR ===
 .idea/
