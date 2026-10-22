@@ -8,6 +8,8 @@
 - Release abandoned grant questions and preserve revocations when a pending
   approval is saved.
 - Redact captured working-directory paths in provider debug output.
+- Describe the `agent` tool with a flat object schema for Anthropic
+  requests. Keep action-specific argument checks in the tool.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
