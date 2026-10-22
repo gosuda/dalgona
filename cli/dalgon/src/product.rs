@@ -381,6 +381,7 @@ pub fn builtin_manuals() -> Vec<crate::ProductManual> {
 pub fn product() -> ProductFactory {
     ProductFactory {
         binary: BINARY,
+        version: env!("CARGO_PKG_VERSION"),
         defaults: DEFAULTS,
         build,
         docs: builtin_manuals,

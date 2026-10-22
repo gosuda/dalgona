@@ -49,7 +49,7 @@ fn public_command_hides_only_the_sandbox_helper() {
 #[test]
 fn version_errors_use_the_selected_binary_name_and_package_version() {
     let package = env!("CARGO_PKG_VERSION");
-    let dal_error = super::command_for("dalgon")
+    let dal_error = super::command_for("dalgon", package)
         .try_get_matches_from(["dalgon", "--version"])
         .unwrap_err();
     assert_eq!(dal_error.kind(), ErrorKind::DisplayVersion);
@@ -58,13 +58,24 @@ fn version_errors_use_the_selected_binary_name_and_package_version() {
         format!("dalgon {package}")
     );
 
-    let dalgona_error = super::command_for("dalgona")
+    let dalgona_error = super::command_for("dalgona", package)
         .try_get_matches_from(["dalgona", "--version"])
         .unwrap_err();
     assert_eq!(
         dalgona_error.to_string().trim_end(),
         format!("dalgona {package}")
     );
+}
+
+#[test]
+fn version_lines_follow_the_factory_version_not_the_compiled_crate() {
+    // The dalgona product versions independently: a bumped dalgona package
+    // must render its own line even though the tree is compiled in dalgon.
+    let error = super::command_for("dalgona", "9.9.9")
+        .try_get_matches_from(["dalgona", "--version"])
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+    assert_eq!(error.to_string().trim_end(), "dalgona 9.9.9");
 }
 
 #[test]
@@ -142,7 +153,7 @@ fn completion_scripts_name_the_binary_for_every_shell() {
         super::ShellArg::Powershell,
         super::ShellArg::Zsh,
     ] {
-        let script = super::completion_script(shell, "dalgon");
+        let script = super::completion_script(shell, "dalgon", env!("CARGO_PKG_VERSION"));
         assert!(
             !script.is_empty(),
             "every shell must render a usable script"

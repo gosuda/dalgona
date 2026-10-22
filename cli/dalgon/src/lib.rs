@@ -62,6 +62,12 @@ pub enum BuildError {
 pub struct ProductFactory {
     /// Binary identity selecting the version line (`dalgon`, `dal`, or `dl`).
     pub binary: &'static str,
+    /// Product version rendered on the `--version` line.
+    ///
+    /// Each product bakes its own crate version here: the dalgon and dalgona
+    /// products version independently, so the shared edge must not read the
+    /// version from the crate it was compiled in.
+    pub version: &'static str,
     /// Embedded product-default TOML layered after dal code defaults.
     pub defaults: &'static str,
     /// Builds the architecture product from the captured edge context.
@@ -140,7 +146,7 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     if argv.get(1).is_some_and(|arg| arg == "__sandbox") {
         return sandbox::run(&argv);
     }
-    let cli = match cli::parse_cli(factory.binary, argv) {
+    let cli = match cli::parse_cli(factory.binary, factory.version, argv) {
         Ok(cli) => cli,
         Err(error) => return clap_exit(&error),
     };
@@ -149,6 +155,11 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     }
     let (vars, cwd) = match capture_process() {
         Ok(captured) => captured,
+        Err(code) => return code,
+    };
+    #[cfg(all(feature = "test-support", unix))]
+    let vars = match claim_controlling_pty(vars) {
+        Ok(vars) => vars,
         Err(code) => return code,
     };
     // The tracing dispatcher is process lifetime: from here, product
@@ -170,13 +181,15 @@ pub fn run(factory: ProductFactory) -> ExitCode {
         Ok(startup) => startup,
         Err(code) => return code,
     };
-    if let Some(cli::Commands::Docs(args)) = &cli.command {
-        return dispatch::docs(args.clone(), factory.binary, (factory.docs)());
-    }
     let sink = open_log_sink(
         edge::parse_log_level(&startup.vars).ok().flatten(),
         &startup.data_root,
     );
+    if let Some(cli::Commands::Docs(args)) = &cli.command {
+        let code = dispatch::docs(args.clone(), factory.binary, (factory.docs)());
+        flush_log(sink.as_ref(), exit::flush_budget());
+        return code;
+    }
     let product = match build_once(&factory, startup.data_root.clone(), &startup.config) {
         Ok(product) => product,
         Err(code) => {
@@ -263,7 +276,7 @@ async fn run_command(
             exit::ExitKind::RequestedFailure,
         ),
         Some(cli::Commands::Completion(args)) => {
-            let script = cli::completion_script(args.shell, factory.binary);
+            let script = cli::completion_script(args.shell, factory.binary, factory.version);
             let _ = write!(std::io::stdout().lock(), "{script}");
             exit::code(exit::ExitKind::Success)
         }
@@ -691,6 +704,57 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
         ));
     }
     Ok((vars, cwd))
+}
+
+/// The test-only request flag for a foreground controlling terminal.
+///
+/// Only gate-launched children opt in: the PTY helper sets it before spawn,
+/// and the already-executing child consumes it here. Release builds never
+/// read it.
+#[cfg(all(feature = "test-support", unix))]
+const CONTROLLING_PTY_ENV: &str = "DAL_TEST_CONTROLLING_PTY";
+
+/// Acquires the stdin PTY as this process's controlling terminal when the
+/// test-only flag requests it, then consumes the flag.
+///
+/// Runs in the already-executing child: a new session via `setsid`, attaches
+/// the stdin slave with `TIOCSCTTY`, and makes this process the foreground
+/// group with `tcsetpgrp`. Every step uses the safe Rustix wrappers, with no
+/// `pre_exec`, no parent-session mutation, and no new command or flag. The
+/// flag is removed from the captured map so it does not enter the host's
+/// provider, tool, or child snapshots. Setup failures exit
+/// explicitly instead of falling back to plain PTY I/O.
+#[cfg(all(feature = "test-support", unix))]
+fn claim_controlling_pty(mut vars: VarsMap) -> Result<VarsMap, ExitCode> {
+    let opted_in = vars
+        .remove(std::ffi::OsStr::new(CONTROLLING_PTY_ENV))
+        .is_some_and(|value| !value.is_empty());
+    if !opted_in {
+        return Ok(vars);
+    }
+    if let Err(error) = attach_stdin_as_controlling_terminal() {
+        return Err(two_lines(
+            [
+                format!("dalgon: cannot acquire the test controlling terminal: {error}"),
+                "Run this gate through its PTY test harness.".into(),
+            ],
+            exit::ExitKind::Internal,
+        ));
+    }
+    Ok(vars)
+}
+
+/// Attaches the stdin slave as this process's controlling terminal and
+/// foreground group: a new session, `TIOCSCTTY` on stdin, then `tcsetpgrp`
+/// to this process. Safe Rustix wrappers only; the caller maps the failure.
+#[cfg(all(feature = "test-support", unix))]
+fn attach_stdin_as_controlling_terminal() -> Result<(), rustix::io::Errno> {
+    let stdin = rustix::stdio::stdin();
+    rustix::process::setsid()?;
+    rustix::process::ioctl_tiocsctty(stdin)?;
+    let pid = rustix::process::getpid();
+    rustix::termios::tcsetpgrp(stdin, pid)?;
+    Ok(())
 }
 
 /// Opens the family log sink once after the roots resolve and installs it.
