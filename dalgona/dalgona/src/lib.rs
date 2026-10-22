@@ -51,6 +51,9 @@ const DEFAULTS: &str = include_str!("defaults.toml");
 pub fn product() -> dalgon::ProductFactory {
     dalgon::ProductFactory {
         binary: NAME,
+        // Evaluated in this crate, so the dalgona `--version` line tracks the
+        // dalgona package version independently of the dalgon package version.
+        version: env!("CARGO_PKG_VERSION"),
         defaults: DEFAULTS,
         build,
         docs: docs::manuals,

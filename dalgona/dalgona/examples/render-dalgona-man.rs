@@ -8,7 +8,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let out = Path::new(&out);
-    let mut command = dalgon::cli::command().name("dalgona");
+    let mut command = dalgon::cli::command()
+        .name("dalgona")
+        .version(env!("CARGO_PKG_VERSION"));
     command.build();
     match fs::create_dir_all(out).and_then(|()| render(&command, "", out)) {
         Ok(()) => ExitCode::SUCCESS,
