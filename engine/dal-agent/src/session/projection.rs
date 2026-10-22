@@ -84,8 +84,8 @@ impl Projection {
                     output_tokens: 0,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
-                    premium_requests: None,
                     cost_usd: None,
+                    premium_requests: None,
                 },
                 context_tokens: 0,
                 context_window: 0,
@@ -346,8 +346,15 @@ fn entry_bytes(entry: &EntryView) -> usize {
         EntryKind::User { parts } | EntryKind::ToolResult { parts, .. } => {
             parts.iter().map(part_bytes).sum::<usize>()
         }
-        EntryKind::Assistant { model, content, .. } => {
-            model.len() + content.iter().map(block_bytes).sum::<usize>()
+        EntryKind::Assistant {
+            model,
+            content,
+            replay,
+            ..
+        } => {
+            model.len()
+                + content.iter().map(block_bytes).sum::<usize>()
+                + replay.as_ref().map_or(0, |json| json.as_str().len())
         }
         EntryKind::Reminder { source, text } => source.len() + text.len(),
         EntryKind::Model { route } => match route {
@@ -405,14 +412,98 @@ mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
 
     use dal_core::{
-        ApprovalMode, EntryId, EntryKind, EntryView, Gen, JournalPart, Mode, PageReq, SessionId,
-        ThinkingLevel, Timestamp, TreeDelta, UpdateKind, Workspace,
+        ApprovalMode, AssistantStop, Block, EntryId, EntryKind, EntryView, Family, Gen,
+        JournalPart, Mode, PageReq, RawJson, SessionId, ThinkingLevel, Timestamp, TreeDelta,
+        UpdateKind, Usage, Workspace,
     };
 
     use super::{Projection, SnapshotArgs};
 
     fn entry_id(value: u64) -> EntryId {
         EntryId::new(NonZeroU64::new(value).expect("fixture id is nonzero"))
+    }
+
+    #[test]
+    fn assistant_entry_replay_counts_against_the_page_byte_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Each entry carries one short text block and a large entry-level
+        // replay: only the entry-level payload can push two of them past the
+        // page byte cap.
+        let replay = RawJson::parse(&format!("\"{}\"", "r".repeat(150_000)))?;
+        let entries = (1..=2)
+            .map(|value| EntryView {
+                id: entry_id(value),
+                parent: (value > 1).then(|| entry_id(value - 1)),
+                kind: EntryKind::Assistant {
+                    api: Family::Responses,
+                    model: "test-model".into(),
+                    content: vec![Block::Text {
+                        text: "short".into(),
+                        replay: None,
+                    }],
+                    usage: Usage {
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_tokens: None,
+                        cache_write_tokens: 0,
+                        cost_usd: None,
+                        premium_requests: None,
+                    },
+                    stop: AssistantStop::Done,
+                    route: None,
+                    replay: Some(replay.clone()),
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut projection =
+            Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+        projection.apply(&UpdateKind::Tree(TreeDelta {
+            added: entries,
+            leaf: Some(entry_id(2)),
+        }));
+        let root = tempfile::tempdir()?;
+        let workspace = Workspace::new(root.path().to_path_buf())?;
+        let session = SessionId::parse("018f0f62-3b00-7000-8000-000000000001")
+            .expect("fixture session id is valid");
+        let limit = NonZeroU32::new(PageReq::MAX_LIMIT).expect("page limit is nonzero");
+        let page = |before| {
+            projection
+                .snapshot(SnapshotArgs {
+                    generation: Gen::new(NonZeroU64::MIN),
+                    id: session,
+                    workspace: workspace.clone(),
+                    open: Vec::new(),
+                    updated_at: Timestamp::now(),
+                    created_at: None,
+                    archived: None,
+                    page: PageReq { limit, before },
+                })
+                .entries
+        };
+
+        let newest = page(None);
+        let newest_ids = newest
+            .items
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            newest_ids,
+            [entry_id(2).to_string()],
+            "two 150 kB replays exceed the page byte cap"
+        );
+        assert_eq!(newest.next_before, Some(entry_id(2)));
+
+        let oldest = page(newest.next_before);
+        let oldest_ids = oldest
+            .items
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(oldest_ids, [entry_id(1).to_string()]);
+        assert_eq!(oldest.next_before, None);
+        Ok(())
     }
 
     #[test]
