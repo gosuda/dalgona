@@ -12,12 +12,13 @@ use dal_core::{
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use crate::codex::ask::{client_answer, decision_answer, server_request};
+use crate::codex::ask::{client_answer, command_decision, file_change_decision, server_request};
 use crate::codex::items::{Event, TurnStream, turn_value};
 use crate::codex::threads::thread_value;
 use crate::serve_codex;
 use crate::transport::{MemoryPeer, MemoryTransport};
 
+mod ask_answers;
 mod schema_check;
 
 use schema_check::{assert_valid, schema};
@@ -361,21 +362,78 @@ fn unknown_approval_decisions_decline() {
         "7",
         "null",
     ] {
-        assert_eq!(
-            decision_answer(Some(&json(decision))),
-            Answer::Decline,
-            "{decision}"
-        );
+        for parse in [command_decision, file_change_decision] {
+            assert_eq!(parse(Some(&json(decision))), Answer::Decline, "{decision}");
+        }
     }
-    assert_eq!(decision_answer(None), Answer::Decline);
+    for parse in [command_decision, file_change_decision] {
+        assert_eq!(parse(None), Answer::Decline);
+    }
     for (decision, answer) in [
         (r#""accept""#, Answer::Approve),
         (r#""acceptForSession""#, Answer::ApproveForSession),
         (r#""decline""#, Answer::Decline),
         (r#""cancel""#, Answer::Cancel),
     ] {
-        assert_eq!(decision_answer(Some(&json(decision))), answer, "{decision}");
+        for parse in [command_decision, file_change_decision] {
+            assert_eq!(parse(Some(&json(decision))), answer, "{decision}");
+        }
     }
+}
+
+#[test]
+fn amendment_acceptance_approves_only_this_call() {
+    let valid = json(r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["--allow"]}}"#);
+    assert_eq!(command_decision(Some(&valid)), Answer::Approve);
+    let allow =
+        json(r#"{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"action":"allow"}}}"#);
+    assert_eq!(command_decision(Some(&allow)), Answer::Approve);
+    for malformed in [
+        r#"{"acceptWithExecpolicyAmendment":{}}"#,
+        r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":"x"}}"#,
+        r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[7]}}"#,
+    ] {
+        assert_eq!(
+            command_decision(Some(&json(malformed))),
+            Answer::Decline,
+            "{malformed}"
+        );
+    }
+}
+
+#[test]
+fn file_change_approval_rejects_command_amendments() {
+    let approval = |tool: &str| {
+        request(Question::Approval {
+            tool: tool.into(),
+            preview: preview("src/lib.rs", "+fn main() {}"),
+            grant: None,
+            call: None,
+        })
+    };
+    let patch = approval("patch");
+    let exec = approval("exec");
+    for decision in [
+        r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[]}}"#,
+        r#"{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"action":"allow"}}}"#,
+    ] {
+        let result = json(&format!(r#"{{"decision":{decision}}}"#));
+        assert_eq!(
+            client_answer(&patch, Some(&result)),
+            Answer::Decline,
+            "{decision}"
+        );
+        assert_eq!(
+            client_answer(&exec, Some(&result)),
+            Answer::Approve,
+            "{decision}"
+        );
+    }
+    let session = json(r#"{"decision":"acceptForSession"}"#);
+    assert_eq!(
+        client_answer(&patch, Some(&session)),
+        Answer::ApproveForSession
+    );
 }
 
 #[test]
