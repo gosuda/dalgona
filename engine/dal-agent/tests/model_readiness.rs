@@ -552,3 +552,223 @@ async fn closing_session_drops_an_in_flight_readiness_request() {
         "the readiness request outlived its closed session"
     );
 }
+
+fn bedrock_route() -> ModelRoute {
+    ModelRoute::Api {
+        family: dal_core::Family::Bedrock,
+        model: "groq/anthropic.claude-sonnet-4-0".into(),
+    }
+}
+
+fn bedrock_user() -> String {
+    "[providers.groq]\napi = \"bedrock\"\nbase_url = \"http://127.0.0.1:9\"\nkey_env = \"AWS_BEARER_TOKEN_BEDROCK\"\n"
+        .to_owned()
+}
+
+fn bedrock_env(root: PathBuf, extra: &[(&str, &str)]) -> Env {
+    let mut environment = env(root);
+    environment
+        .vars
+        .insert("AWS_EC2_METADATA_DISABLED".into(), "true".into());
+    environment
+        .vars
+        .insert("AWS_REGION".into(), "us-east-1".into());
+    for (key, value) in extra {
+        environment
+            .vars
+            .insert(OsString::from(key), OsString::from(value));
+    }
+    environment
+}
+
+fn write_bedrock_bearer(data: &Path) {
+    let auth = data.join("auth.json");
+    std::fs::write(
+        &auth,
+        r#"{"groq":{"kind":"api_key","key":"bedrock-bearer-secret"}}"#,
+    )
+    .expect("auth file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600))
+            .expect("auth permissions");
+    }
+}
+
+#[tokio::test]
+async fn bedrock_readiness_without_credentials_reports_none() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path().join("data");
+    let root = temp.path().join("workspace");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&root).expect("workspace dir");
+    let route = bedrock_route();
+    let outcome = Arc::new(Mutex::new(None));
+    let completed = Arc::new(Notify::new());
+    let user = bedrock_user();
+    let host = Host::start(
+        Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: vec![probe_extension(ReadinessProbe {
+                route: route.clone(),
+                outcome: Arc::clone(&outcome),
+                capture_only: false,
+                completed: Arc::clone(&completed),
+                captured_services: None,
+                captured_caller: None,
+            })],
+            bundled: Vec::new(),
+        },
+        config(&data, Some(&user)),
+        bedrock_env(root.clone(), &[]),
+    )
+    .await
+    .expect("host");
+    let agent = open_ephemeral(&host, &root).await;
+    completed.notified().await;
+    assert_eq!(*outcome.lock().expect("probe outcome lock"), Some(Ok(None)));
+    host.close(agent.session()).await.expect("close session");
+    host.shutdown(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn bedrock_readiness_with_stored_bearer_reports_ready() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path().join("data");
+    let root = temp.path().join("workspace");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&root).expect("workspace dir");
+    write_bedrock_bearer(&data);
+    let route = bedrock_route();
+    let outcome = Arc::new(Mutex::new(None));
+    let completed = Arc::new(Notify::new());
+    let user = bedrock_user();
+    let host = Host::start(
+        Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: vec![probe_extension(ReadinessProbe {
+                route: route.clone(),
+                outcome: Arc::clone(&outcome),
+                capture_only: false,
+                completed: Arc::clone(&completed),
+                captured_services: None,
+                captured_caller: None,
+            })],
+            bundled: Vec::new(),
+        },
+        config(&data, Some(&user)),
+        bedrock_env(root.clone(), &[]),
+    )
+    .await
+    .expect("host");
+    let agent = open_ephemeral(&host, &root).await;
+    completed.notified().await;
+    assert_eq!(
+        *outcome.lock().expect("probe outcome lock"),
+        Some(Ok(Some(route)))
+    );
+    host.close(agent.session()).await.expect("close session");
+    host.shutdown(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn bedrock_readiness_with_captured_static_keys_reports_ready() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path().join("data");
+    let root = temp.path().join("workspace");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&root).expect("workspace dir");
+    let route = bedrock_route();
+    let outcome = Arc::new(Mutex::new(None));
+    let completed = Arc::new(Notify::new());
+    let user = bedrock_user();
+    let host = Host::start(
+        Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: vec![probe_extension(ReadinessProbe {
+                route: route.clone(),
+                outcome: Arc::clone(&outcome),
+                capture_only: false,
+                completed: Arc::clone(&completed),
+                captured_services: None,
+                captured_caller: None,
+            })],
+            bundled: Vec::new(),
+        },
+        config(&data, Some(&user)),
+        bedrock_env(
+            root.clone(),
+            &[
+                ("AWS_ACCESS_KEY_ID", "bedrock-test-key"),
+                ("AWS_SECRET_ACCESS_KEY", "bedrock-test-secret"),
+            ],
+        ),
+    )
+    .await
+    .expect("host");
+    let agent = open_ephemeral(&host, &root).await;
+    completed.notified().await;
+    assert_eq!(
+        *outcome.lock().expect("probe outcome lock"),
+        Some(Ok(Some(route)))
+    );
+    host.close(agent.session()).await.expect("close session");
+    host.shutdown(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn bedrock_readiness_preserves_cancellation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path().join("data");
+    let root = temp.path().join("workspace");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&root).expect("workspace dir");
+    let route = bedrock_route();
+    let completed = Arc::new(Notify::new());
+    let captured_services = Arc::new(Mutex::new(None));
+    let captured_caller = Arc::new(Mutex::new(None));
+    let user = bedrock_user();
+    let host = Host::start(
+        Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: vec![probe_extension(ReadinessProbe {
+                route: route.clone(),
+                outcome: Arc::new(Mutex::new(None)),
+                capture_only: true,
+                completed: Arc::clone(&completed),
+                captured_services: Some(Arc::clone(&captured_services)),
+                captured_caller: Some(Arc::clone(&captured_caller)),
+            })],
+            bundled: Vec::new(),
+        },
+        config(&data, Some(&user)),
+        bedrock_env(root.clone(), &[]),
+    )
+    .await
+    .expect("host");
+    let agent = open_ephemeral(&host, &root).await;
+    completed.notified().await;
+    let services = captured_services
+        .lock()
+        .expect("captured services lock")
+        .take()
+        .expect("session services");
+    let caller = captured_caller
+        .lock()
+        .expect("captured caller lock")
+        .take()
+        .expect("session caller");
+    host.close(agent.session()).await.expect("close session");
+    let result = services.model_ready(&caller, route).await;
+    assert_eq!(result, Err(ServiceError::Cancelled));
+    host.shutdown(std::time::Duration::from_secs(1)).await;
+}
