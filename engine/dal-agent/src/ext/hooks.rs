@@ -17,7 +17,7 @@ pub mod watch;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::ext::ObserverError;
 use dal_core::ext::{BeforeRequest, BeforeTurn};
@@ -160,6 +160,26 @@ pub(crate) fn hook_caller(extension: &Extension, turn: Option<TurnId>) -> Option
         )
         .with_extension(extension),
     )
+}
+/// Mints a hook caller with the explicit continuation slot of the same invocation.
+///
+/// The invocation root passes its owner's downgrade explicitly; it attaches
+/// here via [`Caller::with_continuation`] and never by extension-name,
+/// owner, or history matching. `None` keeps today's one-shot behavior
+/// (tests, service-only inference). One owner per hook iteration; the strong
+/// owner is held through that hook's dispatch call with explicit release at
+/// end. No shared fanout slot.
+#[must_use]
+pub(crate) fn hook_caller_with_continuation(
+    extension: &Extension,
+    turn: Option<TurnId>,
+    continuation: Option<Weak<crate::session::continuation::ContinuationSlot>>,
+) -> Option<Caller> {
+    let caller = hook_caller(extension, turn)?;
+    Some(match continuation {
+        Some(slot) => caller.with_continuation(slot),
+        None => caller,
+    })
 }
 
 /// The fields one hook fan-out shares: everything [`DispatchCx`] carries
@@ -372,14 +392,22 @@ pub fn clamp_params(params: RequestParams, caps: &Caps) -> RequestParams {
     RequestParams { thinking, ..params }
 }
 
-/// Runs one hook future under the effective deadline and the turn cancel
+/// Starts one hook future under the effective deadline and the turn cancel
 /// token. Timeout resolves to an over-budget failure; cancel resolves to
 /// [`HookError::Cancelled`]; both stay fail-closed at the call site.
+///
+/// `start` runs only while the turn is live: a cancelled turn never creates
+/// the hook's future, so nothing the hook does before its first poll can
+/// happen after the cancel.
 async fn settle<T>(
-    future: BoxFuture<'static, Result<T, HookError>>,
+    start: impl FnOnce() -> BoxFuture<'static, Result<T, HookError>>,
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<T, HookError> {
+    if cancel.is_cancelled() {
+        return Err(HookError::Cancelled);
+    }
+    let future = start();
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(HookError::Cancelled),
@@ -406,11 +434,19 @@ pub async fn dispatch_tool_call(
     let deadline = cx.deadline();
     let mut current = args;
     for hook in hooks {
-        let input = ToolCallEvent {
-            args: current.clone(),
-            ..event.clone()
-        };
-        match settle(hook.call(input, cx.mint(deadline)), cx.cancel, deadline).await {
+        let settled = settle(
+            || {
+                let input = ToolCallEvent {
+                    args: current.clone(),
+                    ..event.clone()
+                };
+                hook.call(input, cx.mint(deadline))
+            },
+            cx.cancel,
+            deadline,
+        )
+        .await;
+        match settled {
             Ok(ToolCallVerdict::Allow) => {}
             Ok(ToolCallVerdict::Rewrite { args }) => current = args,
             Ok(ToolCallVerdict::Block { reason }) => {
@@ -430,7 +466,9 @@ pub async fn dispatch_tool_call(
                 };
             }
             Err(err) => {
-                record_observer_failure(cx, ext, &err);
+                if !matches!(err, HookError::Cancelled) {
+                    record_observer_failure(cx, ext, &err);
+                }
                 return ToolCallStep {
                     args: current,
                     block: Some(hook_block_message(ext, &err)),
@@ -469,6 +507,8 @@ fn record_observer_failure(cx: &DispatchCx<'_>, ext: &str, err: &HookError) {
 
 /// Runs the injected approver once on the final tool-call arguments.
 /// Cancel or the effective deadline resolves fail-closed to [`ToolDecision::Denied`].
+/// A cancelled turn never starts the approver, so it opens no question it
+/// could never wait for.
 pub async fn approve_tool_call(
     event: &ToolCallEvent,
     approver: &dyn Fn(ToolCallEvent) -> BoxFuture<'static, Approval>,
@@ -476,6 +516,9 @@ pub async fn approve_tool_call(
     turn_deadline: Instant,
     grant_wait_ms: u64,
 ) -> ToolDecision {
+    if cancel.is_cancelled() {
+        return ToolDecision::Denied;
+    }
     let deadline = effective_deadline(turn_deadline, grant_wait_ms);
     tokio::select! {
         biased;
@@ -491,7 +534,8 @@ pub async fn approve_tool_call(
 /// Folds one extension's `input` hooks over the content in registration
 /// order. Transforms feed the next hook; a failure keeps the running
 /// content with one notice. A `builtin` handled result still lets later
-/// origins run; the first later handled result stops dispatch.
+/// origins run; the first later handled result stops dispatch. A cancel ends
+/// the chain at once: no later hook starts and no failure notice is raised.
 pub async fn dispatch_input(
     ext: &str,
     cx: &DispatchCx<'_>,
@@ -503,11 +547,19 @@ pub async fn dispatch_input(
     let mut current = event.content.clone();
     let mut notices = Vec::new();
     for hook in hooks {
-        let input = InputEvent {
-            content: current.clone(),
-            model: event.model.clone(),
-        };
-        match settle(hook.call(input, cx.mint(deadline)), cx.cancel, deadline).await {
+        let settled = settle(
+            || {
+                let input = InputEvent {
+                    content: current.clone(),
+                    model: event.model.clone(),
+                };
+                hook.call(input, cx.mint(deadline))
+            },
+            cx.cancel,
+            deadline,
+        )
+        .await;
+        match settled {
             Ok(InputVerdict::Continue) => {}
             Ok(InputVerdict::Transform(parts)) => current = parts,
             Ok(InputVerdict::Handled) => {
@@ -520,6 +572,7 @@ pub async fn dispatch_input(
                     notices,
                 };
             }
+            Err(HookError::Cancelled) => break,
             Ok(_) | Err(_) => notices.push(input_failed_notice(ext)),
         }
     }
@@ -531,8 +584,9 @@ pub async fn dispatch_input(
 }
 
 /// Collects one extension's `before_turn` texts in hook order. A failure
-/// adds nothing with one notice. The caller joins every extension's texts
-/// with [`join_before_turn`].
+/// adds nothing with one notice. A cancel ends the chain at once: no later
+/// hook starts and no failure notice is raised. The caller joins every
+/// extension's texts with [`join_before_turn`].
 pub async fn dispatch_before_turn(
     ext: &str,
     cx: &DispatchCx<'_>,
@@ -543,19 +597,20 @@ pub async fn dispatch_before_turn(
     let mut texts = Vec::new();
     let mut notices = Vec::new();
     for hook in hooks {
-        match settle(
-            hook.call(event.clone(), cx.mint(deadline)),
+        let settled = settle(
+            || hook.call(event.clone(), cx.mint(deadline)),
             cx.cancel,
             deadline,
         )
-        .await
-        {
+        .await;
+        match settled {
             Ok(Some(text)) => {
                 if !text.is_empty() {
                     texts.push(text.into_boxed_str());
                 }
             }
             Ok(None) => {}
+            Err(HookError::Cancelled) => break,
             Err(_) => notices.push(before_turn_failed_notice(ext)),
         }
     }
@@ -581,9 +636,10 @@ pub fn join_before_turn(texts: &[Box<str>]) -> Option<String> {
 
 /// Folds one extension's `before_request` hooks over typed parameters in
 /// hook order. Replacements feed the next hook; a failure keeps the running
-/// parameters with one notice. Only typed parameters travel here, so raw
-/// payload bytes cannot change; the caller clamps the final parameters
-/// with [`clamp_params`].
+/// parameters with one notice. A cancel ends the chain at once: no later
+/// hook starts and no failure notice is raised. Only typed parameters travel
+/// here, so raw payload bytes cannot change; the caller clamps the final
+/// parameters with [`clamp_params`].
 pub async fn dispatch_before_request(
     ext: &str,
     cx: &DispatchCx<'_>,
@@ -595,13 +651,22 @@ pub async fn dispatch_before_request(
     let mut current = params;
     let mut notices = Vec::new();
     for hook in hooks {
-        let input = BeforeRequest {
-            params: current.clone(),
-            ..event.clone()
-        };
-        match settle(hook.call(input, cx.mint(deadline)), cx.cancel, deadline).await {
+        let settled = settle(
+            || {
+                let input = BeforeRequest {
+                    params: current.clone(),
+                    ..event.clone()
+                };
+                hook.call(input, cx.mint(deadline))
+            },
+            cx.cancel,
+            deadline,
+        )
+        .await;
+        match settled {
             Ok(Some(next)) => current = next,
             Ok(None) => {}
+            Err(HookError::Cancelled) => break,
             Err(_) => notices.push(before_request_failed_notice(ext)),
         }
     }
