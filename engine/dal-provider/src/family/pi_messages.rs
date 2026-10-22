@@ -491,122 +491,111 @@ impl PiMessagesDecoder {
         Err(ProviderError::StreamCut)
     }
 
-    fn step(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<Progress, ProviderError> {
-        let kind = match sonic_rs::get_from_str(data, ["type"]) {
-            Ok(kind) => kind,
-            Err(error) if error.is_not_found() => return Ok(Progress::Open),
-            Err(error) => {
-                return Err(protocol(format!(
-                    "event data is not a JSON object: {error}"
-                )));
-            }
-        };
-        match kind.as_str() {
-            Some("text_delta") => self.on_text_delta(data, out)?,
-            Some("text_end") => self.on_text_end(data, out)?,
-            Some("thinking_delta") => self.on_thinking_delta(data, out)?,
-            Some("thinking_end") => self.on_thinking_end(data, out)?,
-            Some("toolcall_start") => self.on_toolcall_start(data, out)?,
-            Some("toolcall_delta") => self.on_toolcall_delta(data, out)?,
-            Some("toolcall_end") => self.on_toolcall_end(data)?,
-            Some("done") => {
-                #[derive(Deserialize)]
-                struct DoneEvent {
-                    reason: Option<String>,
-                    usage: Option<WireUsage>,
-                }
-                let event: DoneEvent = parse(data, "done")?;
-                self.finish(event.reason.as_deref(), event.usage.as_ref(), out);
-                return Ok(Progress::Ended);
-            }
-            Some("error") => {
-                #[derive(Deserialize)]
-                struct ErrorEvent {
-                    reason: Option<String>,
-                    #[serde(rename = "errorMessage")]
-                    error_message: Option<String>,
-                }
-                let event: ErrorEvent = parse(data, "error")?;
-                let message =
-                    event
-                        .error_message
-                        .unwrap_or_else(|| match event.reason.as_deref() {
-                            Some("aborted") => String::from("pi-messages stream was aborted"),
-                            _ => String::from("pi-messages stream returned an error"),
-                        });
-                return Err(self.server_error(&message));
-            }
-            // `start`, `text_start`, `thinking_start`, and unknown event
-            // types carry nothing to emit.
-            _ => {}
-        }
-        Ok(Progress::Open)
-    }
-
-    /// Handles one `text_delta` event.
-    fn on_text_delta(
-        &mut self,
-        data: &str,
-        out: &mut Vec<StreamEvent>,
-    ) -> Result<(), ProviderError> {
+    fn step_toolcall_end(&mut self, data: &str) -> Result<(), ProviderError> {
         #[derive(Deserialize)]
-        struct TextDelta {
-            #[serde(rename = "contentIndex")]
-            content_index: Option<usize>,
-            delta: Option<String>,
-        }
-        let event: TextDelta = parse(data, "text_delta")?;
-        if let Some(index) = event.content_index {
-            self.seen_text.insert(index);
-        }
-        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
-            out.push(StreamEvent::TextDelta { text: delta });
-        }
-        Ok(())
-    }
-
-    /// Handles one `text_end` event.
-    fn on_text_end(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
-        #[derive(Deserialize)]
-        struct TextEnd {
+        struct ToolcallEnd {
             #[serde(rename = "contentIndex")]
             content_index: usize,
-            content: Option<String>,
+            #[serde(rename = "toolCall")]
+            tool_call: Option<WireToolCall>,
         }
-        let event: TextEnd = parse(data, "text_end")?;
-        if !self.seen_text.contains(&event.content_index)
-            && let Some(content) = event.content.filter(|s| !s.is_empty())
+        #[derive(Deserialize)]
+        struct WireToolCall {
+            id: Option<String>,
+            name: Option<String>,
+            arguments: Option<RawJson>,
+            incomplete: Option<bool>,
+        }
+        let event: ToolcallEnd = parse(data, "toolcall_end")?;
+        if let Some(call) = self.calls.get_mut(&event.content_index)
+            && let Some(tc) = event.tool_call
         {
-            out.push(StreamEvent::TextDelta { text: content });
+            if let Some(id) = tc.id.filter(|s| !s.is_empty()) {
+                call.id = id;
+            }
+            if let Some(name) = tc.name.filter(|s| !s.is_empty()) {
+                call.name = name;
+            }
+            if tc.incomplete == Some(true) {
+                call.incomplete = true;
+            }
+            if let Some(args_val) = tc.arguments {
+                call.authoritative_args = Some(args_val.as_str().as_bytes().to_vec());
+            }
         }
         Ok(())
     }
 
-    /// Handles one `thinking_delta` event.
-    fn on_thinking_delta(
+    fn step_toolcall_delta(
         &mut self,
         data: &str,
         out: &mut Vec<StreamEvent>,
     ) -> Result<(), ProviderError> {
         #[derive(Deserialize)]
-        struct ThinkingDelta {
+        struct ToolcallDelta {
             #[serde(rename = "contentIndex")]
-            content_index: Option<usize>,
+            content_index: usize,
             delta: Option<String>,
         }
-        let event: ThinkingDelta = parse(data, "thinking_delta")?;
-        if let Some(index) = event.content_index {
-            self.seen_thinking.insert(index);
-        }
-        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
-            out.push(StreamEvent::ReasoningDelta { text: delta });
+        let event: ToolcallDelta = parse(data, "toolcall_delta")?;
+        let Some(call) = self.calls.get_mut(&event.content_index) else {
+            return Err(protocol(format!(
+                "toolcall_delta for unknown contentIndex {}",
+                event.content_index
+            )));
+        };
+        if let Some(fragment) = event.delta.filter(|s| !s.is_empty()) {
+            call.args.extend_from_slice(fragment.as_bytes());
+            out.push(StreamEvent::ToolArgsDelta {
+                id: call.id.clone(),
+                fragment: fragment.into_bytes(),
+            });
         }
         Ok(())
     }
 
-    /// Handles one `thinking_end` event, journaling the signature or
-    /// redaction marker as a replay payload.
-    fn on_thinking_end(
+    fn step_toolcall_start(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct ToolcallStart {
+            #[serde(rename = "contentIndex")]
+            content_index: usize,
+            id: Option<String>,
+            #[serde(rename = "toolName")]
+            tool_name: Option<String>,
+        }
+        let event: ToolcallStart = parse(data, "toolcall_start")?;
+        self.budget.admit_item()?;
+        let (Some(id), Some(name)) = (
+            event.id.filter(|s| !s.is_empty()),
+            event.tool_name.filter(|s| !s.is_empty()),
+        ) else {
+            return Err(protocol(format!(
+                "toolcall_start contentIndex {} missing id or toolName",
+                event.content_index
+            )));
+        };
+        out.push(StreamEvent::ToolCallStarted {
+            id: id.clone(),
+            name: name.clone(),
+        });
+        self.calls.insert(
+            event.content_index,
+            OpenCall {
+                id,
+                name,
+                args: Vec::new(),
+                authoritative_args: None,
+                incomplete: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn step_thinking_end(
         &mut self,
         data: &str,
         out: &mut Vec<StreamEvent>,
@@ -653,112 +642,116 @@ impl PiMessagesDecoder {
         Ok(())
     }
 
-    /// Handles one `toolcall_start` event: admits the item and opens the call.
-    fn on_toolcall_start(
+    fn step_thinking_delta(
         &mut self,
         data: &str,
         out: &mut Vec<StreamEvent>,
     ) -> Result<(), ProviderError> {
         #[derive(Deserialize)]
-        struct ToolcallStart {
+        struct ThinkingDelta {
             #[serde(rename = "contentIndex")]
-            content_index: usize,
-            id: Option<String>,
-            #[serde(rename = "toolName")]
-            tool_name: Option<String>,
-        }
-        let event: ToolcallStart = parse(data, "toolcall_start")?;
-        self.budget.admit_item()?;
-        let (Some(id), Some(name)) = (
-            event.id.filter(|s| !s.is_empty()),
-            event.tool_name.filter(|s| !s.is_empty()),
-        ) else {
-            return Err(protocol(format!(
-                "toolcall_start contentIndex {} missing id or toolName",
-                event.content_index
-            )));
-        };
-        out.push(StreamEvent::ToolCallStarted {
-            id: id.clone(),
-            name: name.clone(),
-        });
-        self.calls.insert(
-            event.content_index,
-            OpenCall {
-                id,
-                name,
-                args: Vec::new(),
-                authoritative_args: None,
-                incomplete: false,
-            },
-        );
-        Ok(())
-    }
-
-    /// Handles one `toolcall_delta` event.
-    fn on_toolcall_delta(
-        &mut self,
-        data: &str,
-        out: &mut Vec<StreamEvent>,
-    ) -> Result<(), ProviderError> {
-        #[derive(Deserialize)]
-        struct ToolcallDelta {
-            #[serde(rename = "contentIndex")]
-            content_index: usize,
+            content_index: Option<usize>,
             delta: Option<String>,
         }
-        let event: ToolcallDelta = parse(data, "toolcall_delta")?;
-        let Some(call) = self.calls.get_mut(&event.content_index) else {
-            return Err(protocol(format!(
-                "toolcall_delta for unknown contentIndex {}",
-                event.content_index
-            )));
-        };
-        if let Some(fragment) = event.delta.filter(|s| !s.is_empty()) {
-            call.args.extend_from_slice(fragment.as_bytes());
-            out.push(StreamEvent::ToolArgsDelta {
-                id: call.id.clone(),
-                fragment: fragment.into_bytes(),
-            });
+        let event: ThinkingDelta = parse(data, "thinking_delta")?;
+        if let Some(index) = event.content_index {
+            self.seen_thinking.insert(index);
+        }
+        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
+            out.push(StreamEvent::ReasoningDelta { text: delta });
         }
         Ok(())
     }
 
-    /// Handles one `toolcall_end` event: the final call overrides the
-    /// streamed id, name, and arguments.
-    fn on_toolcall_end(&mut self, data: &str) -> Result<(), ProviderError> {
+    fn step_text_end(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
         #[derive(Deserialize)]
-        struct ToolcallEnd {
+        struct TextEnd {
             #[serde(rename = "contentIndex")]
             content_index: usize,
-            #[serde(rename = "toolCall")]
-            tool_call: Option<WireToolCall>,
+            content: Option<String>,
         }
-        #[derive(Deserialize)]
-        struct WireToolCall {
-            id: Option<String>,
-            name: Option<String>,
-            arguments: Option<RawJson>,
-            incomplete: Option<bool>,
-        }
-        let event: ToolcallEnd = parse(data, "toolcall_end")?;
-        if let Some(call) = self.calls.get_mut(&event.content_index)
-            && let Some(tc) = event.tool_call
+        let event: TextEnd = parse(data, "text_end")?;
+        if !self.seen_text.contains(&event.content_index)
+            && let Some(content) = event.content.filter(|s| !s.is_empty())
         {
-            if let Some(id) = tc.id.filter(|s| !s.is_empty()) {
-                call.id = id;
-            }
-            if let Some(name) = tc.name.filter(|s| !s.is_empty()) {
-                call.name = name;
-            }
-            if tc.incomplete == Some(true) {
-                call.incomplete = true;
-            }
-            if let Some(args_val) = tc.arguments {
-                call.authoritative_args = Some(args_val.as_str().as_bytes().to_vec());
-            }
+            out.push(StreamEvent::TextDelta { text: content });
         }
         Ok(())
+    }
+
+    fn step_text_delta(
+        &mut self,
+        data: &str,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        #[derive(Deserialize)]
+        struct TextDelta {
+            #[serde(rename = "contentIndex")]
+            content_index: Option<usize>,
+            delta: Option<String>,
+        }
+        let event: TextDelta = parse(data, "text_delta")?;
+        if let Some(index) = event.content_index {
+            self.seen_text.insert(index);
+        }
+        if let Some(delta) = event.delta.filter(|s| !s.is_empty()) {
+            out.push(StreamEvent::TextDelta { text: delta });
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<Progress, ProviderError> {
+        let kind = match sonic_rs::get_from_str(data, ["type"]) {
+            Ok(kind) => kind,
+            Err(error) if error.is_not_found() => return Ok(Progress::Open),
+            Err(error) => {
+                return Err(protocol(format!(
+                    "event data is not a JSON object: {error}"
+                )));
+            }
+        };
+        match kind.as_str() {
+            Some("text_delta") => self.step_text_delta(data, out)?,
+            Some("text_end") => self.step_text_end(data, out)?,
+            Some("thinking_delta") => self.step_thinking_delta(data, out)?,
+            Some("thinking_end") => self.step_thinking_end(data, out)?,
+            Some("toolcall_start") => self.step_toolcall_start(data, out)?,
+            Some("toolcall_delta") => self.step_toolcall_delta(data, out)?,
+            Some("toolcall_end") => self.step_toolcall_end(data)?,
+            Some("done") => {
+                #[derive(Deserialize)]
+                struct DoneEvent {
+                    reason: Option<String>,
+                    usage: Option<WireUsage>,
+                }
+                let event: DoneEvent = parse(data, "done")?;
+                self.finish(event.reason.as_deref(), event.usage.as_ref(), out);
+                return Ok(Progress::Ended);
+            }
+            Some("error") => {
+                #[derive(Deserialize)]
+                struct ErrorEvent {
+                    reason: Option<String>,
+                    #[serde(rename = "errorMessage")]
+                    error_message: Option<String>,
+                }
+                let event: ErrorEvent = parse(data, "error")?;
+                let message =
+                    event
+                        .error_message
+                        .unwrap_or_else(|| match event.reason.as_deref() {
+                            Some("aborted") => String::from("pi-messages stream was aborted"),
+                            _ => String::from("pi-messages stream returned an error"),
+                        });
+                return Err(self.server_error(&message));
+            }
+            _ => {}
+        }
+        Ok(Progress::Open)
     }
 
     fn finish(
