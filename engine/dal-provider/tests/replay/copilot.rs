@@ -1,4 +1,4 @@
-//! GitHub Copilot replay integration suite (ENG-02).
+//! GitHub Copilot replay integration suite.
 //!
 //! Real-transport proof for the Copilot route lowering over the Chat and
 //! Anthropic families: an entry with a Copilot id routes through

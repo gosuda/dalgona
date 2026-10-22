@@ -1193,12 +1193,14 @@ async fn call_private(
     if let Err(error) = tool.classify(args, workspace) {
         return (true, error.to_string());
     }
-    let cx = private_cx.mint(CallId::new(call.id.as_str()));
+    let (cx, owner) = private_cx.mint(CallId::new(call.id.as_str()));
     let tool_call = ToolCall {
         id: CallId::new(call.id.as_str()),
         args: args.clone(),
     };
-    match contained(async move { tool.run(tool_call, cx).await }).await {
+    let outcome = contained(async move { tool.run(tool_call, cx).await }).await;
+    owner.release_if_live();
+    match outcome {
         Ok(ToolOutcome::Ok(output)) => (false, output.to_string()),
         Ok(ToolOutcome::Err(error)) => (true, error.to_string()),
         Ok(ToolOutcome::Interrupted) => (true, "Tool call interrupted by user.".into()),

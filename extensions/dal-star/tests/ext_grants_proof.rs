@@ -1,4 +1,4 @@
-//! ENG-13 Starlark adapter proofs: the Rust-only event boundary, the
+//! Starlark adapter proofs: the Rust-only event boundary, the
 //! eval-cell namespace boundary, pure-cell effect denial, and two-plugin
 //! reload atomicity (rollback after partial failure).
 //!
@@ -146,7 +146,7 @@ async fn eval_raw(arguments: &str, allowed: &[&str], replies: Vec<(OpId, OpOutco
     let host = RecordingHost::new(&extensions, allowed, replies);
     let args = RawJson::parse(arguments).expect("tool arguments are JSON");
     let outcome = tool
-        .run(ToolCall::new("eng13", args), tool_cx(host.script_cx()))
+        .run(ToolCall::new("test-call", args), tool_cx(host.script_cx()))
         .await;
     Run { host, outcome }
 }
@@ -226,7 +226,7 @@ async fn run_tool_named(extensions: &[Extension], tool_name: &str) -> String {
     let host = RecordingHost::new(extensions, OpSet::EMPTY, []);
     let args = RawJson::parse("{}").expect("json");
     match tool
-        .run(ToolCall::new("eng13", args), tool_cx(host.script_cx()))
+        .run(ToolCall::new("test-call", args), tool_cx(host.script_cx()))
         .await
     {
         ToolOutcome::Ok(output) => match &output.parts[0] {

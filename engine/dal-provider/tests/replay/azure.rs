@@ -1,4 +1,4 @@
-//! Azure `OpenAI` replay integration suite (ENG-02).
+//! Azure `OpenAI` replay integration suite.
 //!
 //! Real-transport proof for the Azure route lowering over the Chat and
 //! Responses families: a `Chat`/`Responses` entry with the Azure `api-key`

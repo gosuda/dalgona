@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the Antigravity account-verification
-# rejection (ENG-03: the `google-antigravity` family).
+# Synthetic replay fixture for the Antigravity account-verification rejection over the `google-antigravity` family.
 #
 # One exchange: HTTP 403 with a `google.rpc.Status` body whose `details` carry
 # a `google.rpc.ErrorInfo` with reason `VALIDATION_REQUIRED` and the

@@ -1,6 +1,6 @@
-//! ENG-11 store proof gaps: crash-mid-write recovery, fork/clone identity and
+//! Store proof gaps: crash-mid-write recovery, fork/clone identity and
 //! independence, owner-only private files without secret leakage, and the
-//! spec-named 200-iteration SIGKILL sweep.
+//! 200-iteration SIGKILL sweep.
 //!
 //! Every test below drives a real temporary store on the local filesystem.
 //! No mocks, no fault-injection seams: torn bytes are real bytes, killed
@@ -77,7 +77,7 @@ fn journal_lines(path: &Path) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Package metadata (REQ-01): the crate publishes under its spec name with
+/// Package metadata: the crate publishes under its spec name with
 /// the workspace edition and lint set. The unit under test is the same
 /// package the manifest describes.
 #[test]
@@ -649,7 +649,7 @@ async fn sigkill_survives_every_reopen() {
     }
 }
 
-/// Atomic publication (REQ-03) with owner-only privacy (REQ-33):
+/// Atomic publication with owner-only privacy:
 /// `write_atomic` lands exact bytes at mode 0600 with no temp residue,
 /// `write_atomic_new` never replaces an existing target, and plain
 /// `write_atomic` still replaces.
@@ -715,7 +715,7 @@ fn atomic_publish_is_owner_only_and_new_never_replaces() {
     );
 }
 
-/// Batch durability (REQ-13) over content-addressed blobs (REQ-08): every
+/// Batch durability over content-addressed blobs: every
 /// durable receipt names exactly the bytes on disk, receipts chain
 /// contiguously, and a blob-backed batch is backed by a real
 /// `blobs/<64-hex-digest>` file before any record names it.
@@ -786,8 +786,8 @@ async fn durable_receipt_matches_bytes_on_disk_with_blobs_published_first() {
     );
 }
 
-/// Lock-free blob reads with typed absence (REQ-10) and lock-guarded
-/// delete (REQ-31): an open session's blobs read through the `Store`
+/// Lock-free blob reads with typed absence and lock-guarded
+/// delete: an open session's blobs read through the `Store`
 /// handle without the lock; deleting while open reports `Locked` and
 /// changes nothing; after close the tree is gone and reads report `Gone`.
 #[tokio::test]
@@ -847,7 +847,7 @@ async fn open_journal_reads_blobs_without_lock_and_delete_reports_gone() {
     }
 }
 
-/// Handle properties (REQ-12): `Journal` is `Send` but neither `Sync` nor
+/// Handle properties: `Journal` is `Send` but neither `Sync` nor
 /// `Clone`, and mutation takes `&mut self` (`store.rs:1038`). `Send` is
 /// pinned below (the build breaks if it is lost); the negative bounds are
 /// structural and were verified against this exact tree with bound probes:

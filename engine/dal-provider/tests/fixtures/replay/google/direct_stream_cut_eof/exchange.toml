@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API stream cut after
-# delivery (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API stream cut after delivery over the `google-generative-ai` family.
 #
 # One exchange: HTTP 200 whose body ends cleanly after one complete text
 # chunk, with no `finishReason` anywhere. The decoder must end the turn with

@@ -1,7 +1,7 @@
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
 
-//! ENG-10 vocabulary proofs: journal record codec (VOC-07A), pure
-//! branch/fork projection (VOC-07B), and curated `lib.rs` exports (VOC-08A).
+//! Vocabulary proofs: journal record codec, pure
+//! branch/fork projection, and curated lib.rs exports.
 //!
 //! These tests exercise only the public `dal_core::` API. The sibling
 //! `journal/tests.rs` unit suite owns byte-canonical vectors; this file pins
@@ -42,7 +42,7 @@ fn header() -> Header {
     Header {
         id: SessionId::new_v7(),
         at: stamp(),
-        workspace: Workspace::new("/tmp/eng10-vocab-journal".into()).expect("absolute workspace"),
+        workspace: Workspace::new("/tmp/vocab-journal-proof".into()).expect("absolute workspace"),
         product: Product::Dal,
         from: None,
     }
@@ -109,7 +109,7 @@ fn resolved_line(request: &RequestId, tail: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-// ---- VOC-07A: version gate ----
+// ---- version gate ----
 
 #[test]
 fn version_zero_is_unsupported_not_missing() {
@@ -217,7 +217,7 @@ fn unknown_record_kind_at_v1_is_unknown_kind() {
     }
 }
 
-// ---- VOC-07A: framing ----
+// ---- framing ----
 
 #[test]
 fn line_framing_rejects_empty_blank_non_utf8_and_trailing_bytes() {
@@ -274,7 +274,7 @@ fn max_record_bound_is_pinned_and_ordinary_lines_fit() {
     assert_eq!(back, record);
 }
 
-// ---- VOC-07A: member order and strictness ----
+// ---- member order and strictness ----
 
 #[test]
 fn encode_writes_version_type_and_entry_prefix_first() {
@@ -377,7 +377,7 @@ fn deeply_nested_opaque_bodies_survive_the_codec() {
     assert_eq!(decode(&line).expect("nested ext decodes").record, record);
 }
 
-// ---- VOC-07A: mail, leaf, inferred ----
+// ---- mail, leaf, inferred ----
 
 #[test]
 fn mail_mode_is_a_closed_three_tag_set() {
@@ -467,7 +467,7 @@ fn leaf_to_none_is_valid_and_inferred_purpose_is_strict() {
     ));
 }
 
-// ---- VOC-07A: assistant route provenance ----
+// ---- assistant route provenance ----
 
 #[test]
 fn absent_route_stays_absent_and_reencodes_without_one() {
@@ -581,7 +581,7 @@ fn encode_rejects_empty_model_ids() {
     ));
 }
 
-// ---- VOC-07A: resolution causes ----
+// ---- resolution causes ----
 
 #[test]
 fn resolved_causes_round_trip_and_absent_stays_legacy() {
@@ -628,7 +628,7 @@ fn resolved_causes_round_trip_and_absent_stays_legacy() {
     }
 }
 
-// ---- VOC-07A: misc typed boundaries ----
+// ---- misc typed boundaries ----
 
 #[test]
 fn mismatched_tree_variant_is_refused_not_misencoded() {
@@ -657,7 +657,7 @@ fn scan_head_labels_v1_tree_prefixes_and_skips_the_rest() {
     assert!(scan_head(b"{\"v\":1,\"type\":\"bogus\",\"id\":4,\"parent\":3}").is_none());
 }
 
-// ---- VOC-07B: branch projection ----
+// ---- branch projection ----
 
 fn chain_fixture() -> (Header, Vec<Record>) {
     let header = header();
@@ -867,7 +867,7 @@ fn cyclic_parents_terminate_without_hanging() {
     }
 }
 
-// ---- VOC-08A: curated public exports ----
+// ---- curated public exports ----
 
 fn pin_type<T>() {
     let _ = std::mem::size_of::<T>();

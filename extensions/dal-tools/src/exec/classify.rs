@@ -416,6 +416,72 @@ mod guards {
         matches!(tokens.next(), Ok(None))
     }
 
+    /// Long options that run commands or name output files. Git accepts any
+    /// unambiguous prefix of a long option, so both directions match: an
+    /// abbreviation (`--open`, `--u`) and an extension with a value
+    /// (`--open-files-in-pager=less`, `--output-extra`) are all rejected.
+    /// `uploadpack` (no hyphen) is listed alongside `upload-pack` because the
+    /// bypass uses that spelling; `exec` is blocked conservatively since any
+    /// `--exec[=...]` form names a command to run.
+    const GIT_DANGEROUS_LONGS: &[&str] = &[
+        "output",
+        "open-files-in-pager",
+        "textconv",
+        "ext-diff",
+        "upload-pack",
+        "uploadpack",
+        "exec",
+    ];
+
+    fn git_dangerous_long(raw: &str) -> bool {
+        GIT_DANGEROUS_LONGS
+            .iter()
+            .any(|long| decoded_option_matches(raw, long))
+    }
+
+    /// Reports whether the shell-decoded word names the `--` option `long`,
+    /// abbreviated or extended, ignoring any `=value` suffix. Quotes and
+    /// escapes decode like the other guards, so quoting cannot smuggle an
+    /// abbreviation past the raw bytes. Returns false for words that are not
+    /// `--` options or fail to decode.
+    fn decoded_option_matches(raw: &str, long: &str) -> bool {
+        let bytes = raw.as_bytes();
+        let long = long.as_bytes();
+        let mut index = 0;
+        let mut quote = 0u8;
+        let mut dashes = 0u8;
+        let mut matched = 0usize;
+        while index < bytes.len() {
+            match super::decode_word_byte(bytes, &mut index, &mut quote) {
+                super::ShellWordByte::Literal(byte) => {
+                    if dashes < 2 {
+                        if byte != b'-' {
+                            return false;
+                        }
+                        dashes += 1;
+                    } else if byte == b'=' {
+                        return matched > 0;
+                    } else {
+                        if matched >= long.len() {
+                            return true;
+                        }
+                        if byte != long[matched] {
+                            return false;
+                        }
+                        matched += 1;
+                        if matched == long.len() {
+                            return true;
+                        }
+                    }
+                }
+                super::ShellWordByte::Delimiter => {}
+                super::ShellWordByte::Invalid => return false,
+            }
+            index += 1;
+        }
+        quote == 0 && dashes == 2 && matched > 0
+    }
+
     fn git_args_ok(mut tokens: super::Tokens<'_>) -> bool {
         loop {
             let argument = match tokens.next() {
@@ -424,12 +490,9 @@ mod guards {
                 Err(_) => return false,
             };
             if super::has_shell_expansion_or_glob(argument)
-                || super::shell_word_starts_with(argument, "--output")
                 || super::shell_word_starts_with(argument, "-o")
                 || super::shell_word_starts_with(argument, "-O")
-                || super::shell_word_starts_with(argument, "--open-files-in-pager")
-                || super::shell_word_starts_with(argument, "--textconv")
-                || super::shell_word_starts_with(argument, "--ext-diff")
+                || git_dangerous_long(argument)
                 || has_clustered_short(argument, b"oO")
             {
                 return false;

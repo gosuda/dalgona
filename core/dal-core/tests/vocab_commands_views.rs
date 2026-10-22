@@ -1,8 +1,8 @@
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
 
-//! ENG-10 vocabulary wire proofs: command, request, update, and view shapes.
+//! Vocabulary wire proofs: command, request, update, and view shapes.
 //!
-//! Rows VOC-05A, VOC-05B, VOC-05C, VOC-05D, VOC-06A, VOC-06B. Every test goes
+//! Every test goes
 //! through the public `dal_core::` API; `sonic_rs` is the wire codec.
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -32,7 +32,7 @@ fn nonzero(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("fixture limit is nonzero")
 }
 
-// --- VOC-06B: PageReq typed boundary ---------------------------------------
+// --- PageReq typed boundary ---------------------------------------
 
 #[test]
 fn page_req_deserialization_enforces_max_limit() -> TestResult {
@@ -91,7 +91,7 @@ fn page_req_wire_keeps_camel_case_names() -> TestResult {
     Ok(())
 }
 
-// --- VOC-05A: command vocabulary -------------------------------------------
+// --- command vocabulary -------------------------------------------
 
 #[test]
 fn command_rejects_unknown_type_tags() {
@@ -207,7 +207,7 @@ fn every_command_variant_round_trips() -> TestResult {
     Ok(())
 }
 
-// --- VOC-05B: replies and rejections ----------------------------------------
+// --- replies and rejections ----------------------------------------
 
 #[test]
 fn every_rejection_has_distinct_nonempty_display() {
@@ -265,7 +265,7 @@ fn replies_use_snake_case_tags_and_reject_unknown() -> TestResult {
     Ok(())
 }
 
-// --- VOC-05C: request vocabulary --------------------------------------------
+// --- request vocabulary --------------------------------------------
 
 fn preview() -> Preview {
     Preview {
@@ -406,7 +406,7 @@ fn unknown_question_answer_and_owner_tags_rejected() -> TestResult {
     Ok(())
 }
 
-// --- VOC-05D: call grant -----------------------------------------------------
+// --- call grant -----------------------------------------------------
 
 #[test]
 fn call_grant_until_is_transparent_job_id() -> TestResult {
@@ -434,7 +434,7 @@ fn call_grant_until_is_transparent_job_id() -> TestResult {
     Ok(())
 }
 
-// --- VOC-06A: updates ---------------------------------------------------------
+// --- updates ---------------------------------------------------------
 
 #[test]
 fn update_contrasts_unknown_kind_with_rejected_known_kind() -> TestResult {
@@ -515,7 +515,7 @@ fn update_sequences_reject_zero_and_kinds_use_wire_names() -> TestResult {
     Ok(())
 }
 
-// --- VOC-06B: views ------------------------------------------------------------
+// --- views ------------------------------------------------------------
 
 #[test]
 fn turn_state_uses_state_tag() -> TestResult {

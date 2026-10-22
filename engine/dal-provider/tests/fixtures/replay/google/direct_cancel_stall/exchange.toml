@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API mid-stream cancellation
-# proof (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API mid-stream cancellation proof over the `google-generative-ai` family.
 #
 # The server writes the first complete text chunk (207 bytes) and then stalls
 # with the socket open (`stall_after = 207`), so cancelling the turn must

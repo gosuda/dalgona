@@ -26,6 +26,8 @@ use super::{BoxFuture, Caller, CallerKind, Doc, ScriptCx, Services, ToolDescript
 use crate::Env;
 use crate::error::{SchemeError, ToolError};
 use crate::proc::{Proc, SpawnOpts};
+use crate::session::continuation::ContinuationOwner;
+use crate::session::tasks::SessionTasks;
 
 /// Raw tool arguments preserved byte for byte.
 ///
@@ -440,28 +442,32 @@ pub(crate) struct PrivateCx {
 impl PrivateCx {
     /// Mints the context of one private tool call.
     ///
-    /// Clones the model handler's caller verbatim, preserving its explicit
-    /// continuation [`Weak`] for the same call. No name, owner, or history
-    /// matching: a private call without an attached slot runs today's
-    /// one-shot path. The strong owner stays held by the invocation root
-    /// through the awaited tool run.
-    pub(crate) fn mint(&self, call: CallId) -> ToolCx<'static> {
-        ToolCx::new(
-            self.caller.clone(),
-            call,
-            self.session,
-            None,
-            Arc::clone(&self.services),
-            Arc::new(ForTestRuntime {
-                workspace: self.workspace.clone(),
-                cancel: self.cancel.clone(),
-                approve: false,
-            }),
-            CallSnapshot {
-                generation: self.generation,
-                cutoff: None,
-                env: Arc::clone(&self.env),
-            },
+    /// Clones the model handler's caller for its kind, minting a fresh
+    /// continuation owner instead of reusing the caller's slot. No name,
+    /// owner, or history matching. The returned owner stays held by the
+    /// caller through the awaited tool run.
+    pub(crate) fn mint(&self, call: CallId) -> (ToolCx<'static>, ContinuationOwner) {
+        let owner = ContinuationOwner::new(SessionTasks::new());
+        let caller = self.caller.clone().with_continuation(owner.downgrade());
+        (
+            ToolCx::new(
+                caller,
+                call,
+                self.session,
+                None,
+                Arc::clone(&self.services),
+                Arc::new(ForTestRuntime {
+                    workspace: self.workspace.clone(),
+                    cancel: self.cancel.clone(),
+                    approve: false,
+                }),
+                CallSnapshot {
+                    generation: self.generation,
+                    cutoff: None,
+                    env: Arc::clone(&self.env),
+                },
+            ),
+            owner,
         )
     }
 }

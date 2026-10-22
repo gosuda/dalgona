@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API transport proof
-# (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API transport proof over the `google-generative-ai` family.
 #
 # Authored from the public `GenerateContent` grammar (the REST request body
 # `contents` / `systemInstruction` / `tools[].functionDeclarations` /

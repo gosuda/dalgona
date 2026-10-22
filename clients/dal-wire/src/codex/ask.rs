@@ -231,7 +231,7 @@ pub(crate) fn command_decision(decision: Option<&Value>) -> Answer {
         .get("acceptWithExecpolicyAmendment")
         .and_then(|amendment| amendment.get("execpolicy_amendment"))
         .and_then(|value| value.as_array())
-        .is_some_and(|items| items.iter().all(|item| item.as_str().is_some()))
+        .is_some_and(|items| !items.is_empty() && items.iter().all(|item| item.as_str().is_some()))
     {
         return Answer::Approve;
     }

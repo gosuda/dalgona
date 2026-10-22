@@ -143,7 +143,7 @@ async fn a_client_answer_and_a_turn_cancel_are_not_unavailable() {
         "a release carries the journaled cause"
     );
 
-    let (_, waiter) = open_text(&broker);
+    let (_, waiter) = open_reported(&broker);
     let cancelled = broker.resolve_turn(turn(), ResolutionCause::Cancelled);
     assert_eq!(cancelled.len(), 1);
     assert_eq!(cancelled[0].cause, ResolutionCause::Cancelled);
@@ -628,6 +628,32 @@ fn a_turn_resolution_names_its_cause_and_skips_claimed_requests() {
     let confirmed = broker.resolve_turn(turn(), ResolutionCause::Cancelled);
     assert_eq!(ids(&confirmed), vec![late]);
     assert_core_cancel(&confirmed[0], late, ResolutionCause::Cancelled);
+}
+
+/// A turn resolution parks an unreported request until its open folds: the
+/// claim hands over through `report_opened`, so the terminal record follows
+/// the `RequestOpened` instead of dropping as an unknown question. The slot
+/// stays resolved throughout, so a late answer still meets `AlreadyResolved`.
+#[test]
+fn a_turn_resolution_parks_unreported_requests_until_their_open_folds() {
+    let broker = Broker::new();
+    let (id, _waiter) = open_text(&broker);
+    assert!(
+        broker
+            .resolve_turn(turn(), ResolutionCause::Cancelled)
+            .is_empty(),
+        "an unreported claim parks instead of returning early"
+    );
+    assert!(
+        broker
+            .answer(id, Answer::Decline, client("tui"))
+            .is_err_and(|error| already_resolved_by(&error, id, &client("core"))),
+        "the parked slot stays resolved for late answers"
+    );
+    let handover = broker
+        .report_opened(id)
+        .expect("the parked claim hands over at the open");
+    assert_core_cancel(&handover, id, ResolutionCause::Cancelled);
 }
 
 #[test]

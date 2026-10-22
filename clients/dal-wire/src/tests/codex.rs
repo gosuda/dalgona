@@ -393,6 +393,7 @@ fn amendment_acceptance_approves_only_this_call() {
         r#"{"acceptWithExecpolicyAmendment":{}}"#,
         r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":"x"}}"#,
         r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[7]}}"#,
+        r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[]}}"#,
     ] {
         assert_eq!(
             command_decision(Some(&json(malformed))),
@@ -400,6 +401,29 @@ fn amendment_acceptance_approves_only_this_call() {
             "{malformed}"
         );
     }
+}
+
+#[test]
+fn empty_execpolicy_amendment_declines() {
+    let decision = json(r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[]}}"#);
+    assert_eq!(
+        command_decision(Some(&decision)),
+        Answer::Decline,
+        "an amendment that adds nothing must not approve"
+    );
+    let exec = request(Question::Approval {
+        tool: "exec".into(),
+        preview: preview("git push", "git push origin main"),
+        grant: None,
+        call: None,
+    });
+    let result =
+        json(r#"{"decision":{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[]}}}"#);
+    assert_eq!(
+        client_answer(&exec, Some(&result)),
+        Answer::Decline,
+        "an empty amendment must fail closed for exec approvals"
+    );
 }
 
 #[test]
@@ -414,22 +438,19 @@ fn file_change_approval_rejects_command_amendments() {
     };
     let patch = approval("patch");
     let exec = approval("exec");
-    for decision in [
-        r#"{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":[]}}"#,
-        r#"{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"action":"allow"}}}"#,
-    ] {
-        let result = json(&format!(r#"{{"decision":{decision}}}"#));
-        assert_eq!(
-            client_answer(&patch, Some(&result)),
-            Answer::Decline,
-            "{decision}"
-        );
-        assert_eq!(
-            client_answer(&exec, Some(&result)),
-            Answer::Approve,
-            "{decision}"
-        );
-    }
+    let decision =
+        r#"{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"action":"allow"}}}"#;
+    let result = json(&format!(r#"{{"decision":{decision}}}"#));
+    assert_eq!(
+        client_answer(&patch, Some(&result)),
+        Answer::Decline,
+        "{decision}"
+    );
+    assert_eq!(
+        client_answer(&exec, Some(&result)),
+        Answer::Approve,
+        "{decision}"
+    );
     let session = json(r#"{"decision":"acceptForSession"}"#);
     assert_eq!(
         client_answer(&patch, Some(&session)),

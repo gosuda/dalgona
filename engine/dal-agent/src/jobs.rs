@@ -273,17 +273,19 @@ impl JobTable {
     /// Settles one job exactly once and writes the pending ledger lines
     /// before returning: owners that settle outside `jobs.*` ops and the
     /// reaper (the command-job task) must not leave the report buffered,
-    /// or a session that ends here loses it on reopen. A failed write
-    /// keeps the lines in the outbox for the next flush.
+    /// or a session that ends here loses it on reopen.
+    ///
+    /// # Errors
+    /// Returns the ledger error; the settlement stays recorded and the
+    /// lines stay buffered for the next flush.
     pub(crate) async fn settle_durably(
         &mut self,
         id: JobId,
         outcome: JobOutcome,
         tail: Box<[u8]>,
-    ) -> Option<FinishedJob> {
+    ) -> Result<Option<FinishedJob>, LedgerError> {
         let finished = self.settle_once(id, outcome, tail);
-        let _ = self.flush().await;
-        finished
+        self.flush().await.map(|()| finished)
     }
 
     /// Reserves one queued row behind the bounded FIFO.
@@ -550,14 +552,19 @@ impl JobTable {
         Ok(())
     }
 
-    /// Fires every live job's token and settles every live row as cancelled.
+    /// Fires every live job's token, settles every live row as cancelled,
+    /// and flushes the terminal ledger ends before returning.
     ///
-    /// Session close calls this before draining tasks, then flushes: detached
+    /// Session close calls this before draining tasks: detached
     /// reapers dropped by the drain would otherwise abandon their rows with
     /// no terminal ledger end. Firing first still lets a live reaper stop its
     /// child through the group ladder; settling here guarantees the end even
     /// when the reaper never wakes, since `settle_once` keeps the first end.
-    pub(crate) fn cancel_all(&mut self) {
+    ///
+    /// # Errors
+    /// Returns the ledger error; the cancellations stay recorded and the
+    /// lines stay buffered for the next flush.
+    pub(crate) async fn cancel_all(&mut self) -> Result<(), LedgerError> {
         let live: Vec<JobId> = self
             .jobs
             .iter()
@@ -570,6 +577,7 @@ impl JobTable {
             record.cancel.cancel();
             let _ = self.settle_once(id, JobOutcome::Cancelled, Box::new([]));
         }
+        self.flush().await
     }
 
     /// Ends `id` for the extension that spawned it, through `settle_once`.
@@ -1266,7 +1274,8 @@ mod tests {
             JobOutcome::Exited { code: 0 },
             Box::from(&b"report"[..]),
         )
-        .await;
+        .await
+        .expect("settle_durably persists the report");
         drop(jobs);
 
         // No caller flushed after the settle: if the End line had stayed

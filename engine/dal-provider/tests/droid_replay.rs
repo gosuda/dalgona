@@ -1,4 +1,4 @@
-//! Factory Droid proxy replay (ENG-08 / PADD-03).
+//! Factory Droid proxy replay.
 //!
 //! Full-stack proof that the Droid proxy multiplexer reuses the shared Chat
 //! wire: a `factory-droid` entry with a `WorkOS` OAuth credential routes

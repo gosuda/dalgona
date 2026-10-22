@@ -723,6 +723,7 @@ pub(crate) fn droid_default_upstream(model: &str) -> &'static str {
 /// the real client (the backend gates on the version, like Devin's pinned
 /// CLI identity).
 const ANTIGRAVITY_CLIENT_VERSION: &str = "2.19.1";
+const ACCOUNT_VERIFICATION_PREFIX: &str = "Account verification required.";
 
 /// The default `x-api-provider` per Droid model id, transcribed from the
 /// first entry of each `upstream-rotation` in the pinned Factory registry.
@@ -1499,22 +1500,25 @@ where
                                 code,
                                 message,
                                 ..
-                            } => matches!(
-                                crate::retry::classify(
-                                    Some(*status),
-                                    code.as_deref(),
-                                    message,
-                                    &RequestState {
-                                        family: context.family,
-                                        provider: &context.provider,
-                                        model: &context.model,
-                                        oauth: true,
-                                        refreshed: false,
-                                        delivered: false,
-                                    },
-                                ),
-                                RetryDecision::Retry(_)
-                            ),
+                            } => {
+                                !message.starts_with(ACCOUNT_VERIFICATION_PREFIX)
+                                    && matches!(
+                                        crate::retry::classify(
+                                            Some(*status),
+                                            code.as_deref(),
+                                            message,
+                                            &RequestState {
+                                                family: context.family,
+                                                provider: &context.provider,
+                                                model: &context.model,
+                                                oauth: true,
+                                                refreshed: false,
+                                                delivered: false,
+                                            },
+                                        ),
+                                        RetryDecision::Retry(_)
+                                    )
+                            }
                             AttemptFailure::Provider(ProviderError::Transport { .. }) => true,
                             AttemptFailure::Provider(_) => false,
                         };
@@ -1662,7 +1666,7 @@ async fn google_status_failure(
     {
         let message = transport_mod::redact_text(
             format!(
-                "Account verification required. Visit {url} to continue, then retry your request."
+                "{ACCOUNT_VERIFICATION_PREFIX} Visit {url} to continue, then retry your request."
             ),
             secrets,
         );

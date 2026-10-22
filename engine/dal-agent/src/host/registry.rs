@@ -1156,9 +1156,13 @@ impl Host {
         );
         let mode = self.state.shared.config.mode();
         let configured_model = self.state.shared.config.model().map(ModelRoute::from_id);
+        let requested_model = self
+            .default_route()
+            .await
+            .or_else(|| configured_model.clone());
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
-                model: configured_model.clone(),
+                model: requested_model,
                 thinking,
                 approval,
                 name: None,
@@ -2322,9 +2326,10 @@ mod tests {
 
     /// Three sessions whose end hooks block on held gates: one shared
     /// deadline bounds the whole close phase to a single grace (a fresh
-    /// per-session timeout would cost one grace per session), the blocked
-    /// tails stay parked and reported rather than detached, and every
-    /// entered hook is accounted for when cancellation drops its future.
+    /// per-session timeout would cost one grace per session), the hurried
+    /// tails are drained before shutdown returns so nothing outlives it,
+    /// and every entered hook is accounted for when cancellation drops
+    /// its future.
     #[tokio::test(start_paused = true)]
     async fn one_deadline_bounds_the_whole_close_phase_with_blocked_sessions() {
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -2363,9 +2368,9 @@ mod tests {
             report.sessions_closed >= 1,
             "the first close always runs to the deadline: {report:?}"
         );
-        assert!(
-            report.tasks_remaining >= 1,
-            "blocked end tails are reported as pending work, never detached: {report:?}"
+        assert_eq!(
+            report.tasks_remaining, 0,
+            "shutdown drains hurried teardown tails; nothing outlives shutdown: {report:?}"
         );
         let ends = recorded_ends(&log);
         assert!(
@@ -2467,9 +2472,10 @@ mod tests {
     }
 
     /// Two sessions whose end hooks each hold three quarters of the budget
-    /// in controlled time: the first close finishes and publishes inside the
-    /// one shared deadline, the second is cut at that same deadline — the
-    /// budget is spent across closes, never restarted per session.
+    /// in controlled time: the first close finishes inside the one shared
+    /// deadline, the second is hurried at that same deadline and then
+    /// drained, so both publish — the budget is still spent across closes,
+    /// never restarted per session, as the elapsed bound pins.
     #[tokio::test(start_paused = true)]
     async fn the_close_budget_is_spent_across_closes_not_restarted_per_session() {
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -2519,8 +2525,8 @@ mod tests {
         }
         assert_eq!(
             removed.len(),
-            1,
-            "exactly the close that finished inside the budget published its removal: {removed:?}"
+            2,
+            "the hurried close still publishes its removal once drained: {removed:?}"
         );
         let ends = recorded_ends(&log);
         assert!(

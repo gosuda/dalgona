@@ -480,7 +480,7 @@ pub(crate) fn plugin_missing(name: &str, dir: &Path) -> [String; 2] {
 /// diagnostic, including `path:line:col` where the failure has a location.
 pub(crate) fn plugin_failed_to_load(name: &str, detail: &str) -> [String; 2] {
     [
-        format!("dalgon: plugin \"{name}\" failed to load: {detail}"),
+        format!("dalgon: plugin \"{name}\" failed to load: plugin load failed: {detail}"),
         format!("Fix the error and run dalgon again, or remove \"{name}\" from the plugins key."),
     ]
 }

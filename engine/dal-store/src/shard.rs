@@ -58,11 +58,12 @@ enum Job {
     Register {
         journal: Journal,
         blob_dir: Option<PathBuf>,
-        done: oneshot::Sender<Result<usize, JournalError>>,
+        done: oneshot::Sender<Result<(usize, u64), JournalError>>,
     },
     Append {
         session: SessionId,
         slot: usize,
+        generation: u64,
         batch: Vec<u8>,
         blobs: Vec<PendingBlob>,
         done: oneshot::Sender<Result<Receipt, StoreError>>,
@@ -75,6 +76,7 @@ enum Job {
     BlobsPublished(AppendCall),
     Retire {
         slot: usize,
+        generation: u64,
         done: Option<oneshot::Sender<()>>,
         /// Dropped only after the worker dropped the physical journal, so what
         /// guards the journal file (its session lock) outlives every write
@@ -83,7 +85,7 @@ enum Job {
     },
     /// A staged durability sync failed off-thread: the bytes it covered can
     /// no longer be rolled back in place, so the journal is marked damaged.
-    Damaged { slot: usize },
+    Damaged { slot: usize, generation: u64 },
     #[cfg(test)]
     Hold(Box<dyn FnOnce() + Send>),
 }
@@ -93,6 +95,7 @@ enum Job {
 struct AppendCall {
     session: SessionId,
     slot: usize,
+    generation: u64,
     batch: Vec<u8>,
     done: oneshot::Sender<Result<Receipt, StoreError>>,
 }
@@ -344,6 +347,7 @@ enum Then {
     /// beforehand); resolve the receipt.
     Resolve {
         slot: usize,
+        generation: u64,
         receipt: Receipt,
         done: oneshot::Sender<Result<Receipt, StoreError>>,
     },
@@ -411,6 +415,7 @@ fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
         match job.then {
             Then::Resolve {
                 slot,
+                generation,
                 receipt,
                 done,
             } => {
@@ -418,7 +423,7 @@ fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
                     // FIFO-ordered behind every append queued so far: the mark
                     // lands before later appends run, so they fail instead of
                     // writing onto bytes whose durability is no longer trusted.
-                    let _ = job.queue.push_control(Job::Damaged { slot });
+                    let _ = job.queue.push_control(Job::Damaged { slot, generation });
                 }
                 let _ = done.send(result.map(|()| receipt));
             }
@@ -442,7 +447,7 @@ fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
 }
 struct RegistrationReply {
     queue: Arc<Queue>,
-    receiver: Option<oneshot::Receiver<Result<usize, JournalError>>>,
+    receiver: Option<oneshot::Receiver<Result<(usize, u64), JournalError>>>,
 }
 
 impl Drop for RegistrationReply {
@@ -451,9 +456,10 @@ impl Drop for RegistrationReply {
             return;
         };
         receiver.close();
-        if let Ok(Ok(slot)) = receiver.try_recv() {
+        if let Ok(Ok((slot, generation))) = receiver.try_recv() {
             let _ = self.queue.push_control(Job::Retire {
                 slot,
+                generation,
                 done: None,
                 hold: None,
             });
@@ -609,11 +615,12 @@ impl Shards {
             None => return Err(journal_closed(session)),
         };
         registration.receiver = None;
-        let slot = response.map_err(|_| journal_closed(session))??;
+        let (slot, generation) = response.map_err(|_| journal_closed(session))??;
         Ok(Lane {
             queue,
             session,
             slot,
+            generation,
             pending: None,
             retiring: false,
             retired: None,
@@ -687,6 +694,7 @@ pub(crate) struct Lane {
     queue: Arc<Queue>,
     session: SessionId,
     slot: usize,
+    generation: u64,
     pending: Option<(
         std::time::Instant,
         oneshot::Receiver<Result<Receipt, StoreError>>,
@@ -743,6 +751,7 @@ impl Lane {
             self.queue.enqueue(Job::Append {
                 session: self.session,
                 slot: self.slot,
+                generation: self.generation,
                 batch,
                 blobs,
                 done,
@@ -787,6 +796,7 @@ impl Lane {
             let (done, reply) = oneshot::channel();
             if !self.queue.push_control(Job::Retire {
                 slot: self.slot,
+                generation: self.generation,
                 done: Some(done),
                 hold: None,
             }) {
@@ -824,6 +834,7 @@ impl Lane {
         self.retiring = true;
         let _ = self.queue.push_control(Job::Retire {
             slot: self.slot,
+            generation: self.generation,
             done: None,
             hold: Some(hold),
         });
@@ -836,6 +847,7 @@ impl Drop for Lane {
             // The worker may already be stopped; its slot table was then dropped.
             let _ = self.queue.push_control(Job::Retire {
                 slot: self.slot,
+                generation: self.generation,
                 done: None,
                 hold: None,
             });
@@ -866,8 +878,9 @@ impl SyncFan {
 
 /// The worker-local slot table is the sole owner of this shard's journals.
 fn run(queue: &Arc<Queue>, sync: &SyncFan) {
-    let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
-    let mut free = Vec::new();
+    let mut journals: Vec<Option<(Journal, Option<PathBuf>, u64)>> = Vec::new();
+    let mut generations: Vec<u64> = Vec::new();
+    let mut free: Vec<usize> = Vec::new();
     while let Some(job) = queue.pop() {
         match job {
             Job::Register {
@@ -875,12 +888,17 @@ fn run(queue: &Arc<Queue>, sync: &SyncFan) {
                 blob_dir,
                 done,
             } => {
-                let slot = free.pop().unwrap_or_else(|| {
+                let (slot, generation) = if let Some(slot) = free.pop() {
+                    let generation = generations[slot].wrapping_add(1);
+                    generations[slot] = generation;
+                    (slot, generation)
+                } else {
                     journals.push(None);
-                    journals.len() - 1
-                });
-                journals[slot] = Some((journal, blob_dir));
-                if done.send(Ok(slot)).is_err() {
+                    generations.push(0);
+                    (journals.len() - 1, 0)
+                };
+                journals[slot] = Some((journal, blob_dir, generation));
+                if done.send(Ok((slot, generation))).is_err() {
                     drop(journals[slot].take());
                     free.push(slot);
                 }
@@ -888,67 +906,43 @@ fn run(queue: &Arc<Queue>, sync: &SyncFan) {
             Job::Append {
                 session,
                 slot,
+                generation,
                 batch,
                 blobs,
                 done,
-            } => {
-                let call = AppendCall {
+            } => append(
+                &mut journals,
+                queue,
+                sync,
+                AppendCall {
                     session,
                     slot,
+                    generation,
                     batch,
                     done,
-                };
-                if blobs.is_empty() {
-                    // Nothing to publish: the batch can write immediately.
-                    journalize(&mut journals, queue, sync, call);
-                    continue;
-                }
-                // Phase one: write blob temps on the worker and hand the
-                // ordered publish steps to the syncer. The journal write waits
-                // for `BlobsPublished` so bytes can never exist before the
-                // blobs they reference are durable.
-                let mut steps = Vec::new();
-                let staged = match journals.get_mut(slot).and_then(Option::as_mut) {
-                    Some((_, blob_dir)) => publish(blobs, blob_dir.as_deref(), &mut steps),
-                    None => Err(closed(call.session)),
-                };
-                match staged {
-                    Ok(()) => {
-                        let job = SyncJob {
-                            born: std::time::Instant::now(),
-                            steps,
-                            then: Then::Journalize(call),
-                            queue: Arc::clone(queue),
-                        };
-                        if let Err(unsent) = sync.send(slot, job) {
-                            // The syncer died: finish the publishes inline,
-                            // then the journal write, on the worker.
-                            let job = unsent.0;
-                            let Then::Journalize(call) = job.then else {
-                                debug_assert!(false, "only Journalize jobs reach this arm");
-                                continue;
-                            };
-                            match finish_steps(job.steps) {
-                                Ok(()) => journalize(&mut journals, queue, sync, call),
-                                Err(failure) => {
-                                    let _ = call.done.send(Err(failure));
-                                }
-                            }
-                        }
-                    }
-                    Err(failure) => {
-                        let _ = call.done.send(Err(failure));
-                    }
-                }
-            }
+                },
+                blobs,
+            ),
             Job::BlobsPublished(call) => journalize(&mut journals, queue, sync, call),
-            Job::Damaged { slot } => {
-                if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut) {
+            Job::Damaged { slot, generation } => {
+                if let Some((journal, _, current)) = journals.get_mut(slot).and_then(Option::as_mut)
+                    && *current == generation
+                {
                     journal.mark_damaged();
                 }
             }
-            Job::Retire { slot, done, hold } => {
-                if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::take) {
+            Job::Retire {
+                slot,
+                generation,
+                done,
+                hold,
+            } => {
+                let live = matches!(
+                    journals.get(slot),
+                    Some(Some((_, _, current))) if *current == generation
+                );
+                if live && let Some((journal, _, _)) = journals.get_mut(slot).and_then(Option::take)
+                {
                     drop(journal);
                     free.push(slot);
                 }
@@ -963,12 +957,64 @@ fn run(queue: &Arc<Queue>, sync: &SyncFan) {
     }
 }
 
+/// Stages one append: blob-less batches journalize immediately; blob-bearing
+/// batches hand their ordered publish steps to the syncer first, so bytes can
+/// never exist before the blobs they reference are durable.
+fn append(
+    journals: &mut [Option<(Journal, Option<PathBuf>, u64)>],
+    queue: &Arc<Queue>,
+    sync: &SyncFan,
+    call: AppendCall,
+    blobs: Vec<PendingBlob>,
+) {
+    if blobs.is_empty() {
+        journalize(journals, queue, sync, call);
+        return;
+    }
+    let mut steps = Vec::new();
+    let staged = match journals.get_mut(call.slot).and_then(Option::as_mut) {
+        Some((_, blob_dir, current)) if *current == call.generation => {
+            publish(blobs, blob_dir.as_deref(), &mut steps)
+        }
+        _ => Err(closed(call.session)),
+    };
+    let slot = call.slot;
+    match staged {
+        Ok(()) => {
+            let job = SyncJob {
+                born: std::time::Instant::now(),
+                steps,
+                then: Then::Journalize(call),
+                queue: Arc::clone(queue),
+            };
+            if let Err(unsent) = sync.send(slot, job) {
+                // The syncer died: finish the publishes inline, then the
+                // journal write, on the worker.
+                let job = unsent.0;
+                let Then::Journalize(call) = job.then else {
+                    debug_assert!(false, "only Journalize jobs reach this arm");
+                    return;
+                };
+                match finish_steps(job.steps) {
+                    Ok(()) => journalize(journals, queue, sync, call),
+                    Err(failure) => {
+                        let _ = call.done.send(Err(failure));
+                    }
+                }
+            }
+        }
+        Err(failure) => {
+            let _ = call.done.send(Err(failure));
+        }
+    }
+}
+
 /// Writes `batch` on the worker and stages its durability sync for the
 /// syncer. Reached only once every blob the batch references is durable:
 /// immediately for a blob-less append, or through [`Job::BlobsPublished`]
 /// after the publish steps landed.
 fn journalize(
-    journals: &mut [Option<(Journal, Option<PathBuf>)>],
+    journals: &mut [Option<(Journal, Option<PathBuf>, u64)>],
     queue: &Arc<Queue>,
     sync: &SyncFan,
     call: AppendCall,
@@ -976,11 +1022,12 @@ fn journalize(
     let AppendCall {
         session,
         slot,
+        generation,
         batch,
         done,
     } = call;
     let staged = match journals.get_mut(slot).and_then(Option::as_mut) {
-        Some((journal, _)) => journal
+        Some((journal, _, current)) if *current == generation => journal
             .append_unsynced(&batch)
             .map_err(StoreError::from)
             .and_then(|receipt| match journal.stage_sync(receipt) {
@@ -995,7 +1042,7 @@ fn journalize(
                     Err(repair)
                 }
             }),
-        None => Err(closed(session)),
+        _ => Err(closed(session)),
     };
     match staged {
         Ok((file, path, receipt)) => {
@@ -1004,6 +1051,7 @@ fn journalize(
                 steps: vec![SyncStep::Journal { file, path }],
                 then: Then::Resolve {
                     slot,
+                    generation,
                     receipt,
                     done,
                 },
@@ -1015,6 +1063,7 @@ fn journalize(
                 let job = unsent.0;
                 let Then::Resolve {
                     slot,
+                    generation,
                     receipt,
                     done,
                 } = job.then
@@ -1024,7 +1073,9 @@ fn journalize(
                 };
                 let result = finish_steps(job.steps).map(|()| receipt);
                 if result.is_err()
-                    && let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut)
+                    && let Some((journal, _, current)) =
+                        journals.get_mut(slot).and_then(Option::as_mut)
+                    && *current == generation
                 {
                     journal.mark_damaged();
                 }

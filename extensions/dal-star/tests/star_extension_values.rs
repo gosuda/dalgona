@@ -1,4 +1,4 @@
-//! ENG-10 extension-value obligations at the Starlark boundary.
+//! Extension-value obligations at the Starlark boundary.
 //!
 //! Each test pins the boundary's validation behavior for values crossing
 //! from Starlark scripts into `dal-core` extension values: exact text where

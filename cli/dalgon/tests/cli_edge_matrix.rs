@@ -1,6 +1,6 @@
 //! Binary-boundary matrix for headless print, aliases, signals, plugin, and rules.
 //!
-//! Covers the §3 residual for parts 20 + 26 (ENG-18). Every proof runs the
+//! Process-edge proofs. Every proof runs the
 //! REAL built binary with scripted providers or synthetic inputs only: no
 //! network, temp dirs for config/data roots.
 
@@ -142,7 +142,7 @@ fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-// --- Part 20: headless print mode -------------------------------------------
+// --- Headless print mode ----------------------------------------------------
 
 #[test]
 fn headless_print_streams_assistant_text_with_single_trailing_lf() -> Result<(), Box<dyn Error>> {
@@ -276,7 +276,7 @@ fn empty_name_is_usage() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// --- Part 20: aliases ---------------------------------------------------------
+// --- Aliases ------------------------------------------------------------------
 
 #[test]
 fn alias_binaries_report_the_same_package_version() -> Result<(), Box<dyn Error>> {
@@ -338,7 +338,7 @@ fn alias_binaries_share_help_tree_and_config_behavior() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-// --- Part 20: signals ----------------------------------------------------------
+// --- Signals ------------------------------------------------------------------
 
 #[test]
 #[cfg_attr(not(unix), ignore = "POSIX SIGINT delivery only")]
@@ -381,7 +381,7 @@ fn sigint_during_headless_exec_turn_exits_130() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// --- Part 26: plugin CLI --------------------------------------------------------
+// --- Plugin CLI ---------------------------------------------------------------
 
 #[test]
 fn plugin_list_with_no_plugins_is_deterministic_empty() -> Result<(), Box<dyn Error>> {
@@ -526,7 +526,7 @@ fn plugin_grant_fails_closed_for_unknown_and_builtin() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-// --- Part 26: rules CLI ----------------------------------------------------------
+// --- Rules CLI ----------------------------------------------------------------
 
 #[test]
 fn rules_with_no_rules_names_both_roots() -> Result<(), Box<dyn Error>> {

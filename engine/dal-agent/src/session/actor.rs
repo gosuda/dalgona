@@ -1571,8 +1571,10 @@ impl Actor {
         if let Some(backend) = self.backend.get() {
             let jobs = Arc::clone(backend.jobs());
             let mut table = jobs.lock().await;
-            table.cancel_all();
-            let _ = table.flush().await;
+            if let Err(error) = table.cancel_all().await {
+                tracing::warn!(target: "dalgon.agent", session = %self.session, error = %error, "job ledger flush failed");
+                self.broken = Some(format!("job ledger write failed: {error}").into());
+            }
         }
         // 1. Quiesce session tasks; their drops claim and enqueue.
         self.tasks.stop().await;
@@ -2147,11 +2149,18 @@ impl Actor {
             .records
             .iter()
             .any(|record| matches!(record, Record::Name { .. }));
+        let has_reserved = emit
+            .records
+            .iter()
+            .any(|record| matches!(record, Record::TurnReserved { .. }));
         if let Err(error) = self.journal.append(emit.records).await {
             tracing::warn!(target: "dalgon.agent", session = %self.session, error = %error, "journal append failed");
             let message: Box<str> = format!("journal write failed: {error}").into();
             if breaks_session(&error) {
                 self.broken = Some(message.clone());
+            }
+            if has_reserved {
+                return Err(AgentError::Invalid(ValidationError::new(message)));
             }
             return Err(AgentError::PersistenceFailed { message });
         }

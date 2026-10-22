@@ -111,7 +111,12 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     .await;
     let result = match outcome {
         Ok(result) => result,
-        Err(code) => return ExitCode::from(code),
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
     let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
     if let Some(code) = closed.skipped_by {
@@ -171,7 +176,12 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     .await;
     let result = match outcome {
         Ok(result) => result,
-        Err(code) => return ExitCode::from(code),
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
     let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
     if let Some(code) = closed.skipped_by {

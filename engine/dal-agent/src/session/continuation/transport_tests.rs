@@ -1865,3 +1865,57 @@ async fn released_owner_never_resurrects_the_run() {
     );
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn interrupted_first_step_retries_with_a_fresh_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = CursorH2::start(vec![
+        RunScript::new(vec![Step::Hold]),
+        RunScript::new(vec![
+            Step::Send(text_frame("done")),
+            Step::Send(turn_ended_frame(1, 1)),
+        ]),
+    ])
+    .await;
+    let (state, _host) = host_state(dir.path()).await;
+    let set = cursor_set(4, &server.base_url(), dir.path());
+    let session = SessionId::new_v7();
+    let owner = ContinuationOwner::new(SessionTasks::new());
+    let slot = slot_of(&owner);
+    let cancel = CancellationToken::new();
+    let request = cursor_request(&["session_tool"]);
+
+    let first = open(
+        &state,
+        session,
+        &owner,
+        cursor_provider(&set),
+        &request,
+        &cancel,
+    )
+    .await;
+    drop(first);
+    assert!(!slot.is_awaiting());
+
+    let retried = drain(
+        open(
+            &state,
+            session,
+            &owner,
+            cursor_provider(&set),
+            &request,
+            &cancel,
+        )
+        .await,
+    )
+    .await;
+    assert!(ends_in_turn(&retried), "the retry ends: {retried:?}");
+    assert_eq!(
+        server.wire.run_count(),
+        2,
+        "the interrupted step retries with a fresh run"
+    );
+    assert!(owner.release_if_live());
+    assert!(server.wire.h2_only());
+    server.shutdown().await;
+}

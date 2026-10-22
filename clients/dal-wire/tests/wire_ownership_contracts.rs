@@ -1,7 +1,7 @@
-//! ENG-18 wire ownership proofs: auth, heartbeat, reconnect, router, ACP,
+//! Wire ownership proofs: auth, heartbeat, reconnect, router, ACP,
 //! Codex, and A2A.
 //!
-//! Covers the wire-surfaces-part contracts (step 24) at the public API
+//! Covers the wire-surfaces-part contracts at the public API
 //! boundary: token lifecycle, HTTP dispatch and auth, version selection for
 //! ACP, the pinned Codex subset, A2A gating, WebSocket keepalive and close
 //! codes, and `RemoteHost` identity plus reconnect. Every proof drives the

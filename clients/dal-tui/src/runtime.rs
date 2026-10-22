@@ -1176,7 +1176,10 @@ where
         }
         surfaces.live.spin(now);
         dialog_landed = surfaces.paint(io, state, &mut painter, opts, &theme)?;
-        if !dialog_landed {
+        if !dialog_landed
+            && !(surfaces.dialog.is_open()
+                && !crate::render::below_floor(term_width, term_height))
+        {
             surfaces.dialog.tick_without_dialog(Instant::now());
         }
         if surfaces.session.cancel_settled
@@ -2685,8 +2688,7 @@ fn apply_event_at(
             || session.help.is_some()
             || session.overlay)
     {
-        session.interrupt_or_dismiss(live, transcript);
-        return;
+        live.close_expand();
     }
     if let Some(mut confirm) = session.dialog.take() {
         match confirm.key(key) {
@@ -2702,17 +2704,17 @@ fn apply_event_at(
     }
     if dialog.is_open() {
         live.close_expand();
-    }
-    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-        session.apply_signin_key(key);
-        apply_picker_key(session, live, key);
         if let Some(answer) = dialog.key(key) {
             session.pending_answers.push(answer);
         }
-        apply_help_key(session, key, kitty);
+        return;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        session.interrupt_or_dismiss(live, transcript);
         return;
     }
     if session.overlay {
+        apply_overlay_key(session, transcript, key, kitty);
         return;
     }
     if session.signin.is_some() {
@@ -2728,7 +2730,7 @@ fn apply_event_at(
         return;
     }
     if session.help.is_some() {
-        apply_overlay_key(session, transcript, key, kitty);
+        apply_help_key(session, key, kitty);
         return;
     }
     let viewport = screen == crate::Screen::Fullscreen;
@@ -3001,6 +3003,7 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
                     session.popup_base = None;
                     session.popup_index = 0;
                     session.picker = None;
+                    session.update_popup();
                 }
                 Some(PickerAction::ResumeSession(target)) => {
                     if Some(target.id) == session.own {

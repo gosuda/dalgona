@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API connection cut after
-# delivery (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API connection cut after delivery over the `google-generative-ai` family.
 #
 # One exchange: HTTP 200 whose body writes one complete text chunk (207
 # bytes) and 36 bytes of the next chunk, then the server aborts the

@@ -13,8 +13,8 @@
 //! re-encoded.
 //!
 //! Wire sources: with the pinned senpi tree implementing its
-//! `mistral-conversations` api on top of `v1/chat/completions` (a shape the
-//! ENG-05 contract forbids reusing), everything here derives from Mistral's
+//! `mistral-conversations` api on top of `v1/chat/completions` (a shape
+//! never reused here), everything here derives from Mistral's
 //! public API instead and is marked [INFERENCE]: the official generated
 //! `client-ts` (`models/components/conversationevents.ts` and siblings,
 //! read from a scratch clone) fixes the SSE event names, the entry shapes,

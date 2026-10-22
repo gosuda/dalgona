@@ -330,6 +330,7 @@ impl StdioTransport {
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
             result = self.pipe.write_line(body.as_str()) => Ok(result),
         };
+        let transport_cancelled = self.cancel.is_cancelled();
         let write_result = match write_result {
             Err(error) => Err(error),
             Ok(Some(Ok(()))) => Ok(()),
@@ -343,7 +344,7 @@ impl StdioTransport {
         };
         if let Err(error) = write_result {
             inflight.settle().await;
-            if cancel.is_cancelled() || self.cancel.is_cancelled() {
+            if cancel.is_cancelled() || transport_cancelled {
                 return Err(TransportError::Cancelled);
             }
             return Err(error);

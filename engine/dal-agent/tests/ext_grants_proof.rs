@@ -1,4 +1,4 @@
-//! ENG-13 extension grant, budget, cancellation, rollback, and
+//! Extension grant, budget, cancellation, rollback, and
 //! service-boundary proofs over the public [`Host`] surface.
 //!
 //! Every test drives a real session: a scripted model ends each turn

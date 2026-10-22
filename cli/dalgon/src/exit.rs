@@ -334,6 +334,36 @@ mod tests {
             Some(143),
             "the second signal during close must decide the exit status"
         );
+        assert_eq!(
+            closed.report.sessions_closed, 1,
+            "the close still shuts the host even when a signal skips the wait"
+        );
+        drop(host);
+        drop(tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drive_second_signal_still_closes_host_and_preserves_code() {
+        let (tmp, host) = busy_host().await;
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut signals = crate::edge::ShutdownSignals::register();
+        signals.enqueue(143);
+        signals.enqueue(130);
+        let outcome =
+            crate::dispatch::drive(&stop, &mut signals, std::future::pending::<()>()).await;
+        assert_eq!(outcome, Err(130));
+        let Err(code) = outcome else {
+            unreachable!("pending future never completes")
+        };
+        let closed = Ladder {
+            began: Instant::now(),
+        }
+        .close_host_after_quiet_wait(host.clone())
+        .await;
+        assert_eq!(closed.skipped_by, None);
+        assert_eq!(closed.report.sessions_closed, 1);
+        assert_eq!(code, 130);
         drop(host);
         drop(tmp);
     }

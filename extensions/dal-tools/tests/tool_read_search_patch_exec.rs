@@ -1,4 +1,4 @@
-//! ENG-14 tool-boundary proofs: read, search, patch, and exec obligations.
+//! Tool-boundary proofs: read, search, patch, and exec obligations.
 //!
 //! Every test drives the registered `dal-tools` extension through the public
 //! `Tool` seam with a deny/approve test context, exactly as a host would:
@@ -7,7 +7,7 @@
 //! reaches into `pub(crate)` engine internals; a green suite proves the
 //! boundary contracts a model actually meets.
 //!
-//! Obligation map (ledger §2.13–§2.15):
+//! Obligation map:
 //! - RST-02, RST-12, patch containment, ETP-04: path authorization tests.
 //! - PTS-04: stale-input / proof tests (whole-tag round trip, no-tag refusal).
 //! - PTS-06/08: atomic-edit tests (multi-file and overlap failures write nothing).
@@ -24,7 +24,7 @@
 #![expect(
     clippy::expect_used,
     clippy::panic,
-    reason = "eng14 boundary tests fail loudly at their setup boundary"
+    reason = "tool boundary tests fail loudly at their setup boundary"
 )]
 
 use std::path::{Path, PathBuf};
@@ -47,35 +47,35 @@ struct DeadServices;
 
 impl Services for DeadServices {
     fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn fs_write(&self, _who: &Caller, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn net(&self, _who: &Caller, _req: FetchRequest) -> ServiceFuture<'_, FetchResponse> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn run(&self, _who: &Caller, _req: RunRequest) -> ServiceFuture<'_, RunOutput> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn env(&self, _who: &Caller, _key: &str) -> ServiceFuture<'_, Option<String>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn mcp_declarations(&self, _who: &Caller) -> ServiceFuture<'_, Vec<McpDeclaration>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn add_session_tools(
@@ -83,39 +83,39 @@ impl Services for DeadServices {
         _who: &Caller,
         _tools: Vec<(Arc<dyn Tool>, Visibility)>,
     ) -> ServiceFuture<'_, ()> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn jobs(&self, _who: &Caller, _op: JobsOp) -> ServiceFuture<'_, JobsReply> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn scheme(&self, _who: &Caller, _uri: &str) -> ServiceFuture<'_, Option<dal_agent::ext::Doc>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn turn(&self, _who: &Caller, _op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn state(
@@ -123,7 +123,7 @@ impl Services for DeadServices {
         _who: &Caller,
         _op: StateOp,
     ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn model_ready(
@@ -131,15 +131,15 @@ impl Services for DeadServices {
         _who: &Caller,
         _model: dal_core::ModelRoute,
     ) -> ServiceFuture<'_, Option<dal_core::ModelRoute>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn infer_stream(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, EventStream> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn call_tool(
@@ -148,11 +148,11 @@ impl Services for DeadServices {
         _name: &str,
         _args: Box<RawValue>,
     ) -> ServiceFuture<'_, ToolOutcome> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn notify(&self, _who: &Caller, _notice: Notice) {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn append_record(
@@ -161,19 +161,19 @@ impl Services for DeadServices {
         _kind: &str,
         _body: Box<RawValue>,
     ) -> ServiceFuture<'_, EntryId> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 
     fn blob_get(&self, _who: &Caller, _digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        unreachable!("eng14 boundary tests do not use services")
+        unreachable!("tool boundary tests do not use services")
     }
 }
 
@@ -220,7 +220,7 @@ async fn run_approved(tool: &Arc<dyn Tool>, args: &str) -> ToolOutcome {
 
 async fn drive(tool: &Arc<dyn Tool>, args: &str, cx: ToolCx<'static>) -> ToolOutcome {
     let raw = RawValue::parse(args).expect("test args are one JSON value");
-    tool.run(ToolCall::new("eng14", raw), cx).await
+    tool.run(ToolCall::new("probe-call", raw), cx).await
 }
 
 /// Concatenated text parts of a successful outcome; any other outcome fails
@@ -768,10 +768,10 @@ async fn exec_rejects_absolute_escaping_and_missing_cwd() {
             "cwd {bad} is refused"
         );
     }
-    let args = changes(&sonic_rs::json!({ "command": "echo hi", "cwd": "no-such-eng14-dir" }));
+    let args = changes(&sonic_rs::json!({ "command": "echo hi", "cwd": "no-such-dir" }));
     assert_eq!(
         err_text(run(&exec, &args).await),
-        "exec: cwd no-such-eng14-dir does not exist"
+        "exec: cwd no-such-dir does not exist"
     );
 
     // Control: a workspace-relative cwd passes validation. The deny-context
@@ -871,13 +871,13 @@ async fn search_index_reflects_patch_without_stale_hits() {
     // Prime the index: the novel token is absent.
     let args = changes(&sonic_rs::json!({
         "mode": "grep",
-        "pattern": "wombat_novel_eng14",
+        "pattern": "wombat_novel_probe",
         "literal": true,
         "path": rel,
     }));
     let primed = ok_text(run(&search, &args).await);
     assert!(
-        primed.contains("No matches for wombat_novel_eng14"),
+        primed.contains("No matches for wombat_novel_probe"),
         "prime query misses, got: {primed}"
     );
     assert!(
@@ -887,7 +887,7 @@ async fn search_index_reflects_patch_without_stale_hits() {
 
     // Introduce the token through the patch tool, which must dirty the index.
     let args = changes(&sonic_rs::json!({ "changes": [
-        { "path": path, "old": "plain filler\n", "new": "wombat_novel_eng14 appears\n" },
+        { "path": path, "old": "plain filler\n", "new": "wombat_novel_probe appears\n" },
     ] }));
     let text = ok_text(run_approved(&patch_tool, &args).await);
     assert!(
@@ -898,7 +898,7 @@ async fn search_index_reflects_patch_without_stale_hits() {
     // A stale snapshot would still report no matches; freshness rebuilds.
     let args = changes(&sonic_rs::json!({
         "mode": "grep",
-        "pattern": "wombat_novel_eng14",
+        "pattern": "wombat_novel_probe",
         "literal": true,
         "path": rel,
     }));
@@ -925,27 +925,27 @@ async fn search_find_reflects_patch_created_files() {
 
     let args = changes(&sonic_rs::json!({
         "mode": "find",
-        "pattern": "*.eng14f",
+        "pattern": "*.probefind",
         "path": rel,
     }));
     assert!(
-        ok_text(run(&search, &args).await).contains("No files match *.eng14f"),
+        ok_text(run(&search, &args).await).contains("No files match *.probefind"),
         "prime find misses"
     );
 
     let args = changes(&sonic_rs::json!({ "changes": [
-        { "path": format!("{rel}/made.eng14f"), "create": "made\n" },
+        { "path": format!("{rel}/made.probefind"), "create": "made\n" },
     ] }));
     let text = ok_text(run_approved(&patch_tool, &args).await);
     assert!(text.starts_with("Success"), "create applies, got: {text}");
 
     let args = changes(&sonic_rs::json!({
         "mode": "find",
-        "pattern": "*.eng14f",
+        "pattern": "*.probefind",
         "path": rel,
     }));
     assert!(
-        ok_text(run(&search, &args).await).contains("made.eng14f"),
+        ok_text(run(&search, &args).await).contains("made.probefind"),
         "created file is findable without a stale snapshot"
     );
 }

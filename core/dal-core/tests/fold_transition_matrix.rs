@@ -4,7 +4,7 @@
     reason = "integration tests fail loudly"
 )]
 
-//! ENG-10 fold state-transition matrix (FLD-03A, FLD-03B, FLD-05A, FLD-06A).
+//! Fold state-transition matrix (lifecycle reachability + every event variant).
 //!
 //! Drives one `Session` into every reachable lifecycle phase through the
 //! public event API, then fires one instance of every `Event` variant (with a

@@ -4,7 +4,7 @@
     reason = "integration tests fail loudly"
 )]
 
-//! ENG-01 shared-contract regression tests for the journal codec.
+//! Shared-contract regression tests for the journal codec.
 //!
 //! Covers call identity, terminal outcomes, cancellation ordering,
 //! ownership boundaries, and decode/encode parity through public APIs.

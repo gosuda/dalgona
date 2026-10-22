@@ -1,12 +1,12 @@
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
 
-//! ENG-10 vocabulary boundary proofs: steps 1-3 (`id`, `workspace`,
+//! Vocabulary boundary proofs: id, workspace,
 //! `content`, `model` core + pricing) through the public `dal_core::` API.
 //!
 //! Each test pins a typed-boundary contract: invalid states are rejected at
 //! construction AND at deserialization with typed errors, never panics or
 //! silent normalisation. Where the code deliberately evolved beyond the
-//! step text (opaque ids accept empty; `Api` routes carry no grammar), the
+//! original wording (opaque ids accept empty; `Api` routes carry no grammar), the
 //! test pins the code behavior and the report records the drift.
 
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ fn quoted(value: &str) -> String {
     format!("\"{value}\"")
 }
 
-// VOC-01A: canonical lowercase UUIDv7, all five id types.
+// Canonical lowercase UUIDv7, all five id types.
 #[test]
 fn uuid_ids_reject_noncanonical_shapes_at_parse_and_decode() {
     const CANONICAL: &str = "01927f40-0000-7000-8000-000000000001";
@@ -120,7 +120,7 @@ fn uuid_ids_reject_noncanonical_shapes_at_parse_and_decode() {
     );
 }
 
-// VOC-01B: nonzero counters, all five counter types.
+// Nonzero counters, all five counter types.
 #[test]
 fn counter_ids_reject_zero_and_noninteger_shapes() {
     assert_eq!(decode::<EntryId>("1").expect("decode").get(), 1);
@@ -154,7 +154,7 @@ fn counter_ids_reject_zero_and_noninteger_shapes() {
     }
 }
 
-// VOC-01C: opaque ids preserve text verbatim, including empty; reject non-strings.
+// Opaque ids preserve text verbatim, including empty; reject non-strings.
 // Code evidence: `engine/dal-provider/src/family/devin/history.rs` skips tool
 // calls with an empty call id and `engine/dal-provider/src/family/google/shared.rs`
 // mints a fresh id for absent/empty/reused provider ids, so empty text must
@@ -186,7 +186,7 @@ fn opaque_id_decoding_preserves_text_verbatim() {
     }
 }
 
-// VOC-01D: BLAKE3 digest grammar.
+// BLAKE3 digest grammar.
 #[test]
 fn blob_id_rejects_off_spec_spellings() {
     let canonical = BlobId::from_bytes(b"stored").to_string();
@@ -217,7 +217,7 @@ fn blob_id_rejects_off_spec_spellings() {
     }
 }
 
-// VOC-01E: absolute workspace, lexical preservation.
+// Absolute workspace, lexical preservation.
 #[test]
 fn workspace_rejects_relative_and_preserves_absolute_lexically() {
     for relative in ["relative/child", "", ".", "..", "../escape"] {
@@ -249,7 +249,7 @@ fn workspace_rejects_relative_and_preserves_absolute_lexically() {
     assert_eq!(workspace.into_path_buf(), absolute);
 }
 
-// VOC-02B: inline limit counts bytes; exact error text is the contract.
+// Inline limit counts bytes; exact error text is the contract.
 #[test]
 fn content_inline_limit_counts_bytes_with_exact_error() {
     for length in [ContentLimits::INLINE_BYTES, ContentLimits::INLINE_BYTES + 1] {
@@ -304,7 +304,7 @@ fn content_inline_limit_counts_bytes_with_exact_error() {
     );
 }
 
-// VOC-02A: part shapes, serde tags, and the `validate`-is-the-gate rule.
+// Part shapes, serde tags, and the `validate`-is-the-gate rule.
 #[test]
 fn content_part_serde_leaves_limit_to_validate() {
     let blob_id = BlobId::from_bytes(b"stored");
@@ -421,7 +421,7 @@ fn check_family_wire_names() {
     assert!(decode::<Family>("1").is_err());
 }
 
-// VOC-03A: route grammars at construction AND decode; family wire names;
+// Route grammars at construction AND decode; family wire names;
 // `from_id` prefix mapping.
 #[test]
 fn model_route_grammars_enforced_at_construction_and_decode() {
@@ -532,7 +532,7 @@ fn api_route_empty_model_decodes_with_journal_holding_nonempty_rule() {
     );
 }
 
-// VOC-03B: depth bound precedes cycle scan; plain repeats are not cycles.
+// Depth bound precedes cycle scan; plain repeats are not cycles.
 #[test]
 fn synthetic_chain_reports_depth_before_cycle_and_ignores_plain_repeats() {
     let synth = |id: &str| ModelRoute::synthetic(id).expect("valid synthetic");
@@ -613,7 +613,7 @@ fn priced_usage() -> Usage {
     }
 }
 
-// VOC-03C: precedence provider > configured > compiled > unknown; unknown is
+// Precedence provider > configured > compiled > unknown; unknown is
 // never invented as zero; invalid provider costs do not fall back.
 #[test]
 fn usage_cost_precedence_never_invents_zero() {
@@ -671,7 +671,7 @@ fn usage_cost_precedence_never_invents_zero() {
     );
 }
 
-// VOC-03D: four-rate formula, disjoint counters, invalid inputs stay unknown.
+// Four-rate formula, disjoint counters, invalid inputs stay unknown.
 #[test]
 fn usage_price_formula_and_invalid_inputs() {
     let usage = priced_usage();
@@ -733,7 +733,7 @@ fn usage_price_formula_and_invalid_inputs() {
     );
 }
 
-// VOC-03D tiers + premium: one request-wide card, highest exceeded boundary;
+// Price tiers + premium: one request-wide card, highest exceeded boundary;
 // premium-only responses price unknown unless the provider reported a cost.
 #[test]
 fn price_tier_and_premium_semantics() {

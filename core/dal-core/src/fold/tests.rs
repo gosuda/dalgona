@@ -5119,7 +5119,7 @@ fn declared_fold_mirrors_job_records_into_session_jobs() {
 }
 #[cfg(test)]
 mod threshold_estimate_fallback {
-    //! ENG-17 C-05: the automatic-threshold trigger must estimate from the
+    //! The automatic-threshold trigger must estimate from the
     //! projected branch whenever measured usage is absent, stale (pre-dating a
     //! compaction), or tied to another model, using the shared token-estimation
     //! owner in `crate::tokens`. A change in the turn outcome (a `Compact`

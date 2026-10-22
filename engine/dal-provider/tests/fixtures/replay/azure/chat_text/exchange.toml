@@ -1,5 +1,4 @@
 # Synthetic replay fixture for the Azure OpenAI Chat transport proof
-# (ENG-02: Azure route lowering over the Chat family).
 #
 # Authored from the Azure adapter contract documented in
 # `engine/dal-provider/src/family/azure.rs` (`chat_target`: a loopback base

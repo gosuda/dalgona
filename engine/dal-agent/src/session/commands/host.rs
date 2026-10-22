@@ -331,7 +331,9 @@ impl CommandHost for DriverHost {
                 .await
                 .unwrap_or_default()
                 .into_boxed_slice();
-            jobs.lock().await.settle_durably(id, outcome, tail).await;
+            if let Err(error) = jobs.lock().await.settle_durably(id, outcome, tail).await {
+                tracing::warn!(target: "dalgon.agent", job = %id, error = %error, "job ledger flush failed");
+            }
         });
         id
     }

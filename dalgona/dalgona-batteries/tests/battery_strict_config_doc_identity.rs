@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! ENG-23 gap proofs: strict-config and doc-page identity for the
+//! Gap proofs: strict-config and doc-page identity for the
 //! web / plan-todo / MCP / review batteries.
 //!
 //! Pure offline assertions over the public battery surface: no network,
-//! no host, no journal. Each test names the REQ row it closes.
+//! no host, no journal. Each test names the contract row it closes.
 
 use dalgona_batteries::{
     mcp::{MCP_DOC, McpSettings, mcp},
@@ -48,7 +48,7 @@ fn full_web_section() -> toml::Value {
     ])
 }
 
-/// REQ-37-12: the seven `[plugin.web]` fields decode strictly; every bad
+/// The seven `[plugin.web]` fields decode strictly; every bad
 /// field fails with the exact typed message under the shared prefix.
 #[test]
 fn web_strict_config_accepts_the_canonical_section_and_rejects_each_bad_field() {
@@ -146,7 +146,7 @@ fn web_strict_config_accepts_the_canonical_section_and_rejects_each_bad_field() 
     }
 }
 
-/// REQ-37-14: `dalgona://web` serves the battery's `WEB_DOC` identity.
+/// `dalgona://web` serves the battery's `WEB_DOC` identity.
 #[test]
 fn web_doc_page_names_both_tools_and_the_config_table() {
     assert!(WEB_DOC.starts_with("# web\n"), "title line drifted");
@@ -161,7 +161,7 @@ fn web_doc_page_names_both_tools_and_the_config_table() {
     }
 }
 
-/// REQ-38-18: `dalgona://plan` serves the battery's `PLAN_DOC` identity.
+/// `dalgona://plan` serves the battery's `PLAN_DOC` identity.
 /// The entry table maps both `plan` and `work` at it (`docs.rs:36,38`).
 #[test]
 fn plan_doc_page_names_plan_todo_and_both_schemes() {
@@ -180,7 +180,7 @@ fn plan_doc_page_names_plan_todo_and_both_schemes() {
     }
 }
 
-/// REQ-38-19: `[plugin.plan]` is strict with a default-enabled section.
+/// `[plugin.plan]` is strict with a default-enabled section.
 #[test]
 fn plan_config_defaults_to_enabled_and_rejects_unknown_or_untyped_keys() {
     let default = PlanConfig::parse_config(None).expect("missing section defaults");
@@ -205,7 +205,7 @@ fn plan_config_defaults_to_enabled_and_rejects_unknown_or_untyped_keys() {
     );
 }
 
-/// REQ-39-15: `dalgona://mcp` serves the battery's `MCP_DOC` identity.
+/// `dalgona://mcp` serves the battery's `MCP_DOC` identity.
 #[test]
 fn mcp_doc_page_names_revisions_transports_and_limits() {
     assert!(MCP_DOC.starts_with("# mcp\n"), "title line drifted");
@@ -221,7 +221,7 @@ fn mcp_doc_page_names_revisions_transports_and_limits() {
     }
 }
 
-/// Supports REQ-39-02/14 boundary: `[plugin.mcp]` carries no user settings;
+/// Supports the settings boundary: `[plugin.mcp]` carries no user settings;
 /// anything but the shared switch is a typed rejection.
 #[test]
 fn mcp_settings_default_enabled_and_reject_unknown_keys_strictly() {
@@ -251,7 +251,7 @@ fn mcp_settings_default_enabled_and_reject_unknown_keys_strictly() {
     assert_eq!(section_error.to_string(), "plugin.mcp must be a table");
 }
 
-/// REQ-40-12: `dalgona://review` serves the battery's `REVIEW_DOC` identity.
+/// `dalgona://review` serves the battery's `REVIEW_DOC` identity.
 #[test]
 fn review_doc_page_names_caps_convergence_and_restart_grant() {
     assert!(REVIEW_DOC.starts_with("# review\n"), "title line drifted");
@@ -269,7 +269,7 @@ fn review_doc_page_names_caps_convergence_and_restart_grant() {
     }
 }
 
-/// REQ-40-01: `[plugin.review]` defaults and strict range rejection.
+/// `[plugin.review]` defaults and strict range rejection.
 #[test]
 fn review_config_defaults_and_rejects_unknown_or_out_of_range_values() {
     let default = ReviewConfig::parse_config(None).expect("missing section defaults");
@@ -324,10 +324,10 @@ fn review_config_defaults_and_rejects_unknown_or_out_of_range_values() {
     );
 }
 
-/// Cross-battery wiring: every ENG-23 factory still registers under its
+/// Cross-battery wiring: every battery factory still registers under its
 /// fixed identity, so the doc pages above belong to a loadable battery.
 #[test]
-fn eng23_factories_register_without_touching_the_network() {
+fn battery_factories_register_without_touching_the_network() {
     web_exists().expect("web battery registers");
     work_exists().expect("work battery registers");
     mcp_exists().expect("mcp battery registers");
@@ -350,10 +350,10 @@ fn work_exists() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn mcp_exists() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = std::env::temp_dir().join("eng23-mcp-config-probe");
+    let dir = std::env::temp_dir().join("battery-mcp-config-probe");
     let cfg = dalgona_batteries::mcp::McpConfig {
         tokens_path: dir.join("tokens.json"),
-        client_version: String::from("eng23-probe"),
+        client_version: String::from("battery-probe"),
     };
     let _ = mcp(&cfg)?;
     Ok(())

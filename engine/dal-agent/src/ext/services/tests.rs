@@ -544,6 +544,10 @@ fn cancel_next(broker: &Broker, turn: TurnId) {
         .next()
         .expect("an open request")
         .id;
+    // The fake backend's `request_opened` is a no-op, so model the actor's
+    // fold of the open: `resolve_turn` parks unreported claims until
+    // `report_opened` hands them over.
+    let _ = broker.report_opened(id);
     let resolved = broker.resolve_turn(turn, ResolutionCause::Cancelled);
     assert!(
         resolved.iter().any(|item| item.request.id == id),

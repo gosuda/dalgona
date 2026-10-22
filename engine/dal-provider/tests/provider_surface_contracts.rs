@@ -1,4 +1,4 @@
-//! ENG-01 shared-contract regression tests for the provider surface.
+//! Shared-contract regression tests for the provider surface.
 //!
 //! Covers provider/call identity (`provider/def.rs`), terminal outcomes and
 //! cancellation ordering (`error/`), and credential-ownership boundaries plus

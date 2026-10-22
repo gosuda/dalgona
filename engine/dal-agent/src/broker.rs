@@ -330,7 +330,14 @@ impl Broker {
     }
 
     /// Resolves every still-unresolved request of one turn as a core `Cancel`,
-    /// oldest first, reported or not; resolved slots stay for late answers.
+    /// oldest first; resolved slots stay for late answers.
+    ///
+    /// One pass under one lock. Reported requests return for the caller to
+    /// queue; unreported ones keep their claim parked for
+    /// [`Self::report_opened`], so the terminal record always follows the
+    /// folded `RequestOpened` instead of dropping as an unknown question.
+    /// Either way each slot is resolved here once, so later answers,
+    /// withdrawals, deadlines, and turn resolutions find it taken.
     ///
     /// This is the actor's backstop after a turn's terminal record, so `cause`
     /// is `Cancelled` when the driver confirmed a cancel and `Withdrawn` for
@@ -360,7 +367,12 @@ impl Broker {
             if slot.turn != Some(turn) || slot.resolved_by.is_some() {
                 continue;
             }
-            resolved.push(slot.claim_cancel(cause));
+            let claim = slot.claim_cancel(cause);
+            if slot.reported {
+                resolved.push(claim);
+            } else {
+                slot.parked = Some(claim);
+            }
         }
         resolved
     }

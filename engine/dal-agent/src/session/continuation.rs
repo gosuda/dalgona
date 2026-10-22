@@ -40,7 +40,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use dal_core::{CallId, InferFailure, ModelRequest, Part};
-use dal_provider::{EventStream, HostToolResult, Provider, ProviderError, ProviderRun};
+use dal_provider::{EventStream, HostToolResult, Provider, ProviderError, ProviderRun, RunState};
 use tokio_util::sync::CancellationToken;
 
 use super::tasks::SessionTasks;
@@ -717,8 +717,12 @@ fn plan_cover(
 ///   drops the fresh run instead of installing it, and a failed handshake
 ///   restores `Idle` through the reservation guard.
 /// - Live with a staged stream: takes and returns it.
-/// - Live without one, or a resume in flight: `InvalidRequest` (awaiting
-///   means respond first).
+/// - Live without one whose run still streams or awaits: `InvalidRequest`
+///   (awaiting means respond first).
+/// - Live without one whose run already ended (`Closed`, `Released`, or
+///   `Lost`): drops the dead conversation and reserves `Opening` for a
+///   fresh [`Provider::open_run`], so an interrupted first step retries.
+/// - A resume or handshake in flight: `InvalidRequest`.
 /// - Released: `InvalidRequest`.
 ///
 /// The provider handle moves in and is stored for the later resumes, so the
@@ -742,21 +746,33 @@ pub(crate) async fn open_step(
     };
     {
         let mut state = slot.lock_state();
-        match &mut *state {
-            SlotState::Released => return Err(invalid("the continuation is released")),
-            SlotState::Live(conversation) => {
-                if let Some(staged) = conversation.staged.take() {
-                    return Ok(staged);
+        if let SlotState::Live(conversation) = &mut *state
+            && let Some(staged) = conversation.staged.take()
+        {
+            return Ok(staged);
+        }
+        let reopen = matches!(
+            &*state,
+            SlotState::Live(conversation)
+                if matches!(
+                    conversation.run.state(),
+                    RunState::Closed | RunState::Released | RunState::Lost(_)
+                )
+        );
+        if reopen {
+            *state = SlotState::Opening;
+        } else {
+            match &mut *state {
+                SlotState::Released => return Err(invalid("the continuation is released")),
+                SlotState::Live(_) => return Err(invalid("the continuation has no ready step")),
+                SlotState::InFlight | SlotState::Opening => {
+                    return Err(invalid("the continuation has no ready step"));
                 }
-                return Err(invalid("the continuation has no ready step"));
-            }
-            SlotState::InFlight | SlotState::Opening => {
-                return Err(invalid("the continuation has no ready step"));
-            }
-            SlotState::Idle => {
-                // Reserve before any wire traffic: a concurrent open fails
-                // above instead of sending a second handshake.
-                *state = SlotState::Opening;
+                SlotState::Idle => {
+                    // Reserve before any wire traffic: a concurrent open fails
+                    // above instead of sending a second handshake.
+                    *state = SlotState::Opening;
+                }
             }
         }
     }

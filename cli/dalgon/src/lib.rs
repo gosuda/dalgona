@@ -380,8 +380,12 @@ async fn run_headless(
     .await
     {
         Ok(outcome) => outcome,
-        // A second signal ends the run at once, without waiting out the host.
-        Err(code) => return ExitCode::from(code),
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
     // The print run already waited for status kinds to go quiet when it
     // timed out on them, so the host must not spend that grace again.

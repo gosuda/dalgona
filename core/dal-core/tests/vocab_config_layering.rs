@@ -4,12 +4,12 @@
     reason = "integration tests fail loudly"
 )]
 
-//! ENG-10 VOC-04A..VOC-04E close-out: config schema, layering, overrides,
+//! Config close-out: config schema, layering, overrides,
 //! strict validation, and product-closed battery keys through the public API.
 //!
 //! Existing unit suites already prove the happy paths (`config/tests/core.rs`,
 //! `prices.rs`, `rules.rs`, `edit_style.rs`); every test here pins an
-//! uncovered boundary or state-transition edge from Part 02 step 4.
+//! uncovered boundary or state-transition edge.
 
 use dal_core::{
     ApprovalMode, Config, ConfigError, ConfigOverrides, ConfigProduct, EditStyleInput, Mode, Screen,
@@ -34,7 +34,7 @@ fn invalid_key(user_toml: &str) -> (String, String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// VOC-04A: mode projection
+// Mode projection
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -56,7 +56,7 @@ fn mode_projection_covers_all_modes() {
 }
 
 // ---------------------------------------------------------------------------
-// VOC-04B: three-layer loader
+// Three-layer loader
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -174,7 +174,7 @@ fn dotted_keys_and_inline_tables_parse_as_nested() {
 }
 
 // ---------------------------------------------------------------------------
-// VOC-04C: in-memory overrides
+// In-memory overrides
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -290,7 +290,7 @@ fn overrides_cannot_bypass_closed_set_typing() {
 }
 
 // ---------------------------------------------------------------------------
-// VOC-04D: strict validation
+// Strict validation
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -557,7 +557,7 @@ fn aliases_and_plugins_tables_are_typed() {
 }
 
 // ---------------------------------------------------------------------------
-// VOC-04E: closed product keys and batteries
+// Closed product keys and batteries
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -1,5 +1,4 @@
 # Synthetic replay fixture for the GitHub Copilot Chat transport proof
-# (ENG-02: Copilot route lowering over the Chat family).
 #
 # Authored from the Copilot adapter contract documented in
 # `engine/dal-provider/src/family/copilot.rs` (Chat surface path

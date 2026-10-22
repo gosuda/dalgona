@@ -1,5 +1,4 @@
 # Synthetic replay fixture for the GitHub Copilot Anthropic transport proof
-# (ENG-02: Copilot route lowering over the Anthropic family).
 #
 # Authored from the Copilot adapter contract documented in
 # `engine/dal-provider/src/family/copilot.rs` (Anthropic surface path

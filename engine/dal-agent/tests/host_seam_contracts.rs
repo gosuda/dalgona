@@ -1,4 +1,4 @@
-//! ENG-01 shared-contract regression tests for the host seam.
+//! Shared-contract regression tests for the host seam.
 //!
 //! Proves call identity (`LoginId`), terminal outcomes (exactly one
 //! `LoginFinished` per completed login), cancellation ordering, and
@@ -106,7 +106,8 @@ async fn api_key_login_stores_credential_and_reports_no_secrets() {
     let host = test_host(dir.path()).await;
     let mut subscription = host.subscribe();
     let (key, pasted) = oneshot::channel();
-    key.send(String::from("sk-eng01-proof")).expect("send key");
+    key.send(String::from("sk-proof-credential"))
+        .expect("send key");
     let (io, _events) = LoginIo::channel(Some(pasted), CancellationToken::new());
     let outcome = host
         .login("openai", Method::ApiKey, io)
@@ -120,7 +121,7 @@ async fn api_key_login_stores_credential_and_reports_no_secrets() {
     for entry in &stored {
         let rendered = format!("{entry:?}");
         assert!(
-            !rendered.contains("sk-eng01-proof"),
+            !rendered.contains("sk-proof-credential"),
             "stored credential leaks secret: {rendered}"
         );
     }
@@ -142,7 +143,8 @@ async fn logout_removes_only_the_named_entry_and_keeps_env_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
     let host = test_host(dir.path()).await;
     let (key, pasted) = oneshot::channel();
-    key.send(String::from("sk-eng01-proof")).expect("send key");
+    key.send(String::from("sk-proof-credential"))
+        .expect("send key");
     let (io, _events) = LoginIo::channel(Some(pasted), CancellationToken::new());
     host.login("openai", Method::ApiKey, io)
         .await

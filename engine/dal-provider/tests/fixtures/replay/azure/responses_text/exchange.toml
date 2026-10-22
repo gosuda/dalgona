@@ -1,5 +1,4 @@
 # Synthetic replay fixture for the Azure OpenAI Responses transport proof
-# (ENG-02: Azure route lowering over the Responses family).
 #
 # Authored from the Azure adapter contract documented in
 # `engine/dal-provider/src/family/azure.rs` (`responses_base`: a non-Azure

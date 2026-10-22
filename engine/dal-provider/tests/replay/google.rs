@@ -1,4 +1,4 @@
-//! Google replay integration suite (ENG-03).
+//! Google replay integration suite.
 //!
 //! Real-transport proof for the Google families that speak HTTP SSE through
 //! the shared replay server: the direct Gemini API (`google-generative-ai`,

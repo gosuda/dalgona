@@ -4,10 +4,9 @@
     reason = "integration tests fail loudly"
 )]
 
-//! ENG-10 close-out proofs: core vocabulary, fold, approval, extension values.
+//! Close-out proofs: core vocabulary, fold, approval, extension values.
 //!
-//! Part 04 (`core-fold-approval`, FLD-*) + Part 05 (`core-extension-values`,
-//! EXT-*) obligations, proved through the public `dal-core` API only:
+//! Fold, approval, and extension-value obligations, proved through the public `dal-core` API only:
 //! typed boundaries, state-transition refusals, approval-bypass attempts,
 //! and extension-value lifecycle. Parent rulings pinned here:
 //! `Other => Execute` (never `None`), read-only exec stays on the execute
@@ -116,7 +115,6 @@ fn planned(id: &str, tool_name: &str, class: ToolClass) -> PlannedCall {
 
 // ---------------------------------------------------------------------------
 // A. Typed boundaries: extension identifiers and service vocabulary
-// (EXT-01A, EXT-01B, EXT-01C, EXT-01D)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -272,7 +270,7 @@ fn sidecar_names_reject_dots_empty_and_long_inputs() {
 
 #[test]
 fn hook_outcome_rejects_a_verdict_for_the_wrong_event() {
-    // Typed boundary (EXT-04A): an observer-style mismatch can never be built.
+    // Typed boundary: an observer-style mismatch can never be built.
     let ok = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))
         .expect("guard outcome builds");
     assert_eq!(ok.event(), HookEvent::BeforeTurn);
@@ -284,7 +282,6 @@ fn hook_outcome_rejects_a_verdict_for_the_wrong_event() {
 
 // ---------------------------------------------------------------------------
 // B. Invalid state transitions leave the session untouched
-// (FLD-03B, FLD-05A, FLD-05B, FLD-05C)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -475,7 +472,7 @@ fn contradictory_grant_resolutions_are_refused_before_state_changes() {
 }
 
 // ---------------------------------------------------------------------------
-// C. Approval bypass attempts fail closed (FLD-01A..01D, FLD-02A, FLD-02B)
+// C. Approval bypass attempts fail closed
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -673,7 +670,7 @@ fn planner_covers_every_call_exactly_once_in_input_order() {
 }
 
 // ---------------------------------------------------------------------------
-// D. Lifecycle: boot, open, and thread-safety (FLD-04A, FLD-07A, EXT-06A)
+// D. Lifecycle: boot, open, and thread-safety
 // ---------------------------------------------------------------------------
 
 #[test]
