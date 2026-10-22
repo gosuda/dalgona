@@ -30,6 +30,8 @@ Built-in commands, in registry order. Plugin commands appear after these with th
 | /quit |  | quit dalgon |
 | /mode | <normal\|eval-first\|eval-only> | set the harness mode |
 
+`/exit` is an alias for `/quit`.
+
 `/name`'s confirmation prints a resume token after the name: `Resume it with dalgon -r <token>.` The token is the name itself when it is shell-safe (letters, digits, `.`, `_`, `-` bare; spaces and apostrophes in double quotes), otherwise the session id. Paste it as shown; anything the shell would expand or split always arrives as the id.
 
 `/share`, `/bug`, and `/trust` never upload. `/share` directs you to `/export`, which writes a file you can send yourself. A conflicting command name is an error `command "<name>" is already registered by plugin "<first>"; plugin "<second>" cannot register it`; the numeric-suffix form `/review:1` is rejected. Completion matches name prefixes and orders them by name.
