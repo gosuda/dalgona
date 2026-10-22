@@ -95,8 +95,8 @@ fn workspace_keeps_one_root_lockfile() -> support::TestResult<()> {
     for lock in &locks {
         if *lock == "Cargo.lock" {
             root_locks += 1;
-        } else if !(lock.starts_with("cli/dalgon/tests/fixtures/")
-            || lock.starts_with("dalgona/gates/tests/fixtures/"))
+        } else if !lock.starts_with("cli/dalgon/tests/fixtures/")
+            && !lock.starts_with("dalgona/gates/tests/fixtures/")
         {
             unexpected.push(*lock);
         }

@@ -51,18 +51,9 @@ pub fn repo_root() -> PathBuf {
 /// Runs `command` to completion and returns its captured output.
 ///
 /// # Errors
-/// Returns the spawn or wait error with its kind kept, naming the program, so
-/// a missing tool is not reported as a bare operating-system error.
+/// Returns the spawn or wait error.
 pub fn run_command(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
-    command.output().map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!(
-                "cannot run `{}`: {error}",
-                command.get_program().to_string_lossy()
-            ),
-        )
-    })
+    command.output()
 }
 
 /// The resident set of this process, in bytes, read per platform without a
@@ -370,7 +361,7 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
         return Ok(binary);
     }
     Err(format!(
-        "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bins` before this gate",
+        "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
         binary.display()
     )
     .into())
@@ -1266,8 +1257,9 @@ pub struct SubscriberLedger {
     /// How many deliveries were drained in total.
     pub deliveries: usize,
     /// How many drained deliveries the pump site classified as
-    /// workload-relevant: job start/settle on the fast200 reader,
-    /// tool settle/turn end on the scale500 and v9 readers.
+    /// workload-relevant: job start/settle updates and detached-`exec`
+    /// results on the fast200 reader, tool settle/turn end on the scale500
+    /// and v9 readers.
     pub relevant: usize,
     /// The largest single drain.
     pub largest_drain: usize,
@@ -1335,15 +1327,21 @@ impl SubscriberLedger {
     /// Fails on any `Resync`, an early stream end, zero observed deliveries,
     /// zero workload-relevant deliveries, or a per-job rate above the V9
     /// T9 bound. `deliveries` counts every `Update` (including turn-startup
-    /// noise), so `relevant` — classified per pump site (job start/settle
-    /// on the fast200 reader; tool settle/turn end on the scale500 and v9
-    /// readers) — is the load proof: the drain loop records a final
+    /// noise), so `relevant` — classified per pump site (job updates and
+    /// detached-`exec` results on the fast200 reader; tool settle/turn end
+    /// on the scale500 and v9 readers) — is the load proof: the drain loop
+    /// records a final
     /// (possibly empty) drain on the stop flag, so `drains > 0` alone
     /// cannot tell full pressure from no flow, and one startup update
     /// cannot stand in for workload. The drain-size bound is reported, not
     /// asserted: a drain can legally exceed the queue cap when production
     /// outpaces the 250 ms poll, and only a `Resync` proves the queue
     /// overflowed.
+    ///
+    /// For `exec` pumps, the rate window names only `JobStarted`/`JobSettled`
+    /// updates, which those workloads never emit; `updates_by_job` is empty and
+    /// `worst_job_rate == 0`. The bound is vacuous there; other gates carry the
+    /// load proof.
     ///
     /// # Errors
     /// Returns the violated bound.
@@ -1416,23 +1414,5 @@ fn collect_session_journals(dir: &Path, found: &mut Vec<PathBuf>) {
         } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
             found.push(path);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::run_command;
-
-    #[test]
-    fn run_command_names_a_program_that_cannot_start() {
-        let mut command = std::process::Command::new("dalgona-gates-no-such-program");
-        let Err(error) = run_command(&mut command) else {
-            panic!("a missing program must not start");
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        assert!(
-            error.to_string().contains("dalgona-gates-no-such-program"),
-            "the error must name the program: {error}"
-        );
     }
 }
