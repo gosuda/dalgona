@@ -69,7 +69,7 @@ pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a failed publish.
 #[cfg(test)]
-pub(crate) fn put_prepared(dir: &Path, pending: PendingBlob) -> Result<(), BlobError> {
+pub(crate) fn put_prepared(dir: &Path, pending: &PendingBlob) -> Result<(), BlobError> {
     let staged = stage_prepared(dir, pending)?;
     let mut dirs = Vec::new();
     finish_staged(staged, &mut dirs)?;
@@ -182,11 +182,17 @@ pub(crate) enum StagedPublish {
 /// returns the staged publish. An existing digest stages only the owed
 /// directory sync.
 ///
+/// The blob is borrowed, so a caller whose publication can fail keeps the
+/// bytes for a retry instead of losing them with the failed attempt.
+///
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a
 /// failed write.
-pub(crate) fn stage_prepared(dir: &Path, pending: PendingBlob) -> Result<StagedPublish, BlobError> {
-    let (id, bytes) = pending.into_parts();
+pub(crate) fn stage_prepared(
+    dir: &Path,
+    pending: &PendingBlob,
+) -> Result<StagedPublish, BlobError> {
+    let (id, bytes) = (pending.id(), pending.bytes());
     check_blob_size(bytes.len())?;
     let dest = dir.join(id.to_string());
     if existing_blob(&dest)? {
@@ -280,26 +286,37 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// # Errors
 /// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
-    let path = session_dir.join("blobs").join(id.to_string());
-    match crate::private::open_private_file(&path).and_then(|mut file| {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }) {
-        Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
-        Ok(_) => Err(io_blob(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("blob {id} does not match its digest; the file is damaged"),
-        ))),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            match fs::metadata(session_dir) {
-                Ok(_) => Err(BlobError::NotFound { id: *id }),
-                Err(session) if session.kind() == io::ErrorKind::NotFound => Err(BlobError::Gone),
-                Err(session) => Err(io_blob(session)),
-            }
-        }
-        Err(source) => Err(io_blob(source)),
+    let blobs = session_dir.join("blobs");
+    let file = crate::private::open_private_file(&blobs.join(id.to_string()))
+        .map_err(|source| missing_source(&blobs, id, source))?;
+    let bytes = read_capped(file)?;
+    if BlobId::from_bytes(&bytes) == *id {
+        return Ok(bytes);
     }
+    Err(io_blob(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("blob {id} does not match its digest; the file is damaged"),
+    )))
+}
+
+/// Reads an open blob file whole. A file past the blob cap is damaged or
+/// planted: it is refused before any read, and a file grown since the stat is
+/// refused after one byte over the cap, so a hostile file cannot drive an
+/// unbounded allocation.
+fn read_capped(file: File) -> Result<Vec<u8>, BlobError> {
+    let length = file.metadata().map_err(io_blob)?.len();
+    if length > MAX_BLOB {
+        return Err(BlobError::TooLarge { bytes: length });
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    file.take(MAX_BLOB.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_blob)?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if read > MAX_BLOB {
+        return Err(BlobError::TooLarge { bytes: read });
+    }
+    Ok(bytes)
 }
 
 /// Hard-links or copies each named digest from the source blob directory into
@@ -461,19 +478,24 @@ fn decode_base64_inner(text: &str, validation: Base64Validation) -> Option<Vec<u
 /// Collects blob digests named by a record's parts.
 #[must_use]
 pub(crate) fn named_blobs(record: &dal_core::Record) -> Vec<BlobId> {
-    let mut ids = Vec::new();
     let Some(entry) = record.entry() else {
-        return ids;
+        return Vec::new();
     };
     match &entry.kind {
         dal_core::EntryKind::User { parts }
         | dal_core::EntryKind::ToolResult { parts, .. }
-        | dal_core::EntryKind::Compaction { parts, .. } => {
-            for part in parts {
-                push_part(part, &mut ids);
-            }
-        }
-        _ => {}
+        | dal_core::EntryKind::Compaction { parts, .. } => named_part_blobs(parts),
+        _ => Vec::new(),
+    }
+}
+
+/// Collects blob digests named by bare journal parts, including fork anchor
+/// restart parts that never appear in a copied record.
+#[must_use]
+pub(crate) fn named_part_blobs(parts: &[dal_core::JournalPart]) -> Vec<BlobId> {
+    let mut ids = Vec::new();
+    for part in parts {
+        push_part(part, &mut ids);
     }
     ids
 }
@@ -982,8 +1004,8 @@ mod tests {
             )
         ));
 
-        put_prepared(&blobs, text_blob).expect("publish prepared text");
-        put_prepared(&blobs, image_blob).expect("publish prepared image");
+        put_prepared(&blobs, &text_blob).expect("publish prepared text");
+        put_prepared(&blobs, &image_blob).expect("publish prepared image");
 
         assert_eq!(
             fs::read(blobs.join(text_id.to_string()))

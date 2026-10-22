@@ -247,6 +247,123 @@ async fn memory_blob_put_deduplicates_and_reads_back() {
     assert_eq!(journal.read_blob(expected).expect("read blob"), bytes);
 }
 
+#[tokio::test]
+async fn ephemeral_fork_and_clone_stay_ephemeral_and_share_blobs() {
+    let (temp, store) = setup("life-ephemeral-branch");
+    let before: Vec<std::path::PathBuf> = fs::read_dir(temp.path())
+        .expect("list data root")
+        .map(|entry| entry.expect("read entry").path())
+        .collect();
+    let id = SessionId::new_v7();
+    let mut source = store.ephemeral_session(id);
+    let big = "e".repeat(20_000);
+    source
+        .append(vec![user(1, "root")])
+        .await
+        .expect("ephemeral root appends");
+    source
+        .append(vec![user(2, &big)])
+        .await
+        .expect("ephemeral blob-sized text appends");
+    let digest = source
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::User(entry) => match &entry.kind {
+                EntryKind::User { parts } => match &parts[..] {
+                    [JournalPart::TextBlob { blob, .. }] => Some(blob.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("blob-sized text names a blob");
+    let blob = BlobId::parse(&digest).expect("digest parses");
+
+    assert_eq!(
+        source.read_blob(blob).expect("parent blob reads"),
+        big.as_bytes(),
+        "the ephemeral parent reads its own shared blob"
+    );
+
+    let (mut fork, text) = source
+        .fork(entry_id(2))
+        .await
+        .expect("ephemeral fork succeeds");
+    assert_eq!(text, big, "fork returns the anchor text");
+    assert!(
+        fork.is_ephemeral(),
+        "fork of an ephemeral source stays ephemeral"
+    );
+    assert!(
+        fork.sidecar().is_none(),
+        "ephemeral fork has no sidecar handle"
+    );
+    assert_eq!(
+        fork.read_blob(blob).expect("forked blob reads"),
+        big.as_bytes(),
+        "forked memory blob shares the source bytes"
+    );
+    fork.close().await.expect("close ephemeral fork");
+    assert_eq!(
+        fork.read_blob(blob).expect("forked blob reads after close"),
+        big.as_bytes(),
+        "closing the fork keeps its shared blob in memory"
+    );
+
+    let mut clone = source
+        .clone_session()
+        .await
+        .expect("ephemeral clone succeeds");
+    assert!(
+        clone.is_ephemeral(),
+        "clone of an ephemeral source stays ephemeral"
+    );
+    assert!(
+        clone.sidecar().is_none(),
+        "ephemeral clone has no sidecar handle"
+    );
+    assert_eq!(
+        clone.read_blob(blob).expect("cloned blob reads"),
+        big.as_bytes(),
+        "cloned memory blob shares the source bytes"
+    );
+    clone.close().await.expect("close ephemeral clone");
+    assert_eq!(
+        clone
+            .read_blob(blob)
+            .expect("cloned blob reads after close"),
+        big.as_bytes(),
+        "closing the clone keeps its shared blob in memory"
+    );
+
+    assert_eq!(
+        source
+            .read_blob(blob)
+            .expect("parent blob reads after branches close"),
+        big.as_bytes(),
+        "the ephemeral parent still resolves its shared blob"
+    );
+
+    assert!(
+        matches!(
+            store.open_session(id).await,
+            Err(StoreError::NotFound { .. })
+        ),
+        "an ephemeral session has no durable journal to reopen"
+    );
+    source.close().await.expect("close ephemeral source");
+    let after: Vec<std::path::PathBuf> = fs::read_dir(temp.path())
+        .expect("relist data root")
+        .map(|entry| entry.expect("read entry").path())
+        .collect();
+    assert_eq!(
+        before, after,
+        "ephemeral fork and clone write nothing to disk"
+    );
+}
+
 fn leaf_records(records: &[Record]) -> Vec<Option<EntryId>> {
     records
         .iter()

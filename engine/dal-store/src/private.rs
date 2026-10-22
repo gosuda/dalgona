@@ -43,16 +43,23 @@ pub fn create_private_file_new(path: &Path) -> io::Result<File> {
     create_new(path, FileMode::Mode0600)
 }
 
-/// Opens a regular private file without following a Windows reparse point.
+/// Opens an existing private file for reading.
 ///
-/// The security policy is checked against the opened handle, not a path.
-/// Existing files with unsafe permissions are rejected; on Windows a rejected
-/// file's DACL is also tightened to the private policy best-effort, so stored
-/// secrets stop being shared while the open still fails closed. A later open
-/// then treats the file as migrated.
+/// On Windows the file opens without following a reparse point and its
+/// security policy is checked against the opened handle, not a path. A file
+/// with an unsafe DACL, a reparse point, or a non-file type is rejected, and a
+/// rejected file's DACL is also tightened to the private policy best-effort,
+/// so stored secrets stop being shared while the open still fails closed. A
+/// later open then treats the file as migrated.
+///
+/// On Unix the file opens as a plain read: neither permission bits nor
+/// symlinks are checked here. A caller that must refuse a shared or linked
+/// file checks the path with `symlink_metadata` and the returned handle with
+/// [`file_is_private`].
 ///
 /// # Errors
-/// Fails for missing files, symlinks/reparse points, non-files, or unsafe permissions.
+/// Fails for a missing file and, on Windows, for symlinks/reparse points,
+/// non-files, or unsafe permissions.
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     #[cfg(windows)]
     {
@@ -72,10 +79,13 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     }
 }
 
-/// Opens a private regular file for reading and writing without creating it.
+/// Opens an existing private file for reading and writing without creating it.
+///
+/// Windows checks the handle exactly as [`open_private_file`] does; Unix opens
+/// the file as it is and checks no permission bits.
 ///
 /// # Errors
-/// Fails if the file cannot be opened or its permissions are unsafe.
+/// Fails if the file cannot be opened or, on Windows, its permissions are unsafe.
 pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
     #[cfg(windows)]
     {
@@ -100,7 +110,8 @@ pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
 
 /// Opens an existing private lock file or creates one atomically as private.
 /// An existing file with an unsafe Windows DACL is rejected after the DACL is
-/// tightened best-effort, so the next call opens it as private.
+/// tightened best-effort, so the next call opens it as private. On Unix a new
+/// file is created with mode 0600 and an existing one opens as it is.
 ///
 /// # Errors
 /// Fails when the file cannot be opened, created, or validated.

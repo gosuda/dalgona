@@ -400,3 +400,109 @@ async fn blob_limit_holds_from_both_sides() {
     );
     journal.close().await.expect("session closes");
 }
+
+/// A compaction whose replacement text is large enough to leave the journal
+/// for a blob. It carries no user entry, so a lazy session buffers it.
+#[cfg(unix)]
+fn compaction_with_text(id: u64, text: &str) -> Record {
+    Record::Compaction(Entry {
+        id: entry_id(id),
+        parent: None,
+        at: timestamp(),
+        kind: EntryKind::Compaction {
+            summary: None,
+            first_kept: None,
+            tokens_before: 1,
+            replay: None,
+            usage: None,
+            parts: vec![JournalPart::Text { text: text.into() }],
+            parts_tokens: 1,
+        },
+    })
+}
+
+/// Records buffered before the first user entry name blobs the session has not
+/// published yet. A first create that fails must leave those bytes buffered,
+/// or the retry would write a journal naming a blob that no file holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_first_create_keeps_the_blobs_buffered_records_name() {
+    let (temp, store, _) = setup("blob-first-create-retry");
+    let root = temp.path().join("data");
+    let id = SessionId::new_v7();
+    let big = "c".repeat(16_384);
+    let digest = BlobId::from_bytes(big.as_bytes());
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![compaction_with_text(1, &big)])
+        .await
+        .expect("the compaction buffers before any user entry");
+    assert!(journal.is_lazy(), "nothing is durable yet");
+
+    fs::write(&root, b"not a directory").expect("block the data root");
+    journal
+        .append(vec![text_record(2, "first")])
+        .await
+        .expect_err("the first create fails");
+    fs::remove_file(&root).expect("clear the blocker");
+    assert!(journal.is_lazy(), "a failed first create leaves it lazy");
+
+    journal
+        .append(vec![text_record(2, "first")])
+        .await
+        .expect("the retry creates the session");
+    assert_eq!(
+        store
+            .read_blob(id, digest)
+            .expect("the blob the buffered compaction names is published"),
+        big.as_bytes()
+    );
+    assert!(
+        fs::read_to_string(store.session_file(id))
+            .expect("read the journal")
+            .contains(&digest.to_string()),
+        "the durable journal names the blob that now exists"
+    );
+    journal.close().await.expect("session closes");
+}
+
+/// A blob file past the cap is damaged or planted. A read refuses it from the
+/// file length instead of allocating whatever the file holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn oversized_blob_file_is_refused_before_it_is_read() {
+    let (temp, store, _) = setup("blob-oversized-file");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![text_record(1, "prefix")])
+        .await
+        .expect("prefix append");
+    let planted = BlobId::from_bytes(b"planted");
+    let path = session_dir(&temp.path().join("data"), id)
+        .join("blobs")
+        .join(planted.to_string());
+    let file = fs::File::create(&path).expect("plant a blob file");
+    file.set_len(67_108_865)
+        .expect("grow the file past the cap without writing it");
+    drop(file);
+
+    for error in [
+        store
+            .read_blob(id, planted)
+            .expect_err("the store refuses an oversized blob file"),
+        journal
+            .read_blob(planted)
+            .expect_err("the journal refuses an oversized blob file"),
+    ] {
+        assert!(
+            matches!(error, BlobError::TooLarge { bytes: 67_108_865 }),
+            "got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "blob of 67108865 bytes is larger than the limit of 67108864 bytes"
+        );
+    }
+    journal.close().await.expect("session closes");
+}

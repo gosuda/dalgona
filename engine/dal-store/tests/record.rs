@@ -704,3 +704,250 @@ async fn null_replay_append_is_refused_without_a_partial_write() {
         "the refused batch left the journal byte-identical"
     );
 }
+
+#[tokio::test]
+async fn premium_usage_persists_across_reopen() {
+    let temp = TempDir::new("record-premium");
+    let (store, _) = store_in(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    let assistant_usage = Usage {
+        input_tokens: 7,
+        cached_input_tokens: 2,
+        output_tokens: 5,
+        reasoning_tokens: Some(1),
+        cache_write_tokens: 3,
+        premium_requests: Some(1.5),
+        cost_usd: None,
+    };
+    let inferred_usage = Usage {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        premium_requests: Some(2.25),
+        cost_usd: None,
+    };
+    let assistant = Entry {
+        id: entry_id(2),
+        parent: Some(entry_id(1)),
+        at: timestamp(),
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test-model".into(),
+            route: Some(AssistantRoute::Api(Family::Chat)),
+            content: vec![Block::Text {
+                text: "hi".into(),
+                replay: None,
+            }],
+            usage: assistant_usage,
+            stop: AssistantStop::Done,
+            replay: None,
+        },
+    };
+    let inferred = Record::Inferred {
+        at: timestamp(),
+        who: Owner::Core,
+        purpose: InferredPurpose::Synthetic {
+            id: "review/model".into(),
+        },
+        usage: inferred_usage,
+    };
+    let turn_end = Record::TurnEnd {
+        at: timestamp(),
+        turn: turn_id(1),
+        stop: TurnEndStop::Done,
+        usage: Some(Usage {
+            input_tokens: 8,
+            cached_input_tokens: 2,
+            output_tokens: 6,
+            reasoning_tokens: None,
+            cache_write_tokens: 3,
+            premium_requests: Some(3.75),
+            cost_usd: None,
+        }),
+        changes: vec![],
+    };
+    journal
+        .append(vec![
+            Record::User(user_entry(1, "start")),
+            Record::TurnStart {
+                at: timestamp(),
+                turn: turn_id(1),
+            },
+            Record::Assistant(assistant),
+            inferred,
+            turn_end,
+        ])
+        .await
+        .expect("premium turn appends");
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store.open_session(id).await.expect("session reopens");
+    let back = reopened.records();
+    let kept_assistant = back
+        .iter()
+        .find_map(|record| match record {
+            Record::Assistant(entry) => match &entry.kind {
+                EntryKind::Assistant { usage, .. } => Some(*usage),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("assistant survives");
+    assert_eq!(
+        kept_assistant.premium_requests,
+        Some(1.5),
+        "assistant premium survives the durable round-trip"
+    );
+    let kept_inferred = back
+        .iter()
+        .find_map(|record| match record {
+            Record::Inferred { usage, .. } => Some(*usage),
+            _ => None,
+        })
+        .expect("inferred survives");
+    assert_eq!(
+        kept_inferred.premium_requests,
+        Some(2.25),
+        "inferred premium survives the durable round-trip"
+    );
+    let kept_turn_end = back
+        .iter()
+        .find_map(|record| match record {
+            Record::TurnEnd { usage, .. } => Some(*usage),
+            _ => None,
+        })
+        .expect("turn end survives");
+    assert_eq!(
+        kept_turn_end
+            .expect("turn end carries usage")
+            .premium_requests,
+        Some(3.75),
+        "the summed turn premium survives the durable round-trip"
+    );
+}
+
+#[tokio::test]
+async fn sub_micro_premium_turn_agrees_across_reopen() {
+    let temp = TempDir::new("record-premium-precision");
+    let (store, _) = store_in(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    let leg = 0.000_000_4;
+    let assistant = Entry {
+        id: entry_id(2),
+        parent: Some(entry_id(1)),
+        at: timestamp(),
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test-model".into(),
+            route: Some(AssistantRoute::Api(Family::Chat)),
+            content: vec![Block::Text {
+                text: "hi".into(),
+                replay: None,
+            }],
+            usage: Usage {
+                input_tokens: 7,
+                cached_input_tokens: 2,
+                output_tokens: 5,
+                reasoning_tokens: Some(1),
+                cache_write_tokens: 3,
+                premium_requests: Some(leg),
+                cost_usd: None,
+            },
+            stop: AssistantStop::Done,
+            replay: None,
+        },
+    };
+    let inferred = Record::Inferred {
+        at: timestamp(),
+        who: Owner::Core,
+        purpose: InferredPurpose::Synthetic {
+            id: "review/model".into(),
+        },
+        usage: Usage {
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: Some(leg),
+            cost_usd: None,
+        },
+    };
+    let turn_end = Record::TurnEnd {
+        at: timestamp(),
+        turn: turn_id(1),
+        stop: TurnEndStop::Done,
+        usage: Some(Usage {
+            input_tokens: 8,
+            cached_input_tokens: 2,
+            output_tokens: 6,
+            reasoning_tokens: None,
+            cache_write_tokens: 3,
+            premium_requests: Some(leg + leg),
+            cost_usd: None,
+        }),
+        changes: vec![],
+    };
+    journal
+        .append(vec![
+            Record::User(user_entry(1, "start")),
+            Record::TurnStart {
+                at: timestamp(),
+                turn: turn_id(1),
+            },
+            Record::Assistant(assistant),
+            inferred,
+            turn_end,
+        ])
+        .await
+        .expect("sub-micro premium turn appends");
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store.open_session(id).await.expect("session reopens");
+    let back = reopened.records();
+    let legs = [
+        back.iter()
+            .find_map(|record| match record {
+                Record::Assistant(entry) => match &entry.kind {
+                    EntryKind::Assistant { usage, .. } => Some(usage.premium_requests),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("assistant survives"),
+        back.iter()
+            .find_map(|record| match record {
+                Record::Inferred { usage, .. } => Some(usage.premium_requests),
+                _ => None,
+            })
+            .expect("inferred survives"),
+    ];
+    let kept_total = back
+        .iter()
+        .find_map(|record| match record {
+            Record::TurnEnd { usage, .. } => Some(*usage),
+            _ => None,
+        })
+        .expect("turn end survives")
+        .expect("turn end carries usage")
+        .premium_requests;
+    let mut known = true;
+    let mut sum = 0.0;
+    for premium in legs {
+        match premium {
+            Some(value) => {
+                sum += value;
+            }
+            None => {
+                known = false;
+            }
+        }
+    }
+    assert_eq!(
+        kept_total,
+        known.then_some(sum),
+        "the reopened turn total agrees with its reopened legs"
+    );
+}

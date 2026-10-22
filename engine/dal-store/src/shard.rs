@@ -76,6 +76,10 @@ enum Job {
     Retire {
         slot: usize,
         done: Option<oneshot::Sender<()>>,
+        /// Dropped only after the worker dropped the physical journal, so what
+        /// guards the journal file (its session lock) outlives every write
+        /// still queued ahead of this job.
+        hold: Option<Box<dyn Send>>,
     },
     /// A staged durability sync failed off-thread: the bytes it covered can
     /// no longer be rolled back in place, so the journal is marked damaged.
@@ -448,7 +452,11 @@ impl Drop for RegistrationReply {
         };
         receiver.close();
         if let Ok(Ok(slot)) = receiver.try_recv() {
-            let _ = self.queue.push_control(Job::Retire { slot, done: None });
+            let _ = self.queue.push_control(Job::Retire {
+                slot,
+                done: None,
+                hold: None,
+            });
         }
     }
 }
@@ -780,6 +788,7 @@ impl Lane {
             if !self.queue.push_control(Job::Retire {
                 slot: self.slot,
                 done: Some(done),
+                hold: None,
             }) {
                 return Err(journal_closed(self.session));
             }
@@ -793,6 +802,32 @@ impl Lane {
         self.retired = None;
         Ok(())
     }
+
+    /// Whether an admitted append has not settled: the worker may still write
+    /// its batch to the journal file after the actor stopped waiting for it.
+    #[must_use]
+    pub(crate) fn has_unsettled_append(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Retires the worker-owned journal exactly as dropping this lane does,
+    /// and keeps `hold` alive until the worker has dropped that journal.
+    ///
+    /// A journal dropped with an unsettled append hands its session lock here:
+    /// releasing the lock first would let a reopen scan the file and attach a
+    /// second writer, which the late batch then overwrites. A lane already
+    /// retiring has no append in flight, so `hold` drops at once.
+    pub(crate) fn retire_holding(&mut self, hold: Box<dyn Send>) {
+        if self.retiring {
+            return;
+        }
+        self.retiring = true;
+        let _ = self.queue.push_control(Job::Retire {
+            slot: self.slot,
+            done: None,
+            hold: Some(hold),
+        });
+    }
 }
 
 impl Drop for Lane {
@@ -802,6 +837,7 @@ impl Drop for Lane {
             let _ = self.queue.push_control(Job::Retire {
                 slot: self.slot,
                 done: None,
+                hold: None,
             });
             self.retiring = true;
         }
@@ -911,11 +947,12 @@ fn run(queue: &Arc<Queue>, sync: &SyncFan) {
                     journal.mark_damaged();
                 }
             }
-            Job::Retire { slot, done } => {
+            Job::Retire { slot, done, hold } => {
                 if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::take) {
                     drop(journal);
                     free.push(slot);
                 }
+                drop(hold);
                 if let Some(done) = done {
                     let _ = done.send(());
                 }
@@ -1019,7 +1056,7 @@ fn publish(
     let mut present = false;
     let mut wrote = false;
     for pending in blobs {
-        match blob::stage_prepared(dir, pending)? {
+        match blob::stage_prepared(dir, &pending)? {
             blob::StagedPublish::Present { .. } => present = true,
             staged @ blob::StagedPublish::Pending { .. } => {
                 wrote = true;

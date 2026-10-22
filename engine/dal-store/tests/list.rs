@@ -751,6 +751,112 @@ async fn unusable_info_cache_falls_back_to_the_journal() {
     assert_eq!(name_of(&store, id).as_deref(), Some("kept"), "absent cache");
 }
 
+/// A batch the writer could not roll back stays on disk behind its rollback
+/// marker until the next open repairs it. Listing and resolving read the
+/// journal without repairing it, so they stop at the marker like every other
+/// reader: a rename or archive that was never acknowledged names nothing.
+#[tokio::test]
+async fn listing_and_resolving_stop_at_a_rollback_marker() {
+    let (temp, store, workspace) = setup("list-rollback-marker");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "committed")])
+        .await
+        .expect("first append");
+    journal
+        .set_name(Some("kept name"))
+        .await
+        .expect("the name is acknowledged");
+    journal.close().await.expect("session closes");
+    let path = store.session_file(id);
+    let committed = fs::read(&path).expect("read the committed journal");
+    let mut staged = committed.clone();
+    for failed in [
+        Record::Name {
+            at: timestamp(),
+            name: Some("failed name".into()),
+        },
+        Record::Archive {
+            at: timestamp(),
+            archived: true,
+        },
+    ] {
+        staged.extend_from_slice(&encode(&failed).expect("failed batch encodes"));
+    }
+    fs::write(&path, &staged).expect("stage a failed batch");
+    let marker = path.with_file_name("journal.jsonl.rollback");
+    fs::write(&marker, format!("{}\n", committed.len())).expect("write the rollback marker");
+
+    let page = store
+        .list(ListQuery {
+            limit: Some(500),
+            cursor: None,
+            search: None,
+        })
+        .expect("listing succeeds");
+    let info = page
+        .items
+        .iter()
+        .find(|info| info.id == id)
+        .expect("the session lists");
+    assert_eq!(
+        info.name.as_deref(),
+        Some("kept name"),
+        "a rename behind the marker is not the session's name"
+    );
+    assert_eq!(
+        info.archived,
+        Some(false),
+        "an archive behind the marker never happened"
+    );
+    assert_eq!(
+        store
+            .resolve(&workspace, "kept name")
+            .expect("the acknowledged name resolves"),
+        id
+    );
+    assert!(
+        matches!(
+            store.resolve(&workspace, "failed name"),
+            Err(StoreError::NoMatch { .. })
+        ),
+        "the failed rename resolves to nothing"
+    );
+    assert_eq!(
+        store.newest().expect("newest reads the workspace"),
+        Some(id),
+        "the unarchived session is still the newest"
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread the journal"),
+        staged,
+        "listing repairs nothing"
+    );
+    assert!(marker.exists(), "listing never consumes the marker");
+
+    // A marker that points inside a record is damage, never a guess. A fresh
+    // store has no cached facts for the unchanged journal.
+    fs::write(&marker, format!("{}\n", committed.len() - 1)).expect("write a bad marker");
+    let fresh = Store::new(temp.path().join("data"), workspace, Product::Dalgona);
+    let page = fresh
+        .list(ListQuery {
+            limit: Some(500),
+            cursor: None,
+            search: None,
+        })
+        .expect("listing succeeds");
+    let damaged = page
+        .items
+        .iter()
+        .find(|info| info.id == id)
+        .expect("the damaged session still lists");
+    assert_eq!(
+        &*damaged.preview, "(damaged session file)",
+        "an inconsistent marker marks the session damaged"
+    );
+}
+
 #[tokio::test]
 async fn list_limit_of_one_returns_one_of_two_sessions() {
     let (_temp, store, _) = setup("list-limit-one");

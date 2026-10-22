@@ -804,6 +804,127 @@ async fn cancelled_close_restores_live_flag_and_reopen_reports_locked() {
     reopened.close().await.expect("close reopened session");
 }
 
+/// A journal dropped while the worker still owes an admitted batch its file
+/// write keeps the session locked until the worker retires the journal.
+/// Otherwise a reopen scans the file before the batch lands and attaches a
+/// second writer at the same end offset, which the late batch then overwrites.
+#[tokio::test]
+async fn dropped_journal_keeps_its_lock_until_the_worker_finishes_an_admitted_append() {
+    let temp = TempDir::new();
+    let store = store(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "drop test")])
+        .await
+        .expect("create file session");
+
+    let shards = crate::shard::shared().expect("start shard workers");
+    let (started, release) = shards.hold_worker_for_test(id).expect("queue worker hold");
+    tokio::task::spawn_blocking(move || started.recv())
+        .await
+        .expect("wait task")
+        .expect("worker started hold");
+
+    let mut context = Context::from_waker(Waker::noop());
+    let future = journal.append(vec![Record::Name {
+        at: timestamp(),
+        name: Some("admitted".into()),
+    }]);
+    let mut future = Box::pin(future);
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    drop(future);
+    drop(journal);
+
+    let release_later = async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        release.send(()).expect("release held shard");
+    };
+    let (reopened, ()) = tokio::join!(store.open_session(id), release_later);
+    let (mut reopened, report) = reopened.expect("reopen once the worker retired the journal");
+
+    assert!(report.torn.is_none(), "the admitted batch landed whole");
+    let admitted = reopened
+        .records()
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::Name {
+                    name: Some(name),
+                    ..
+                } if name.as_ref() == "admitted"
+            )
+        })
+        .count();
+    assert_eq!(
+        admitted, 1,
+        "the reopen scanned the file after the batch landed"
+    );
+    reopened.close().await.expect("close reopened session");
+}
+
+/// A first append creates the session directory chain. The journal's own sync
+/// covers only the session directory, so each new directory's entry in its
+/// parent is synced too — on every attempt, not just the one that created it.
+/// A parent that cannot be synced fails the append instead of acknowledging
+/// records a power loss could take with the directory, and a retry while the
+/// parent is still unsyncable fails again rather than trusting the directories
+/// the first attempt left behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn first_append_syncs_the_entry_of_every_directory_it_creates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let store = store(&temp);
+    let id = SessionId::new_v7();
+    let sessions = temp.path().join("data").join("sessions");
+    fs::create_dir_all(&sessions).expect("create the sessions directory");
+    // Write and search without read: the workspace directory can be created
+    // inside it, but the directory cannot be opened to sync the new entry.
+    fs::set_permissions(&sessions, fs::Permissions::from_mode(0o300))
+        .expect("drop directory read permission");
+    let enforced = fs::read_dir(&sessions).is_err();
+    let mut journal = store.create_session(id);
+
+    let refused = journal
+        .append(vec![user(1, "entry a crash could drop")])
+        .await;
+    assert!(
+        journal.is_lazy(),
+        "a create that could not be made durable leaves the session lazy"
+    );
+    // The failed attempt leaves the chain in place; the retry must re-owe the
+    // same sync instead of reporting success for an entry that was never made
+    // durable.
+    let retried_while_broken = journal.append(vec![user(1, "retry before repair")]).await;
+    fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700))
+        .expect("restore directory permissions");
+
+    assert!(
+        enforced,
+        "chmod is not enforced for this user (root or an ACL bypass), so the directory-sync failure is unreachable; run this test unprivileged"
+    );
+    assert!(
+        matches!(&refused, Err(StoreError::Io { path, .. }) if *path == sessions),
+        "got {refused:?}"
+    );
+    assert!(
+        matches!(&retried_while_broken, Err(StoreError::Io { path, .. }) if *path == sessions),
+        "the retry finds the chain present and must fail on the same sync, got {retried_while_broken:?}"
+    );
+    assert!(
+        journal.is_lazy(),
+        "two undurable creates still leave the session lazy"
+    );
+    journal
+        .append(vec![user(1, "synced")])
+        .await
+        .expect("the retry after repair creates the session");
+    journal.close().await.expect("session closes");
+}
+
 #[tokio::test]
 async fn blob_publish_failure_keeps_record_unpublished_and_marks_broken() {
     let temp = TempDir::new();
