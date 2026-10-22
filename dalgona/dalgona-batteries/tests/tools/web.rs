@@ -110,6 +110,53 @@ async fn network_cancellation_interrupts_the_tool() -> TestResult {
 }
 
 #[tokio::test]
+async fn oversized_and_malformed_urls_are_invalid_before_net() -> TestResult {
+    let host = Host::answering([]);
+    *locked(&host.net) = Net::Hang;
+    let extension = web(config(1))?;
+    let long = format!("http://1.1.1.1/{}", "x".repeat(2048));
+    assert!(long.len() > 2048, "the url must exceed the byte limit");
+    let text = run_tool(
+        &extension,
+        &host,
+        "web_fetch",
+        &format!(r#"{{"url":"{long}"}}"#),
+    )
+    .await?;
+    assert_eq!(text, "invalid URL: longer than 2048 bytes");
+    let text = run_tool(
+        &extension,
+        &host,
+        "web_fetch",
+        r#"{"url":"::: not a url :::"}"#,
+    )
+    .await?;
+    assert!(text.starts_with("invalid URL: "), "{text}");
+    assert_eq!(requested_urls(&host), [] as [std::string::String; 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_redirect_without_a_location_is_a_status_error() -> TestResult {
+    let host = scripted([FetchResponse {
+        status: 302,
+        headers: Vec::new(),
+        body: Vec::new(),
+    }]);
+    let extension = web(config(30))?;
+    let text = run_tool(
+        &extension,
+        &host,
+        "web_fetch",
+        r#"{"url":"http://1.1.1.1/start"}"#,
+    )
+    .await?;
+    assert_eq!(text, "web_fetch got HTTP 302 for http://1.1.1.1/start");
+    assert_eq!(requested_urls(&host), ["http://1.1.1.1/start"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_http_schemes_never_reach_the_net_service() -> TestResult {
     let host = Host::answering([]);
     *locked(&host.net) = Net::Hang;
@@ -247,7 +294,7 @@ async fn a_body_over_the_read_cap_is_cut_to_the_prefix_and_reports_the_bytes_rea
 
 #[tokio::test]
 async fn a_requested_cap_below_the_ceiling_cuts_earlier() -> TestResult {
-    let host = scripted([reply(200, "text/plain", &vec![b'x'; 5000])]);
+    let host = scripted([reply(200, "text/plain", &[b'x'; 5000])]);
     let extension = web(config(30))?;
     let text = run_tool(
         &extension,
@@ -666,6 +713,245 @@ async fn a_search_count_outside_one_to_twenty_is_invalid_before_env_and_net() ->
             "count {count} reached the net service"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_search_that_outlives_the_deadline_times_out_without_the_key() -> TestResult {
+    let host = Host::answering([]);
+    locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+    *locked(&host.net) = Net::Hang;
+    let extension = web(config(1))?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"parse rust"}"#).await?;
+    assert_eq!(
+        text,
+        "web_search timed out after 1s: \
+         https://api.search.brave.com/res/v1/web/search?q=parse+rust&count=5"
+    );
+    assert!(
+        !text.contains(BRAVE_KEY),
+        "the timeout must not carry the key"
+    );
+    assert_eq!(requested_urls(&host).len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn search_cancellation_interrupts_the_tool() -> TestResult {
+    let host = Host::answering([]);
+    locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+    *locked(&host.net) = Net::Cancel;
+    let extension = web(config(30))?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"parse rust"}"#).await?;
+    assert_eq!(text, "interrupted");
+    Ok(())
+}
+
+const INVALID_QUERY: &str = "web_search: query must be 1 to 400 characters.";
+
+#[tokio::test]
+async fn empty_and_oversized_queries_are_invalid_before_env_and_net() -> TestResult {
+    let oversized = "q".repeat(401);
+    let cases = [
+        r#"{"query":""}"#.to_owned(),
+        r#"{"query":"   "}"#.to_owned(),
+        format!(r#"{{"query":"{oversized}"}}"#),
+    ];
+    for args in &cases {
+        // Missing credentials: the query check must win over the
+        // not-configured path, and nothing may reach the net service.
+        let host = Host::answering([]);
+        let extension = web(config(30))?;
+        let text = run_tool(&extension, &host, "web_search", args).await?;
+        assert_eq!(text, INVALID_QUERY, "{args} without credentials");
+        assert!(
+            requested_urls(&host).is_empty(),
+            "{args} reached the net service"
+        );
+
+        // Present credentials with a scripted success waiting: the request
+        // must still be refused before the network.
+        let host = scripted([reply(200, "application/json", br#"{"web":{"results":[]}}"#)]);
+        locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+        let extension = web(config(30))?;
+        let text = run_tool(&extension, &host, "web_search", args).await?;
+        assert_eq!(text, INVALID_QUERY, "{args} with credentials");
+        assert!(
+            requested_urls(&host).is_empty(),
+            "{args} reached the net service"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_four_hundred_char_query_is_forwarded() -> TestResult {
+    let query = "q".repeat(400);
+    let args = format!(r#"{{"query":"{query}"}}"#);
+    let host = scripted([reply(200, "application/json", br#"{"web":{"results":[]}}"#)]);
+    locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+    let extension = web(config(30))?;
+    let text = run_tool(&extension, &host, "web_search", &args).await?;
+    let result = parse(&text)?;
+    assert_eq!(result["provider"].as_str(), Some("brave"));
+    assert_eq!(requested_urls(&host).len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_tavily_non_json_body_yields_empty_results() -> TestResult {
+    let host = scripted([reply(200, "application/json", b"not json at all {{{")]);
+    locked(&host.env_vars).insert("TAVILY_API_KEY".to_owned(), TAVILY_KEY.to_owned());
+    let extension = web(tavily_config())?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"q"}"#).await?;
+    let result = parse(&text)?;
+    assert_eq!(result["provider"].as_str(), Some("tavily"));
+    assert_eq!(
+        result["results"].as_array().map(sonic_rs::Array::len),
+        Some(0)
+    );
+    assert!(!text.contains(TAVILY_KEY));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_search_body_cut_by_the_read_cap_decodes_tolerantly() -> TestResult {
+    // The full body is valid Brave JSON with two hits; the 1024-byte read
+    // cap cuts it mid-array, so the prefix no longer parses and the tool
+    // must return empty results instead of an error.
+    let mut hits = Vec::new();
+    for index in 0..40 {
+        hits.push(format!(
+            r#"{{"title":"t{index}","url":"https://a.test/{index}","description":"s{index}"}}"#
+        ));
+    }
+    let body = format!("{{\"web\":{{\"results\":[{}]}}}}", hits.join(",")).into_bytes();
+    assert!(body.len() > 1024, "the body must exceed the small cap");
+
+    let small = WebConfig {
+        max_body_bytes: 1024,
+        ..config(30)
+    };
+    let host = scripted([reply(200, "application/json", &body)]);
+    locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+    let extension = web(small)?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"q"}"#).await?;
+    let capped = parse(&text)?;
+    assert_eq!(capped["provider"].as_str(), Some("brave"));
+    assert_eq!(
+        capped["results"].as_array().map(sonic_rs::Array::len),
+        Some(0),
+        "the cut prefix must decode to empty results, never an error"
+    );
+
+    // The same body under the default ceiling keeps its hits, proving the
+    // cap — not the projection — produced the empty list above.
+    let host = scripted([reply(200, "application/json", &body)]);
+    locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+    let extension = web(config(30))?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"q"}"#).await?;
+    let full = parse(&text)?;
+    assert!(
+        full["results"].as_array().map_or(0, sonic_rs::Array::len) > 0,
+        "the uncut body must keep its hits: {text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_markdown_body_over_the_markdown_cap_is_truncated_with_the_exact_marker() -> TestResult {
+    let host = scripted([reply(200, "text/plain", &[b'x'; 100])]);
+    let extension = web(WebConfig {
+        max_markdown_bytes: 32,
+        ..config(30)
+    })?;
+    let text = run_tool(
+        &extension,
+        &host,
+        "web_fetch",
+        r#"{"url":"http://1.1.1.1/note"}"#,
+    )
+    .await?;
+    let result = parse(&text)?;
+    assert_eq!(result["raw_bytes"].as_u64(), Some(100));
+    assert_eq!(result["truncated"].as_bool(), Some(true));
+    assert_eq!(
+        result["markdown"].as_str(),
+        Some(&format!("{}\n\n[dalgona: truncated at 32 bytes]", "x".repeat(32))[..]),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_html_body_converts_to_markdown_through_the_tool() -> TestResult {
+    // Both the lowercase and the parameterized uppercase spellings must
+    // take the Convert branch; the exact Markdown proves `htmd` ran.
+    for content_type in ["text/html", "TEXT/HTML; charset=utf-8"] {
+        let host = scripted([reply(200, content_type, b"<h1>Hello</h1>")]);
+        let extension = web(config(30))?;
+        let text = run_tool(
+            &extension,
+            &host,
+            "web_fetch",
+            r#"{"url":"http://1.1.1.1/page"}"#,
+        )
+        .await?;
+        let result = parse(&text)?;
+        assert_eq!(
+            result["markdown"].as_str(),
+            Some("# Hello"),
+            "{content_type}"
+        );
+        assert_eq!(result["status"].as_u64(), Some(200));
+        assert_eq!(result["final_url"].as_str(), Some("http://1.1.1.1/page"));
+        assert_eq!(result["truncated"].as_bool(), Some(false));
+        assert_eq!(
+            result["raw_bytes"].as_u64(),
+            Some(b"<h1>Hello</h1>".len() as u64)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_content_type_is_an_unsupported_media_error() -> TestResult {
+    let host = scripted([FetchResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: b"abc".to_vec(),
+    }]);
+    let extension = web(config(30))?;
+    let text = run_tool(
+        &extension,
+        &host,
+        "web_fetch",
+        r#"{"url":"http://1.1.1.1/page"}"#,
+    )
+    .await?;
+    assert_eq!(
+        text,
+        "unsupported content type \"\": web_fetch converts HTML and text only"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_tavily_search_to_a_closed_port_hides_the_key() -> TestResult {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let host = Host::answering([]);
+    locked(&host.env_vars).insert("TAVILY_API_KEY".to_owned(), TAVILY_KEY.to_owned());
+    *locked(&host.net) = Net::Live {
+        base: Some(format!("http://127.0.0.1:{port}")),
+    };
+    let extension = web(tavily_config())?;
+    let text = run_tool(&extension, &host, "web_search", r#"{"query":"parse rust"}"#).await?;
+    assert_eq!(
+        text,
+        "web_search failed: no response from https://api.tavily.com/search"
+    );
+    assert!(!text.contains(TAVILY_KEY));
     Ok(())
 }
 
