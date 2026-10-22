@@ -1448,12 +1448,7 @@ async fn collect_turn(
     .await
 }
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one loopback fixture proves the direct turn end to end in place"
-)]
-async fn loopback_direct_turn_carries_key_and_decodes_tool_reasoning() {
+fn tool_reasoning_request() -> ModelRequest {
     let mut request = loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro");
     request.tools = vec![ModelToolSpec {
         name: "read".into(),
@@ -1485,50 +1480,10 @@ async fn loopback_direct_turn_carries_key_and_decodes_tool_reasoning() {
         },
     ]
     .into();
-    let thinking = plan(Some("high"));
-    let wire = gemini::build(&gemini::GeminiRequest {
-        request: &request,
-        thinking: &thinking,
-        api_key: "secret-key",
-        image_input: true,
-    })
-    .unwrap();
+    request
+}
 
-    let body = sse(&[
-        r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}"#,
-        r#"{"candidates":[{"content":{"parts":[{"text":" world","thought":true}]}}]}"#,
-        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a.txt"},"id":"call_1"},"thoughtSignature":"QUJDRA=="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}"#,
-    ]);
-    let listener = LoopbackListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let seen: Seen = Arc::default();
-    let mut server = tokio::task::JoinSet::new();
-    server.spawn(serve_script(listener, vec![(200, body)], Arc::clone(&seen)));
-
-    let response = send(
-        Family::GoogleGenerativeAi,
-        &crate::http::build_client(),
-        wire,
-        &base,
-        "dalgon/test",
-    )
-    .await
-    .unwrap();
-    assert!(response.status().is_success());
-    let events = collect_turn(
-        Family::GoogleGenerativeAi,
-        "google",
-        "gemini-3-pro",
-        response,
-    )
-    .await;
-    server
-        .join_next()
-        .await
-        .expect("server completes")
-        .expect("serve ok")
-        .unwrap();
-
+fn assert_tool_reasoning_turn(seen: &Seen, events: &[Result<StreamEvent, ProviderError>]) {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     let (head, req_body) = &seen[0];
@@ -1603,6 +1558,56 @@ async fn loopback_direct_turn_carries_key_and_decodes_tool_reasoning() {
         ),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn loopback_direct_turn_carries_key_and_decodes_tool_reasoning() {
+    let request = tool_reasoning_request();
+    let thinking = plan(Some("high"));
+    let wire = gemini::build(&gemini::GeminiRequest {
+        request: &request,
+        thinking: &thinking,
+        api_key: "secret-key",
+        image_input: true,
+    })
+    .unwrap();
+
+    let body = sse(&[
+        r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"text":" world","thought":true}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a.txt"},"id":"call_1"},"thoughtSignature":"QUJDRA=="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}"#,
+    ]);
+    let listener = LoopbackListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen: Seen = Arc::default();
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(serve_script(listener, vec![(200, body)], Arc::clone(&seen)));
+
+    let response = send(
+        Family::GoogleGenerativeAi,
+        &crate::http::build_client(),
+        wire,
+        &base,
+        "dalgon/test",
+    )
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
+    let events = collect_turn(
+        Family::GoogleGenerativeAi,
+        "google",
+        "gemini-3-pro",
+        response,
+    )
+    .await;
+    server
+        .join_next()
+        .await
+        .expect("server completes")
+        .expect("serve ok")
+        .unwrap();
+
+    assert_tool_reasoning_turn(&seen, &events);
 }
 
 #[tokio::test]
@@ -1856,59 +1861,77 @@ async fn loopback_antigravity_posts_the_cca_envelope() {
     );
 }
 
-async fn serve_pair(
-    first: Vec<u8>,
-    second: Vec<u8>,
-) -> (String, Seen, tokio::task::JoinSet<std::io::Result<()>>) {
+/// Asserts the empty-STOP retry contract: the scripted empty response was
+/// re-requested and the consumer only ever saw the retried answer.
+fn assert_empty_stop_rerequested(events: &[StreamEvent], seen: &Seen) {
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        2,
+        "the empty response was re-requested"
+    );
+    assert_eq!(
+        events[0],
+        StreamEvent::TextDelta {
+            text: String::from("Hello"),
+        }
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
+    use crate::{
+        auth::credential::{Credential, OAuthCredential},
+        lifecycle,
+        stream::EventStream,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    // The first response is the empty-STOP failure; the second carries the
+    // answer. The decoder errors before delivering anything, so the
+    // lifecycle's pre-delivery retry re-requests and the consumer only ever
+    // sees the second response.
+    let empty =
+        sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]);
+    let served = sse(&[
+        r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
+    ]);
     let listener = LoopbackListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen: Seen = Arc::default();
-    let mut server = tokio::task::JoinSet::new();
-    server.spawn(serve_script(
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(serve_script(
         listener,
-        vec![(200, first), (200, second)],
+        vec![(200, empty), (200, served)],
         Arc::clone(&seen),
     ));
-    (base, seen, server)
-}
 
-type AttemptFuture = std::pin::Pin<
-    Box<
-        dyn Future<
-                Output = Result<
-                    Option<crate::stream::EventStream>,
-                    crate::lifecycle::AttemptFailure,
-                >,
-            > + Send,
-    >,
->;
-
-fn gemini_attempt(
-    request: ModelRequest,
-    thinking: ThinkingPlan,
-    client: reqwest::Client,
-    base: String,
-) -> impl FnMut(
-    &crate::auth::credential::Credential,
-    &tokio_util::sync::CancellationToken,
-) -> AttemptFuture
-+ Send
-+ 'static {
-    move |_: &crate::auth::credential::Credential, _: &tokio_util::sync::CancellationToken| {
+    let request = loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro");
+    let thinking = plan(Some("high"));
+    let client = crate::http::build_client();
+    let attempt = move |_: &Credential, _: &CancellationToken| {
         let (request, thinking, client, base) = (
             request.clone(),
             thinking.clone(),
             client.clone(),
             base.clone(),
         );
-        Box::pin(async move {
+        async move {
             let wire = gemini::build(&gemini::GeminiRequest {
                 request: &request,
                 thinking: &thinking,
                 api_key: "secret-key",
                 image_input: true,
             })
-            .map_err(crate::lifecycle::AttemptFailure::Provider)?;
+            .map_err(lifecycle::AttemptFailure::Provider)?;
             let response = send(
                 Family::GoogleGenerativeAi,
                 &client,
@@ -1917,7 +1940,7 @@ fn gemini_attempt(
                 "dalgon/test",
             )
             .await
-            .map_err(crate::lifecycle::AttemptFailure::Provider)?;
+            .map_err(lifecycle::AttemptFailure::Provider)?;
             let chunks = response
                 .bytes_stream()
                 .map(|chunk| chunk.expect("loopback chunk").to_vec());
@@ -1928,37 +1951,9 @@ fn gemini_attempt(
                 crate::sse::decode_stream(chunks),
                 None,
             );
-            Ok(Some(crate::stream::EventStream::new(events, || {})))
-        })
-    }
-}
-
-#[tokio::test]
-async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
-    use crate::{
-        auth::credential::{Credential, OAuthCredential},
-        lifecycle,
+            Ok(Some(EventStream::new(events, || {})))
+        }
     };
-    use tokio_util::sync::CancellationToken;
-
-    // The first response is the empty-STOP failure; the second carries the
-    // answer. The decoder errors before delivering anything, so the
-    // lifecycle's pre-delivery retry re-requests and the consumer only ever
-    // sees the second response.
-    let (base, seen, mut server) = serve_pair(
-        sse(&[r#"{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}"#]),
-        sse(&[
-            r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#,
-        ]),
-    )
-    .await;
-
-    let attempt = gemini_attempt(
-        loopback_request(Family::GoogleGenerativeAi, "gemini-3-pro"),
-        plan(Some("high")),
-        crate::http::build_client(),
-        base,
-    );
     let refresh = |_: OAuthCredential| async {
         Err::<Credential, _>(ProviderError::NoCredentials {
             provider: String::from("google"),
@@ -1978,33 +1973,14 @@ async fn loopback_empty_stop_is_re_requested_through_the_lifecycle() {
     while let Some(item) = stream.next().await {
         events.push(item.expect("the retried response succeeds"));
     }
-    server
+    tasks
         .join_next()
         .await
         .expect("server completes")
         .expect("serve ok")
-        .expect("serve script");
+        .unwrap();
 
-    assert_eq!(
-        seen.lock().expect("server records").len(),
-        2,
-        "the empty response was re-requested"
-    );
-    assert_eq!(
-        events[0],
-        StreamEvent::TextDelta {
-            text: String::from("Hello"),
-        }
-    );
-    assert!(
-        matches!(
-            events.last(),
-            Some(StreamEvent::Stop {
-                reason: StopReason::EndTurn,
-            })
-        ),
-        "{events:?}"
-    );
+    assert_empty_stop_rerequested(&events, &seen);
 }
 
 #[tokio::test]

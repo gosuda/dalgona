@@ -510,25 +510,6 @@ impl Drop for ChildGuard {
     }
 }
 
-/// Chains a recorded stdin write fault onto a terminal process failure.
-///
-/// The writer detail is an OS error string only, never prompt bytes or
-/// subprocess output, so appending it leaks no secret. The process failure
-/// kind is preserved: a sign-in `InvalidRequest` stays `InvalidRequest` so
-/// retry routing is unchanged.
-fn with_writer_cause(error: ProviderError, writer: &str) -> ProviderError {
-    match error {
-        ProviderError::InvalidRequest { message } => ProviderError::InvalidRequest {
-            message: format!("{message}; writing the gemini prompt failed: {writer}"),
-        },
-        ProviderError::Transport { family, reason } => ProviderError::Transport {
-            family,
-            reason: format!("{reason}; writing the gemini prompt failed: {writer}"),
-        },
-        other => other,
-    }
-}
-
 fn combine_with_cleanup(original: ProviderError, cleanup: &str) -> ProviderError {
     match original {
         ProviderError::Transport { family, reason } => ProviderError::Transport {
@@ -1014,25 +995,19 @@ impl CliState {
             .leader
             .or_else(|| self.guard.child.try_wait().ok().flatten());
         match status {
-            Some(status) if !status.success() => {
-                let base =
-                    exit_failure(status.code()).unwrap_or_else(|| ProviderError::Transport {
-                        family: FAMILY,
-                        reason: if self.stderr_bytes == 0 {
-                            format!("gemini exited with {status} and no result")
-                        } else {
-                            format!(
-                                "gemini exited with {status} and no result ({} stderr bytes withheld)",
-                                self.stderr_bytes
-                            )
-                        },
-                    });
-                if let Some(writer) = self.writer_error.take() {
-                    Err(with_writer_cause(base, &writer))
-                } else {
-                    Err(base)
-                }
-            }
+            Some(status) if !status.success() => Err(exit_failure(status.code()).unwrap_or_else(
+                || ProviderError::Transport {
+                    family: FAMILY,
+                    reason: if self.stderr_bytes == 0 {
+                        format!("gemini exited with {status} and no result")
+                    } else {
+                        format!(
+                            "gemini exited with {status} and no result ({} stderr bytes withheld)",
+                            self.stderr_bytes
+                        )
+                    },
+                },
+            )),
             Some(_) => {
                 if let Some(error) = self.writer_error.take() {
                     return Err(ProviderError::Transport {

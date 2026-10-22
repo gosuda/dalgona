@@ -20,9 +20,8 @@
 //! streamGenerateContent?alt=sse` (Gemini/Vertex) or the Cloud Code Assist
 //! envelope (`{project, model, request, requestType}`, Antigravity only;
 //! the Gemini CLI surface is a credential-less local subprocess, never an
-//! HTTP client). Tool-call arguments are written from their [`RawJson`] text,
-//! never re-encoded; tool schemas are projected onto the subset the wire
-//! accepts (`schema::project`). The Gemini 3 `thinkingLevel` spelling
+//! HTTP client). Tool schemas and tool-call arguments are written from their
+//! [`RawJson`] text, never re-encoded. The Gemini 3 `thinkingLevel` spelling
 //! and the `thoughtSignature` fields travel byte-exact through the decoders
 //! ([`shared::GeminiDecoder`]) so a signed signature reaches the next turn's
 //! replay bound for the same family and model.
