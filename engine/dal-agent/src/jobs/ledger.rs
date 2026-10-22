@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use dal_core::{JobId, JobOutcome, JobReport};
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,6 @@ pub(super) enum Line {
     End {
         id: JobId,
         label: Box<str>,
-        /// The command the starter supplied; absent on lines written before
-        /// the field existed and for jobs started without a command.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<Arc<str>>,
         outcome: JobOutcome,
         text: Box<str>,
     },
@@ -57,20 +53,11 @@ pub(crate) enum LedgerError {
     },
 }
 
-/// One replayed end line: the public report and the private command text.
-#[derive(Debug)]
-pub(super) struct Ended {
-    /// The report every consumer sees.
-    pub(super) report: JobReport,
-    /// The command the starter supplied; the report type carries none.
-    pub(super) command: Option<Arc<str>>,
-}
-
 /// What a reopened ledger recovered.
 #[derive(Debug, Default)]
 pub(super) struct Recovered {
     /// Every ended report, oldest first.
-    pub(super) ended: Vec<Ended>,
+    pub(super) ended: Vec<JobReport>,
     /// Ended reports no journaled wake delivered, oldest first.
     pub(super) pending: Vec<JobReport>,
     /// The held-job set.
@@ -105,12 +92,11 @@ impl Ledger {
         Ok((Self { path: Some(path) }, recovered))
     }
 
-    /// Builds the end line of one top-level report and its starter command.
-    pub(super) fn end(report: &JobReport, command: Option<Arc<str>>) -> Line {
+    /// Builds the end line of one top-level report.
+    pub(super) fn end(report: &JobReport) -> Line {
         Line::End {
             id: report.id,
             label: report.label.clone(),
-            command,
             outcome: report.outcome.clone(),
             text: report.text.clone(),
         }
@@ -174,7 +160,6 @@ fn replay(text: &str) -> Result<Recovered, usize> {
             Line::End {
                 id,
                 label,
-                command,
                 outcome,
                 text,
             } => {
@@ -185,7 +170,7 @@ fn replay(text: &str) -> Result<Recovered, usize> {
                     text,
                 };
                 recovered.pending.push(report.clone());
-                recovered.ended.push(Ended { report, command });
+                recovered.ended.push(report);
             }
             Line::Hold { id } => {
                 recovered.held.insert(id);

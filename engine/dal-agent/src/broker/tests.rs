@@ -564,6 +564,166 @@ fn a_turn_resolution_rejects_a_cause_that_is_not_a_turn_end() {
     let _ = broker.resolve_turn(turn(), ResolutionCause::Answered);
 }
 
+/// A consent answer whose terminal record never lands must stay retryable:
+/// after the actor fail-closes the waiter, a later answer for the same
+/// request journals exactly one outcome record (`ConsentRaceReview` F5).
+///
+/// The body below drives the real broker and the real fold through the
+/// actor's claim/record seam: `Broker::answer` claims the slot, the fold
+/// step emits the terminal `Record::Resolved`, and the (simulated) journal
+/// append either lands it or drops it.
+#[tokio::test(start_paused = true)]
+async fn a_failed_durability_keeps_the_consent_retry_journaling_exactly_once() {
+    use dal_core::{Effect, Event, Record, Session};
+
+    fn emitted_records(effects: &[Effect]) -> Vec<Record> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Emit(emit) => Some(emit.records.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    fn resolved_ids(records: &[Record]) -> Vec<RequestId> {
+        records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Resolved { request, .. } => Some(*request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let broker = Broker::new();
+    let (request, waiter) = broker.open(Owner::Core, text(), turn(), Instant::now() + LIMIT);
+    let stamp = jiff::Timestamp::UNIX_EPOCH;
+    let (mut fold, _) = Session::replay([], stamp).expect("empty replay");
+    fold.step(
+        Event::RequestOpened {
+            request: request.clone(),
+        },
+        stamp,
+        &mut Vec::new(),
+    )
+    .expect("the question opens");
+
+    // First attempt: the answer wins the broker claim and the fold emits
+    // its terminal record — but the journal append fails, so nothing lands
+    // and the actor fail-closes the waiter, exactly as today.
+    let won = broker
+        .answer(request.id, Answer::Approve, client("tui"))
+        .expect("the first answer wins");
+    let mut effects = Vec::new();
+    fold.step(
+        Event::GrantResolved {
+            request: request.id,
+            answer: won.answer.clone(),
+            by: Some(won.by.clone()),
+            was_default: won.was_default,
+            cause: won.cause,
+        },
+        stamp,
+        &mut effects,
+    )
+    .expect("the resolution steps");
+    let dropped = emitted_records(&effects);
+    assert_eq!(
+        resolved_ids(&dropped),
+        vec![request.id],
+        "the first attempt emits one terminal record"
+    );
+    broker.cancel(&won);
+    let end = settled(waiter).await;
+    assert_eq!(
+        end.cause, None,
+        "a durability failure fail-closes the waiter with no journaled cause"
+    );
+
+    // The actor's failure path recycles the failed claim: the waiter stays
+    // fail-closed, but the slot and the fold question reopen for a retry.
+    assert!(
+        broker.unclaim(request.id, &won.by),
+        "the failed winner releases its claim"
+    );
+    assert!(
+        fold.restore_open_question(&request),
+        "the dropped question is tracked again"
+    );
+
+    // Retry: a later answer for the same request must win and emit one
+    // terminal record, so the journal gains exactly one outcome across
+    // both attempts — never zero, never two.
+    let retry = broker
+        .answer(request.id, Answer::Approve, client("tui"))
+        .expect("the retry wins after a failed durability attempt");
+    let mut effects = Vec::new();
+    fold.step(
+        Event::GrantResolved {
+            request: request.id,
+            answer: retry.answer.clone(),
+            by: Some(retry.by.clone()),
+            was_default: retry.was_default,
+            cause: retry.cause,
+        },
+        stamp,
+        &mut effects,
+    )
+    .expect("the retry steps");
+    // Only landed appends reach the durable store: the first attempt's
+    // emit was dropped by the failed write, the retry's emit lands.
+    let mut journal: Vec<Record> = Vec::new();
+    journal.extend(emitted_records(&effects));
+    assert_eq!(
+        resolved_ids(&journal),
+        vec![request.id],
+        "the journal gains exactly one outcome across both attempts"
+    );
+    assert!(
+        journal
+            .iter()
+            .all(|record| matches!(record, Record::Resolved { .. })),
+        "the journal holds only the terminal record: {journal:?}"
+    );
+}
+
+#[test]
+fn unclaim_releases_only_the_failed_winner_it_names() {
+    let broker = Broker::new();
+    let (id, _waiter) = open_text(&broker);
+    assert!(
+        !broker.unclaim(id, &client("tui")),
+        "an unclaimed slot has nothing to release"
+    );
+    let won = broker
+        .answer(id, Answer::Approve, client("tui"))
+        .expect("the first answer wins");
+    assert!(
+        !broker.unclaim(id, &client("core")),
+        "a rival cannot dislodge the winner"
+    );
+    assert!(
+        broker
+            .answer(id, Answer::Approve, client("core"))
+            .is_err_and(|error| already_resolved_by(&error, id, &client("tui"))),
+        "the winner still owns the slot after a rival unclaim"
+    );
+    assert!(
+        broker.unclaim(id, &won.by),
+        "the failed winner releases its own claim"
+    );
+    assert!(
+        broker.answer(id, Answer::Approve, client("core")).is_ok(),
+        "the slot is contestable again after the release"
+    );
+    assert!(
+        !broker.unclaim(RequestId::new_v7(), &client("core")),
+        "an unknown slot releases nothing"
+    );
+}
+
 #[test]
 fn parked_lists_only_unreported_claims_oldest_first_and_keeps_them_resolved() {
     let broker = Broker::new();

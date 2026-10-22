@@ -398,3 +398,49 @@ async fn progress_stops_at_cancellation() {
         .await
         .expect("no progress follows the cancellation");
 }
+
+/// A running child with periodic progress emits multiple distinct progress
+/// updates through the real session broadcast subscription before exiting.
+#[tokio::test]
+async fn running_child_with_periodic_progress_emits_multiple_updates_through_session_broadcast() {
+    let script = "printf 'PHASE_1\\n'\n\
+                  while [ ! -f step2 ]; do sleep 0.05; done\n\
+                  printf 'PHASE_2\\n'\n\
+                  while [ ! -f release ]; do sleep 0.05; done\n";
+    let mut rig = start_rig(script).await.expect("start the progress rig");
+    let call = tool_call_id(&rig.seen).await.expect("the probe runs");
+
+    // First progress update observed by the session subscriber.
+    let (_, phase1) = progress_rows_until(&mut rig.subscription, &call, "PHASE_1")
+        .await
+        .expect("first periodic progress update arrives through session broadcast");
+    assert!(
+        phase1.contains("PHASE_1"),
+        "the first update contains the first phase output"
+    );
+    assert!(!phase1.contains("PHASE_2"), "phase 2 has not started yet");
+
+    // Signal the child to emit the next phase of output.
+    std::fs::write(rig.workspace_dir.join("step2"), b"").expect("advance child to step2");
+
+    // Second periodic progress update observed by the session subscriber.
+    let (_, phase2) = progress_rows_until(&mut rig.subscription, &call, "PHASE_2")
+        .await
+        .expect("second periodic progress update arrives through session broadcast");
+    assert!(
+        phase2.contains("PHASE_1") && phase2.contains("PHASE_2"),
+        "the second update contains cumulative tail lines through the session broadcast"
+    );
+
+    // Release the child to finish.
+    std::fs::write(rig.workspace_dir.join("release"), b"").expect("release child to exit");
+    assert!(
+        !drain_until_end(&mut rig.subscription)
+            .await
+            .expect("the turn ends"),
+        "the exit is not a cancellation"
+    );
+    assert_progress_quiet(&mut rig.subscription, &call)
+        .await
+        .expect("no progress follows the terminal outcome");
+}
