@@ -1,5 +1,9 @@
 //! Binary-boundary tests for provider logout behavior.
 
+#[expect(
+    dead_code,
+    reason = "fixture helpers are shared across binary test crates"
+)]
 mod support;
 
 use std::error::Error;

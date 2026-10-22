@@ -1,5 +1,9 @@
 //! Binary-boundary tests for `dalgon dev` journal surgery and fold attribution.
 
+#[expect(
+    dead_code,
+    reason = "fixture helpers are shared across binary test crates"
+)]
 mod support;
 
 use std::{

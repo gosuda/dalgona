@@ -1,5 +1,9 @@
 //! Binary-boundary tests for the model catalog command.
 
+#[expect(
+    dead_code,
+    reason = "fixture helpers are shared across binary test crates"
+)]
 mod support;
 
 use std::{

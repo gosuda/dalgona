@@ -1,8 +1,3 @@
-#![expect(
-    dead_code,
-    reason = "fixture helpers are shared across binary test crates"
-)]
-
 use std::{
     error::Error,
     fs,
