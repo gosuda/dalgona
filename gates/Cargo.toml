@@ -279,3 +279,7 @@ path = "tests/loop-tui-13.rs"
 [[test]]
 name = "dal-full-01"
 path = "tests/dal-full-01.rs"
+
+[[test]]
+name = "guard-spill-01"
+path = "tests/guard-spill-01.rs"
