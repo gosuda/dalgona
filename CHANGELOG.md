@@ -11,6 +11,8 @@
 - Describe the `agent` tool with a flat object schema for Anthropic
   requests. Keep action-specific argument checks in the tool.
 - Report cancellation when `agent wait` observes a cancelled child.
+- Stop retrying Google quota-exhaustion responses. Keep retrying temporary
+  rate limits.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
