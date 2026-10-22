@@ -334,7 +334,7 @@ fn log_signal_failure(name: &str, error: &io::Error) {
 /// Registers one POSIX shutdown signal; a failure logs one warning and skips
 /// that signal.
 #[cfg(unix)]
-fn register_signal(
+pub(crate) fn register_signal(
     kind: tokio::signal::unix::SignalKind,
     name: &str,
 ) -> Option<tokio::signal::unix::Signal> {

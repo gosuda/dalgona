@@ -284,14 +284,7 @@ where
     M: FnMut() -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> + Send + 'static,
     S: FnMut(bool) -> Result<(), TuiError> + Send + 'static,
 {
-    let signals = match signal::Signals::start() {
-        Ok(signals) => signals,
-        Err(error) => {
-            return tui_error(TuiError::Terminal(format!(
-                "dalgon: cannot watch terminal signals: {error}\nRestart dalgon in a terminal."
-            )));
-        }
-    };
+    let signals = signal::Signals::start();
     #[expect(
         clippy::disallowed_methods,
         reason = "process edge: the process edge owns standard input"

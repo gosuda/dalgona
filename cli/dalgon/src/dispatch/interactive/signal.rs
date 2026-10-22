@@ -19,18 +19,19 @@ pub(super) struct Signals {
 }
 
 impl Signals {
-    /// Registers handlers before raw mode or the blocking client starts.
-    pub(super) fn start() -> io::Result<Self> {
+    /// Registers handlers before raw mode or the blocking client starts. A
+    /// signal whose registration fails logs one warning and is skipped.
+    pub(super) fn start() -> Self {
         let stop = Arc::new(AtomicU8::new(0));
         let resize = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));
-        let tasks = start_tasks(Arc::clone(&stop), Arc::clone(&resize), Arc::clone(&epoch))?;
-        Ok(Self {
+        let tasks = start_tasks(Arc::clone(&stop), Arc::clone(&resize), Arc::clone(&epoch));
+        Self {
             stop,
             resize,
             epoch,
             tasks,
-        })
+        }
     }
 
     /// Wraps standard input with shutdown and resize observations.
@@ -63,23 +64,17 @@ fn start_tasks(
     stop: Arc<AtomicU8>,
     resize: Arc<AtomicBool>,
     epoch: Arc<AtomicU64>,
-) -> io::Result<Vec<JoinHandle<()>>> {
-    use tokio::signal::unix::{SignalKind, signal};
+) -> Vec<JoinHandle<()>> {
+    use tokio::signal::unix::SignalKind;
 
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut window_change = signal(SignalKind::window_change())?;
+    let mut shutdown = crate::edge::ShutdownSignals::register();
+    let window_change = crate::edge::register_signal(SignalKind::window_change(), "SIGWINCH");
     #[expect(
         clippy::disallowed_methods,
         reason = "process edge: the process edge owns its signal watchers"
     )]
     let stop_task = tokio::spawn(async move {
-        let code = tokio::select! {
-            _ = interrupt.recv() => 130,
-            _ = terminate.recv() => 143,
-            _ = hangup.recv() => 129,
-        };
+        let code = shutdown.next().await;
         stop.store(code, Ordering::SeqCst);
     });
     #[expect(
@@ -87,33 +82,34 @@ fn start_tasks(
         reason = "process edge: the process edge owns its signal watchers"
     )]
     let resize_task = tokio::spawn(async move {
+        let Some(mut window_change) = window_change else {
+            return;
+        };
         while window_change.recv().await.is_some() {
             epoch.fetch_add(1, Ordering::SeqCst);
             resize.store(true, Ordering::SeqCst);
         }
     });
-    Ok(vec![stop_task, resize_task])
+    vec![stop_task, resize_task]
 }
 
-#[cfg(not(unix))]
+/// Watches the console Ctrl+C event (130) and the console close event (129,
+/// the terminal-hangup status). Resize arrives as a terminal input event.
+#[cfg(windows)]
 #[expect(
     clippy::disallowed_methods,
     reason = "process edge: the process edge owns its signal watchers"
-)]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the unix variant fails on signal-driver setup; this variant cannot fail"
 )]
 fn start_tasks(
     stop: Arc<AtomicU8>,
     _resize: Arc<AtomicBool>,
     _epoch: Arc<AtomicU64>,
-) -> io::Result<Vec<JoinHandle<()>>> {
-    Ok(vec![tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            stop.store(130, Ordering::SeqCst);
-        }
-    })])
+) -> Vec<JoinHandle<()>> {
+    let mut shutdown = crate::edge::ShutdownSignals::register();
+    vec![tokio::spawn(async move {
+        let code = shutdown.next().await;
+        stop.store(code, Ordering::SeqCst);
+    })]
 }
 
 /// Terminal adapter whose signal state is captured by the process edge.
