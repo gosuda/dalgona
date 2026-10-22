@@ -403,3 +403,59 @@ fn agents_decode_run_rejects_role_and_system_together() {
         "agents: step step: role and system cannot both be set.",
     );
 }
+
+/// The child-only `report` tool keeps the closed schema its decoder reads:
+/// the three statuses, both members required, no unknown members, and the
+/// report length cap linked to `REPORT_LIMIT` (not a second literal copy that
+/// can drift when the limit changes).
+#[test]
+fn report_tool_schema_stays_closed_and_tracks_the_report_limit() {
+    let schema: sonic_rs::Value =
+        sonic_rs::from_str(REPORT_SCHEMA).expect("REPORT_SCHEMA is valid JSON");
+    let object = schema.as_object().expect("REPORT_SCHEMA is an object");
+    assert_eq!(
+        object.get(&"type").and_then(JsonValueTrait::as_str),
+        Some("object")
+    );
+    let properties = object
+        .get(&"properties")
+        .and_then(|properties| properties.as_object())
+        .expect("REPORT_SCHEMA declares its properties");
+    let status = properties
+        .get(&"status")
+        .and_then(|status| status.as_object())
+        .expect("REPORT_SCHEMA declares status");
+    let kinds: Vec<&str> = status
+        .get(&"enum")
+        .and_then(|kinds| kinds.as_array())
+        .expect("status keeps its enum")
+        .iter()
+        .filter_map(JsonValueTrait::as_str)
+        .collect();
+    assert_eq!(kinds, ["done", "blocked", "failed"]);
+    let report = properties
+        .get(&"report")
+        .and_then(|report| report.as_object())
+        .expect("REPORT_SCHEMA declares report");
+    assert_eq!(
+        report.get(&"maxLength").and_then(JsonValueTrait::as_u64),
+        Some(u64::try_from(REPORT_LIMIT).expect("REPORT_LIMIT fits in u64")),
+        "the schema cap tracks REPORT_LIMIT, not a literal copy"
+    );
+    let mut required: Vec<&str> = object
+        .get(&"required")
+        .and_then(|required| required.as_array())
+        .expect("REPORT_SCHEMA keeps its required list")
+        .iter()
+        .filter_map(JsonValueTrait::as_str)
+        .collect();
+    required.sort_unstable();
+    assert_eq!(required, ["report", "status"]);
+    assert_eq!(
+        object
+            .get(&"additionalProperties")
+            .and_then(JsonValueTrait::as_bool),
+        Some(false),
+        "report stays closed to unknown members"
+    );
+}

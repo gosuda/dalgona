@@ -59,6 +59,21 @@ const TASK_JOB_NAME: &str = "agents-task";
 /// Deadline for one git call of the isolation backend.
 const GIT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Stdout bytes one git call keeps: the largest prefix the run service's
+/// spawn door accepts, `MAX_STDOUT_PREFIX_BYTES` in `dal-agent`'s `proc`
+/// module. The door refuses a larger request before launching, so every git
+/// call of the isolation backend and of salvage would fail at spawn. Output
+/// past the limit sets `stdout_prefix_overflowed`, which `complete` turns
+/// into an unread call. The tests drive the real host to pin this value to
+/// the cap the door enforces.
+const GIT_STDOUT_PREFIX_LIMIT: u32 = 262_145;
+
+/// File of a task worktree's creation receipt that records the base commit
+/// the tree started from: `<data root>/isolation/<session>/<task>/base.txt`.
+/// Open salvage captures a lost tree's work against this commit, so commits
+/// the task made inside its tree are kept with its edits.
+const RECEIPT_BASE_FILE: &str = "base.txt";
+
 /// Skip reason of a step the run never started because it was cancelled.
 const CANCELLED_SKIP: &str = "the run was cancelled";
 
@@ -156,7 +171,14 @@ impl ParkingGate {
 }
 
 enum Message {
-    Input(oneshot::Sender<Result<(), ServiceError>>),
+    Input {
+        reply: oneshot::Sender<Result<(), ServiceError>>,
+        /// The prompt's opening token, carried so the owner can drop an
+        /// already-cancelled prompt before mutating any state. A prompt the
+        /// waiter gave up on (user cancel or shutdown) must leave the
+        /// battery exactly as the cancel-before-send path does.
+        cancel: CancellationToken,
+    },
     BeforeTurn(oneshot::Sender<()>),
     ToolCall(ToolCallEvent, oneshot::Sender<ToolCallVerdict>),
     Tool {
@@ -467,11 +489,34 @@ impl Runtime {
             .map_err(|_| ServiceError::failed(None, "orchestration owner is closed"))?
     }
 
+    /// Salvages this session's lost worktrees before the owner starts.
+    /// Filesystem-gated: without leftover directories this makes no service
+    /// call. Split from `open` so the session setup stays under the
+    /// function-length cap; the call order is unchanged.
+    async fn salvage_session_open(
+        &self,
+        session: SessionId,
+        workspace: &Path,
+        caller: &Caller,
+        services: &dyn Services,
+    ) {
+        if let Some(root) = self.config.data_root.as_ref() {
+            salvage_open_worktrees(services, caller, session, workspace, root).await;
+        }
+    }
+
     async fn open(&self, start: SessionStart, cx: HookCx) -> Result<(), HookError> {
         let session = cx.session;
         let parent = cx.parent;
         let caller = cx.caller.clone();
         let services = Arc::clone(&cx.services);
+        self.salvage_session_open(
+            session,
+            start.workspace.as_path(),
+            &caller,
+            services.as_ref(),
+        )
+        .await;
         if parent.is_some() && self.config.agents.enabled {
             let report_tool =
                 super::tools::report_tool(self).map_err(|error| failed(&error.to_string()))?;
@@ -652,10 +697,18 @@ impl SessionState {
 
     async fn handle_message(&mut self, message: Message) -> bool {
         match message {
-            Message::Input(reply) => {
-                let result = self.input().await;
-                self.publish_status();
-                let _ = reply.send(result);
+            Message::Input { reply, cancel } => {
+                // The waiter may have given up while this prompt sat queued
+                // (user cancel or shutdown). Such a prompt is a no-op: the
+                // owner applies no battery state at all, matching the
+                // cancel-before-send path, and sends nothing because the
+                // receiver is already dropped. A deadline-expired prompt
+                // still runs: the core admits it either way.
+                if !cancel.is_cancelled() {
+                    let result = self.input().await;
+                    self.publish_status();
+                    let _ = reply.send(result);
+                }
             }
             Message::BeforeTurn(reply) => self.before_turn(reply),
             Message::ToolCall(event, reply) => {
@@ -795,9 +848,7 @@ impl SessionState {
         let fresh = self.completed_jobs().await?;
         let fresh_ids: Vec<JobId> = fresh.iter().map(|report| report.id).collect();
         for report in fresh {
-            if !self.held.iter().any(|held| held.id == report.id) {
-                self.held.push(report);
-            }
+            self.hold_report(report);
         }
         let held_ids: Vec<JobId> = self.held.iter().map(|report| report.id).collect();
         self.arbiter.note_ended(&held_ids, now());
@@ -812,8 +863,12 @@ impl SessionState {
         if self.arbiter.wake_has_other_sources(&jobs)
             && let Err(error) = self.evaluate_idle_goal().await
         {
+            // Restore before releasing: a failed release must not strand
+            // reports the host still counts as taken. Extend rather than
+            // assign: a wake that is not due leaves `jobs` empty while the
+            // waiting reports are still in `held`.
+            self.held.extend(jobs);
             self.release_reports(fresh_ids).await?;
-            self.held = jobs;
             return Err(error);
         }
         let attempted: Vec<JobId> = jobs.iter().map(|report| report.id).collect();
@@ -828,7 +883,14 @@ impl SessionState {
             .into_iter()
             .filter(|id| !job_ids.contains(id))
             .collect();
-        self.release_reports(omitted).await?;
+        if let Err(error) = self.release_reports(omitted).await {
+            // `collect` drained the arbiter and `jobs` came out of `held`; no
+            // report was released, so the host never offers them again. Put
+            // all of it back for the next tick before reporting the failure.
+            self.requeue_ready(&ready);
+            self.rehold_jobs(&ready);
+            return Err(error);
+        }
         if text.is_empty() {
             self.requeue_ready(&ready);
             return Ok(());
@@ -839,8 +901,7 @@ impl SessionState {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
                 self.arbiter.release(&job_ids);
-                self.release_reports(job_ids).await?;
-                self.requeue_ready(&ready);
+                self.release_and_requeue(&ready, job_ids).await?;
                 return Err(error);
             }
         };
@@ -1225,6 +1286,47 @@ impl SessionState {
                 "job reports could not be released",
             )),
         }
+    }
+
+    /// Holds a report for the next wake unless it is already held.
+    fn hold_report(&mut self, report: super::arbiter::JobReport) {
+        if !self.held.iter().any(|held| held.id == report.id) {
+            self.held.push(report);
+        }
+    }
+
+    /// Puts the job reports of `ready` back in `held`. Assembling a wake
+    /// drains `held`, and `Ready::Jobs` is not requeued because a release
+    /// normally hands the reports back to the host; when that release fails
+    /// the host still counts them as taken, so only `held` can redeliver them.
+    fn rehold_jobs(&mut self, ready: &[super::arbiter::Ready]) {
+        let reports = ready
+            .iter()
+            .filter_map(|item| match item {
+                super::arbiter::Ready::Jobs(reports) => Some(reports),
+                _ => None,
+            })
+            .flatten();
+        for report in reports {
+            self.hold_report(report.clone());
+        }
+    }
+
+    /// Releases the reports of a wake that never started a turn, then
+    /// requeues what that wake drained. The requeue runs even when the
+    /// release fails, so the failure reaches the caller without losing work;
+    /// the reports the host could not take back are held here instead.
+    async fn release_and_requeue(
+        &mut self,
+        ready: &[super::arbiter::Ready],
+        ids: Vec<JobId>,
+    ) -> Result<(), ServiceError> {
+        let released = self.release_reports(ids).await;
+        self.requeue_ready(ready);
+        if released.is_err() {
+            self.rehold_jobs(ready);
+        }
+        released
     }
 
     fn requeue_ready(&mut self, ready: &[super::arbiter::Ready]) {
@@ -1930,8 +2032,10 @@ impl SessionState {
     }
 
     /// Restores a persisted delivery after a wake that never started a turn,
-    /// then releases its reports for redelivery. Returns a failed rollback
-    /// write, else the wake failure when one caused the refusal.
+    /// then releases its reports for redelivery and requeues the wake's
+    /// sources. Returns a failed release, else a failed rollback write, else
+    /// the wake failure when one caused the refusal; the requeue has run in
+    /// every case.
     async fn abandon_wake(
         &mut self,
         ready: &[super::arbiter::Ready],
@@ -1948,8 +2052,7 @@ impl SessionState {
             None
         };
         self.arbiter.release(&job_ids);
-        self.release_reports(job_ids).await?;
-        self.requeue_ready(ready);
+        self.release_and_requeue(ready, job_ids).await?;
         if let Some(error) = rollback_error {
             return Err(error);
         }
@@ -2583,7 +2686,7 @@ impl SessionState {
         )
         .await
         .map_err(|error| refuse(denied_refusal(&error)))?;
-        if version.status != ExitStatusKind::Exited(0) {
+        if !complete(&version) {
             return Err(refuse(IsolationRefusal::NoGit));
         }
         let text = String::from_utf8_lossy(&version.stdout_prefix);
@@ -2610,7 +2713,7 @@ impl SessionState {
         )
         .await
         {
-            Ok(output) if output.status == ExitStatusKind::Exited(0) => Ok(PathBuf::from(
+            Ok(output) if complete(&output) => Ok(PathBuf::from(
                 String::from_utf8_lossy(&output.stdout_prefix).trim(),
             )),
             Ok(_) => Err(refuse(super::worktree::IsolationRefusal::NotARepository)),
@@ -2632,11 +2735,9 @@ impl SessionState {
         )
         .await
         {
-            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
-                Ok(String::from_utf8_lossy(&output.stdout_prefix)
-                    .trim()
-                    .to_owned())
-            }
+            Ok(output) if complete(&output) => Ok(String::from_utf8_lossy(&output.stdout_prefix)
+                .trim()
+                .to_owned()),
             Ok(_) => Err(refuse(super::worktree::IsolationRefusal::NoHead)),
             Err(error) => Err(refuse(denied_refusal(&error))),
         }
@@ -2656,11 +2757,9 @@ impl SessionState {
         )
         .await
         {
-            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
-                Ok(String::from_utf8_lossy(&output.stdout_prefix)
-                    .trim()
-                    .to_owned())
-            }
+            Ok(output) if complete(&output) => Ok(String::from_utf8_lossy(&output.stdout_prefix)
+                .trim()
+                .to_owned()),
             Ok(output) => Err(refuse(super::worktree::IsolationRefusal::NoBase {
                 reason: stderr_line(&output),
             })),
@@ -2899,7 +2998,7 @@ async fn git(
         stdin: None,
         timeout: Some(GIT_CALL_TIMEOUT),
         env: vec![(Box::from("GIT_OPTIONAL_LOCKS"), Box::from("0"))],
-        stdout_prefix_limit: 1 << 20,
+        stdout_prefix_limit: GIT_STDOUT_PREFIX_LIMIT,
     };
     services.run(caller, request).await
 }
@@ -2974,14 +3073,541 @@ fn complete(output: &RunOutput) -> bool {
     output.status == ExitStatusKind::Exited(0) && !output.stdout_prefix_overflowed
 }
 
-/// Why a git call did not succeed: the service error, or the first stderr
-/// line of a call that exited badly. `None` means it succeeded.
+/// Why a git call did not succeed: the service error, the first stderr line
+/// of a call that exited badly, or the overflow of a call that outgrew the
+/// stdout prefix cap. `None` means it succeeded with all of its stdout kept.
 fn git_refusal(result: &Result<RunOutput, ServiceError>) -> Option<String> {
     match result {
-        Ok(output) if output.status == ExitStatusKind::Exited(0) => None,
+        Ok(output) if complete(output) => None,
+        Ok(output) if output.stdout_prefix_overflowed => {
+            let line = stderr_line(output);
+            if line.is_empty() {
+                Some("the git output exceeded the stdout prefix limit".to_owned())
+            } else {
+                Some(line)
+            }
+        }
         Ok(output) => Some(stderr_line(output)),
         Err(error) => Some(error.to_string()),
     }
+}
+
+/// Salvage-local git argv. Each starts with `git` and carries its explicit
+/// `-C` root like the worktree-backend forms, but these read-only shapes
+/// (status, net diff, worktree list) predate any battery policy for them, so
+/// they stay local to open salvage instead of joining that registry.
+fn salvage_argv_status(dir: &str) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "status".to_owned(),
+        "--porcelain".to_owned(),
+        "--untracked-files=all".to_owned(),
+        "--ignored".to_owned(),
+    ]
+}
+
+fn salvage_argv_net_diff(dir: &str, base: &str) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "diff".to_owned(),
+        "--binary".to_owned(),
+        base.to_owned(),
+    ]
+}
+
+fn salvage_argv_worktree_list(top: &str) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        top.to_owned(),
+        "worktree".to_owned(),
+        "list".to_owned(),
+        "--porcelain".to_owned(),
+    ]
+}
+
+/// Splits one `status --porcelain` output into `(untracked, ignored)`: the
+/// two kinds of entry no diff against the base can carry. Tracked entries
+/// need no class of their own, because the net diff reads them. Any
+/// malformed line invalidates the whole read: doubt preserves the tree.
+fn salvage_status_class(stdout: &[u8]) -> Option<(bool, bool)> {
+    let mut untracked = false;
+    let mut ignored = false;
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() < 3 || line[2] != b' ' {
+            return None;
+        }
+        if line.starts_with(b"!!") {
+            ignored = true;
+        } else if line.starts_with(b"??") {
+            untracked = true;
+        }
+    }
+    Some((untracked, ignored))
+}
+
+fn salvage_argv_net_names(dir: &str, base: &str) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "diff".to_owned(),
+        "--name-only".to_owned(),
+        "-z".to_owned(),
+        base.to_owned(),
+    ]
+}
+
+/// Whether `text` is a full object name: 40 or 64 lowercase hex digits. A
+/// base read from disk reaches a git argv, so nothing else may pass; an
+/// option-shaped or truncated record is refused, not interpreted.
+fn valid_object_name(text: &str) -> bool {
+    matches!(text.len(), 40 | 64)
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The base commit a task's creation receipt records, or `None` when the
+/// file is missing or is not exactly one full object name and a newline.
+async fn receipt_base(receipt: &Path) -> Option<String> {
+    let text = tokio::fs::read_to_string(receipt.join(RECEIPT_BASE_FILE))
+        .await
+        .ok()?;
+    let name = text.strip_suffix('\n')?;
+    valid_object_name(name).then(|| name.to_owned())
+}
+
+/// Records the creation receipt of one task worktree: its private
+/// `<data root>/isolation/<session>/<task>/` directory and, in `base.txt`,
+/// the base commit the tree starts from. Open salvage trusts only trees that
+/// carry the receipt and takes a lost tree's work against that base. The
+/// directory and the file go through the store's private-directory and
+/// atomic-write helpers like every other record of that directory, so a
+/// crash leaves either no file or a whole one.
+async fn record_isolation_receipt(
+    data_root: &Path,
+    session: SessionId,
+    task: JobId,
+    base: &str,
+) -> Result<(), String> {
+    let dir = data_root
+        .join("isolation")
+        .join(session.to_string())
+        .join(task.to_string());
+    let record = format!("{base}\n").into_bytes();
+    tokio::task::spawn_blocking(move || {
+        dal_store::create_private_dir_all(&dir).map_err(|error| error.to_string())?;
+        dal_store::write_atomic(
+            &dir.join(RECEIPT_BASE_FILE),
+            &record,
+            dal_store::FileMode::Mode0600,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Reads the host's durable held-job set. The jobs service has no query for
+/// it: `Unhold` answers with the whole set under one lock, and a job that
+/// was never held changes nothing, so a fresh id reads the set without
+/// touching it. A failed or unexpected answer is `None`, and salvage then
+/// touches nothing.
+async fn read_held_set(services: &dyn Services, caller: &Caller) -> Option<HashSet<JobId>> {
+    let probe = JobsOp::Unhold {
+        id: JobId::new_v7(),
+    };
+    match services.jobs(caller, probe).await {
+        Ok(JobsReply::Held(ids)) => Some(ids.into_iter().collect()),
+        _ => None,
+    }
+}
+
+/// Whether nothing exists at `path`. Any other answer, including an
+/// unreadable one, counts as present: doubt preserves the tree.
+async fn certainly_absent(path: &Path) -> bool {
+    matches!(
+        tokio::fs::symlink_metadata(path).await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Crash/reopen salvage for one session open.
+///
+/// Only directories of this session (`<data root>/worktrees/<session>/`)
+/// named by a task job id are candidates. A candidate salvages when the live
+/// job table does not hold it: task jobs are children of their run job and
+/// the jobs ledger records only top-level endings, so after a restart a
+/// crashed task has no row, and absence from the table is the lost signal; a
+/// listed ended-`lost` job salvages the same way. The store lock refuses a
+/// second opener with `SessionBusy` before this hook runs, so an absent id
+/// is not another process's live tree. Live jobs, jobs in the host's durable
+/// held set, and jobs that ended any other way keep their trees in place, so
+/// no pid is ever read; a job list or held-set read that fails touches
+/// nothing. A settled task whose tree was left in place has no row
+/// either and salvages like a lost one: the capture below saves its work
+/// before the tree goes.
+/// Provenance is conjunctive. The battery's creation receipt
+/// (`<data root>/isolation/<session>/<task>/`, written when the worktree is
+/// created) must exist, must carry no `retained.json` marker (a tree left
+/// in place for hand recovery is never taken), and must record a valid base
+/// commit in `base.txt`; the top checkout's worktree list must also register
+/// the path. Any check failing leaves the tree in place. For each proven
+/// tree the battery reads `status --porcelain` first: any ignored or
+/// untracked entry, or an unreadable or malformed status, leaves the tree in
+/// place, so ignored files (invisible to every diff) and untracked files
+/// (never in the patch: no staging step runs here) are never destroyed.
+/// Otherwise it saves ONE net patch, `diff --binary <base>`: the working
+/// tree against the commit the tree started from, so tracked work that is
+/// staged, unstaged, or committed inside the tree lands in it together. An
+/// empty patch leaves the tree in place. The raw status is saved as
+/// `status.txt` through the scoped artifact operation after the patch, and
+/// the worktree is removed only after both are durable. A failed status
+/// record leaves the tree in place. Prune runs only when every candidate
+/// salvaged with nothing left behind. It never merges: no apply argv runs
+/// here. Any failure leaves the tree in place and names it in the one
+/// summary notice, which also reports that the parent checkout was not
+/// changed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the salvage sweep reads as one ordered pass (scan, classify, report, prune); splitting it would scatter the failure-then-notice ordering its witnesses pin"
+)]
+async fn salvage_open_worktrees(
+    services: &dyn Services,
+    caller: &Caller,
+    session: SessionId,
+    workspace: &Path,
+    data_root: &Path,
+) {
+    let session_dir = data_root.join("worktrees").join(session.to_string());
+    let Ok(mut entries) = tokio::fs::read_dir(&session_dir).await else {
+        return;
+    };
+    let mut candidates = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_type().await.is_ok_and(|kind| kind.is_dir())
+            && let Some(task) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<JobId>().ok())
+        {
+            candidates.push((task, entry.path()));
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    let Ok(JobsReply::Listed(jobs)) = services.jobs(caller, JobsOp::List).await else {
+        return;
+    };
+    // The durable held set outlives a restart even when the held job's row
+    // does not, so the table alone cannot exclude it.
+    let Some(held) = read_held_set(services, caller).await else {
+        return;
+    };
+    let mut lost = Vec::new();
+    for (task, dir) in candidates {
+        // A held job keeps its tree whatever else the table says.
+        if held.contains(&task) {
+            continue;
+        }
+        let row = jobs.iter().find(|job| job.id == task);
+        let ended_lost = match row {
+            // No ledger row: the task died with its process. The session
+            // lock already excluded a second opener, so this tree is ours.
+            None => true,
+            Some(job) => matches!(job.state, JobStateView::Done(JobOutcome::Lost)),
+        };
+        // Anything else — a live job, or a job that ended another way —
+        // keeps its tree in place.
+        if ended_lost {
+            lost.push((task, dir));
+        }
+    }
+    // readdir order is filesystem-dependent; sort for deterministic argv.
+    lost.sort_by_key(|(task, _)| task.to_string());
+    if lost.is_empty() {
+        return;
+    }
+    let workspace_text = workspace.display().to_string();
+    let top = match git(
+        services,
+        caller,
+        workspace,
+        super::worktree::argv_toplevel(&workspace_text),
+    )
+    .await
+    {
+        Ok(output) if complete(&output) => Some(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout_prefix).trim(),
+        )),
+        _ => None,
+    };
+    let Some(top) = top else {
+        let left = lost.iter().map(|(task, dir)| {
+            format!(
+                "{task} left at {}: the checkout top could not be resolved",
+                dir.display()
+            )
+        });
+        notify_salvage(services, caller, &left.collect::<Vec<_>>(), "");
+        return;
+    };
+    let top_text = top.display().to_string();
+    let listed = match git(
+        services,
+        caller,
+        &top,
+        salvage_argv_worktree_list(&top_text),
+    )
+    .await
+    {
+        Ok(output) if complete(&output) => output,
+        _ => {
+            // Without registration proof no tree may be touched.
+            let left = lost.iter().map(|(task, dir)| {
+                format!(
+                    "{task} left at {}: worktree registration could not be read",
+                    dir.display()
+                )
+            });
+            notify_salvage(services, caller, &left.collect::<Vec<_>>(), "");
+            return;
+        }
+    };
+    let mut registered = HashSet::new();
+    for line in listed.stdout_prefix.split(|byte| *byte == b'\n') {
+        if let Some(path) = line.strip_prefix(b"worktree ".as_slice()) {
+            registered.insert(path.to_vec());
+        }
+    }
+    let mut salvaged = Vec::new();
+    let mut left = Vec::new();
+    for (task, dir) in lost {
+        let dir_text = dir.display().to_string();
+        // Creation receipt: only the battery makes isolation/<session>/<task>.
+        let receipt = data_root
+            .join("isolation")
+            .join(session.to_string())
+            .join(task.to_string());
+        if !tokio::fs::symlink_metadata(&receipt)
+            .await
+            .is_ok_and(|meta| meta.file_type().is_dir())
+        {
+            left.push(format!(
+                "{task} left at {dir_text}: no creation record; left in place"
+            ));
+            continue;
+        }
+        // A retained record marks a tree left in place for hand recovery. An
+        // aborted run keeps its trees while a parked writer may still use
+        // them, so salvage never takes a marked tree.
+        if !certainly_absent(&receipt.join(ArtifactFile::RetainedJson.file_name())).await {
+            left.push(format!(
+                "{task} left at {dir_text}: a retained record marks it for hand recovery; left in place"
+            ));
+            continue;
+        }
+        if !registered.contains(dir_text.as_bytes()) {
+            left.push(format!(
+                "{task} left at {dir_text}: not a registered worktree of this checkout; left in place"
+            ));
+            continue;
+        }
+        // The base the tree started from: the one commit the net patch is
+        // taken against. Without it commits made inside the tree could not
+        // be told from the base, so no capture is attempted.
+        let Some(base) = receipt_base(&receipt).await else {
+            left.push(format!(
+                "{task} left at {dir_text}: its creation record names no valid base commit; left in place"
+            ));
+            continue;
+        };
+        let status = git(services, caller, &dir, salvage_argv_status(&dir_text)).await;
+        let status = match status {
+            Ok(status) if complete(&status) => status,
+            _ => {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree status could not be read"
+                ));
+                continue;
+            }
+        };
+        let Some((untracked, ignored)) = salvage_status_class(&status.stdout_prefix) else {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree status was not valid; left in place"
+            ));
+            continue;
+        };
+        if ignored {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree holds ignored files; left for hand recovery"
+            ));
+            continue;
+        }
+        // Untracked bytes never enter the net patch (no staging step runs
+        // here), so a tree holding them stays in place with its contents.
+        if untracked {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree holds untracked files; left for hand recovery"
+            ));
+            continue;
+        }
+        // One net patch: `diff <base>` reads the working tree against the
+        // commit the tree started from, so tracked work that is staged,
+        // unstaged, or committed inside the tree lands in it together and no
+        // second diff may merge into it.
+        let diff = git(
+            services,
+            caller,
+            &dir,
+            salvage_argv_net_diff(&dir_text, &base),
+        )
+        .await;
+        let diff = match diff {
+            Ok(diff) if complete(&diff) => diff,
+            _ => {
+                left.push(format!(
+                    "{task} left at {dir_text}: the changes could not be computed"
+                ));
+                continue;
+            }
+        };
+        // Nothing differs from the base: there is no work to capture, and an
+        // uncertain classification never removes a tree.
+        if diff.stdout_prefix.is_empty() {
+            left.push(format!(
+                "{task} left at {dir_text}: no captured changes; left in place"
+            ));
+            continue;
+        }
+        let names = git(
+            services,
+            caller,
+            &dir,
+            salvage_argv_net_names(&dir_text, &base),
+        )
+        .await;
+        let names = match names {
+            Ok(names) if complete(&names) => names,
+            _ => {
+                left.push(format!(
+                    "{task} left at {dir_text}: the changed paths could not be read"
+                ));
+                continue;
+            }
+        };
+        let paths_valid = parse_nul_names(&names.stdout_prefix)
+            .is_some_and(|changed| super::delivery::changed_paths_valid(&changed));
+        if !paths_valid {
+            left.push(format!(
+                "{task} left at {dir_text}: the changed paths were not valid names"
+            ));
+            continue;
+        }
+        let patch_path = receipt.join(ArtifactFile::DeltaPatch.file_name());
+        let saved = services
+            .sidecar(
+                caller,
+                SidecarOp::Artifact {
+                    job: task,
+                    file: ArtifactFile::DeltaPatch,
+                    bytes: diff.stdout_prefix,
+                },
+            )
+            .await;
+        if let Err(error) = saved {
+            left.push(format!(
+                "{task} left at {dir_text}: the patch could not be saved: {error}"
+            ));
+            continue;
+        }
+        // The pre-stage status stays a distinct record next to the patch. It
+        // records tracked staging state only: untracked and ignored trees are
+        // refused above, so no untracked line can appear here. It travels
+        // through the same durable artifact owner as the patch and is saved
+        // before the removal, so a tree is never destroyed without both
+        // records persisted.
+        let status_saved = services
+            .sidecar(
+                caller,
+                SidecarOp::Artifact {
+                    job: task,
+                    file: ArtifactFile::StatusTxt,
+                    bytes: status.stdout_prefix,
+                },
+            )
+            .await;
+        if let Err(error) = status_saved {
+            left.push(format!(
+                "{task} left at {dir_text}: the status record could not be saved: {error}"
+            ));
+            continue;
+        }
+        let removed = git(
+            services,
+            caller,
+            &top,
+            super::worktree::argv_worktree_remove(&top_text, &dir_text),
+        )
+        .await;
+        if let Some(why) = git_refusal(&removed) {
+            left.push(format!("{task} left at {dir_text}: {why}"));
+            continue;
+        }
+        salvaged.push(format!("{task} kept at {}", patch_path.display()));
+    }
+    // Prune only when every candidate salvaged with nothing left behind: a
+    // prune beside a left tree could strand its registration.
+    let mut prune_note = String::new();
+    if !salvaged.is_empty() && left.is_empty() {
+        let pruned = git(
+            services,
+            caller,
+            &top,
+            super::worktree::argv_worktree_prune(&top_text),
+        )
+        .await;
+        if let Some(why) = git_refusal(&pruned) {
+            prune_note = format!(" (worktree prune did not run: {why})");
+        }
+    } else if !left.is_empty() {
+        prune_note = format!(
+            " (worktree prune skipped: {} tree(s) left in place)",
+            left.len()
+        );
+    }
+    let mut parts = salvaged;
+    parts.extend(left);
+    notify_salvage(services, caller, &parts, &prune_note);
+}
+
+/// Sends the one open-salvage summary notice. The caller only invokes this
+/// with a nonempty `parts`, so the notice always names a tree.
+fn notify_salvage(services: &dyn Services, caller: &Caller, parts: &[String], prune_note: &str) {
+    if parts.is_empty() {
+        return;
+    }
+    let text = format!(
+        "open salvage: {}. The parent checkout was not changed (no merge).{prune_note}",
+        parts.join("; ")
+    );
+    services.notify(
+        caller,
+        Notice {
+            turn: None,
+            kind: "orchestration.salvage".into(),
+            text: text.into(),
+        },
+    );
 }
 
 /// The kept outcome when staging, diffing, or saving the patch failed: the
@@ -4324,8 +4950,19 @@ impl Coordinator {
         )
         .await
         .map_err(|error| error.to_string())?;
-        if output.status != ExitStatusKind::Exited(0) {
-            return Err(stderr_line(&output));
+        let result: Result<RunOutput, ServiceError> = Ok(output);
+        if let Some(why) = git_refusal(&result) {
+            return Err(why);
+        }
+        // Creation receipt: open-time salvage trusts only trees that carry
+        // it plus worktree-list registration, and captures work against the
+        // base it records. Fail loudly so no task starts unsalvageable
+        // later; the tree is fresh and empty, so it goes with the failure.
+        if let Err(error) = record_isolation_receipt(root, self.session, task, &base.commit).await {
+            let removal = self.remove_worktree(&base.top, &dir).await;
+            return Err(format!(
+                "the isolation receipt could not be recorded: {error}{removal}"
+            ));
         }
         Ok(dir)
     }
@@ -4689,10 +5326,17 @@ impl Hook<InputEvent, InputVerdict> for InputHook {
         let runtime = self.0.clone();
         let session = cx.session;
         let deadline = cx.deadline;
+        // The hook's select arms race the waiter against the opening token;
+        // the owner's queued copy re-checks it at dequeue, so an
+        // already-cancelled prompt never mutates state.
+        let queued = cx.cancel.clone();
         let cancel = cx.cancel;
         Box::pin(async move {
             match runtime
-                .hook_request(session, deadline, cancel, Message::Input)
+                .hook_request(session, deadline, cancel, move |reply| Message::Input {
+                    reply,
+                    cancel: queued,
+                })
                 .await?
             {
                 Ok(()) => Ok(InputVerdict::Continue),

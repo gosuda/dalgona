@@ -37,6 +37,8 @@ struct Script {
     cancel_unexpected: HashSet<SessionId>,
     turn_idle_error: Option<&'static str>,
     jobs_list_error: Option<&'static str>,
+    /// Job lists answered normally before `jobs_list_error` applies.
+    jobs_list_skip: usize,
     started: Option<SessionId>,
     await_error: Option<&'static str>,
     report: Option<String>,
@@ -60,6 +62,14 @@ struct Script {
     lines_error: Option<&'static str>,
     /// A failure the host answers the next sidecar write with.
     sidecar_write_error: Option<&'static str>,
+    /// A failure the host answers the next sidecar artifact write with.
+    artifact_fail: Option<&'static str>,
+    /// A failure the host answers the next write of one named artifact file
+    /// with; other artifact files persist normally.
+    artifact_fail_file: Option<(ArtifactFile, &'static str)>,
+    /// Persisted artifacts and worktree removals in service order, so a test
+    /// can prove which record was durable before a tree was removed.
+    salvage_order: Vec<&'static str>,
     /// The sidecar files the session wrote, by name.
     sidecar_files: std::collections::HashMap<String, Vec<u8>>,
     /// A refusal the host answers every start with.
@@ -82,8 +92,17 @@ struct Script {
     releases: Vec<Vec<JobId>>,
     /// A refusal the host answers the next wake with.
     wake_refusal: Option<&'static str>,
+    /// A wake-limit denial the host answers the next wake with, the way the
+    /// core answers once a session passes its automatic-turn cutoff. The
+    /// count itself stays core-owned; the battery proves only stop-on-denial.
+    wake_denied_limit: bool,
     /// A failure the host answers the next release with.
     release_fail: Option<&'static str>,
+    /// The host's durable held set; `Hold` and `Unhold` change it and answer
+    /// with all of it, the way the real jobs service does.
+    held: Vec<JobId>,
+    /// A failure the host answers the next hold or unhold with.
+    held_error: Option<&'static str>,
 }
 
 /// How the scripted host answers one commit.
@@ -296,6 +315,26 @@ impl Host {
         Ok(JobsReply::Committed { ids })
     }
 
+    /// Adds one job to the scripted held set and answers with all of it.
+    fn hold_job(script: &mut Script, id: JobId) -> Result<JobsReply, ServiceError> {
+        if let Some(message) = script.held_error.take() {
+            return Err(ServiceError::failed(None, message));
+        }
+        if !script.held.contains(&id) {
+            script.held.push(id);
+        }
+        Ok(JobsReply::Held(script.held.clone()))
+    }
+
+    /// Removes one job from the scripted held set and answers with all of it.
+    fn unhold_job(script: &mut Script, id: JobId) -> Result<JobsReply, ServiceError> {
+        if let Some(message) = script.held_error.take() {
+            return Err(ServiceError::failed(None, message));
+        }
+        script.held.retain(|held| *held != id);
+        Ok(JobsReply::Held(script.held.clone()))
+    }
+
     fn release_reports(script: &mut Script, ids: Vec<JobId>) -> Result<JobsReply, ServiceError> {
         if let Some(message) = script.release_fail.take() {
             return Err(ServiceError::failed(None, message));
@@ -411,6 +450,13 @@ impl Services for Host {
             });
         }
         let mut script = locked(&self.script);
+        if req.argv.iter().any(|word| word == "worktree") {
+            for verb in ["remove", "prune"] {
+                if req.argv.iter().any(|word| word == verb) {
+                    script.salvage_order.push(verb);
+                }
+            }
+        }
         script.run_requests.push(req);
         let reply = script.run_outputs.pop_front();
         Box::pin(async move {
@@ -560,6 +606,10 @@ impl Services for Host {
         Box::pin(async move { reply })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "scripted-host JobsOp dispatch lists every operation arm explicitly so failure messages name the missing arm"
+    )]
     fn jobs(&self, _who: &Caller, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
         if let JobsOp::Wait { id, .. } = op {
             return self.wait_job(id);
@@ -581,7 +631,6 @@ impl Services for Host {
                         label: name.to_string().into(),
                         state: JobStateView::Running,
                         log: None,
-                        command: None,
                         last_activity_at: dal_core::Timestamp::now(),
                     },
                     parent,
@@ -626,12 +675,20 @@ impl Services for Host {
                     .find(|(job, _, _)| job.id == id)
                     .map(|(job, _, _)| job.clone()),
             )),
-            JobsOp::List => match script.jobs_list_error.take() {
-                Some(message) => Err(ServiceError::failed(None, message)),
-                None => Ok(JobsReply::Listed(
-                    script.jobs.iter().map(|(job, _, _)| job.clone()).collect(),
-                )),
-            },
+            JobsOp::List => {
+                let failure = if script.jobs_list_skip > 0 {
+                    script.jobs_list_skip -= 1;
+                    None
+                } else {
+                    script.jobs_list_error.take()
+                };
+                match failure {
+                    Some(message) => Err(ServiceError::failed(None, message)),
+                    None => Ok(JobsReply::Listed(
+                        script.jobs.iter().map(|(job, _, _)| job.clone()).collect(),
+                    )),
+                }
+            }
             JobsOp::Lines { after, .. } => {
                 if let Some(message) = script.lines_error.take() {
                     Err(ServiceError::failed(None, message))
@@ -645,7 +702,8 @@ impl Services for Host {
             JobsOp::Take { limit } => Ok(Self::take_reports(&mut script, limit)),
             JobsOp::Commit { ids } => Self::commit_reports(&mut script, ids),
             JobsOp::Release { ids } => Self::release_reports(&mut script, ids),
-            JobsOp::Hold { .. } | JobsOp::Unhold { .. } => Ok(JobsReply::Held(Vec::new())),
+            JobsOp::Hold { id } => Self::hold_job(&mut script, id),
+            JobsOp::Unhold { id } => Self::unhold_job(&mut script, id),
             _ => Err(ServiceError::failed(None, "unscripted job operation")),
         };
         let aborts = settled_task && reply.is_ok() && std::mem::take(&mut script.abort_on_settle);
@@ -681,6 +739,12 @@ impl Services for Host {
             TurnOp::Wake { text, .. } => {
                 let mut script = locked(&self.script);
                 script.events.push("wake");
+                if script.wake_denied_limit {
+                    script.wake_denied_limit = false;
+                    return Box::pin(async move {
+                        Err(ServiceError::Denied(dal_core::DenyReason::WakeLimit))
+                    });
+                }
                 if let Some(message) = script.wake_refusal.take() {
                     return Box::pin(async move { Err(ServiceError::failed(None, message)) });
                 }
@@ -696,6 +760,22 @@ impl Services for Host {
         let mut script = locked(&self.script);
         let reply = match op {
             SidecarOp::Artifact { job, file, bytes } => {
+                if let Some((failing, message)) = script.artifact_fail_file
+                    && failing == file
+                {
+                    script.artifact_fail_file = None;
+                    drop(script);
+                    return Box::pin(async move { Err(ServiceError::failed(None, message)) });
+                }
+                if let Some(message) = script.artifact_fail.take() {
+                    drop(script);
+                    return Box::pin(async move { Err(ServiceError::failed(None, message)) });
+                }
+                script.salvage_order.push(match file {
+                    ArtifactFile::DeltaPatch => "artifact:delta_patch",
+                    ArtifactFile::StatusTxt => "artifact:status_txt",
+                    _ => "artifact:other",
+                });
                 script.artifacts.push((job, file, bytes));
                 None
             }
@@ -1008,7 +1088,6 @@ impl Fixture {
                 label: "report".into(),
                 state: JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
                 log: None,
-                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -1480,7 +1559,6 @@ async fn list_with_ids_shows_the_requested_job_past_the_limit() -> TestResult {
                     label: format!("filler-{index}").into(),
                     state: JobStateView::Running,
                     log: None,
-                    command: None,
                     last_activity_at: dal_core::Timestamp::now(),
                 },
                 None,
@@ -1493,7 +1571,6 @@ async fn list_with_ids_shows_the_requested_job_past_the_limit() -> TestResult {
                 label: "target".into(),
                 state: JobStateView::Running,
                 log: None,
-                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -1982,7 +2059,6 @@ async fn monitor_lines_reach_a_wake_and_old_live_jobs_show_silence() -> TestResu
                 label: "server".into(),
                 state: JobStateView::Running,
                 log: None,
-                command: None,
                 last_activity_at: dal_core::Timestamp::from_second(0)?,
             },
             None,
@@ -2052,7 +2128,6 @@ async fn a_failing_monitor_read_neither_stops_later_jobs_nor_stays_silent() -> T
                     label: label.into(),
                     state: JobStateView::Running,
                     log: None,
-                    command: None,
                     last_activity_at: dal_core::Timestamp::now(),
                 },
                 None,
@@ -2392,7 +2467,6 @@ async fn monitor_batches_that_do_not_fit_are_delivered_in_the_next_wake() -> Tes
             label: "server".into(),
             state: JobStateView::Running,
             log: None,
-            command: None,
             last_activity_at: dal_core::Timestamp::now(),
         },
         None,
@@ -2551,7 +2625,6 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
                 label: "queued report".into(),
                 state: JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
                 log: None,
-                command: None,
                 last_activity_at: dal_core::Timestamp::now(),
             },
             None,
@@ -2706,6 +2779,192 @@ async fn user_grace_fires_at_ten_seconds_and_a_prompt_drops_it() -> TestResult {
         "{}",
         fixture.script().wakes[0]
     );
+    Ok(())
+}
+
+/// A goal fixture whose settled user turn armed the ten-second continuation.
+async fn armed_continuation() -> Result<Fixture, Box<dyn std::error::Error>> {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    fixture
+        .user_turn(goal_turn(), Stop::EndTurn, "made progress")
+        .await?;
+    fixture.pump().await;
+    Ok(fixture)
+}
+
+/// The real input hook over `fixture`, bound to `cancel` as the opening token.
+fn input_call(
+    fixture: &Fixture,
+    cancel: CancellationToken,
+) -> dal_agent::ext::BoxFuture<
+    'static,
+    Result<dal_core::ext::InputVerdict, dal_agent::ext::HookError>,
+> {
+    use dal_agent::ext::Hook as _;
+    let mut cx = HookCx::for_test(fixture.host.clone(), fixture.session, None);
+    cx.cancel = cancel;
+    super::InputHook(fixture.runtime.clone()).call(
+        dal_core::ext::InputEvent {
+            content: vec![dal_core::Part::Text {
+                text: "work".into(),
+            }],
+            model: None,
+        },
+        cx,
+    )
+}
+
+/// Yields until `ready` holds, so a test waits on an observed fact instead
+/// of a fixed number of scheduler turns.
+async fn yield_until(mut ready: impl FnMut() -> bool) -> TestResult {
+    for _ in 0..10_000 {
+        if ready() {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
+    Err("the awaited condition never held".into())
+}
+
+/// Parks the owner inside a `jobs` list and returns the parked call, so
+/// every later message queues behind it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the held-owner witness spawns the one call the owner parks inside"
+)]
+async fn park_owner(
+    fixture: &Fixture,
+) -> Result<tokio::task::JoinHandle<Result<String, ServiceError>>, Box<dyn std::error::Error>> {
+    let gate = fixture.runtime.parking_gate();
+    gate.arm();
+    let parked = tokio::spawn(list_agents_call(
+        fixture.runtime.clone(),
+        fixture.session,
+        fixture.caller(),
+        CallId::new("park"),
+    ));
+    yield_until(|| gate.parked() >= 1).await?;
+    Ok(parked)
+}
+
+/// Sends the real input hook with `cancel` and returns once its message
+/// sits in the held owner's mailbox.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the held-owner witness runs the hook beside the parked owner"
+)]
+async fn queue_input(
+    fixture: &Fixture,
+    cancel: CancellationToken,
+) -> Result<
+    tokio::task::JoinHandle<Result<dal_core::ext::InputVerdict, dal_agent::ext::HookError>>,
+    Box<dyn std::error::Error>,
+> {
+    let before = fixture.runtime.mailbox_fill_now(fixture.session);
+    let call = tokio::spawn(input_call(fixture, cancel));
+    yield_until(|| fixture.runtime.mailbox_fill_now(fixture.session) > before).await?;
+    Ok(call)
+}
+
+/// Frees the held owner, then proves it drained its queue: a read-only call
+/// sent after the queued input is answered only once that input was handled.
+async fn release_and_drain(
+    fixture: &Fixture,
+    parked: tokio::task::JoinHandle<Result<String, ServiceError>>,
+) -> TestResult {
+    fixture.runtime.parking_gate().release();
+    parked.await.map_err(|error| error.to_string())??;
+    list_agents_call(
+        fixture.runtime.clone(),
+        fixture.session,
+        fixture.caller(),
+        CallId::new("drain"),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Lets the armed ten-second continuation come due and reports what the
+/// battery did with it: the wakes sent and the goal counters it saved.
+async fn continuation_outcome(
+    fixture: &Fixture,
+) -> Result<(usize, Counters), Box<dyn std::error::Error>> {
+    tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
+    fixture.pump().await;
+    Ok((fixture.wake_count(), fixture.counters()?))
+}
+
+/// A prompt whose opening was cancelled while its message sat behind a busy
+/// owner must leave the battery exactly as a cancel before the hook enqueued
+/// anything does: the armed continuation survives and is delivered.
+#[tokio::test(start_paused = true)]
+async fn a_prompt_cancelled_while_queued_leaves_the_battery_as_a_preenqueue_cancel_does()
+-> TestResult {
+    // Baseline: the cancel is already set when the hook starts, so nothing
+    // is enqueued and the owner never sees the prompt.
+    let baseline = armed_continuation().await?;
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        matches!(
+            input_call(&baseline, cancelled).await,
+            Err(dal_agent::ext::HookError::Cancelled)
+        ),
+        "a pre-cancelled opening never reaches the owner"
+    );
+    let expected = continuation_outcome(&baseline).await?;
+    assert_eq!(
+        expected.0, 1,
+        "the baseline keeps and delivers the continuation"
+    );
+
+    // Queued: the owner is held mid-message, the prompt is enqueued behind
+    // it, and the opening is cancelled only then.
+    let queued = armed_continuation().await?;
+    let parked = park_owner(&queued).await?;
+    let token = CancellationToken::new();
+    let call = queue_input(&queued, token.clone()).await?;
+    token.cancel();
+    assert!(
+        matches!(
+            call.await.map_err(|error| error.to_string())?,
+            Err(dal_agent::ext::HookError::Cancelled)
+        ),
+        "the waiter gives up on the cancelled opening"
+    );
+    release_and_drain(&queued, parked).await?;
+    let actual = continuation_outcome(&queued).await?;
+    assert_eq!(
+        actual, expected,
+        "a prompt cancelled while queued must not reach the battery state"
+    );
+    assert!(
+        queued.script().wakes[0].starts_with(GOAL_PROMPT_HEAD),
+        "{}",
+        queued.script().wakes[0]
+    );
+    Ok(())
+}
+
+/// The control for the witness above: a queued prompt whose opening is NOT
+/// cancelled is still applied by the owner and drops the armed continuation,
+/// so the cancellation check skips only prompts the waiter gave up on.
+#[tokio::test(start_paused = true)]
+async fn a_queued_prompt_with_a_live_opening_still_drops_the_continuation() -> TestResult {
+    let fixture = armed_continuation().await?;
+    let parked = park_owner(&fixture).await?;
+    let call = queue_input(&fixture, CancellationToken::new()).await?;
+    release_and_drain(&fixture, parked).await?;
+    assert!(
+        matches!(
+            call.await.map_err(|error| error.to_string())?,
+            Ok(dal_core::ext::InputVerdict::Continue)
+        ),
+        "a live queued prompt is answered and continues"
+    );
+    let (wakes, _) = continuation_outcome(&fixture).await?;
+    assert_eq!(wakes, 0, "the applied prompt dropped the continuation");
     Ok(())
 }
 
@@ -3069,6 +3328,100 @@ async fn a_confirmed_wake_commits_once_and_a_refused_wake_releases_and_requeues_
     Ok(())
 }
 
+/// The core answers one wake past its automatic-turn cutoff with a
+/// wake-limit denial; the battery stops its controller and keeps the report
+/// queued instead of waking again. The twenty-turn count itself stays
+/// core-owned: this proves only the stop-on-denial arm, never the number.
+#[tokio::test(start_paused = true)]
+async fn a_wake_limit_denial_stops_automatic_wakes_and_keeps_the_report() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("cutoff report");
+    fixture.script().wake_denied_limit = true;
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    fixture.pump().await;
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        fixture.pump().await;
+    }
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script
+                .events
+                .iter()
+                .filter(|event| **event == "wake")
+                .count(),
+            1,
+            "the denied wake is attempted once, never retried: the controller stopped"
+        );
+        assert!(
+            script.wakes.is_empty(),
+            "no wake reached the session past the cutoff"
+        );
+        assert_eq!(script.releases, vec![vec![job]], "released exactly once");
+        assert!(
+            script.commits.is_empty(),
+            "an undelivered report is never committed"
+        );
+        assert!(
+            !script.delivered.contains(&job),
+            "the report stays queued for the next user turn"
+        );
+    }
+    let delivery: Vec<_> = fixture
+        .host
+        .notices()
+        .into_iter()
+        .filter(|notice| &*notice.kind == "orchestration.delivery")
+        .collect();
+    assert!(
+        delivery.is_empty(),
+        "a cutoff stop is silent: the report waits, no failure is reported"
+    );
+    // The stop persists: a second report ending later starts no new wake.
+    // The one-shot denial is consumed, so any further wake would succeed;
+    // a paused controller never attempts one.
+    let second = fixture.done_job("later report");
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    fixture.pump().await;
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        fixture.pump().await;
+    }
+    let script = fixture.script();
+    assert_eq!(
+        script
+            .events
+            .iter()
+            .filter(|event| **event == "wake")
+            .count(),
+        1,
+        "the cutoff stop persists: the later report starts no new wake"
+    );
+    assert!(
+        script.wakes.is_empty(),
+        "no wake reached the session past the cutoff"
+    );
+    assert!(
+        !script.delivered.contains(&second),
+        "the later report also waits for the next user turn"
+    );
+    drop(script);
+    let delivery: Vec<_> = fixture
+        .host
+        .notices()
+        .into_iter()
+        .filter(|notice| &*notice.kind == "orchestration.delivery")
+        .collect();
+    assert!(
+        delivery.is_empty(),
+        "the persistent stop stays silent: no failure is reported"
+    );
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_failed_delivery_poll_is_reported_once_to_the_owner() -> TestResult {
     let fixture = Fixture::open().await?;
@@ -3098,6 +3451,226 @@ async fn a_failed_delivery_poll_is_reported_once_to_the_owner() -> TestResult {
         "{}",
         delivery[0].text
     );
+    Ok(())
+}
+
+impl Fixture {
+    /// Ends `count` top-level jobs; sixteen waiting reports wake the session
+    /// at the first delivery tick, without the two-second quiet wait.
+    fn done_jobs(&self, count: usize, text: impl Fn(usize) -> String) -> Vec<JobId> {
+        (0..count)
+            .map(|index| self.done_job(&text(index)))
+            .collect()
+    }
+
+    /// Nine identical calls trip the loop guard, which admits its recovery
+    /// text for the next wake.
+    async fn trip_loop_guard(&self) -> TestResult {
+        let turn = goal_turn();
+        self.begin_turn(turn).await?;
+        for index in 0..9 {
+            self.call_tool(turn, &format!("loop-{index}")).await?;
+        }
+        Ok(())
+    }
+
+    /// Runs `quarters` delivery ticks, one quarter-second of virtual time
+    /// each.
+    async fn run_ticks(&self, quarters: u32) {
+        for _ in 0..quarters {
+            tokio::time::advance(std::time::Duration::from_millis(250)).await;
+            self.pump().await;
+        }
+    }
+
+    fn delivery_notices(&self) -> Vec<Notice> {
+        let notices = self.host.notices();
+        notices
+            .into_iter()
+            .filter(|notice| &*notice.kind == "orchestration.delivery")
+            .collect()
+    }
+}
+
+const RECOVERY_HEAD: &str = "The loop guard stopped the previous turn";
+
+/// A refused wake whose release also fails must not lose the reports: the
+/// host still counts them as taken, so only the owner's held set can offer
+/// them again. Before the repair the release error returned before the
+/// requeue, `held` had been drained for the wake, and the scripted host never
+/// re-offers a taken report: no second wake ever came.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_after_a_refused_wake_keeps_the_report_for_the_next_wake() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("redelivered report");
+    {
+        let mut script = fixture.script();
+        script.wake_refusal = Some("the turn service refused");
+        script.release_fail = Some("the jobs service is restarting");
+    }
+    fixture.run_ticks(14).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the failed release is reported once");
+    assert!(
+        notices[0].text.contains("the jobs service is restarting"),
+        "the caller still sees the release error: {}",
+        notices[0].text
+    );
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1, "one wake follows the failure");
+    assert!(
+        script.wakes[0].contains("redelivered report"),
+        "{}",
+        script.wakes[0]
+    );
+    assert_eq!(script.commits, vec![vec![job]], "committed exactly once");
+    assert!(script.delivered.contains(&job));
+    assert!(
+        script.releases.is_empty(),
+        "the failed release is the only one"
+    );
+    Ok(())
+}
+
+/// The recovery text that rode with the reports is a source with no job
+/// behind it: `collect` drained it from the arbiter, so a failed release must
+/// still requeue it. Before the repair the recovery text was dropped with the
+/// reports and no wake followed.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_after_a_refused_wake_requeues_the_recovery_text_with_the_reports()
+-> TestResult {
+    let fixture = Fixture::open().await?;
+    let jobs = fixture.done_jobs(16, |index| format!("report <{index}>"));
+    fixture.trip_loop_guard().await?;
+    {
+        let mut script = fixture.script();
+        script.wake_refusal = Some("the turn service refused");
+        script.release_fail = Some("the jobs service is restarting");
+    }
+    fixture.run_ticks(8).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the failed release is reported once");
+    assert!(
+        notices[0].text.contains("the jobs service is restarting"),
+        "{}",
+        notices[0].text
+    );
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1, "one wake carries everything");
+    let wake = &script.wakes[0];
+    assert!(wake.contains(RECOVERY_HEAD), "recovery text lost: {wake}");
+    for index in 0..16 {
+        assert!(wake.contains(&format!("report <{index}>")), "{wake}");
+    }
+    assert_eq!(script.delivered, jobs.into_iter().collect::<HashSet<_>>());
+    Ok(())
+}
+
+/// The goal checkpoint path: the sidecar write fails before the wake starts
+/// and the release of the wake's reports fails too. The continuation and the
+/// report must both come back for the next wake.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_after_an_unsavable_goal_checkpoint_keeps_the_report_and_the_goal()
+-> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let job = fixture.done_job("checkpoint report");
+    {
+        let mut script = fixture.script();
+        script.sidecar_write_error = Some("the sidecar store is down");
+        script.release_fail = Some("the jobs service is restarting");
+    }
+    fixture.run_ticks(14).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the failed release is reported once");
+    assert!(
+        notices[0].text.contains("the jobs service is restarting"),
+        "{}",
+        notices[0].text
+    );
+    let counted = fixture.counters()?;
+    assert_eq!(
+        (counted.consecutive, counted.unattended, counted.goal_turns),
+        (1, 1, 1),
+        "the retried continuation counts once"
+    );
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1);
+    assert!(script.wakes[0].contains("checkpoint report"));
+    assert!(script.wakes[0].contains(GOAL_PROMPT_HEAD));
+    assert!(script.delivered.contains(&job));
+    Ok(())
+}
+
+/// The omitted-report release runs before any wake: a source composed with
+/// reports that overflow the budget loses the recovery text and every
+/// report when that release fails, since `collect` and the held drain have
+/// already happened.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_of_omitted_reports_keeps_the_recovery_text_and_every_report() -> TestResult
+{
+    let fixture = Fixture::open().await?;
+    let jobs = fixture.done_jobs(16, |index| format!("{index:02} {}", "x".repeat(1_100)));
+    fixture.trip_loop_guard().await?;
+    fixture.script().release_fail = Some("the jobs service is restarting");
+    fixture.run_ticks(14).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the failed release is reported once");
+    assert!(
+        notices[0].text.contains("the jobs service is restarting"),
+        "{}",
+        notices[0].text
+    );
+    let script = fixture.script();
+    assert_eq!(script.delivered, jobs.into_iter().collect::<HashSet<_>>());
+    assert_eq!(
+        script.wakes.len(),
+        2,
+        "the budget splits the sixteen reports over two wakes"
+    );
+    assert!(script.wakes[0].contains(RECOVERY_HEAD));
+    assert!(!script.wakes[1].contains(RECOVERY_HEAD));
+    assert_eq!(
+        script.releases.len(),
+        1,
+        "the omitted reports are released once after the failure"
+    );
+    Ok(())
+}
+
+/// The goal verdict fails while sixteen fresh reports are due, and the
+/// release that returns them fails too: restoring `held` must not wait for
+/// the release.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_after_a_failed_goal_verdict_keeps_the_fresh_reports() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let jobs = fixture.done_jobs(16, |index| format!("report <{index}>"));
+    {
+        let mut script = fixture.script();
+        // The delivery poll lists once itself; the verdict's live-work count
+        // lists again and fails.
+        script.jobs_list_skip = 1;
+        script.jobs_list_error = Some("the jobs list is unavailable");
+        script.release_fail = Some("the jobs service is restarting");
+    }
+    fixture.run_ticks(8).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the failed release is reported once");
+    assert!(
+        notices[0].text.contains("the jobs service is restarting"),
+        "{}",
+        notices[0].text
+    );
+    let counted = fixture.counters()?;
+    assert_eq!(
+        (counted.consecutive, counted.unattended, counted.goal_turns),
+        (1, 1, 1)
+    );
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1);
+    assert!(script.wakes[0].contains(GOAL_PROMPT_HEAD));
+    assert_eq!(script.delivered, jobs.into_iter().collect::<HashSet<_>>());
     Ok(())
 }
 
@@ -4403,8 +4976,22 @@ async fn a_capture_failure_settles_the_task_job_with_the_kept_recovery_path() ->
         "the settled task job text must name the kept recovery directory: {task_text}"
     );
     assert!(
-        task_text.contains("the changes could not be staged"),
-        "the settled task job text must carry the capture reason: {task_text}"
+        task_text.contains(": failed"),
+        "a capture failure must settle the task as failed: {task_text}"
+    );
+    assert!(
+        matches!(
+            fixture
+                .script()
+                .jobs
+                .iter()
+                .find(|(_, parent, _)| parent.is_some())
+                .ok_or("task absent")?
+                .0
+                .state,
+            JobStateView::Done(dal_core::JobOutcome::Failed { .. })
+        ),
+        "a capture failure must settle the task job as failed: {task_text}"
     );
     assert!(
         task_text.contains("Recover the tree at that path"),
@@ -4415,11 +5002,11 @@ async fn a_capture_failure_settles_the_task_job_with_the_kept_recovery_path() ->
     Ok(())
 }
 
-/// The `StressRuntimeBoundaries` proofs: the per-checkout merge probe at the
-/// real acquisition/drop boundary (T-66, INV-H, D-49) and the owner mailbox
-/// under deterministic hold-and-drain pressure (T-66, INV-C, decision 24).
-/// The scripted-host tests below run on every suite pass; the 500-child
-/// real-git scale test is gated on `DALGONA_ORCH_STRESS` like the gates.
+/// The stress-boundary proofs: the per-checkout merge probe at the real
+/// acquisition/drop boundary and the owner mailbox under deterministic
+/// hold-and-drain pressure. The scripted-host tests below run on every suite
+/// pass; the 500-child real-git scale test is gated on `DALGONA_ORCH_STRESS`
+/// like the gates.
 #[expect(
     clippy::disallowed_methods,
     reason = "the probe test parks a waiter task behind the holder it measures"
@@ -4780,10 +5367,10 @@ const LIST_AGENTS: &str = r#"{"action":"list"}"#;
 /// producers queue behind the parked owner.
 const FLOOD: usize = super::super::constants::BATTERY_MAILBOX + 144;
 
-/// The T-66 miniature width: every child the scale test starts.
+/// The miniature width: every child the scale test starts.
 const CHILDREN: usize = 500;
 
-/// The T-66 miniature writers: the worktree children merging one file each.
+/// The miniature writers: the worktree children merging one file each.
 const WRITERS: usize = 250;
 
 /// Sends one `agents list` tool call at `session`, for the producers that
@@ -5076,7 +5663,1731 @@ async fn stress_verify_checkout(root: &std::path::Path) -> TestResult {
     Ok(())
 }
 
-/// The T-66 shape in miniature inside the battery crate: 500 children, 250
+/// Open-salvage proofs: the battery salvages only own-session worktree
+/// directories whose task jobs the live table does not hold, or holds as
+/// ended `lost`.
+///
+/// Opens its owner with a fresh data root, then closes that owner: the proofs
+/// drive `salvage_open_worktrees` directly, and a live owner shares the
+/// scripted host. Its 250 ms delivery tick lists jobs too, so it could take
+/// a one-shot `jobs_list_error` meant for salvage (or emit its own delivery
+/// notice) between the test arming the script and salvage asking. Every
+/// directory below is created by the test, so no other test's leftovers can
+/// interfere.
+async fn salvage_open() -> Result<(Fixture, std::path::PathBuf), Box<dyn std::error::Error>> {
+    let data = unique_temp_root("dalgona-salvage");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data)?;
+    let mut config = parse_config(None)?;
+    config.goal.enabled = false;
+    config.data_root = Some(data.clone());
+    let fixture = Fixture::open_owner(config).await?;
+    fixture
+        .runtime
+        .close(
+            fixture.session,
+            SessionEnd {
+                session: fixture.session,
+                reason: "close".into(),
+            },
+        )
+        .await;
+    Ok((fixture, data))
+}
+
+fn salvage_job(id: JobId, state: JobStateView) -> (JobStatus, Option<JobId>, String) {
+    (
+        JobStatus {
+            id,
+            label: "task".into(),
+            state,
+            log: None,
+            last_activity_at: dal_core::Timestamp::now(),
+        },
+        None,
+        String::new(),
+    )
+}
+
+fn salvage_dir(data: &std::path::Path, session: SessionId, task: JobId) -> std::path::PathBuf {
+    let dir = data
+        .join("worktrees")
+        .join(session.to_string())
+        .join(task.to_string());
+    std::fs::create_dir_all(&dir).expect("the salvage worktree dir exists");
+    dir
+}
+
+/// The base commit the scripted salvage trees record in their receipts: a
+/// full object name, the shape open salvage accepts.
+const SALVAGE_BASE: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// The battery's creation receipt: open salvage trusts only trees carrying
+/// it, and takes their work against the base it records.
+fn salvage_receipt(data: &std::path::Path, session: SessionId, task: JobId) {
+    let receipt = data
+        .join("isolation")
+        .join(session.to_string())
+        .join(task.to_string());
+    std::fs::create_dir_all(&receipt).expect("the salvage receipt exists");
+    std::fs::write(receipt.join("base.txt"), format!("{SALVAGE_BASE}\n"))
+        .expect("the receipt records its base");
+}
+
+/// Drives the open-salvage path directly against the scripted host and
+/// returns the workspace its git calls start from.
+async fn run_salvage(fixture: &Fixture, data: &std::path::Path) -> dal_core::Workspace {
+    let workspace = ToolCx::for_test(fixture.host.clone()).workspace().clone();
+    run_salvage_in(fixture, data, &workspace).await;
+    workspace
+}
+
+/// Drives open salvage from `workspace`, the checkout the owner opened over.
+/// The real-git proofs pass their repo top: the scripted test workspace is the
+/// platform temp dir, where a real `rev-parse --show-toplevel` finds no repo.
+async fn run_salvage_in(
+    fixture: &Fixture,
+    data: &std::path::Path,
+    workspace: &dal_core::Workspace,
+) {
+    let services: Arc<dyn Services> = fixture.host.clone();
+    super::salvage_open_worktrees(
+        services.as_ref(),
+        &fixture.caller(),
+        fixture.session,
+        workspace.as_path(),
+        data,
+    )
+    .await;
+}
+
+fn argv_words(requests: &[RunRequest]) -> Vec<Vec<String>> {
+    requests
+        .iter()
+        .map(|request| {
+            request
+                .argv
+                .iter()
+                .map(|word| word.to_string_lossy().into_owned())
+                .collect()
+        })
+        .collect()
+}
+
+fn words(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "scripted salvage boundary proof with inline fixture scripting; kept whole so each failure message reads against its setup"
+)]
+async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let lost = JobId::new_v7();
+    // `vanished` has no job row: a crashed task leaves no ledger row, so
+    // absence from the live table is the lost signal. The store lock already
+    // excluded a second opener, so this tree is ours, not foreign.
+    let vanished = JobId::new_v7();
+    let live = JobId::new_v7();
+    let done = JobId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.jobs.push(salvage_job(
+            lost,
+            JobStateView::Done(dal_core::JobOutcome::Lost),
+        ));
+        script.jobs.push(salvage_job(live, JobStateView::Running));
+        script.jobs.push(salvage_job(
+            done,
+            JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
+        ));
+    }
+    for task in [lost, vanished, live, done] {
+        salvage_dir(&data, fixture.session, task);
+    }
+    let dir_text = |task: JobId| {
+        data.join("worktrees")
+            .join(fixture.session.to_string())
+            .join(task.to_string())
+            .display()
+            .to_string()
+    };
+    // Salvage sorts by task id for deterministic argv; script the outputs
+    // and the expectations in that same order.
+    let mut salvaged = vec![lost, vanished];
+    salvaged.sort_by_key(JobId::to_string);
+    let top = "/tmp/dalgona-salvage-top";
+    for task in &salvaged {
+        salvage_receipt(&data, fixture.session, *task);
+    }
+    {
+        let mut script = fixture.script();
+        script.run_outputs.push_back(Ok(output(top)));
+        let mut listing = String::new();
+        for task in &salvaged {
+            listing.push_str("worktree ");
+            listing.push_str(&dir_text(*task));
+            listing.push('\n');
+        }
+        listing.push_str("HEAD deadbeef\n");
+        script.run_outputs.push_back(Ok(output(listing.as_str())));
+        for (n, _) in salvaged.iter().enumerate() {
+            // Porcelain v1 is `XY PATH`: an unstaged modification is ` M`.
+            // A one-column `M file.txt` is not a line git emits, and salvage
+            // refuses a malformed status read by design.
+            script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+            script
+                .run_outputs
+                .push_back(Ok(output(format!("delta {n}").as_str())));
+            script.run_outputs.push_back(Ok(output("file.txt\0")));
+            script.run_outputs.push_back(Ok(output("")));
+        }
+        script.run_outputs.push_back(Ok(output("")));
+    }
+    let workspace = run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    let workspace_text = workspace.as_path().display().to_string();
+    // Top and registration first, then status, net diff, names, and remove
+    // per tree in sorted order, then one prune. No staging step runs, so
+    // untracked bytes can never merge into the patch. Every argv starts
+    // with git and carries its explicit -C root.
+    let mut expected = vec![
+        words(&[
+            "git",
+            "-C",
+            workspace_text.as_str(),
+            "rev-parse",
+            "--show-toplevel",
+        ]),
+        words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+    ];
+    for task in &salvaged {
+        let dir = dir_text(*task);
+        expected.push(words(&[
+            "git",
+            "-C",
+            dir.as_str(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ]));
+        expected.push(words(&[
+            "git",
+            "-C",
+            dir.as_str(),
+            "diff",
+            "--binary",
+            SALVAGE_BASE,
+        ]));
+        expected.push(words(&[
+            "git",
+            "-C",
+            dir.as_str(),
+            "diff",
+            "--name-only",
+            "-z",
+            SALVAGE_BASE,
+        ]));
+        expected.push(words(&[
+            "git",
+            "-C",
+            top,
+            "worktree",
+            "remove",
+            "--force",
+            dir.as_str(),
+        ]));
+    }
+    expected.push(words(&["git", "-C", top, "worktree", "prune"]));
+    assert_eq!(
+        argv_words(&script.run_requests),
+        expected,
+        "salvage runs only the fixed git argv for the lost trees"
+    );
+    for (n, task) in salvaged.iter().enumerate() {
+        let delta = format!("delta {n}");
+        assert!(
+            script.artifacts.iter().any(|(job, file, bytes)| {
+                job == task
+                    && *file == ArtifactFile::DeltaPatch
+                    && bytes.as_slice() == delta.as_bytes()
+            }),
+            "the lost delta is persisted through the artifact operation"
+        );
+    }
+    for task in &salvaged {
+        let status = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| job == task && *file == ArtifactFile::StatusTxt)
+            .map(|(_, _, bytes)| bytes.clone())
+            .ok_or("the status record was persisted through the artifact owner")?;
+        assert_eq!(
+            status, b" M file.txt\n",
+            "the status metadata stays distinct from the patch"
+        );
+    }
+    // Each tree's patch and status are durable, in that order, before that
+    // tree's removal; the one prune comes last.
+    let mut expected_order = Vec::new();
+    for _ in &salvaged {
+        expected_order.extend(["artifact:delta_patch", "artifact:status_txt", "remove"]);
+    }
+    expected_order.push("prune");
+    assert_eq!(
+        script.salvage_order, expected_order,
+        "status is durable through the artifact owner before each removal"
+    );
+    assert_eq!(script.notices.len(), 1, "salvage sends one summary notice");
+    let notice = &script.notices[0];
+    assert_eq!(notice.kind.to_string(), "orchestration.salvage");
+    assert!(
+        salvaged
+            .iter()
+            .all(|task| notice.text.contains(task.to_string().as_str()))
+            && notice.text.contains("delta.patch")
+            && notice.text.contains("was not changed")
+            && !notice.text.contains("skipped"),
+        "the notice names the kept patches and reports no merge: {}",
+        notice.text
+    );
+    for task in [live, done] {
+        let dir = data
+            .join("worktrees")
+            .join(fixture.session.to_string())
+            .join(task.to_string());
+        assert!(dir.is_dir(), "a live or done tree stays in place: {dir:?}");
+    }
+    assert!(
+        !script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == "apply")),
+        "salvage never merges"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Asserts the reopen salvaged exactly the lost tree: the fixed salvage git
+/// argv, the durable delta and status records, the ordered salvage events,
+/// the single summary notice, and no merge.
+fn assert_reopened_salvage(
+    script: &Script,
+    workspace_text: &str,
+    top: &str,
+    dir_text: &str,
+    vanished: &JobId,
+) {
+    assert_eq!(
+        argv_words(&script.run_requests),
+        vec![
+            words(&["git", "-C", workspace_text, "rev-parse", "--show-toplevel"]),
+            words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+            words(&[
+                "git",
+                "-C",
+                dir_text,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored"
+            ]),
+            words(&["git", "-C", dir_text, "diff", "--binary", SALVAGE_BASE]),
+            words(&[
+                "git",
+                "-C",
+                dir_text,
+                "diff",
+                "--name-only",
+                "-z",
+                SALVAGE_BASE
+            ]),
+            words(&["git", "-C", top, "worktree", "remove", "--force", dir_text]),
+            words(&["git", "-C", top, "worktree", "prune"]),
+        ],
+        "the reopen runs only the fixed salvage git argv for the lost tree"
+    );
+    assert!(
+        script.artifacts.iter().any(|(job, file, bytes)| {
+            job == vanished && *file == ArtifactFile::DeltaPatch && bytes.as_slice() == b"delta"
+        }),
+        "the reopened session persists the lost delta through the artifact owner"
+    );
+    assert!(
+        script.artifacts.iter().any(|(job, file, bytes)| {
+            job == vanished
+                && *file == ArtifactFile::StatusTxt
+                && bytes.as_slice() == b" M file.txt\n"
+        }),
+        "the reopened session persists the status record through the artifact owner"
+    );
+    assert_eq!(
+        script.salvage_order,
+        [
+            "artifact:delta_patch",
+            "artifact:status_txt",
+            "remove",
+            "prune"
+        ],
+        "status is durable before the removal on the reopen path"
+    );
+    assert_eq!(
+        script.notices.len(),
+        1,
+        "the reopen sends one summary notice"
+    );
+    let notice = &script.notices[0];
+    assert_eq!(notice.kind.to_string(), "orchestration.salvage");
+    assert!(
+        notice.text.contains(vanished.to_string().as_str())
+            && notice.text.contains("delta.patch")
+            && notice.text.contains("not changed")
+            && !notice.text.contains("skipped"),
+        "the notice names the kept patch and reports no merge: {}",
+        notice.text
+    );
+    assert!(
+        !script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == "apply")),
+        "the reopen never merges"
+    );
+}
+
+/// `Runtime::open` itself enters the salvage hook: reopening a session over a
+/// data root that holds a leftover lost tree salvages it through the real
+/// `salvage_open_worktrees` path — the delta is durable through the artifact
+/// owner, one summary notice names the kept patch, and nothing merges. The
+/// ambient salvage tests drive `salvage_open_worktrees` directly; this proves
+/// the crash/reopen wiring the session-open path owns.
+#[tokio::test]
+async fn reopening_a_session_salvages_its_lost_worktree() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-top";
+    // A fresh session on the same runtime: the crashed task left no job row,
+    // so its tree is lost, and the store lock already excluded a second
+    // opener, so this tree is ours, not foreign.
+    let session = SessionId::new_v7();
+    let vanished = JobId::new_v7();
+    let dir = salvage_dir(&data, session, vanished);
+    salvage_receipt(&data, session, vanished);
+    let dir_text = dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.jobs.clear();
+        script.notices.clear();
+        script_status_tree(&mut script, top, &dir_text);
+        script_removal_and_prune(&mut script);
+    }
+    let services: Arc<dyn Services> = fixture.host.clone();
+    let workspace = ToolCx::for_test(fixture.host.clone()).workspace().clone();
+    let workspace_text = workspace.as_path().display().to_string();
+    let cx = HookCx::for_test(services, session, None);
+    fixture
+        .runtime
+        .open(
+            SessionStart {
+                session,
+                workspace,
+                resumed: true,
+            },
+            cx,
+        )
+        .await?;
+    {
+        let script = fixture.script();
+        assert_reopened_salvage(&script, &workspace_text, top, &dir_text, &vanished);
+    }
+    fixture
+        .runtime
+        .close(
+            session,
+            SessionEnd {
+                session,
+                reason: "close".into(),
+            },
+        )
+        .await;
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Scripts the git answers for one salvageable lost tree up to its removal:
+/// checkout top, worktree registration, status, net diff, and changed names.
+fn script_status_tree(script: &mut Script, top: &str, dir_text: &str) {
+    script.run_outputs.push_back(Ok(output(top)));
+    script.run_outputs.push_back(Ok(output(
+        format!("worktree {dir_text}\nHEAD deadbeef\n").as_str(),
+    )));
+    script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+    script.run_outputs.push_back(Ok(output("delta")));
+    script.run_outputs.push_back(Ok(output("file.txt\0")));
+}
+
+/// Scripts the answers to the one worktree remove and the one prune.
+fn script_removal_and_prune(script: &mut Script) {
+    script.run_outputs.push_back(Ok(output("")));
+    script.run_outputs.push_back(Ok(output("")));
+}
+
+/// The status record is part of the salvage: when only it fails to persist,
+/// the patch is already durable but the tree must stay, with no removal and
+/// no prune. Once the store recovers, the same tree salvages and is removed
+/// exactly once, after both records are durable.
+#[tokio::test]
+async fn open_salvage_status_failure_keeps_tree_until_status_is_durable() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let task = JobId::new_v7();
+    let dir = salvage_dir(&data, fixture.session, task);
+    salvage_receipt(&data, fixture.session, task);
+    let dir_text = dir.display().to_string();
+    let top = "/tmp/dalgona-salvage-status-top";
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script_status_tree(&mut script, top, &dir_text);
+        script.artifact_fail_file = Some((ArtifactFile::StatusTxt, "the status store is down"));
+    }
+    run_salvage(&fixture, &data).await;
+    {
+        let script = fixture.script();
+        assert!(
+            !script.run_requests.iter().any(|request| request
+                .argv
+                .iter()
+                .any(|word| word == "remove" || word == "prune")),
+            "a tree without a durable status record is neither removed nor pruned: {:?}",
+            argv_words(&script.run_requests)
+        );
+        assert_eq!(
+            script.salvage_order,
+            ["artifact:delta_patch"],
+            "the patch persisted, the status did not, and nothing followed"
+        );
+        assert!(
+            script
+                .artifacts
+                .iter()
+                .all(|(_, file, _)| *file != ArtifactFile::StatusTxt),
+            "the failed status record is not recorded"
+        );
+        assert!(dir.is_dir(), "the tree stays in place: {dir:?}");
+        assert_eq!(script.notices.len(), 1, "salvage sends one summary notice");
+        let text = &script.notices[0].text;
+        assert!(
+            text.contains(task.to_string().as_str())
+                && text.contains("the status record could not be saved")
+                && text.contains("prune skipped")
+                && !text.contains("kept at"),
+            "the notice names the kept tree and the failed status record: {text}"
+        );
+    }
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.run_requests.clear();
+        script.salvage_order.clear();
+        script.artifacts.clear();
+        script_status_tree(&mut script, top, &dir_text);
+        script_removal_and_prune(&mut script);
+    }
+    run_salvage(&fixture, &data).await;
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script.salvage_order,
+            [
+                "artifact:delta_patch",
+                "artifact:status_txt",
+                "remove",
+                "prune"
+            ],
+            "with a healthy store both records are durable before the one removal"
+        );
+        let (_, _, status) = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| *job == task && *file == ArtifactFile::StatusTxt)
+            .ok_or("the retry persisted the status record")?;
+        assert_eq!(status.as_slice(), b" M file.txt\n");
+        assert_eq!(script.notices.len(), 1);
+        assert!(
+            script.notices[0].text.contains("kept at"),
+            "the retry reports the salvage: {}",
+            script.notices[0].text
+        );
+    }
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_salvage_excludes_live_and_done_trees() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let mut tasks = Vec::new();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        for state in [
+            JobStateView::Running,
+            JobStateView::Detached,
+            JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
+            JobStateView::Done(dal_core::JobOutcome::Cancelled),
+        ] {
+            let task = JobId::new_v7();
+            script.jobs.push(salvage_job(task, state));
+            salvage_dir(&data, fixture.session, task);
+            tasks.push(task);
+        }
+    }
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert!(
+        script.run_requests.is_empty(),
+        "excluded trees order no git: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(
+        script.artifacts.is_empty(),
+        "excluded trees persist nothing"
+    );
+    assert!(script.notices.is_empty(), "excluded trees report nothing");
+    for task in &tasks {
+        let dir = data
+            .join("worktrees")
+            .join(fixture.session.to_string())
+            .join(task.to_string());
+        assert!(dir.is_dir(), "an excluded tree stays in place: {dir:?}");
+    }
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_salvage_keeps_the_tree_when_its_delta_cannot_be_read() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let lost = JobId::new_v7();
+    let lost_dir = salvage_dir(&data, fixture.session, lost);
+    salvage_receipt(&data, fixture.session, lost);
+    let lost_text = lost_dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.jobs.push(salvage_job(
+            lost,
+            JobStateView::Done(dal_core::JobOutcome::Lost),
+        ));
+        script
+            .run_outputs
+            .push_back(Ok(output("/tmp/dalgona-salvage-top")));
+        script
+            .run_outputs
+            .push_back(Ok(output(format!("worktree {lost_text}\n").as_str())));
+        script.run_outputs.push_back(Ok(output(" M f\n")));
+        script
+            .run_outputs
+            .push_back(Ok(failed_output("fatal: not a git repository")));
+    }
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert_eq!(
+        script.run_requests.len(),
+        4,
+        "a failed net diff stops before remove and prune: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(
+        script.artifacts.is_empty(),
+        "no delta means no patch artifact"
+    );
+    assert_eq!(script.notices.len(), 1);
+    assert!(
+        script.notices[0]
+            .text
+            .contains("the changes could not be computed"),
+        "the notice names why the tree stayed: {}",
+        script.notices[0].text
+    );
+    assert!(
+        lost_dir.is_dir(),
+        "the unreadable tree stays in place: {lost_dir:?}"
+    );
+    assert!(
+        !script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == "apply")),
+        "salvage never merges"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_salvage_touches_nothing_when_the_job_list_fails() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let lost = JobId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.jobs.push(salvage_job(
+            lost,
+            JobStateView::Done(dal_core::JobOutcome::Lost),
+        ));
+        script.jobs_list_error = Some("the list failed");
+    }
+    let lost_dir = salvage_dir(&data, fixture.session, lost);
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert!(
+        script.jobs_list_error.is_none(),
+        "salvage itself asked for the live table and took the failure"
+    );
+    assert_eq!(
+        script.run_requests,
+        [] as [RunRequest; 0],
+        "without the live table salvage orders no git"
+    );
+    assert_eq!(script.artifacts, [] as [(JobId, ArtifactFile, Vec<u8>); 0]);
+    assert_eq!(script.notices, [] as [Notice; 0]);
+    assert!(lost_dir.is_dir(), "the tree stays in place: {lost_dir:?}");
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Runs one tool call through the real `tool_call` hook and returns its
+/// verdict.
+async fn tool_verdict(
+    fixture: &Fixture,
+    tool: &str,
+    args: &str,
+    id: &str,
+) -> Result<dal_core::ext::ToolCallVerdict, Box<dyn std::error::Error>> {
+    use dal_agent::ext::Hook as _;
+    let turn = dal_core::TurnId::new(std::num::NonZeroU64::MIN);
+    let verdict = super::ToolCallHook(fixture.runtime.clone())
+        .call(
+            dal_core::ext::ToolCallEvent {
+                turn,
+                call: CallId::new(id),
+                tool: dal_core::Name::parse(tool)?,
+                class: dal_core::ToolClass::Exec {
+                    read_only: false,
+                    grant: None,
+                },
+                args: RawJson::parse(args)?,
+            },
+            HookCx::for_test(fixture.host.clone(), fixture.session, Some(turn)),
+        )
+        .await?;
+    Ok(verdict)
+}
+
+/// The hook rewrites only the one shape the manual promises: an `exec` call
+/// whose command is a recognized sleep wait of ten seconds or more. Its
+/// foreground window becomes five seconds and every other member, the command
+/// above all, survives byte for byte. Every other call is allowed untouched.
+#[tokio::test]
+async fn only_a_classified_exec_sleep_wait_is_rewritten() -> TestResult {
+    use dal_core::ext::ToolCallVerdict;
+    use sonic_rs::JsonValueTrait as _;
+    let fixture = Fixture::open().await?;
+    let args = match tool_verdict(&fixture, "exec", r#"{"command":"sleep 30"}"#, "wait").await? {
+        ToolCallVerdict::Rewrite { args } => args,
+        other => return Err(format!("a sleep wait was not rewritten: {other:?}").into()),
+    };
+    let rewritten: sonic_rs::Value = sonic_rs::from_str(args.as_str())?;
+    assert_eq!(
+        rewritten
+            .get("foreground_s")
+            .and_then(sonic_rs::JsonValueTrait::as_u64),
+        Some(5),
+        "the foreground window is bounded to five seconds: {}",
+        args.as_str()
+    );
+    assert_eq!(
+        rewritten.get("command").and_then(|value| value.as_str()),
+        Some("sleep 30"),
+        "the command itself is untouched: {}",
+        args.as_str()
+    );
+    let untouched = [
+        ("exec", r#"{"command":"echo done"}"#, "not a sleep wait"),
+        (
+            "exec",
+            r#"{"command":"sleep 3"}"#,
+            "a sleep under ten seconds",
+        ),
+        (
+            "exec",
+            r#"{"command":"sleep 30","foreground_s":2}"#,
+            "a window already shorter than five seconds",
+        ),
+        (
+            "read",
+            r#"{"command":"sleep 30"}"#,
+            "another tool carrying the same text",
+        ),
+    ];
+    for (index, (tool, args, why)) in untouched.into_iter().enumerate() {
+        let verdict = tool_verdict(&fixture, tool, args, &format!("other-{index}")).await?;
+        assert!(
+            matches!(verdict, ToolCallVerdict::Allow),
+            "{why} must be allowed unchanged: {verdict:?}"
+        );
+    }
+    Ok(())
+}
+
+/// With the sleep rewrite switched off the same call is allowed untouched.
+#[tokio::test]
+async fn a_disabled_sleep_rewrite_leaves_the_sleep_wait_alone() -> TestResult {
+    let mut config = parse_config(None)?;
+    config.sleep.enabled = false;
+    let fixture = Fixture::open_config(config).await?;
+    let verdict = tool_verdict(&fixture, "exec", r#"{"command":"sleep 30"}"#, "wait").await?;
+    assert!(
+        matches!(verdict, dal_core::ext::ToolCallVerdict::Allow),
+        "{verdict:?}"
+    );
+    Ok(())
+}
+
+/// A repeated sleep wait is first rewritten and then stopped by the loop
+/// guard: once the guard blocks, the call is blocked, never rewritten again.
+#[tokio::test]
+async fn the_loop_guard_blocks_a_repeated_sleep_wait_instead_of_rewriting_it() -> TestResult {
+    use dal_core::ext::ToolCallVerdict;
+    let fixture = Fixture::open().await?;
+    let mut blocked_at = None;
+    for index in 0..9 {
+        let verdict = tool_verdict(
+            &fixture,
+            "exec",
+            r#"{"command":"sleep 30"}"#,
+            &format!("repeat-{index}"),
+        )
+        .await?;
+        let rewritten = matches!(verdict, ToolCallVerdict::Rewrite { .. });
+        let blocked = matches!(verdict, ToolCallVerdict::Block { .. });
+        assert!(
+            rewritten || blocked,
+            "a classified sleep wait is rewritten or blocked: {verdict:?}"
+        );
+        if blocked {
+            blocked_at.get_or_insert(index);
+        } else {
+            assert!(
+                blocked_at.is_none(),
+                "call {index} was rewritten after the guard had blocked"
+            );
+        }
+    }
+    assert!(
+        blocked_at.is_some_and(|index| index > 0),
+        "the guard blocked the repeat only after the first call passed: {blocked_at:?}"
+    );
+    Ok(())
+}
+
+/// The host's held set is durable and outlives the held job's own row, so a
+/// held task has no row after a restart yet its tree must stay. Salvage
+/// reads the set without changing it, skips the held tree before any git
+/// call, and still salvages an unheld lost sibling of the same sweep.
+#[tokio::test]
+async fn open_salvage_leaves_a_tree_in_the_durable_held_set() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-top";
+    let held = JobId::new_v7();
+    let lost = JobId::new_v7();
+    let held_dir = salvage_dir(&data, fixture.session, held);
+    let lost_dir = salvage_dir(&data, fixture.session, lost);
+    for task in [held, lost] {
+        salvage_receipt(&data, fixture.session, task);
+    }
+    let held_text = held_dir.display().to_string();
+    let lost_text = lost_dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.jobs.clear();
+        script.notices.clear();
+        script.held = vec![held];
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(
+            format!("worktree {held_text}\nworktree {lost_text}\n").as_str(),
+        )));
+        script.run_outputs.push_back(Ok(output(" M f.txt\n")));
+        script.run_outputs.push_back(Ok(output("lost delta")));
+        script.run_outputs.push_back(Ok(output("f.txt\0")));
+        script.run_outputs.push_back(Ok(output("")));
+        script.run_outputs.push_back(Ok(output("")));
+    }
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert!(
+        !script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == held_text.as_str())),
+        "no git call names the held tree"
+    );
+    assert!(
+        script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == lost_text.as_str())),
+        "the unheld lost sibling is still salvaged"
+    );
+    assert!(
+        script.artifacts.iter().all(|(job, _, _)| *job == lost),
+        "nothing is saved for the held tree"
+    );
+    assert!(held_dir.is_dir(), "the held tree stays in place");
+    assert_eq!(
+        script.held,
+        [held],
+        "reading the held set changed nothing in it"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A held set that cannot be read is no held set: salvage orders no git,
+/// saves nothing, and leaves every tree, rather than guess who is held.
+#[tokio::test]
+async fn open_salvage_touches_nothing_when_the_held_set_cannot_be_read() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let lost = JobId::new_v7();
+    let lost_dir = salvage_dir(&data, fixture.session, lost);
+    salvage_receipt(&data, fixture.session, lost);
+    {
+        let mut script = fixture.script();
+        script.jobs.clear();
+        script.notices.clear();
+        script.held_error = Some("the held set is unreadable");
+    }
+    run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    assert!(
+        script.held_error.is_none(),
+        "salvage itself asked for the held set and took the failure"
+    );
+    assert_eq!(
+        script.run_requests,
+        [] as [RunRequest; 0],
+        "without the held set salvage orders no git"
+    );
+    assert_eq!(script.artifacts, [] as [(JobId, ArtifactFile, Vec<u8>); 0]);
+    assert_eq!(script.notices, [] as [Notice; 0]);
+    assert!(lost_dir.is_dir(), "the tree stays in place: {lost_dir:?}");
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A base record that is missing, option-shaped, truncated, or not newline
+/// terminated is never passed to git: salvage leaves the tree in place and
+/// orders no status, diff, or removal for it.
+#[tokio::test]
+async fn open_salvage_leaves_trees_whose_receipt_names_no_valid_base() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-top";
+    let cases: [(&str, Option<&str>); 4] = [
+        ("missing", None),
+        ("option-shaped", Some("--output=/tmp/salvage-pwned\n")),
+        (
+            "truncated",
+            Some("0123456789abcdef0123456789abcdef0123456\n"),
+        ),
+        ("unterminated", Some(SALVAGE_BASE)),
+    ];
+    let mut dirs = Vec::new();
+    let mut listing = String::new();
+    for (_, record) in cases {
+        let task = JobId::new_v7();
+        let dir = salvage_dir(&data, fixture.session, task);
+        salvage_receipt(&data, fixture.session, task);
+        let base = data
+            .join("isolation")
+            .join(fixture.session.to_string())
+            .join(task.to_string())
+            .join("base.txt");
+        match record {
+            None => std::fs::remove_file(&base)?,
+            Some(text) => std::fs::write(&base, text)?,
+        }
+        listing.push_str("worktree ");
+        listing.push_str(&dir.display().to_string());
+        listing.push_str("\nHEAD deadbeef\n\n");
+        dirs.push((task, dir));
+    }
+    {
+        let mut script = fixture.script();
+        script.jobs.clear();
+        script.notices.clear();
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(listing.as_str())));
+    }
+    let workspace = run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    let workspace_text = workspace.as_path().display().to_string();
+    assert_eq!(
+        argv_words(&script.run_requests),
+        vec![
+            words(&[
+                "git",
+                "-C",
+                workspace_text.as_str(),
+                "rev-parse",
+                "--show-toplevel"
+            ]),
+            words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+        ],
+        "no status, diff, or removal is ordered for a tree without a valid base"
+    );
+    assert!(script.artifacts.is_empty(), "nothing is captured or saved");
+    assert_eq!(script.notices.len(), 1, "salvage sends one summary notice");
+    let text = &script.notices[0].text;
+    assert_eq!(
+        text.matches("names no valid base commit").count(),
+        dirs.len(),
+        "the notice names every tree and why it stayed: {text}"
+    );
+    assert!(
+        !text.contains("kept at"),
+        "no tree is reported as kept: {text}"
+    );
+    for (task, dir) in &dirs {
+        assert!(text.contains(task.to_string().as_str()), "{text}");
+        assert!(dir.is_dir(), "the tree stays in place: {dir:?}");
+    }
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Asserts only the unmarked tree was read, captured, and removed: the fixed
+/// salvage argv names the plain tree, and no prune runs beside a left tree.
+fn assert_only_plain_tree_salvaged(
+    script: &Script,
+    workspace_text: &str,
+    top: &str,
+    plain_text: &str,
+) {
+    assert_eq!(
+        argv_words(&script.run_requests),
+        vec![
+            words(&["git", "-C", workspace_text, "rev-parse", "--show-toplevel"]),
+            words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+            words(&[
+                "git",
+                "-C",
+                plain_text,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored"
+            ]),
+            words(&["git", "-C", plain_text, "diff", "--binary", SALVAGE_BASE]),
+            words(&[
+                "git",
+                "-C",
+                plain_text,
+                "diff",
+                "--name-only",
+                "-z",
+                SALVAGE_BASE
+            ]),
+            words(&[
+                "git", "-C", top, "worktree", "remove", "--force", plain_text
+            ]),
+        ],
+        "only the unmarked tree is read, captured, and removed; no prune runs beside a left tree"
+    );
+}
+
+/// A tree marked by `retained.json` is left for hand recovery: an aborted run
+/// keeps its trees while a parked writer may still use them. The mark skips
+/// only that tree; an unmarked lost tree of the same sweep still salvages.
+#[tokio::test]
+async fn open_salvage_leaves_a_tree_marked_by_a_retained_record() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-top";
+    let marked = JobId::new_v7();
+    let plain = JobId::new_v7();
+    let marked_dir = salvage_dir(&data, fixture.session, marked);
+    let plain_dir = salvage_dir(&data, fixture.session, plain);
+    for task in [marked, plain] {
+        salvage_receipt(&data, fixture.session, task);
+    }
+    std::fs::write(
+        data.join("isolation")
+            .join(fixture.session.to_string())
+            .join(marked.to_string())
+            .join("retained.json"),
+        b"{}\n",
+    )?;
+    let marked_text = marked_dir.display().to_string();
+    let plain_text = plain_dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.jobs.clear();
+        script.notices.clear();
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(
+            format!("worktree {marked_text}\nworktree {plain_text}\n").as_str(),
+        )));
+        script.run_outputs.push_back(Ok(output(" M f.txt\n")));
+        script.run_outputs.push_back(Ok(output("plain delta")));
+        script.run_outputs.push_back(Ok(output("f.txt\0")));
+        script.run_outputs.push_back(Ok(output("")));
+    }
+    let workspace = run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    let workspace_text = workspace.as_path().display().to_string();
+    assert_only_plain_tree_salvaged(&script, &workspace_text, top, &plain_text);
+    assert!(
+        !script
+            .run_requests
+            .iter()
+            .any(|request| request.argv.iter().any(|word| word == marked_text.as_str())),
+        "no git call names the marked tree"
+    );
+    assert!(
+        script.artifacts.iter().all(|(job, _, _)| *job == plain),
+        "nothing is saved for the marked tree"
+    );
+    assert!(marked_dir.is_dir(), "the marked tree stays in place");
+    assert_eq!(script.notices.len(), 1, "salvage sends one summary notice");
+    let text = &script.notices[0].text;
+    assert!(
+        text.contains(marked.to_string().as_str())
+            && text.contains("retained record")
+            && text.contains(plain.to_string().as_str())
+            && text.contains("kept at"),
+        "the notice names the marked tree and the kept patch: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Creation records the receipt: the run's base commit in `base.txt`, inside
+/// private directories the way the artifact owner makes them. Open salvage
+/// reads exactly this record, so a creation that wrote less would leave every
+/// tree it makes unsalvageable.
+#[tokio::test]
+async fn a_created_worktree_records_the_run_base_in_its_creation_receipt() -> TestResult {
+    let data = unique_temp_root("dalgona-receipt");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data)?;
+    let mut config = isolation_config()?;
+    config.data_root = Some(data.clone());
+    let fixture = Fixture::open_config(config).await?;
+    fixture.script().run_outputs.extend([
+        Ok(output("git version 2.47.0")),
+        Ok(output(&temp_toplevel())),
+        Ok(output("head")),
+        Ok(output(SALVAGE_BASE)),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("diff --git a/code b/code\n")),
+        Ok(output("code\n")),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("")),
+    ]);
+    fixture
+        .tool(r#"{"action":"run","steps":[{"name":"write","prompt":"write","tools":["patch"],"isolation":"worktree"}]}"#)
+        .await?;
+    let report = fixture.ended_run().await?;
+    assert!(report.contains("merged"), "{report}");
+    let task = fixture
+        .script()
+        .jobs
+        .iter()
+        .find(|(_, parent, _)| parent.is_some())
+        .ok_or("task absent")?
+        .0
+        .id;
+    let isolation = data.join("isolation");
+    let session_dir = isolation.join(fixture.session.to_string());
+    let receipt = session_dir.join(task.to_string());
+    assert_eq!(
+        std::fs::read_to_string(receipt.join("base.txt"))?,
+        format!("{SALVAGE_BASE}\n"),
+        "the receipt records the base the worktree was created at"
+    );
+    assert_eq!(
+        super::receipt_base(&receipt).await.as_deref(),
+        Some(SALVAGE_BASE),
+        "what creation writes is exactly what open salvage reads back"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for private in [
+            &isolation,
+            &session_dir,
+            &receipt,
+            &receipt.join("base.txt"),
+        ] {
+            let mode = std::fs::metadata(private)?.permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{private:?} is closed to group and others: {mode:o}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A receipt that cannot be recorded fails the task before any child starts
+/// and takes the fresh, empty worktree with it, so no registered tree is
+/// left that salvage could never trust.
+#[tokio::test]
+async fn a_receipt_that_cannot_be_recorded_fails_the_task_and_removes_its_fresh_worktree()
+-> TestResult {
+    let data = unique_temp_root("dalgona-receipt-refused");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data)?;
+    // A file where the isolation directory belongs: no receipt can be made.
+    std::fs::write(data.join("isolation"), b"not a directory")?;
+    let mut config = isolation_config()?;
+    config.data_root = Some(data.clone());
+    let fixture = Fixture::open_config(config).await?;
+    fixture.script().run_outputs.extend([
+        Ok(output("git version 2.47.0")),
+        Ok(output(&temp_toplevel())),
+        Ok(output("head")),
+        Ok(output("snapshot")),
+        Ok(output("")),
+        Ok(output("")),
+    ]);
+    fixture
+        .tool(r#"{"action":"run","steps":[{"name":"write","prompt":"write","tools":["patch"],"isolation":"worktree"}]}"#)
+        .await?;
+    let report = fixture.ended_run().await?;
+    assert!(
+        report.contains("the isolation receipt could not be recorded"),
+        "the run names why the task failed: {report}"
+    );
+    let script = fixture.script();
+    assert!(
+        script.starts.is_empty(),
+        "no child starts in a tree salvage could not trust"
+    );
+    let removals: Vec<Vec<String>> = argv_words(&script.run_requests)
+        .into_iter()
+        .filter(|argv| argv.iter().any(|word| word == "remove"))
+        .collect();
+    let added: Vec<Vec<String>> = argv_words(&script.run_requests)
+        .into_iter()
+        .filter(|argv| argv.iter().any(|word| word == "add"))
+        .collect();
+    assert_eq!(added.len(), 1, "one worktree was created: {added:?}");
+    assert_eq!(removals.len(), 1, "and that one was removed: {removals:?}");
+    assert_eq!(
+        removals[0].last(),
+        added[0].get(6),
+        "the removal names the worktree the failed creation made"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// The status read keeps only what no diff against the base can carry:
+/// untracked and ignored entries. A malformed line voids the whole read.
+#[test]
+fn salvage_status_class_reports_only_untracked_and_ignored_entries() {
+    assert_eq!(super::salvage_status_class(b""), Some((false, false)));
+    assert_eq!(
+        super::salvage_status_class(b" M a.txt\nA  b.txt\nR  c.txt -> d.txt\n"),
+        Some((false, false)),
+        "tracked entries, staged or not, need no class"
+    );
+    assert_eq!(
+        super::salvage_status_class(b" M a.txt\n?? b.txt\n"),
+        Some((true, false))
+    );
+    assert_eq!(
+        super::salvage_status_class(b"!! target/\n"),
+        Some((false, true))
+    );
+    assert_eq!(
+        super::salvage_status_class(b"M a.txt\n"),
+        None,
+        "a one-column entry is not a line git emits"
+    );
+}
+
+/// Only a full object name reaches a git argv: 40 or 64 lowercase hex digits.
+#[test]
+fn only_a_full_object_name_counts_as_a_recorded_base() {
+    assert!(super::valid_object_name(SALVAGE_BASE));
+    assert!(super::valid_object_name(&"a".repeat(64)));
+    let refused = [
+        String::new(),
+        "HEAD".to_owned(),
+        "--output=x".to_owned(),
+        SALVAGE_BASE.to_uppercase(),
+        SALVAGE_BASE[..39].to_owned(),
+        format!("{SALVAGE_BASE}0"),
+        format!("{SALVAGE_BASE}\n"),
+    ];
+    for text in &refused {
+        assert!(!super::valid_object_name(text), "{text:?}");
+    }
+}
+
+/// Opens a passthrough owner over a fresh repo top and data root. Real git
+/// answers the salvage calls; the jobs table stays scripted.
+#[cfg(unix)]
+async fn salvage_real_open(
+    top: std::path::PathBuf,
+    data: std::path::PathBuf,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let mut config = parse_config(None)?;
+    config.goal.enabled = false;
+    config.data_root = Some(data);
+    let workspace = dal_core::Workspace::new(top).expect("absolute workspace");
+    passthrough_fixture(config, workspace, None).await
+}
+
+/// Builds a seed repo at `top` plus a battery-layout worktree for `task`
+/// with its creation receipt, which records the seed commit as the base the
+/// tree started from. Runs blocking git; callers wrap in `spawn_blocking`.
+#[cfg(unix)]
+fn salvage_real_tree(
+    top: &std::path::Path,
+    data: &std::path::Path,
+    session: SessionId,
+    task: JobId,
+) -> std::path::PathBuf {
+    let base = seed_new_repo(top);
+    let dir = data
+        .join("worktrees")
+        .join(session.to_string())
+        .join(task.to_string());
+    std::fs::create_dir_all(dir.parent().expect("session dir")).expect("parents");
+    run_git(
+        top,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            dir.to_str().expect("utf-8 worktree dir"),
+            "HEAD",
+        ],
+    );
+    let receipt = data
+        .join("isolation")
+        .join(session.to_string())
+        .join(task.to_string());
+    std::fs::create_dir_all(&receipt).expect("receipt");
+    std::fs::write(receipt.join("base.txt"), format!("{base}\n")).expect("receipt base");
+    dir
+}
+
+#[cfg(unix)]
+async fn worktree_line_count(top: std::path::PathBuf) -> usize {
+    let out = tokio::task::spawn_blocking(move || run_git(&top, &["worktree", "list"]))
+        .await
+        .expect("worktree list joins");
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+/// The workspace the real-git owner opened over: the fresh repo top.
+#[cfg(unix)]
+fn salvage_workspace(top: &std::path::Path) -> dal_core::Workspace {
+    dal_core::Workspace::new(top.to_path_buf()).expect("absolute workspace")
+}
+
+#[cfg(unix)]
+fn fresh_roots(prefix: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let top = unique_temp_root(&format!("dalgona-salvage-{prefix}-top"));
+    let data = unique_temp_root(&format!("dalgona-salvage-{prefix}"));
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&top).expect("top");
+    std::fs::create_dir_all(&data).expect("data root");
+    (top, data)
+}
+
+/// Untracked-only work stays in place: untracked bytes never enter the net
+/// patch (no staging step runs), so the tree is kept with its contents and
+/// its registration intact.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_keeps_untracked_only_work_in_place() -> TestResult {
+    let (top, data) = fresh_roots("untracked");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir = tokio::task::spawn_blocking(move || {
+        let dir = salvage_real_tree(&top_in, &data_in, session, task);
+        std::fs::write(dir.join("notes.txt"), b"untracked work\n").expect("notes");
+        dir
+    })
+    .await
+    .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        assert!(
+            dir.is_dir(),
+            "the untracked tree stays in place with its bytes"
+        );
+        assert!(
+            dir.join("notes.txt").is_file(),
+            "the untracked file itself survives"
+        );
+        assert!(
+            script.artifacts.is_empty(),
+            "no patch merges untracked bytes"
+        );
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        2,
+        "its worktree registration stays intact"
+    );
+    let script = fixture.script();
+    assert_eq!(script.notices.len(), 1);
+    assert!(
+        script.notices[0].text.contains(task.to_string().as_str())
+            && script.notices[0].text.contains("untracked"),
+        "the notice names the kept tree and why: {}",
+        script.notices[0].text
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Staged plus unstaged tracked work must both land in the ONE net patch.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_captures_staged_and_unstaged_work() -> TestResult {
+    let (top, data) = fresh_roots("mixed");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir = tokio::task::spawn_blocking(move || {
+        let dir = salvage_real_tree(&top_in, &data_in, session, task);
+        std::fs::write(dir.join("staged.txt"), b"staged change\n").expect("staged");
+        let mut seed = std::fs::read_to_string(dir.join("seed.txt")).expect("seed");
+        seed.push_str("unstaged change\n");
+        std::fs::write(dir.join("seed.txt"), seed).expect("unstaged");
+        run_git(&dir, &["add", "staged.txt"]);
+        dir
+    })
+    .await
+    .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        let patch = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| *job == task && *file == ArtifactFile::DeltaPatch)
+            .map(|(_, _, bytes)| bytes.clone())
+            .ok_or("the mixed delta was saved")?;
+        for needle in ["staged change", "unstaged change"] {
+            assert!(
+                patch.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "the net patch carries {needle:?}"
+            );
+        }
+        // The status travels through the artifact owner, not a bare file
+        // write, and keeps the staging columns the merged patch cannot show.
+        let (_, _, status_bytes) = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| *job == task && *file == ArtifactFile::StatusTxt)
+            .ok_or("the status record was persisted through the artifact owner")?;
+        let status = String::from_utf8_lossy(status_bytes);
+        assert!(
+            status.contains("seed.txt") && status.contains("staged.txt"),
+            "the status record keeps both entries: {status}"
+        );
+        assert!(!dir.exists(), "the salvaged worktree is removed");
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        1,
+        "only the main tree remains"
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// Work the task committed inside its tree is part of the net patch. The
+/// patch is taken against the base the receipt records, not against the
+/// tree's own `HEAD`, which the task's commit moved: a `HEAD`-relative patch
+/// would drop the commit, and the removal would then destroy its only copy.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_keeps_work_the_task_committed_inside_its_tree() -> TestResult {
+    let (top, data) = fresh_roots("committed");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir = tokio::task::spawn_blocking(move || {
+        let dir = salvage_real_tree(&top_in, &data_in, session, task);
+        std::fs::write(dir.join("committed.txt"), b"committed work\n").expect("committed");
+        run_git(&dir, &["add", "committed.txt"]);
+        run_git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "task commit"],
+        );
+        let mut seed = std::fs::read_to_string(dir.join("seed.txt")).expect("seed");
+        seed.push_str("later edit\n");
+        std::fs::write(dir.join("seed.txt"), seed).expect("later edit");
+        dir
+    })
+    .await
+    .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        let patch = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| *job == task && *file == ArtifactFile::DeltaPatch)
+            .map(|(_, _, bytes)| bytes.clone())
+            .ok_or("the delta was saved")?;
+        for needle in ["committed work", "later edit"] {
+            assert!(
+                patch.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "the net patch carries {needle:?}"
+            );
+        }
+        assert!(!dir.exists(), "the salvaged worktree is removed");
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        1,
+        "only the main tree remains"
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A tree whose every change is committed reads clean in `status`, yet it
+/// holds work: the net patch against the base carries it, so the tree is
+/// salvaged rather than reported as having no changes.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_keeps_work_that_is_only_committed_inside_its_tree() -> TestResult {
+    let (top, data) = fresh_roots("committed-only");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir = tokio::task::spawn_blocking(move || {
+        let dir = salvage_real_tree(&top_in, &data_in, session, task);
+        std::fs::write(dir.join("only-committed.txt"), b"committed only\n").expect("committed");
+        run_git(&dir, &["add", "only-committed.txt"]);
+        run_git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "task commit"],
+        );
+        dir
+    })
+    .await
+    .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        let patch = script
+            .artifacts
+            .iter()
+            .find(|(job, file, _)| *job == task && *file == ArtifactFile::DeltaPatch)
+            .map(|(_, _, bytes)| bytes.clone())
+            .ok_or("the committed delta was saved")?;
+        let needle = "committed only";
+        assert!(
+            patch.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "the net patch carries the committed work"
+        );
+        assert!(!dir.exists(), "the salvaged worktree is removed");
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        1,
+        "only the main tree remains"
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A tree that still equals its base holds no work to capture: it is left in
+/// place with its registration, nothing is saved, and the notice says why.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_leaves_a_tree_that_still_equals_its_base() -> TestResult {
+    let (top, data) = fresh_roots("clean");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir =
+        tokio::task::spawn_blocking(move || salvage_real_tree(&top_in, &data_in, session, task))
+            .await
+            .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        assert!(dir.is_dir(), "the unchanged tree stays in place");
+        assert!(script.artifacts.is_empty(), "no patch is saved");
+        assert_eq!(script.notices.len(), 1);
+        assert!(
+            script.notices[0].text.contains(task.to_string().as_str())
+                && script.notices[0].text.contains("no captured changes"),
+            "the notice names the kept tree and why: {}",
+            script.notices[0].text
+        );
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        2,
+        "its worktree registration stays intact"
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A foreign manually-placed directory parsing as a `JobId` is never touched:
+/// without the creation receipt, and without worktree-list registration,
+/// both stay in place with no removal.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_leaves_foreign_directories_in_place() -> TestResult {
+    let (top, data) = fresh_roots("foreign");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, bare, receipted) = (fixture.session, JobId::new_v7(), JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    tokio::task::spawn_blocking(move || {
+        seed_new_repo(&top_in);
+        for task in [bare, receipted] {
+            std::fs::create_dir_all(
+                data_in
+                    .join("worktrees")
+                    .join(session.to_string())
+                    .join(task.to_string()),
+            )
+            .expect("foreign dir");
+        }
+        // Only one carries a forged receipt; neither is a registered worktree.
+        std::fs::create_dir_all(
+            data_in
+                .join("isolation")
+                .join(session.to_string())
+                .join(receipted.to_string()),
+        )
+        .expect("forged receipt");
+    })
+    .await
+    .expect("setup joins");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    {
+        let script = fixture.script();
+        for task in [bare, receipted] {
+            let dir = data
+                .join("worktrees")
+                .join(session.to_string())
+                .join(task.to_string());
+            assert!(dir.is_dir(), "a foreign dir stays in place: {dir:?}");
+        }
+        assert!(
+            script.artifacts.is_empty(),
+            "foreign dirs persist no patch and no status record"
+        );
+        assert!(
+            !script
+                .notices
+                .iter()
+                .any(|notice| notice.text.contains("kept at")),
+            "nothing foreign is salvaged"
+        );
+        assert_eq!(script.notices.len(), 1, "one summary notice names both");
+        assert!(
+            script.notices[0].text.contains("left in place"),
+            "the notice says why: {}",
+            script.notices[0].text
+        );
+    }
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        1,
+        "no foreign registration changed"
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// A sidecar persist failure keeps the tree and its registration, and skips
+/// the prune: everything stays recoverable.
+#[cfg(unix)]
+#[tokio::test]
+async fn open_salvage_failure_keeps_tree_and_skips_prune() -> TestResult {
+    let (top, data) = fresh_roots("persist");
+    let fixture = salvage_real_open(top.clone(), data.clone()).await?;
+    let (session, task) = (fixture.session, JobId::new_v7());
+    let (top_in, data_in) = (top.clone(), data.clone());
+    let dir = tokio::task::spawn_blocking(move || {
+        let dir = salvage_real_tree(&top_in, &data_in, session, task);
+        std::fs::write(dir.join("work.txt"), b"base\n").expect("work");
+        run_git(&dir, &["add", "work.txt"]);
+        run_git(
+            &dir,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        );
+        let mut work = std::fs::read_to_string(dir.join("work.txt")).expect("work");
+        work.push_str("valued work\n");
+        std::fs::write(dir.join("work.txt"), work).expect("valued");
+        dir
+    })
+    .await
+    .expect("setup joins");
+    fixture.script().artifact_fail = Some("the artifact store is down");
+    run_salvage_in(&fixture, &data, &salvage_workspace(&top)).await;
+    let script = fixture.script();
+    assert!(dir.is_dir(), "the unsaved tree stays in place");
+    drop(script);
+    assert_eq!(
+        worktree_line_count(top.clone()).await,
+        2,
+        "its worktree registration stays intact"
+    );
+    let script = fixture.script();
+    assert!(
+        script.artifacts.is_empty(),
+        "no patch and no status record was persisted"
+    );
+    assert_eq!(script.notices.len(), 1);
+    assert!(
+        script.notices[0].text.contains("could not be saved")
+            && script.notices[0].text.contains("prune skipped"),
+        "the notice names the failure and the skipped prune: {}",
+        script.notices[0].text
+    );
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+/// The scale shape in miniature inside the battery crate: 500 children, 250
 /// of them worktree writers merging one distinct real file each through the
 /// real git executable, with the merge probes and the mailbox peak observed
 /// from inside. Gated on `DALGONA_ORCH_STRESS` like the gates: the default
@@ -5098,4 +7409,778 @@ async fn stress_five_hundred_children_merge_two_hundred_fifty_files() -> TestRes
     let _ = tokio::fs::remove_dir_all(&root).await;
     let _ = tokio::fs::remove_dir_all(&data).await;
     Ok(())
+}
+
+/// The orchestration `git` helper against the real spawn admission. Every
+/// other test in this file answers `run` from a script, so none of them can
+/// see the stdout prefix cap the spawn door enforces; these drive a real
+/// `dal_agent::Host` whose `run` service reaches `check_spawn_request`. The
+/// cap is read from the door's own refusal, never copied, so the witnesses
+/// fail the moment `git` asks for more than the door accepts.
+#[cfg(unix)]
+mod real_git_admission {
+    use std::collections::BTreeMap;
+    use std::error::Error;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use dal_agent::error::ServiceError;
+    use dal_agent::ext::{
+        ArgError, BoxFuture, Caller, ExportSpec, ExtensionBuilder, RawValue, Services, Tool,
+        ToolCall, ToolCx, ToolOutcome, ToolOutput,
+    };
+    use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription};
+    use dal_core::ext::{ExportId, ExportKind, OpSet, Visibility};
+    use dal_core::{
+        Answer, ClientId, Command, Config, ConfigProduct, ExitStatusKind, Expect, ModelInfo, Name,
+        Origin, Part, Question, RawJson, Reply, RunOutput, RunRequest, ServiceSet, ToolClass,
+        ToolSpec, UpdateKind, Workspace,
+    };
+
+    use super::TestResult;
+
+    /// Long enough for a cold host start and one real git run.
+    const WAIT: Duration = Duration::from_secs(60);
+
+    /// The stdout prefix limit orchestration git calls carried when every one
+    /// of them was refused at spawn.
+    const OLD_LIMIT: u32 = 1 << 20;
+
+    /// The scripted model step that calls the probe tool once.
+    const STEP_CALL: &str = r#"{"kind":"events","events":[{"type":"tool_call_started","id":"git-call","name":"fixture__run_git"},{"type":"tool_calls_done","calls":[{"id":"git-call","name":"fixture__run_git","args":{"kind":"parsed","value":{}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]}"#;
+
+    /// The scripted model step that ends the turn.
+    const STEP_END: &str = r#"{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#;
+
+    /// One request the probe tool sends through the real `run` service.
+    enum Op {
+        /// An orchestration git call through the real `git` helper.
+        Git(Vec<String>),
+        /// A bare `git --version` run asking for this stdout prefix limit.
+        Limit(u32),
+    }
+
+    /// What the probe saw, in request order: the output, or the refusal text.
+    type Seen = Arc<Mutex<Vec<Result<RunOutput, String>>>>;
+
+    /// A model-visible tool that sends its requests through the real `run`
+    /// service of the session and records every answer.
+    struct GitProbe {
+        name: Name,
+        spec: Arc<ToolSpec>,
+        cwd: PathBuf,
+        ops: Vec<Op>,
+        seen: Seen,
+    }
+
+    impl GitProbe {
+        /// Sends one request through the real `run` service.
+        async fn send(
+            &self,
+            services: &dyn Services,
+            caller: &Caller,
+            op: &Op,
+        ) -> Result<RunOutput, ServiceError> {
+            let limit = match op {
+                Op::Git(argv) => {
+                    return super::super::git(services, caller, &self.cwd, argv.clone()).await;
+                }
+                Op::Limit(limit) => *limit,
+            };
+            let request = RunRequest {
+                argv: vec![OsString::from("git"), OsString::from("--version")],
+                cwd: Some(self.cwd.clone()),
+                stdin: None,
+                timeout: None,
+                env: Vec::new(),
+                stdout_prefix_limit: limit,
+            };
+            services.run(caller, request).await
+        }
+    }
+
+    impl Tool for GitProbe {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+
+        fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+
+        fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+            Ok(ToolClass::Other)
+        }
+
+        fn run<'a>(&'a self, _call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                let services = cx.services();
+                for op in &self.ops {
+                    let result = self.send(services.as_ref(), cx.caller(), op).await;
+                    super::locked(&self.seen).push(result.map_err(|error| error.to_string()));
+                }
+                ToolOutcome::Ok(Box::new(ToolOutput::from_text("probed")))
+            })
+        }
+    }
+
+    /// How the session approves a run: `approval = "all"` runs without a
+    /// question, `ask` opens one a front end answers.
+    #[derive(Clone, Copy)]
+    enum Approval {
+        All,
+        Ask,
+    }
+
+    /// What one driven session observed.
+    struct Driven {
+        /// One entry per probe request, in order.
+        results: Vec<Result<RunOutput, String>>,
+        /// `(title, body)` of every run approval the session opened.
+        previews: Vec<(String, String)>,
+    }
+
+    /// Waits for the turn to end, answering every run approval with approve
+    /// and recording its preview.
+    async fn await_turn_end(
+        agent: &Agent,
+        subscription: &mut Subscription,
+        previews: &mut Vec<(String, String)>,
+    ) -> TestResult {
+        while let Some(delivery) = subscription.next().await {
+            let Delivery::Update(update) = delivery else {
+                continue;
+            };
+            match &update.kind {
+                UpdateKind::RequestOpened(request) => {
+                    if let Question::Approval { tool, preview, .. } = &request.question
+                        && &**tool == "run"
+                    {
+                        previews.push((preview.title.to_string(), preview.body.to_string()));
+                        agent.answer(request.id, Answer::Approve).await?;
+                    }
+                }
+                UpdateKind::TurnEnded { .. } => return Ok(()),
+                _ => {}
+            }
+        }
+        Err("the session closed before the turn ended".into())
+    }
+
+    /// Runs the probe requests in a real host session under `approval = "all"`:
+    /// nothing is asked and the requests run as the real door admits them.
+    async fn drive_unasked(
+        base: &Path,
+        workspace: &Path,
+        ops: Vec<Op>,
+    ) -> Result<Driven, Box<dyn Error>> {
+        drive(base, workspace, Approval::All, ops).await
+    }
+
+    /// Runs the probe requests in a real host session whose front end answers
+    /// every run approval, recording the previews it was shown.
+    async fn drive_asked(
+        base: &Path,
+        workspace: &Path,
+        ops: Vec<Op>,
+    ) -> Result<Driven, Box<dyn Error>> {
+        drive(base, workspace, Approval::Ask, ops).await
+    }
+
+    /// Opens a real host session on `workspace`, lets a scripted model call
+    /// the probe tool once, and returns what the probe saw. `base` holds the
+    /// session's data, home, and cache.
+    async fn drive(
+        base: &Path,
+        workspace: &Path,
+        approval: Approval,
+        ops: Vec<Op>,
+    ) -> Result<Driven, Box<dyn Error>> {
+        let seen = Seen::default();
+        let probe: Arc<dyn Tool> = Arc::new(GitProbe {
+            name: Name::parse("fixture__run_git")?,
+            spec: Arc::new(ToolSpec {
+                name: Name::parse("fixture__run_git")?,
+                description: "git probe tool".into(),
+                parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+                grammar: None,
+            }),
+            cwd: workspace.to_owned(),
+            ops,
+            seen: Arc::clone(&seen),
+        });
+        let previews = drive_tool(
+            base,
+            workspace,
+            approval,
+            probe,
+            ServiceSet::from_names(["run"])?,
+        )
+        .await?;
+        let results = std::mem::take(&mut *super::locked(&seen));
+        Ok(Driven { results, previews })
+    }
+
+    /// Opens a real host session on `workspace`, lets a scripted model call
+    /// `tool` once, and returns every run approval preview. `base` holds the
+    /// session's data, home, and cache.
+    async fn drive_tool(
+        base: &Path,
+        workspace: &Path,
+        approval: Approval,
+        tool: Arc<dyn Tool>,
+        services: ServiceSet,
+    ) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+        let data = base.join("data");
+        tokio::fs::create_dir_all(&data).await?;
+        let fixture = data.join("script.jsonl");
+        tokio::fs::write(&fixture, format!("{STEP_CALL}\n{STEP_END}\n")).await?;
+        let approval_line = match approval {
+            Approval::All => "approval = \"all\"\n",
+            Approval::Ask => "",
+        };
+        let user = format!(
+            "model = \"openai/gpt-6-luna\"\n{approval_line}\n[providers.scripted]\nfixture = \"{}\"\n",
+            fixture.to_string_lossy().replace('\\', "\\\\")
+        );
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str()))?;
+        let extension = ExtensionBuilder::new("fixture", "0.1.0", services)?
+            .with_origin(Origin::Builtin, None)
+            .script_tool(
+                tool,
+                Visibility::Model,
+                ExportSpec {
+                    id: ExportId {
+                        plugin: Name::parse("fixture")?,
+                        kind: ExportKind::Tool,
+                        local: Name::parse("run_git")?,
+                    },
+                    uses: OpSet::EMPTY,
+                    input: RawJson::parse(r#"{"type":"object"}"#)?,
+                    description: "git probe export".into(),
+                },
+            )
+            .build()?;
+        let product = Product {
+            name: "dal",
+            data_root: data,
+            defaults: "",
+            extensions: vec![extension],
+            bundled: Vec::new(),
+        };
+        let env = Env {
+            vars: BTreeMap::from([
+                (OsString::from("OPENAI_API_KEY"), OsString::from("sk-test")),
+                (OsString::from("HOME"), base.join("home").into_os_string()),
+                (
+                    OsString::from("XDG_CACHE_HOME"),
+                    base.join("cache").into_os_string(),
+                ),
+            ]),
+            cwd: workspace.to_owned(),
+            sandbox_helper: None,
+        };
+        let host = Host::start(product, config, env).await?;
+        let agent = host
+            .open(
+                SessionRef::New {
+                    workspace: Workspace::new(workspace.to_owned())?,
+                    name: None,
+                },
+                ClientId::new("git-cap"),
+            )
+            .await?;
+        let mut subscription = match approval {
+            Approval::Ask => agent.subscribe(None)?,
+            Approval::All => agent.subscribe_listen(None)?,
+        };
+        let reply = agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "probe git".into(),
+                }],
+            })
+            .await?;
+        if !matches!(reply, Reply::Accepted { .. }) {
+            return Err(format!("prompt was not accepted: {reply:?}").into());
+        }
+        let mut previews = Vec::new();
+        tokio::time::timeout(
+            WAIT,
+            await_turn_end(&agent, &mut subscription, &mut previews),
+        )
+        .await
+        .map_err(|_| "the probe turn never ended")??;
+        host.close(agent.session()).await?;
+        Ok(previews)
+    }
+
+    /// A model-visible tool that runs the orchestration worktree-gate
+    /// sequence through the real services: a scoped-grant `git worktree
+    /// add` into a worktree root that does not pre-exist, a child start
+    /// inside the created tree, and a child start in another session's
+    /// tree. Records every answer in order.
+    struct WorktreeGateProbe {
+        name: Name,
+        spec: Arc<ToolSpec>,
+        top: PathBuf,
+        data: PathBuf,
+        base: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl WorktreeGateProbe {
+        /// Starts one child in `workspace`, recording the reply verbatim.
+        async fn start_child(&self, services: &dyn Services, caller: &Caller, workspace: PathBuf) {
+            let seen = match Workspace::new(workspace) {
+                Ok(workspace) => {
+                    let start = dal_core::AgentStart {
+                        call: dal_core::CallId::new("worktree-gate-child"),
+                        name: Some("gate-child".into()),
+                        prompt: "work".into(),
+                        model: None,
+                        role: None,
+                        system: None,
+                        tools: None,
+                        workspace: Some(workspace),
+                    };
+                    match services
+                        .agents(caller, dal_core::AgentsOp::Start(start))
+                        .await
+                    {
+                        Ok(reply) => format!("start: {reply:?}"),
+                        Err(error) => format!("start: error {error}"),
+                    }
+                }
+                Err(error) => format!("start: workspace {error}"),
+            };
+            super::locked(&self.seen).push(seen);
+        }
+    }
+
+    impl Tool for WorktreeGateProbe {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+
+        fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+
+        fn classify(&self, _args: &RawValue, ws: &Workspace) -> Result<ToolClass, ArgError> {
+            // The orchestration `agents` grant shape: the workspace plus the
+            // worktree and isolation trees the run itself creates.
+            Ok(ToolClass::Exec {
+                read_only: false,
+                grant: Some(dal_core::GrantSpec {
+                    argv_prefix: "git".into(),
+                    roots: vec![
+                        ws.as_path().to_path_buf(),
+                        self.data.join("worktrees"),
+                        self.data.join("isolation"),
+                    ],
+                }),
+            })
+        }
+
+        fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                let services = cx.services();
+                let caller = cx.caller().clone();
+                let session = cx.session();
+                // The approval lends this call the scoped git grant the same
+                // way the orchestration `agents` approval does before the
+                // run drives git; without it the run calls ride the
+                // workspace-only default and the worktree add denies.
+                if let Err(error) = cx
+                    .authorize(dal_core::Preview {
+                        title: "run worktree gates".into(),
+                        body: "Runs git in the workspace and in its own worktrees.".into(),
+                        digest: None,
+                    })
+                    .await
+                {
+                    return ToolOutcome::Err(dal_agent::error::ToolError::Denied(error));
+                }
+                let dir = self
+                    .data
+                    .join("worktrees")
+                    .join(session.to_string())
+                    .join("task");
+                let added = super::super::git(
+                    services.as_ref(),
+                    &caller,
+                    &self.top,
+                    super::super::super::worktree::argv_worktree_add(
+                        &self.top.display().to_string(),
+                        &dir.display().to_string(),
+                        &self.base,
+                    ),
+                )
+                .await;
+                super::locked(&self.seen).push(match &added {
+                    Ok(out) => format!("add: exited={}", out.status == ExitStatusKind::Exited(0)),
+                    Err(error) => format!("add: refused {error}"),
+                });
+                self.start_child(services.as_ref(), &caller, dir).await;
+                let foreign = self
+                    .data
+                    .join("worktrees")
+                    .join("01900000-0000-7000-8000-000000000000")
+                    .join("task");
+                assert_ne!(session.to_string(), "01900000-0000-7000-8000-000000000000");
+                if let Err(error) = tokio::fs::create_dir_all(&foreign).await {
+                    super::locked(&self.seen).push(format!("foreign: error {error}"));
+                } else {
+                    self.start_child(services.as_ref(), &caller, foreign).await;
+                }
+                ToolOutcome::Ok(Box::new(ToolOutput::from_text("probed")))
+            })
+        }
+    }
+
+    /// Worktree-isolated children pass both admission gates on the real
+    /// host: the `git worktree add` the run's own scoped grant covers is
+    /// admitted even though the worktree root does not pre-exist (R4a),
+    /// and the child started inside the created tree is admitted as this
+    /// session's worktree child (R4b). A child aimed at another session's
+    /// tree still refuses with `WorkspaceOutsideRoot`.
+    #[tokio::test]
+    async fn worktree_isolated_children_pass_both_gates_on_the_real_host() -> TestResult {
+        let root = super::unique_temp_root("dalgona-worktree-gates");
+        let base = root.join("main");
+        let workspace = blob_checkout(&base, &[("note.txt", 8)]).await;
+        let top = workspace.display().to_string();
+        let head = tokio::task::spawn_blocking(move || {
+            let out = super::run_git(&workspace, &["rev-parse", "HEAD"]);
+            String::from_utf8(out.stdout)
+                .expect("head utf-8")
+                .trim()
+                .to_owned()
+        })
+        .await
+        .map_err(|error| format!("rev-parse joins: {error}"))?;
+        let data = base.join("data");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let probe: Arc<dyn Tool> = Arc::new(WorktreeGateProbe {
+            name: Name::parse("fixture__run_git")?,
+            spec: Arc::new(ToolSpec {
+                name: Name::parse("fixture__run_git")?,
+                description: "worktree gate probe tool".into(),
+                parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+                grammar: None,
+            }),
+            top: PathBuf::from(top),
+            data: data.clone(),
+            base: head,
+            seen: Arc::clone(&seen),
+        });
+        drive_tool(
+            &base,
+            &base.join("w"),
+            Approval::All,
+            probe,
+            ServiceSet::from_names(["run", "agents"])?,
+        )
+        .await?;
+        let seen = std::mem::take(&mut *super::locked(&seen));
+        let [added, started, foreign] = seen.as_slice() else {
+            return Err(format!("the probe answered three gates, saw {seen:?}").into());
+        };
+        assert_eq!(
+            added, "add: exited=true",
+            "the worktree add passes its gate"
+        );
+        assert!(
+            started.starts_with("start: Started"),
+            "the child in this session's tree starts: {started}"
+        );
+        assert!(
+            foreign.contains("WorkspaceOutsideRoot"),
+            "another session's tree still refuses: {foreign}"
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        Ok(())
+    }
+
+    /// Reads the cap the real spawn door enforces from its own refusal of the
+    /// old orchestration limit.
+    fn enforced_cap(refusal: &Result<RunOutput, String>) -> Result<usize, Box<dyn Error>> {
+        let message = refusal
+            .as_ref()
+            .err()
+            .ok_or("the real spawn door admitted the old 1 MiB stdout prefix limit")?;
+        let digits: String = message
+            .split("exceeds ")
+            .nth(1)
+            .unwrap_or_default()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().map_err(|_| -> Box<dyn Error> {
+            format!("the refusal of the old limit names no cap: {message}").into()
+        })
+    }
+
+    /// Opens a throwaway session to read the cap the real spawn door enforces.
+    async fn probe_cap(root: &Path) -> Result<usize, Box<dyn Error>> {
+        let base = root.join("probe");
+        let workspace = base.join("w");
+        tokio::fs::create_dir_all(&workspace).await?;
+        let driven = drive_unasked(&base, &workspace, vec![Op::Limit(OLD_LIMIT)]).await?;
+        let [refusal] = driven.results.as_slice() else {
+            return Err("the cap probe made one request and saw another count".into());
+        };
+        enforced_cap(refusal)
+    }
+
+    /// The deterministic content of a `size`-byte blob.
+    fn blob_bytes(size: usize) -> Vec<u8> {
+        (0..size)
+            .map(|index| b"abcdefghijklmnopqrstuvwxyz"[index % 26])
+            .collect()
+    }
+
+    /// Makes `base/w` a git checkout committing one blob per `(name, size)`
+    /// pair, and returns the workspace path. The real git runs on the
+    /// blocking pool.
+    async fn blob_checkout(base: &Path, blobs: &[(&str, usize)]) -> PathBuf {
+        let workspace = base.join("w");
+        let blobs: Vec<(String, usize)> = blobs
+            .iter()
+            .map(|(name, size)| ((*name).to_owned(), *size))
+            .collect();
+        let tree = workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&tree).expect("workspace");
+            super::seed_new_repo(&tree);
+            for (name, size) in &blobs {
+                std::fs::write(tree.join(name), blob_bytes(*size)).expect("blob");
+            }
+            super::run_git(&tree, &["add", "-A"]);
+            super::run_git(
+                &tree,
+                &["-c", "commit.gpgsign=false", "commit", "-m", "blobs"],
+            );
+        })
+        .await
+        .expect("checkout setup joins");
+        workspace
+    }
+
+    /// The git argv that prints one committed blob byte for byte.
+    fn cat_blob(name: &str) -> Vec<String> {
+        ["git", "cat-file", "blob", &format!("HEAD:{name}")]
+            .map(str::to_owned)
+            .to_vec()
+    }
+
+    /// Git output past the cap but under the old limit is admitted and kept
+    /// to the cap. The old 1 MiB limit is itself refused by the same door, so
+    /// this fails against it: the git call comes back refused, not run.
+    #[tokio::test]
+    async fn orchestration_git_output_past_the_cap_and_under_the_old_limit_is_admitted()
+    -> TestResult {
+        let root = super::unique_temp_root("dalgona-git-cap-between");
+        let old = usize::try_from(OLD_LIMIT)?;
+        let size = old / 2;
+        let base = root.join("main");
+        let workspace = blob_checkout(&base, &[("between.bin", size)]).await;
+        let driven = drive_unasked(
+            &base,
+            &workspace,
+            vec![Op::Limit(OLD_LIMIT), Op::Git(cat_blob("between.bin"))],
+        )
+        .await?;
+        let [refusal, listed] = driven.results.as_slice() else {
+            return Err("the probe made two requests and saw another count".into());
+        };
+        let cap = enforced_cap(refusal)?;
+        assert!(
+            cap < size && size < old,
+            "the blob sits between the cap {cap} and the old limit {old}: {size}"
+        );
+        let out = listed.as_ref().map_err(|error| {
+            format!("the real spawn door refused the orchestration git call: {error}")
+        })?;
+        assert_eq!(out.status, ExitStatusKind::Exited(0));
+        assert_eq!(
+            out.stdout_prefix.len(),
+            cap,
+            "the git call keeps exactly the cap the door enforces"
+        );
+        assert!(
+            out.stdout_prefix_overflowed,
+            "the bytes past the cap are flagged, not refused"
+        );
+        assert!(
+            out.stdout_prefix == blob_bytes(size)[..cap],
+            "the kept prefix is the head of the blob"
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        Ok(())
+    }
+
+    /// At the cap boundary the door truncates and flags: output of one byte
+    /// under or exactly at the cap is whole and clean, and one byte over is
+    /// cut to the cap and flagged.
+    #[tokio::test]
+    async fn orchestration_git_output_at_the_cap_boundary_is_whole_and_only_overflow_is_flagged()
+    -> TestResult {
+        let root = super::unique_temp_root("dalgona-git-cap-boundary");
+        let cap = probe_cap(&root).await?;
+        assert!(cap > 1, "the door names a usable cap: {cap}");
+        let blobs = [
+            ("below.bin", cap - 1),
+            ("exact.bin", cap),
+            ("above.bin", cap + 1),
+        ];
+        let base = root.join("main");
+        let workspace = blob_checkout(&base, &blobs).await;
+        let ops = blobs
+            .iter()
+            .map(|(name, _)| Op::Git(cat_blob(name)))
+            .collect();
+        let driven = drive_unasked(&base, &workspace, ops).await?;
+        assert_eq!(driven.results.len(), blobs.len());
+        for ((name, size), result) in blobs.iter().zip(&driven.results) {
+            let out = result.as_ref().map_err(|error| {
+                format!("{name}: the real spawn door refused the orchestration git call: {error}")
+            })?;
+            let kept = (*size).min(cap);
+            assert_eq!(out.status, ExitStatusKind::Exited(0), "{name}");
+            assert_eq!(out.stdout_prefix.len(), kept, "{name}: bytes kept");
+            assert_eq!(
+                out.stdout_prefix_overflowed,
+                *size > cap,
+                "{name}: only output past the cap is flagged"
+            );
+            assert!(
+                out.stdout_prefix == blob_bytes(*size)[..kept],
+                "{name}: the kept prefix is the head of the blob"
+            );
+        }
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        Ok(())
+    }
+
+    /// The approval a front end answers for an orchestration git call shows
+    /// the exact command the host then runs: the cwd and argv render
+    /// losslessly on two lines (no control byte can hide or fake a line), and
+    /// the call, once approved, prints the blob that exact command names.
+    #[tokio::test]
+    async fn the_approval_preview_shows_the_exact_git_call_the_real_host_runs() -> TestResult {
+        let root = super::unique_temp_root("dalgona-git-cap-preview");
+        let cap = probe_cap(&root).await?;
+        let base = root.join("main");
+        let workspace = blob_checkout(&base, &[("exact.bin", cap)]).await;
+        let argv = cat_blob("exact.bin");
+        let driven = drive_asked(&base, &workspace, vec![Op::Git(argv.clone())]).await?;
+        let [(title, body)] = driven.previews.as_slice() else {
+            return Err(format!(
+                "one run approval opened for one git call, saw {:?}",
+                driven.previews
+            )
+            .into());
+        };
+        assert!(
+            argv.iter()
+                .all(|arg| !arg.chars().any(char::is_control) && !arg.contains(' ')),
+            "no argument can render ambiguously in the unescaped preview: {argv:?}"
+        );
+        assert_eq!(title, "run git");
+        assert_eq!(
+            body,
+            &format!("cwd: {}\ncmd: {}", workspace.display(), argv.join(" "))
+        );
+        assert_eq!(body.lines().count(), 2, "{body:?}");
+        let [result] = driven.results.as_slice() else {
+            return Err("the probe made one request and saw another count".into());
+        };
+        let out = result.as_ref().map_err(|error| {
+            format!("the approved orchestration git call was refused at spawn: {error}")
+        })?;
+        assert_eq!(out.status, ExitStatusKind::Exited(0));
+        assert!(
+            !out.stdout_prefix_overflowed && out.stdout_prefix == blob_bytes(cap),
+            "the approved command printed exactly the blob it names"
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        Ok(())
+    }
+}
+
+/// Git prefix admission: a git subprocess whose output exceeds the
+/// documented prefix cap must be refused, not admitted unbounded or
+/// silently cut. Uses the real cap constant and a real git spawn.
+#[cfg(test)]
+mod git_prefix_admission {
+    use super::TestResult;
+    use dal_core::{ExitStatusKind, RunOutput};
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the boundary test intentionally runs the real git executable"
+    )]
+    fn git_output_past_the_prefix_cap_is_refused_not_admitted() -> TestResult {
+        let cap = usize::try_from(super::super::GIT_STDOUT_PREFIX_LIMIT)?;
+        assert!(cap > 1024, "the cap is the real door limit: {cap}");
+        let root = super::unique_temp_root("dalgona-git-prefix-refusal");
+        let work = root.join("w");
+        std::fs::create_dir_all(&work)?;
+        super::seed_new_repo(&work);
+        let size = cap + 1024;
+        let blob: Vec<u8> = (0..size)
+            .map(|index| b"abcdefghijklmnopqrstuvwxyz"[index % 26])
+            .collect();
+        std::fs::write(work.join("over.bin"), &blob)?;
+        super::run_git(&work, &["add", "-A"]);
+        super::run_git(
+            &work,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "blob"],
+        );
+        // Real git spawn producing output past the prefix cap.
+        let spawned = std::process::Command::new("git")
+            .args(["cat-file", "blob", "HEAD:over.bin"])
+            .current_dir(&work)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()?;
+        assert!(spawned.status.success(), "git cat-file runs");
+        assert!(
+            spawned.stdout.len() > cap,
+            "the git output exceeds the cap {cap}: {}",
+            spawned.stdout.len()
+        );
+        assert_eq!(
+            spawned.stdout, blob,
+            "the git output is the blob byte for byte"
+        );
+        // Shape the admission input exactly as the host door does: keep the
+        // capped prefix and flag the overflow.
+        let mut prefix = spawned.stdout;
+        prefix.truncate(cap);
+        let output = RunOutput {
+            status: ExitStatusKind::Exited(0),
+            stdout_tail: Vec::new(),
+            stdout_prefix: prefix,
+            stdout_prefix_overflowed: true,
+            stderr_tail: Vec::new(),
+            log: None,
+        };
+        assert!(
+            !super::super::complete(&output),
+            "output past the cap is not complete"
+        );
+        assert!(
+            super::super::git_refusal(&Ok(output)).is_some(),
+            "output past the cap must be refused, not admitted as success"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 }
