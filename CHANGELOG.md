@@ -13,6 +13,8 @@
 - Report cancellation when `agent wait` observes a cancelled child.
 - Stop retrying Google quota-exhaustion responses. Keep retrying temporary
   rate limits.
+- Resolve family-only model routes through the single configured provider.
+  Refuse ambiguous routes instead of choosing a provider implicitly.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
