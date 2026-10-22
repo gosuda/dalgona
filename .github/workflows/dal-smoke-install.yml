@@ -25,14 +25,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, script: sh, mode: installer }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, script: sh, mode: installer }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, script: sh, mode: installer }
           - { target: x86_64-apple-darwin, os: macos-15-intel, script: sh, mode: installer }
-          - { target: aarch64-apple-darwin, os: macos-latest, script: sh, mode: installer }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest, script: pwsh, mode: installer }
+          - { target: aarch64-apple-darwin, os: macos-15, script: sh, mode: installer }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022, script: pwsh, mode: installer }
           - { target: aarch64-pc-windows-msvc, os: windows-11-arm, script: pwsh, mode: installer }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, mode: cargo-install }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, mode: binstall }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, mode: cargo-install }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, mode: binstall }
     runs-on: ${{ matrix.os }}
     steps:
       - name: Update Rust
