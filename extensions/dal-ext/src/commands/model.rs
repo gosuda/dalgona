@@ -189,22 +189,48 @@ pub(super) fn unknown_provider(cmd: &str, provider: &str) -> ErrorTriple {
 
 /// Submits a harness mode and prints the mode line, keeping the model.
 async fn apply_mode(cx: &CommandCx<'_>, mode: Mode) -> Result<Reply, ErrorTriple> {
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetMode {
             mode,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    let line = match cx.view().settings.model.as_ref() {
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Mode: {current}. Not changed to {}: {message}.",
+                    mode.as_str()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!("Mode: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = match cx.view().settings.model.as_ref() {
         Some(route) => {
             let (provider, id) = route_origin(route);
-            format!(
-                "Mode: {}. The model stays {provider}/{id}. Saved as the default.",
-                mode.as_str()
-            )
+            format!("Mode: {}. The model stays {provider}/{id}.", mode.as_str())
         }
-        None => format!("Mode: {}. Saved as the default.", mode.as_str()),
+        None => format!("Mode: {}.", mode.as_str()),
     };
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
     Ok(Reply::Done(Output::Text(line.into())))
 }
 
@@ -232,8 +258,19 @@ async fn apply_route(
         .await
     {
         Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = old.as_ref().map_or("no model", ModelRoute::id);
+            return Ok(Reply::Done(Output::Text(
+                format!("Model: {current}. Not changed to {provider}/{id}: {message}.").into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = old.as_ref().map_or("no model", ModelRoute::id);
+            return Ok(Reply::Done(Output::Text(
+                format!("Model: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
         Err(SaveError::Failed { message }) => Some(message.to_string()),
-        Err(SaveError::SessionClosed { id }) => Some(format!("session {id} is closed")),
         Err(_) => Some("the save failed".to_owned()),
     };
     let mut line = format!("Model: {provider}/{id}.");
@@ -243,7 +280,7 @@ async fn apply_route(
     match saved {
         None => line.push_str(" Saved as the default."),
         Some(reason) => {
-            let _ = write!(line, " It was not saved as the default: {reason}.");
+            let _ = write!(line, " It did not persist: {reason}.");
         }
     }
     if let Some(previous) = old {
@@ -264,6 +301,9 @@ fn route_origin(route: &ModelRoute) -> (String, String) {
                 Family::Codex => "openai-codex",
                 Family::Responses => "openai",
                 Family::Chat => "openai-chat",
+                // No provider adapter exists for these families yet
+                // (Provider::from_family refuses them); each leaves this
+                // arm for its display name when its adapter lands.
                 Family::Bedrock => "bedrock",
                 Family::Cursor => "cursor",
                 Family::Devin => "devin",
@@ -396,15 +436,43 @@ pub(super) async fn thinking(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Re
             .join(", ");
         return Err(unsupported_thinking(level.name(), &whose, &levels));
     }
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetThinking {
             level,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    Ok(Reply::Done(Output::Text(
-        format!("Thinking: {}. Saved as the default.", level.name()).into(),
-    )))
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.thinking.name();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Thinking: {current}. Not changed to {}: {message}.",
+                    level.name()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.thinking.name();
+            return Ok(Reply::Done(Output::Text(
+                format!("Thinking: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = format!("Thinking: {}.", level.name());
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
+    Ok(Reply::Done(Output::Text(line.into())))
 }
 
 /// Parses a thinking level from its canonical spelling.
@@ -437,15 +505,43 @@ pub(super) async fn mode(cx: &CommandCx<'_>, arg: &str) -> Result<Reply, ErrorTr
     let Some(mode) = parse_mode(arg) else {
         return Err(unknown_mode(arg));
     };
-    let _ = cx
+    let saved = match cx
         .submit_wait(Command::SetMode {
             mode,
             save: dal_core::command::Save::SessionAndDefault,
         })
-        .await;
-    Ok(Reply::Done(Output::Text(
-        format!("Mode: {}. Saved as the default.", mode.as_str()).into(),
-    )))
+        .await
+    {
+        Ok(()) => None,
+        Err(SaveError::Rejected { message }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!(
+                    "Mode: {current}. Not changed to {}: {message}.",
+                    mode.as_str()
+                )
+                .into(),
+            )));
+        }
+        Err(SaveError::SessionClosed { id }) => {
+            let current = cx.view().settings.mode.as_str();
+            return Ok(Reply::Done(Output::Text(
+                format!("Mode: {current}. Not changed: session {id} is closed.").into(),
+            )));
+        }
+        Err(SaveError::Failed { message }) => Some(message.to_string()),
+        Err(_) => Some("the save failed".to_owned()),
+    };
+    let mut line = format!("Mode: {}.", mode.as_str());
+    match saved {
+        None => line.push_str(" Saved as the default."),
+        Some(reason) => {
+            line.push_str(" It did not persist: ");
+            line.push_str(&reason);
+            line.push('.');
+        }
+    }
+    Ok(Reply::Done(Output::Text(line.into())))
 }
 
 /// Runs `/login`.

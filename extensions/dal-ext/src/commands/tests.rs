@@ -559,6 +559,31 @@ fn name_rules() {
     assert_eq!(check_name("my-session_1.x", id).unwrap(), "my-session_1.x");
 }
 
+/// Pins the `/name` resume token per name class: bare, double-quoted for
+/// spaces and apostrophes only, and the session id for every other name.
+#[test]
+fn resume_hint_token_per_name() {
+    let id = session_id();
+    for (name, token) in [
+        ("demo", "demo"),
+        ("my session", "\"my session\""),
+        ("o'brien", "\"o'brien\""),
+        ("demo$(calc)", SESSION_ID),
+        ("a`b", SESSION_ID),
+        ("foo\"; calc #", SESSION_ID),
+        ("a $b", SESSION_ID),
+        ("100%PATH%", SESSION_ID),
+        ("hi!", SESSION_ID),
+        ("a\\", SESSION_ID),
+        ("-rf", SESSION_ID),
+        ("a|b&c<d>e", SESSION_ID),
+        ("a\u{201c}; calc #", SESSION_ID),
+        ("\u{1F600}", SESSION_ID),
+    ] {
+        assert_eq!(check_name(name, id).unwrap(), token, "name {name:?}");
+    }
+}
+
 #[test]
 fn copy_pairs() {
     assert_eq!(
