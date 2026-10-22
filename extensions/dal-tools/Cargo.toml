@@ -63,6 +63,10 @@ proptest.workspace = true
 tempfile.workspace = true
 
 [[test]]
+name = "eng14_read_search_patch"
+path = "tests/eng14_read_search_patch.rs"
+
+[[test]]
 name = "patch_adversarial"
 path = "tests/patch_adversarial.rs"
 
