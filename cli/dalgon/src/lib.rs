@@ -122,6 +122,9 @@ pub(crate) struct Startup {
     #[cfg(feature = "tui")]
     pub(crate) binary: &'static str,
     pub(crate) helper: Option<PathBuf>,
+    /// Whether the user `dal.toml` sets `[serve] bind`. Only a user-set bind
+    /// outranks `--public`'s wildcard default; the compiled default does not.
+    pub(crate) serve_bind_explicit: bool,
 }
 
 /// Runs the process edge for one product factory.
@@ -766,8 +769,20 @@ fn assemble_startup(
         #[cfg(feature = "tui")]
         binary: factory.binary,
         helper: edge::current_exe(),
+        serve_bind_explicit: user_sets_serve_bind(user_toml.as_deref()),
     };
     Ok(startup)
+}
+
+/// Reports whether the user configuration text sets `[serve] bind`.
+///
+/// `Config::load` has already accepted the text, so a parse failure here
+/// cannot happen for text that reached this point; it reads as unset.
+fn user_sets_serve_bind(user_toml: Option<&str>) -> bool {
+    user_toml
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .and_then(|table| table.get("serve")?.as_table()?.get("bind").cloned())
+        .is_some()
 }
 
 /// Maps an `resolve_roots` failure to its usage diagnostics.
@@ -935,5 +950,21 @@ mod config_exit_tests {
             lines[0],
             "dalgon: invalid config value jit for mode: normal, eval-first, eval-only"
         );
+    }
+}
+#[cfg(test)]
+mod serve_bind_provenance_tests {
+    use super::user_sets_serve_bind;
+
+    #[test]
+    fn only_a_user_set_bind_counts_as_explicit() {
+        assert!(!user_sets_serve_bind(None));
+        assert!(!user_sets_serve_bind(Some("")));
+        assert!(!user_sets_serve_bind(Some("[serve]\nport = 7500\n")));
+        assert!(!user_sets_serve_bind(Some("bind = \"0.0.0.0\"\n")));
+        assert!(user_sets_serve_bind(Some(
+            "[serve]\nbind = \"127.0.0.1\"\n"
+        )));
+        assert!(user_sets_serve_bind(Some("serve.bind = \"::1\"\n")));
     }
 }

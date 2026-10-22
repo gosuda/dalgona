@@ -95,6 +95,30 @@ fn serve_error(error: serve::ServeCommandError) -> ExitCode {
     }
 }
 
+/// Handles `dalgon serve token`: writes the token file and exits.
+fn serve_token(
+    token: &cli::ServeTokenArgs,
+    token_file: Option<std::path::PathBuf>,
+    fallback: &std::path::Path,
+) -> ExitCode {
+    let token_file = token_file.unwrap_or_else(|| fallback.to_path_buf());
+    let snapshot = edge::terminal_snapshot();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let stderr = std::io::stderr();
+    let mut err = stderr.lock();
+    match serve::create_token(
+        &token_file,
+        token.force,
+        snapshot.stderr_tty,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(code) => code,
+        Err(error) => serve_error(error),
+    }
+}
+
 /// Runs `dalgon serve` or `dalgon serve token` over the built product.
 pub(crate) async fn serve(
     cli: &cli::Cli,
@@ -110,32 +134,16 @@ pub(crate) async fn serve(
         config,
         data_root,
         helper,
+        serve_bind_explicit,
         ..
     } = startup;
     let core_serve = config.serve();
     if let Some(cli::ServeSubcommand::Token(token)) = &args.command {
-        let token_file = args
-            .token_file
-            .unwrap_or_else(|| core_serve.token_file.clone());
-        let snapshot = edge::terminal_snapshot();
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        return match serve::create_token(
-            &token_file,
-            token.force,
-            snapshot.stderr_tty,
-            &mut out,
-            &mut err,
-        ) {
-            Ok(code) => code,
-            Err(error) => serve_error(error),
-        };
+        return serve_token(token, args.token_file, &core_serve.token_file);
     }
     let serve_config = serve::ServeConfig {
         bind: core_serve.bind.to_string(),
-        bind_was_explicit: false,
+        bind_was_explicit: serve_bind_explicit,
         port: core_serve.port,
         token_file: core_serve.token_file.clone(),
         approval: cli.approval.map_or(core_serve.approval, map_approval),

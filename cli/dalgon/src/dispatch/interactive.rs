@@ -216,6 +216,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         data_root,
         binary,
         helper,
+        ..
     } = startup;
     let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
     if vars.contains_key(OsStr::new("DAL_DEBUG")) {
