@@ -100,7 +100,11 @@ impl WatchFactory for TtsrWatchFactory {
     fn start(&self, turn: &TurnInfo<'_>) -> Option<Box<dyn StreamWatch>> {
         let watch_budget = {
             let mut budget = self.budget.lock().ok()?;
-            if budget.turn != Some(turn.turn) {
+            // The budget follows real turn ordering, not watch-creation
+            // order: a stale start for an older turn leaves the live turn's
+            // interrupt count alone, so a late-created watcher can neither
+            // resurrect an exhausted budget nor spend the live turn's.
+            if budget.turn.is_none_or(|current| turn.turn > current) {
                 budget.turn = Some(turn.turn);
                 budget.interrupts = 0;
             }

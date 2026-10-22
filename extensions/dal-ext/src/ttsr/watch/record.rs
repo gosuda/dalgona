@@ -5,7 +5,7 @@
 //! batch is durable: with a journal entry for a delivered reminder, with
 //! only the turn for a judged pass that wrote no record.
 
-use dal_core::EntryId;
+use dal_core::{EntryId, TurnId};
 
 use super::super::gate::Gate;
 use super::Watch;
@@ -16,13 +16,13 @@ struct Body<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     at: String,
-    turn: u64,
+    turn: TurnId,
     rule: &'a str,
     action: &'static str,
     subject: &'a str,
     pattern: &'a str,
     excerpt: &'a str,
-    entry: Option<u64>,
+    entry: Option<EntryId>,
     /// The pack origin of the fired rule; absent for user and project files,
     /// whose path is the origin. Additive so earlier readers stay valid.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,13 +45,13 @@ impl Watch {
             v: 1,
             kind: "rule_fired",
             at: format!("{at:.3}"),
-            turn: self.turn.get(),
+            turn: self.turn,
             rule: fired.rule.as_str(),
             action: fired.action.as_str(),
             subject: &fired.subject,
             pattern: &fired.pattern,
             excerpt: &fired.excerpt,
-            entry: entry.map(EntryId::get),
+            entry,
             origin: self.origin_label(fire),
         };
         sonic_rs::to_string(&body).ok().map(String::into_boxed_str)
