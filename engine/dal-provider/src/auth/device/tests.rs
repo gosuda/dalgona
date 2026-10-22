@@ -1,4 +1,7 @@
-use super::{DeviceCodeResponse, DeviceOutcome, decode_json, run, wait_for_next_poll};
+use super::{
+    CODEX_MAX_POLLS, DeviceCodeResponse, DeviceOutcome, decode_json, run, run_codex_with_limit,
+    wait_for_next_poll,
+};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -67,19 +70,32 @@ async fn pending_poll_delay_obeys_cancel_and_deadline() {
     assert!(matches!(expired, Err(crate::ProviderError::LoginTimeout)));
 }
 
-async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
+/// Reads one request: `Ok(None)` is a connection that closed before sending
+/// anything, `Err` names any read failure or malformed framing. Only the
+/// empty-connection case is tolerable; everything else fails loudly.
+async fn read_request(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, &'static str> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     loop {
-        let count = stream.read(&mut chunk).await.ok()?;
-        if count == 0 || count > (16_usize * 1024).saturating_sub(request.len()) {
-            return None;
+        let count = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|_| "request read failed")?;
+        if count == 0 {
+            if request.is_empty() {
+                return Ok(None);
+            }
+            return Err("request ended before its framing completed");
+        }
+        if count > (16_usize * 1024).saturating_sub(request.len()) {
+            return Err("request exceeds 16 KiB");
         }
         request.extend_from_slice(&chunk[..count]);
         let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
             continue;
         };
-        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let headers = std::str::from_utf8(&request[..header_end])
+            .map_err(|_| "request headers are not UTF-8")?;
         let content_length = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -90,12 +106,17 @@ async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
             })
             .unwrap_or(0);
         if request.len() >= header_end + 4 + content_length {
-            return Some(request);
+            return Ok(Some(request));
         }
     }
 }
 
-/// Serves one scripted response per connection and captures every request.
+/// Serves one scripted response per successfully read request and captures
+/// every request. A connection that closes before sending anything (for
+/// example a client preconnect abandoned before use) neither consumes a
+/// scripted response nor drops the listener; the same entry waits for the
+/// next connection. Accept failures and malformed or failed reads fail loudly
+/// instead of being retried.
 async fn serve_script(script: Vec<(u16, &'static str)>) -> (Url, Arc<Mutex<Vec<Vec<u8>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -113,22 +134,28 @@ async fn serve_script(script: Vec<(u16, &'static str)>) -> (Url, Arc<Mutex<Vec<V
     )]
     let _server = tokio::spawn(async move {
         for (status, body) in script {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let Some(request) = read_request(&mut stream).await else {
-                return;
-            };
-            captured.lock().expect("requests lock").push(request);
-            let head = format!(
-                "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            if stream.write_all(head.as_bytes()).await.is_err() {
-                return;
-            }
-            if stream.write_all(body.as_bytes()).await.is_err() {
-                return;
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("fixture listener accepts the next connection");
+                let request = match read_request(&mut stream).await {
+                    Ok(Some(request)) => request,
+                    Ok(None) => continue,
+                    Err(reason) => panic!("fixture request unreadable: {reason}"),
+                };
+                captured.lock().expect("requests lock").push(request);
+                let head = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                if stream.write_all(body.as_bytes()).await.is_err() {
+                    return;
+                }
+                break;
             }
         }
     });
@@ -531,6 +558,233 @@ async fn workos_poll_failure_redacts_device_codes() {
         }
         _ => panic!("a failed poll must be a DeviceCode"),
     }
+}
+
+#[tokio::test]
+async fn codex_device_start_posts_json_client_id_then_polls_with_margin() {
+    let (base, requests) = serve_script(vec![
+        (
+            200,
+            r#"{"device_auth_id":"codex-auth-1","user_code":"AAAA-1111","interval":1}"#,
+        ),
+        (
+            200,
+            r#"{"authorization_code":"auth-code-1","code_verifier":"verifier-1"}"#,
+        ),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+
+    let started = Instant::now();
+    let grant = run_codex_with_limit(
+        &http,
+        Family::Codex,
+        "app_test",
+        &urls,
+        Instant::now() + Duration::from_secs(60),
+        &progress,
+        &CancellationToken::new(),
+        CODEX_MAX_POLLS,
+    )
+    .await
+    .expect("pending poll must complete");
+    let elapsed = started.elapsed();
+
+    assert_eq!(grant.authorization_code, "auth-code-1");
+    assert_eq!(grant.code_verifier, "verifier-1");
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "a poll waits the interval plus three seconds, took {elapsed:?}"
+    );
+
+    let captured = requests.lock().expect("requests lock");
+    assert_eq!(captured.len(), 2);
+    let (start_head, start_body) = request_parts(&captured[0]);
+    assert!(start_head.contains("POST"));
+    assert!(
+        start_head.contains("application/json"),
+        "the start body is JSON, got: {start_head}"
+    );
+    assert_eq!(start_body, r#"{"client_id":"app_test"}"#);
+    let (poll_head, poll_body) = request_parts(&captured[1]);
+    assert!(poll_head.contains("POST"));
+    assert!(poll_body.contains(r#""device_auth_id":"codex-auth-1""#));
+    assert!(poll_body.contains(r#""user_code":"AAAA-1111""#));
+}
+
+#[tokio::test]
+async fn codex_403_and_404_count_as_pending() {
+    let (base, requests) = serve_script(vec![
+        (
+            200,
+            r#"{"device_auth_id":"codex-auth-2","user_code":"BBBB-2222","interval":1}"#,
+        ),
+        (403, r#"{"error":"authorization_pending"}"#),
+        (404, "not found"),
+        (
+            200,
+            r#"{"authorization_code":"auth-code-2","code_verifier":"verifier-2"}"#,
+        ),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+
+    let grant = run_codex_with_limit(
+        &http,
+        Family::Codex,
+        "app_test",
+        &urls,
+        Instant::now() + Duration::from_secs(120),
+        &progress,
+        &CancellationToken::new(),
+        CODEX_MAX_POLLS,
+    )
+    .await
+    .expect("pending polls must keep polling");
+    assert_eq!(grant.authorization_code, "auth-code-2");
+
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        4,
+        "one start plus three polls"
+    );
+}
+
+#[tokio::test]
+async fn codex_poll_exhaustion_times_out_after_budget() {
+    let (base, requests) = serve_script(vec![
+        (
+            200,
+            r#"{"device_auth_id":"codex-auth-3","user_code":"CCCC-3333","interval":1}"#,
+        ),
+        (403, r#"{"error":"authorization_pending"}"#),
+        (403, r#"{"error":"authorization_pending"}"#),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+
+    let outcome = run_codex_with_limit(
+        &http,
+        Family::Codex,
+        "app_test",
+        &urls,
+        Instant::now() + Duration::from_secs(120),
+        &progress,
+        &CancellationToken::new(),
+        2,
+    )
+    .await;
+
+    assert!(matches!(outcome, Err(ProviderError::LoginTimeout)));
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        3,
+        "one start plus exactly the budgeted polls"
+    );
+}
+
+#[tokio::test]
+async fn codex_empty_start_fields_are_rejected_without_polling() {
+    for start in [
+        r#"{"device_auth_id":"","user_code":""}"#,
+        r#"{"device_auth_id":"only-id"}"#,
+    ] {
+        let (base, requests) = serve_script(vec![(200, start)]).await;
+        let urls = device_urls(&base);
+        let client = Client::new();
+        let http = OAuthHttp {
+            client: &client,
+            user_agent: "dalgon/test",
+        };
+        let (_, progress) = progress_sink();
+
+        let outcome = run(
+            &http,
+            Family::Codex,
+            Hook::CodexAccount,
+            "app_test",
+            &urls,
+            Instant::now() + Duration::from_secs(30),
+            &progress,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        match outcome {
+            Err(ProviderError::DeviceCode { status, message }) => {
+                assert_eq!(status, 200);
+                assert_eq!(message, "invalid device-code response");
+            }
+            _ => panic!("an empty device response must fail without polling"),
+        }
+        assert_eq!(
+            requests.lock().expect("requests lock").len(),
+            1,
+            "no poll follows a rejected start"
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_empty_grant_fields_are_rejected() {
+    let (base, requests) = serve_script(vec![
+        (
+            200,
+            r#"{"device_auth_id":"codex-auth-4","user_code":"DDDD-4444","interval":1}"#,
+        ),
+        (200, r#"{"authorization_code":"orphan"}"#),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+
+    let outcome = run(
+        &http,
+        Family::Codex,
+        Hook::CodexAccount,
+        "app_test",
+        &urls,
+        Instant::now() + Duration::from_secs(60),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+
+    match outcome {
+        Err(ProviderError::DeviceCode { status, message }) => {
+            assert_eq!(status, 200);
+            assert_eq!(message, "invalid device-token response");
+        }
+        _ => panic!("an empty grant must fail"),
+    }
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        2,
+        "one start plus the rejected poll"
+    );
 }
 
 #[tokio::test]

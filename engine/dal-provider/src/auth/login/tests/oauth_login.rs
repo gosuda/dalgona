@@ -209,6 +209,10 @@ async fn codex_browser_login_stores_the_complete_account_bound_credential() {
     let (io, mut events) = LoginIo::channel(None, CancellationToken::new());
     let driver = async {
         let auth = authorization_event(&mut events).await;
+        assert!(matches!(
+            next_event(&mut events).await,
+            LoginProgress::AskPaste { .. }
+        ));
         let reply = visit(
             &auth.redirect_uri,
             &format!("code=auth-code&state={}", auth.state),
@@ -277,6 +281,50 @@ async fn codex_browser_login_stores_the_complete_account_bound_credential() {
     let cached = fs::read_to_string(fixture.dir.0.join("cache").join("models.json"))
         .expect("the post-login model fetch fills the cache");
     assert!(cached.contains("codex-test"));
+}
+
+#[tokio::test]
+async fn a_pasted_redirect_completes_the_codex_login_without_a_callback_visit() {
+    let fixture = Fixture::new(codex_server()).await;
+    let site = fixture.site();
+    let (paste, receiver) = oneshot::channel();
+    let (io, mut events) = LoginIo::channel(Some(receiver), CancellationToken::new());
+    let driver = async {
+        let auth = authorization_event(&mut events).await;
+        assert!(matches!(
+            next_event(&mut events).await,
+            LoginProgress::AskPaste { .. }
+        ));
+        paste
+            .send(format!(
+                "{}?code=pasted-codex-code&state={}",
+                auth.redirect_uri, auth.state
+            ))
+            .expect("the login still reads the paste");
+        assert!(matches!(
+            next_event(&mut events).await,
+            LoginProgress::Exchanging
+        ));
+        auth
+    };
+    let (result, auth) = drive("openai-codex", Method::Browser, io, &site, driver).await;
+
+    let credential = result.expect("the pasted login succeeds");
+    assert_eq!(fixture.stored("openai-codex"), Some(credential.clone()));
+    let oauth = oauth_of(&credential);
+    assert_eq!(oauth.access_token.expose(), "codex-access");
+    assert_eq!(oauth.account_id.as_deref(), Some("acct-1"));
+
+    let exchange = fixture.server.requests_to(CODEX_TOKEN_PATH);
+    assert_eq!(exchange.len(), 1);
+    assert_eq!(
+        exchange[0].field("code").as_deref(),
+        Some("pasted-codex-code")
+    );
+    assert_eq!(
+        exchange[0].field("redirect_uri").as_deref(),
+        Some(auth.redirect_uri.as_str())
+    );
 }
 
 #[tokio::test]

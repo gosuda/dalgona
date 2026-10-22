@@ -949,8 +949,11 @@ async fn explicit_device_auth_shows_code_without_opening_browser_on_free_callbac
         LoginProgress::AskPaste { .. } | LoginProgress::Exchanging => {}
     };
 
+    // The specified Codex poll cadence waits the server interval plus the
+    // three-second safety margin before the first poll, so the window must
+    // cover the mock's one-second interval plus that margin.
     let result = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(15),
         flow.run(&progress, &CancellationToken::new()),
     )
     .await;
@@ -969,7 +972,7 @@ async fn explicit_device_auth_shows_code_without_opening_browser_on_free_callbac
     assert!(opened_url.lock().is_ok_and(|url| url.is_none()));
     drop(flow);
 
-    let server_result = tokio::time::timeout(Duration::from_secs(3), server.join_next()).await;
+    let server_result = tokio::time::timeout(Duration::from_secs(15), server.join_next()).await;
     assert!(server_result.is_ok());
     let Some(Ok(Some(requests))) = server_result.ok().flatten() else {
         return;

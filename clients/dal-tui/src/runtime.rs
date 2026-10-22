@@ -119,6 +119,15 @@ enum FrontRequest {
         provider: Box<str>,
         key: SecretString,
     },
+    /// Start one sign-in method: a `/login` picker per-method row, or the
+    /// method picker's choice. The API key still prompts for the key;
+    /// every other method starts its flow directly.
+    StartMethod {
+        /// The provider id.
+        provider: Box<str>,
+        /// The method to start.
+        method: Method,
+    },
     /// Open the logout picker with the stored credentials.
     LogoutPicker(Box<str>),
     /// Remove one provider's credential.
@@ -250,6 +259,12 @@ impl Session {
                 self.front.push(FrontRequest::StartKey {
                     provider: signin.provider().into(),
                     key: typed,
+                });
+            }
+            KeyAction::StartMethod(method) => {
+                self.front.push(FrontRequest::StartMethod {
+                    provider: signin.provider().into(),
+                    method,
                 });
             }
             KeyAction::RemoveAll => {
@@ -1425,6 +1440,14 @@ impl Surfaces {
                         Some(key),
                     ));
                 }
+                FrontRequest::StartMethod { provider, method } => {
+                    self.session.picker = None;
+                    self.session.signin = Some(if method == Method::ApiKey {
+                        SignIn::key_prompt(&provider)
+                    } else {
+                        SignIn::flow(host, &opts.rt, &provider, method, None)
+                    });
+                }
                 FrontRequest::LogoutPicker(filter) => self.logout_picker(opts, host, &filter),
                 FrontRequest::Logout(provider) => self.logout(opts, host, Some(&provider)),
                 FrontRequest::LogoutAll => self.logout(opts, host, None),
@@ -1435,19 +1458,25 @@ impl Surfaces {
         }
     }
 
-    /// Opens the sign-in overlay for `provider`: the key prompt, or the flow.
+    /// Opens the sign-in overlay for `provider`: the key prompt, the flow,
+    /// or the method choice when the provider offers several methods.
     fn begin_login<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H, provider: &str) {
         self.session.picker = None;
-        self.session.signin = match signin::preferred_method(provider) {
-            Some(Method::ApiKey) => Some(SignIn::key_prompt(provider)),
-            Some(method) => Some(SignIn::flow(host, &opts.rt, provider, method, None)),
-            None => {
-                self.live.notice(format!(
-                    "Unknown provider \"{}\".",
-                    crate::width::escape(provider)
-                ));
-                None
-            }
+        let methods = signin::offered_methods(provider);
+        self.session.signin = if methods.is_empty() {
+            self.live.notice(format!(
+                "Unknown provider \"{}\".",
+                crate::width::escape(provider)
+            ));
+            None
+        } else if methods.len() == 1 {
+            Some(if methods[0] == Method::ApiKey {
+                SignIn::key_prompt(provider)
+            } else {
+                SignIn::flow(host, &opts.rt, provider, methods[0], None)
+            })
+        } else {
+            Some(SignIn::method_pick(provider, methods))
         };
     }
 
@@ -2285,6 +2314,12 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
                 }
                 Some(PickerAction::ConfirmLogoutAll) => {
                     session.signin = Some(SignIn::confirm_all());
+                    session.picker = None;
+                }
+                Some(PickerAction::Login { provider, method }) => {
+                    session
+                        .front
+                        .push(FrontRequest::StartMethod { provider, method });
                     session.picker = None;
                 }
                 Some(PickerAction::SetDiagrams { enabled, save }) => {

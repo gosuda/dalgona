@@ -12,6 +12,10 @@ Read the embedded manual. Usage: `dalgon docs [URI]`. With no URI, prints the in
 
 Sign in to a model provider, then pick a model.
 
+Providers with browser OAuth:
+- OpenAI Codex opens the sign-in page in your browser and completes via a local loopback callback or a pasted redirect URL, falling back to device authorization if the callback port is busy. Device code can also be chosen directly from the terminal sign-in methods or with `--device-auth`.
+- Anthropic and GitLab Duo open the sign-in page in your browser and complete either via local loopback callback or by pasting the authorization code or redirect URL. An empty line leaves the paste prompt open; the browser callback can still complete sign-in.
+
 Run `dalgon login status` to inspect stored credentials and configured API keys.
 The command exits 0 when at least one provider is ready. If all credentials are
 missing or expired, it exits 1 and prints a sign-in hint. OAuth rows show their

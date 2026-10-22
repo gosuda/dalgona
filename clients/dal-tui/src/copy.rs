@@ -325,6 +325,10 @@ pub mod ids {
     pub const LOGIN_KEY_HINT: &str = "enter save · esc cancel";
     /// Sign-in flow title.
     pub const LOGIN_TITLE: &str = "Signing in to {provider}";
+    /// Method-pick title for multi-method providers.
+    pub const LOGIN_METHOD_TITLE: &str = "Sign in to {provider} \u{b7} pick a method";
+    /// Method-pick key guide.
+    pub const LOGIN_METHOD_KEYS: &str = "up/down choose \u{b7} enter start \u{b7} esc cancel";
     /// Browser sign-in instruction above the URL.
     pub const LOGIN_OPEN_URL: &str = "Open this URL in a browser:";
     /// Shown when the desktop opened the browser.
@@ -552,6 +556,8 @@ pub const DECK: &[(&str, &str)] = &[
     ("login.key.title", ids::LOGIN_KEY_TITLE),
     ("login.key.hint", ids::LOGIN_KEY_HINT),
     ("login.title", ids::LOGIN_TITLE),
+    ("login.method.title", ids::LOGIN_METHOD_TITLE),
+    ("login.method.keys", ids::LOGIN_METHOD_KEYS),
     ("login.openUrl", ids::LOGIN_OPEN_URL),
     ("login.opened", ids::LOGIN_OPENED),
     ("login.device", ids::LOGIN_DEVICE),

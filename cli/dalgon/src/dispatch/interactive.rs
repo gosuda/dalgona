@@ -230,6 +230,11 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
     }
+    #[cfg(feature = "test-support")]
+    let login_endpoints = match super::login::test_login_endpoints(&vars) {
+        Ok(endpoints) => endpoints,
+        Err(error) => return host_exit(&dal_agent::HostError::Provider(error), &data_root),
+    };
     // The local process edge owns the user configuration path, so the
     // host it starts may persist `SessionAndDefault` outcomes there. Remote
     // hosts never write: `connect_remote` above takes no host write path.
@@ -248,6 +253,13 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         Ok(host) => host,
         Err(error) => return host_exit(&error, &data_root),
     };
+    #[cfg(feature = "test-support")]
+    if let Some(endpoints) = login_endpoints
+        && let Err(error) = host.set_login_endpoints(endpoints)
+    {
+        let _ = host.shutdown(std::time::Duration::from_secs(3)).await;
+        return host_exit(&error, &data_root);
+    }
     let shutdown = host.clone();
     let model_host = host.clone();
     let model_rt = opts.rt.clone();

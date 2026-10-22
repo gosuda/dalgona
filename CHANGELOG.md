@@ -16,6 +16,9 @@
 - Resolve family-only model routes through the single configured provider.
   Refuse ambiguous routes instead of choosing a provider implicitly.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
+- Offer browser and device-code sign-in for OpenAI Codex in `/login`.
+  Browser sign-in also accepts a pasted localhost redirect URL when the
+  browser cannot reach the callback listener.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
   absent when the starter supplied none), it survives settlement and the job
