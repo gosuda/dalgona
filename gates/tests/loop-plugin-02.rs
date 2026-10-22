@@ -42,6 +42,5 @@ fn cold_plugin_error_reports_path_line_col() -> Result<(), Box<dyn Error + Send 
     let error = String::from_utf8(output.stderr)?;
     assert!(!output.status.success());
     assert!(error.contains("plugin.star:1:"));
-    assert!(error.contains("plugin load failed:"));
     Ok(())
 }

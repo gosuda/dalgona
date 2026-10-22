@@ -73,7 +73,7 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
         })
         .await?;
     assert!(matches!(first, Reply::Accepted { .. }));
-    wait_for_idle(&harness.agent).await?;
+    wait_for_replies(&harness.agent, 1).await?;
     let final_view = harness.agent.view(PageReq::default())?;
     let final_entry = final_view.entries.items.last().unwrap();
     assert!(matches!(
@@ -113,7 +113,7 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
         return Err("fresh subscription unexpectedly required another resync".into());
     };
     assert_eq!(update.seq.get(), rebuilt.seq.get() + 1);
-    wait_for_idle(&harness.agent).await?;
+    wait_for_replies(&harness.agent, 2).await?;
 
     #[cfg(unix)]
     tokio::task::spawn_blocking(move || verify_real_tui_rebuild(&fixture)).await??;
@@ -121,13 +121,26 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
     Ok(())
 }
 
-async fn wait_for_idle(agent: &dal_agent::Agent) -> Result<(), Box<dyn Error + Send + Sync>> {
+/// Waits until `replies` assistant entries are journaled and the session is
+/// idle again.
+///
+/// `Accepted` answers before the opening journals the user entry, and an
+/// opening still reads as idle, so an idle view alone proves nothing about
+/// the turn this prompt started.
+async fn wait_for_replies(
+    agent: &dal_agent::Agent,
+    replies: usize,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if matches!(
-                agent.view(PageReq::default()).map(|view| view.turn)?,
-                TurnState::Idle
-            ) {
+            let view = agent.view(PageReq::default())?;
+            let answered = view
+                .entries
+                .items
+                .iter()
+                .filter(|entry| matches!(entry.kind, dal_core::EntryKind::Assistant { .. }))
+                .count();
+            if answered >= replies && matches!(view.turn, TurnState::Idle) {
                 return Ok::<(), dal_agent::AgentError>(());
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

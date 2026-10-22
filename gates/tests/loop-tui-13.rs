@@ -24,8 +24,6 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     error::Error,
@@ -33,9 +31,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use pty::vt::VtRecorder;
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture};
 use support::TestDir;
-use vt::VtRecorder;
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 

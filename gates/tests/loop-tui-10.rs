@@ -23,17 +23,15 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     error::Error,
     time::{Duration, Instant},
 };
 
+use pty::vt::VtRecorder;
 use pty::{PtyProcess, dalgon_command};
 use support::TestDir;
-use vt::VtRecorder;
 
 const SPAWN: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(400);

@@ -173,7 +173,7 @@ fn approval_dialog_ignores_garbage_keystrokes() -> TestResult {
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"run the command\r")?;
-    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
+    terminal.wait_for_screen_text(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT, SPAWN)?;
     terminal.write(b"\xff\x00\x08\x7f\x1b[A\x1b[Bx\x0b\x0c")?;
     terminal.collect_for(SETTLE)?;
     assert!(
@@ -233,7 +233,7 @@ fn keys_typed_as_an_approval_opens_never_answer_it() -> TestResult {
         "keys typed while the approval was locked must not allow the command"
     );
 
-    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
+    terminal.wait_for_screen_text(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT, SPAWN)?;
     terminal.collect_for(SETTLE)?;
     assert!(
         !marker.exists(),
@@ -259,7 +259,7 @@ fn input_during_working_turn_stays_sane() -> TestResult {
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"go\r")?;
-    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
+    terminal.wait_for_screen_text(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT, SPAWN)?;
     terminal.write(b"y")?;
     terminal.wait_for(dal_tui::copy::ids::STATE_WORKING.as_bytes(), SPAWN)?;
     terminal.write(b"queued text\x1b[A\x1b[B\x1b[Z\x05\x19")?;

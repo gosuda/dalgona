@@ -33,8 +33,6 @@ mod pty;
 mod support;
 #[path = "support/transcript.rs"]
 mod transcript;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     error::Error,
@@ -43,16 +41,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+use pty::vt::VtRecorder;
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture};
 use support::TestDir;
 use transcript::Transcript;
-use vt::VtRecorder;
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 type FixtureResult = Result<String, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = r#"{"type":"usage","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":340,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":0.0123}}"#;
 const WAIT: Duration = Duration::from_secs(15);
+
+/// What the product writes after a resize to find its live block: a
+/// cursor-position request, then the status request that orders the answer.
+const POSITION_QUERY: &[u8] = b"\x1b[6n\x1b[5n";
 
 /// One scripted provider step that streams `deltas` and ends the turn.
 fn text_step(deltas: &[&str]) -> FixtureResult {
@@ -119,12 +121,72 @@ impl Screen {
         Ok(screen)
     }
 
+    /// Reads output for `millis`, feeding the emulated screen and answering
+    /// every position query the way a terminal does. The product holds its
+    /// frames until the answer arrives, so the answer must come within the
+    /// slice the query was written in, not after the whole window.
     fn pump(&mut self, millis: u64) -> TestResult {
-        self.term.collect_for(Duration::from_millis(millis))?;
-        let output = self.term.output();
-        self.vt.feed(&output[self.fed..]);
-        self.fed = output.len();
-        Ok(())
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        loop {
+            self.term.collect_for(Duration::from_millis(5))?;
+            self.absorb()?;
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Feeds the unread output to the emulated screen. A position query is
+    /// answered with the emulated caret right where the query sits in the
+    /// stream, and a query split across reads waits for its tail.
+    fn absorb(&mut self) -> TestResult {
+        loop {
+            let pending = &self.term.output()[self.fed..];
+            let Some(at) = pending
+                .windows(POSITION_QUERY.len())
+                .position(|window| window == POSITION_QUERY)
+            else {
+                let held = (1..POSITION_QUERY.len())
+                    .rev()
+                    .find(|held| pending.ends_with(&POSITION_QUERY[..*held]))
+                    .unwrap_or(0);
+                let ready = pending.len() - held;
+                self.vt.feed(&pending[..ready]);
+                self.fed += ready;
+                return Ok(());
+            };
+            let end = at + POSITION_QUERY.len();
+            self.vt.feed(&pending[..end]);
+            self.fed += end;
+            let (column, row) = self.vt.cursor();
+            self.term
+                .write(format!("\x1b[{};{}R\x1b[0n", row + 1, column + 1).as_bytes())?;
+        }
+    }
+
+    /// Resizes the pseudo-terminal and the emulated screen the way a
+    /// scrolling terminal does: the caret row stays on screen, so rows above
+    /// it move into the scrollback and rows below it fall off the bottom.
+    /// A resize also resets the scroll region.
+    fn resize(&mut self, columns: u16, rows: u16) -> TestResult {
+        self.absorb()?;
+        let (column, row) = self.vt.cursor();
+        let old_rows = self.vt.screen_rows().len();
+        let new_rows = usize::from(rows);
+        if row >= new_rows {
+            let scroll = row + 1 - new_rows;
+            let mut bytes = format!("\x1b[{old_rows};1H").into_bytes();
+            bytes.extend(std::iter::repeat_n(b'\n', scroll));
+            let caret = format!("\x1b[{};{}H", row + 1 - scroll, column + 1);
+            bytes.extend_from_slice(caret.as_bytes());
+            self.vt.feed(&bytes);
+        }
+        self.term.resize(columns, rows)?;
+        self.vt.resize(columns, rows);
+        let (column, row) = self.vt.cursor();
+        self.vt
+            .feed(format!("\x1b[r\x1b[{};{}H", row + 1, column + 1).as_bytes());
+        self.pump(500)
     }
 
     /// Scrollback plus the visible screen, one row per line.
@@ -200,6 +262,11 @@ impl Screen {
 
 fn contains_line(text: &str, needle: &str) -> bool {
     text.lines().any(|line| line.contains(needle))
+}
+
+/// Waits until the action row is painted, which is the dialog's keyboard-ready state.
+fn approval_ready(screen: &mut Screen) -> TestResult {
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))
 }
 
 #[test]
@@ -297,9 +364,7 @@ fn f1_help_does_not_enter_scrollback_after_resize() -> TestResult {
         screen.send(b"\x1b[6~")?;
     }
     screen.until(|text| text.contains("Jump to latest"))?;
-    screen.term.resize(100, 40)?;
-    screen.vt.resize(100, 40);
-    screen.pump(500)?;
+    screen.resize(100, 40)?;
     screen.send(b"\x1b")?;
     screen.until(|text| !text.contains("Jump to latest"))?;
     assert!(
@@ -349,7 +414,7 @@ fn approving_for_the_session_skips_the_next_dialog_and_cards_settle_once() -> Te
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"run both\r")?;
-    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
+    approval_ready(&mut screen)?;
     let rows = screen.visible();
     let status = rows.last().expect("the screen has rows");
     assert!(
@@ -357,8 +422,7 @@ fn approving_for_the_session_skips_the_next_dialog_and_cards_settle_once() -> Te
         "the status names the wait in full, got {status:?}"
     );
     screen.send(b"a")?;
-    screen.until(|text| text.contains("both commands done") || text.contains("echo ran-two"))?;
-    screen.pump(300)?;
+    screen.until(|text| text.contains("both commands done"))?;
     let text = screen.text();
     assert!(
         !text.contains("echo ran-two"),
@@ -403,7 +467,7 @@ fn denying_a_command_keeps_it_from_running_and_says_so() -> TestResult {
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"touch it\r")?;
-    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
+    approval_ready(&mut screen)?;
     screen.send(b"n")?;
     screen.until(|text| text.contains("denied and moved on"))?;
     let text = screen.text();
@@ -449,13 +513,13 @@ fn typing_while_busy_queues_a_steer_and_the_turn_can_still_be_interrupted() -> T
     let fixture = format!(
         "{}{}",
         exec_step("call-a", "sleep 30")?,
-        text_step(&["unused"])?
+        text_step(&["unused"])?,
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
+    approval_ready(&mut screen)?;
     screen.send(b"y")?;
-    screen.until(|text| text.contains("working"))?;
+    screen.until(|text| text.contains("working  exec"))?;
     screen.send(b"steer later\r")?;
     screen.until(|text| {
         text.contains("1 message queued for the next reply") || text.contains("turn mismatch")
@@ -494,13 +558,13 @@ fn a_steer_typed_during_a_command_reaches_the_model_at_the_next_step() -> TestRe
     let fixture = format!(
         "{}{}",
         exec_step("call-a", "sleep 2")?,
-        text_step(&["steer answered"])?
+        text_step(&["steer answered"])?,
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
+    approval_ready(&mut screen)?;
     screen.send(b"y")?;
-    screen.until(|text| text.contains("working"))?;
+    screen.until(|text| text.contains("working  exec"))?;
     screen.send(b"and then this\r")?;
     screen.until(|text| text.contains("steer answered") || text.contains("turn mismatch"))?;
     let text = screen.text();
@@ -515,17 +579,15 @@ fn resizing_mid_turn_keeps_status_and_composer_on_the_last_rows() -> TestResult 
     let fixture = format!(
         "{}{}",
         exec_step("call-a", "sleep 30")?,
-        text_step(&["unused"])?
+        text_step(&["unused"])?,
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
+    approval_ready(&mut screen)?;
     screen.send(b"y")?;
-    screen.until(|text| text.contains("working"))?;
+    screen.until(|text| text.contains("working  exec"))?;
     for (columns, rows) in [(60_u16, 20_u16), (120, 40), (100, 30)] {
-        screen.term.resize(columns, rows)?;
-        screen.vt.resize(columns, rows);
-        screen.pump(500)?;
+        screen.resize(columns, rows)?;
         let visible = screen.visible();
         let last = visible.last().expect("the screen has rows");
         assert!(
@@ -833,7 +895,7 @@ fn an_unsent_draft_asks_before_quit_and_keeps_editing_on_n() -> TestResult {
     assert!(
         contains_line(
             &screen.text(),
-            "[y] Discard the draft and quit   [n] Keep editing"
+            "[n] Keep editing   [y] Discard the draft and quit"
         ),
         "{}",
         screen.dump()

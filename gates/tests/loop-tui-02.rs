@@ -22,14 +22,12 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{error::Error, time::Duration};
 
+use pty::vt::VtRecorder;
 use pty::{PtyProcess, dalgon_command, occurrences};
 use support::TestDir;
-use vt::VtRecorder;
 
 #[test]
 fn tui_pty_keeps_settled_rows_frozen() -> Result<(), Box<dyn Error + Send + Sync>> {

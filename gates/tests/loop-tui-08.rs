@@ -80,21 +80,10 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    if let Err(error) = terminal.wait_for(
-        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
+    terminal.wait_for_screen_text(
+        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT,
         Duration::from_secs(15),
-    ) {
-        let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
-        let out = std::fs::read_to_string(&serve_stdout).unwrap_or_default();
-        let tail = String::from_utf8_lossy(terminal.output()).into_owned();
-        let tail = tail.get(tail.len().saturating_sub(2048)..).unwrap_or(&tail);
-        let subscriptions = proxy.subscription_cursors().len();
-        let last_server = proxy.server_update_cursor(0);
-        return Err(format!(
-            "{error}\nserve stdout:\n{out}\nserve stderr:\n{log}\nsubscriptions: {subscriptions}\nlast server update: {last_server:?}\npty tail:\n{tail}"
-        )
-        .into());
-    }
+    )?;
     terminal.write(b"y")?;
     wait_for_path(&marker, Duration::from_secs(10), "by the remote turn")?;
     terminal.wait_for(
