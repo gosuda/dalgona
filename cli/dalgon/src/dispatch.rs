@@ -179,56 +179,43 @@ pub(crate) async fn serve(
     let stop = CancellationToken::new();
     let snapshot = edge::terminal_snapshot();
     let closing = host.clone();
-    let run = serve::ServeRun {
-        host,
-        args: serve_args,
-        config: serve_config,
-        data_root,
-        stop: stop.clone(),
+    // The stream locks live only as long as the server: the host close that
+    // follows must not hold up other threads that write diagnostics.
+    let outcome = {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let stderr = std::io::stderr();
+        let mut err = stderr.lock();
+        drive(
+            &stop,
+            serve::run(
+                serve::ServeRun {
+                    host,
+                    args: serve_args,
+                    config: serve_config,
+                    data_root,
+                    stop: stop.clone(),
+                },
+                &mut out,
+                &mut err,
+                snapshot.stderr_tty,
+                snapshot.stdout_tty,
+            ),
+        )
+        .await
     };
-    let outcome = run_server(&stop, run, &snapshot).await;
-    // The host always closes, and the close always runs to completion: only
-    // the quiet poll is ever abandoned, so a durable provider credential write
-    // is never detached. A second signal already seen by `drive` skips the
-    // quiet wait; otherwise a later signal during it decides the exit status.
-    // The run's own failure is reported either way.
-    let ladder = exit::Ladder::begin();
-    let closed = if outcome.is_err() {
-        ladder.close_host_after_quiet_wait(closing).await
-    } else {
-        ladder.close_host(closing).await
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
     };
-    let code = match outcome {
-        Ok(Ok(code)) => code,
-        Ok(Err(error)) => serve_error(error),
-        Err(code) => ExitCode::from(code),
-    };
-    closed.skipped_by.map_or(code, ExitCode::from)
-}
-
-/// Runs the server under [`drive`]. The stream locks live only as long as the
-/// server: the host close that follows must not hold up other threads that
-/// write diagnostics.
-async fn run_server(
-    stop: &CancellationToken,
-    run: serve::ServeRun,
-    snapshot: &edge::TerminalSnapshot,
-) -> Result<Result<ExitCode, serve::ServeCommandError>, u8> {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let stderr = std::io::stderr();
-    let mut err = stderr.lock();
-    drive(
-        stop,
-        serve::run(
-            run,
-            &mut out,
-            &mut err,
-            snapshot.stderr_tty,
-            snapshot.stdout_tty,
-        ),
-    )
-    .await
+    let closed = exit::Ladder::begin().close_host(closing).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(code) => code,
+        Err(error) => serve_error(error),
+    }
 }
 
 /// Writes the unconfigured-plugin diagnostic for `name`.

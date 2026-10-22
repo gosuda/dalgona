@@ -358,31 +358,40 @@ async fn run_headless(
     };
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
-    let outcome = dispatch::drive(
+    let outcome = match dispatch::drive(
         &stop,
         print::run_print(agent, options, &mut stdout, &mut stderr),
     )
-    .await;
-    let shutdown = if matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
-        host.shutdown_after_quiet_wait(Duration::from_secs(3)).await
-    } else {
-        host.shutdown(Duration::from_secs(3)).await
+    .await
+    {
+        Ok(outcome) => outcome,
+        // A second signal ends the run at once, without waiting out the host.
+        Err(code) => return ExitCode::from(code),
     };
-    if !shutdown.status_quiet && !matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
+    // The print run already waited for status kinds to go quiet when it
+    // timed out on them, so the host must not spend that grace again.
+    let quiet_waited = matches!(&outcome, Err(print::PrintError::NotQuiet { .. }));
+    let ladder = exit::Ladder::begin();
+    let closed = if quiet_waited {
+        ladder.close_host_after_quiet_wait(host).await
+    } else {
+        ladder.close_host(host).await
+    };
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    if !closed.report.status_quiet && !quiet_waited {
         let [what, hint] = cli::texts::status_not_quiet_shutdown();
         let _ = stderr
             .write_all(format!("{what}\n{hint}\n").as_bytes())
             .await;
     }
     match outcome {
-        Ok(Ok(print::PrintOutcome::Completed)) => exit::code(exit::ExitKind::Success),
-        Ok(Ok(print::PrintOutcome::Interrupted)) => exit::code(exit::ExitKind::Signal(2)),
-        Ok(Err(error)) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
+        Ok(print::PrintOutcome::Completed) => exit::code(exit::ExitKind::Success),
+        Ok(print::PrintOutcome::Interrupted) => exit::code(exit::ExitKind::Signal(2)),
+        Err(error) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
         // A headless denial is a requested failure like a tool error.
-        Ok(Ok(print::PrintOutcome::Denied) | Err(_)) => {
-            exit::code(exit::ExitKind::RequestedFailure)
-        }
-        Err(code) => ExitCode::from(code),
+        Ok(print::PrintOutcome::Denied) | Err(_) => exit::code(exit::ExitKind::RequestedFailure),
     }
 }
 

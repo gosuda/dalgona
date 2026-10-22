@@ -35,10 +35,6 @@ pub(crate) struct Ladder {
 #[derive(Debug)]
 pub(crate) struct Closed {
     /// What the host reported. The quiet flag reflects the grace clock.
-    #[expect(
-        dead_code,
-        reason = "no caller reads the shutdown report yet; callers consume only `skipped_by`"
-    )]
     pub(crate) report: ShutdownReport,
     /// The `128 + signo` status of a further shutdown signal that ended the
     /// quiet wait. The close itself always runs to completion.
