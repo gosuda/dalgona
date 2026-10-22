@@ -84,10 +84,13 @@ pub enum StreamEvent {
     /// is dropped by [`EventStream`] under the same late-event policy as a
     /// post-`Stop` event, so a consumer treats the delivered capture as the
     /// response's final replay state and never waits for a retry. A capture
-    /// offered on a response with tool calls is refused by the decoding
-    /// grammar, never silently rewritten. The capture is family-neutral: no
-    /// invented source or family travels beside it, and a refusal observed
-    /// by one adapter never reaches another family's request.
+    /// on a response with tool calls is never silently rewritten. Adapter
+    /// decoders never emit one there; the scripted provider's grammar does
+    /// not inspect the call list, so it accepts that shape; the fold drops
+    /// the capture without a failure, so the response keeps no replay. The
+    /// capture is family-neutral: no invented source or family travels
+    /// beside it, and a refusal observed by one adapter never reaches
+    /// another family's request.
     MessageReplay {
         /// The captured payload or the typed refusal.
         capture: dal_core::ReplayCapture,

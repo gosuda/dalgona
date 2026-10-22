@@ -521,6 +521,136 @@ fn replay_fail_status_and_family_must_come_together() {
     }
 }
 
+/// Pins GAP-6 on the scripted side: `Script::new` accepts a capture on a
+/// response with tool calls, because the grammar checks event order and never
+/// the call list. The fold drops that capture: `blocks_from_inference` in
+/// `core/dal-core/src/fold/helpers.rs` clears `replay` when `calls` is
+/// non-empty. This crate cannot drive the fold, so the fold-side drop is
+/// pinned by the dal-core fold capture tests (replay-contract D02).
+#[test]
+fn capture_on_a_tool_call_response_is_accepted_and_delivered_verbatim() {
+    let args = br#"{"path":"a.rs"}"#;
+    let turn = vec![
+        StreamEvent::ToolCallsDone {
+            calls: vec![ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                args: ToolArgs::from_bytes(args),
+            }],
+        },
+        StreamEvent::MessageReplay {
+            capture: ReplayCapture::Captured {
+                payload: RawJson::parse(r#"{"cursor_history":[1]}"#).unwrap(),
+            },
+        },
+        usage_event(),
+        StreamEvent::Stop {
+            reason: StopReason::ToolUse,
+        },
+    ];
+    let script = Script::new(vec![ScriptStep::Events(turn.clone())])
+        .expect("the scripted grammar accepts a capture after tool calls");
+    let mut stream = script.open().unwrap();
+    let seen = drain(&mut stream)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(seen, turn);
+    drop(stream);
+    assert_eq!(script.aborted_streams(), 0);
+
+    let fixture = concat!(
+        r#"{"kind":"events","events":["#,
+        r#"{"type":"tool_calls_done","calls":[{"id":"call_1","name":"read","args":{"kind":"parsed","value":{"path":"a.rs"}}}]},"#,
+        r#"{"type":"message_replay","capture":{"status":"captured","payload":{"cursor_history":[1]}}},"#,
+        r#"{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+        r#"{"type":"stop","reason":"tool_use"}]}"#,
+    );
+    let script = Script::from_replay(fixture.as_bytes())
+        .expect("the JSONL fixture decodes to the same shape");
+    let mut stream = script.open().unwrap();
+    let seen = drain(&mut stream)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(seen.len(), 4, "all four events deliver: {seen:?}");
+    assert!(matches!(seen[1], StreamEvent::MessageReplay { .. }));
+}
+
+/// A thinking-signature `replay` event decodes from JSONL and delivers its
+/// item byte for byte through the entry/collect path. The item bytes are the
+/// signature channel: the same route's next request replays them verbatim,
+/// so any re-encoding, truncation, or field drop here breaks resumption.
+/// The assertion is an exact byte equality on the item, not a containment
+/// or non-emptiness check.
+#[test]
+fn replay_event_carries_a_thinking_signature_verbatim_from_jsonl() {
+    const ITEM: &str =
+        r#"{"type":"thinking","thinking":"deep thought","signature":"EqQBCgIYAhIM-synth-01"}"#;
+    let fixture = concat!(
+        r#"{"kind":"events","events":["#,
+        r#"{"type":"reasoning_delta","text":"deep "},"#,
+        r#"{"type":"reasoning_delta","text":"thought"},"#,
+        r#"{"type":"replay","payload":{"family":"anthropic","model":"claude-test-1","item":{"type":"thinking","thinking":"deep thought","signature":"EqQBCgIYAhIM-synth-01"}}},"#,
+        r#"{"type":"text_delta","text":"The answer is 21."},"#,
+        r#"{"type":"tool_calls_done","calls":[]},"#,
+        r#"{"type":"usage","usage":{"input_tokens":25,"cached_input_tokens":0,"output_tokens":12,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+        r#"{"type":"stop","reason":"end_turn"}]}"#,
+    );
+    let script =
+        Script::from_replay(fixture.as_bytes()).expect("the signature-bearing fixture decodes");
+    let mut stream = script.open().expect("the script opens");
+    let seen = drain(&mut stream)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("no stream error");
+    assert_eq!(seen.len(), 7, "all seven events deliver: {seen:?}");
+    assert!(
+        matches!(&seen[0], StreamEvent::ReasoningDelta { text } if text == "deep "),
+        "first reasoning delta arrives: {seen:?}"
+    );
+    assert!(
+        matches!(&seen[1], StreamEvent::ReasoningDelta { text } if text == "thought"),
+        "second reasoning delta arrives: {seen:?}"
+    );
+    match &seen[2] {
+        StreamEvent::Replay { payload } => {
+            assert_eq!(
+                payload.family,
+                Family::Anthropic,
+                "the route family survives"
+            );
+            assert_eq!(
+                payload.model.as_ref(),
+                "claude-test-1",
+                "the route model survives"
+            );
+            assert_eq!(
+                payload.item.as_str(),
+                ITEM,
+                "the signature item was re-encoded: {}",
+                payload.item.as_str()
+            );
+        }
+        other => panic!("the signature rides a replay event, got {other:?}"),
+    }
+    assert!(
+        matches!(&seen[3], StreamEvent::TextDelta { text } if text == "The answer is 21."),
+        "text follows the signature: {seen:?}"
+    );
+    assert!(matches!(seen[4], StreamEvent::ToolCallsDone { .. }));
+    assert!(matches!(seen[5], StreamEvent::Usage { .. }));
+    assert!(matches!(
+        seen[6],
+        StreamEvent::Stop {
+            reason: StopReason::EndTurn
+        }
+    ));
+    drop(stream);
+    assert_eq!(script.aborted_streams(), 0);
+    assert_eq!(script.remaining(), 0);
+}
+
 proptest::proptest! {
     /// The replay decoder must never panic on arbitrary input: every failure
     /// path surfaces a typed `ScriptError`, never a crash or silent misdecode.

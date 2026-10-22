@@ -805,7 +805,7 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
             (At::Done, StreamEvent::Stop { .. }) | (At::Replay, StreamEvent::Stop { .. }) => {
                 return Err("stop before usage");
             }
-            (At::Done, _) => return Err("a delta, replay, or capture after tool calls done"),
+            (At::Done, _) => return Err("a delta or replay after tool calls done"),
             (At::Replay, StreamEvent::MessageReplay { .. }) => {
                 return Err("a second message replay");
             }
@@ -887,8 +887,8 @@ mod message_replay_tests {
     #[test]
     fn replay_fixture_roundtrips_a_typed_refusal() {
         let turn = TURN.replace(
-            r#""capture":{"status":"captured","payload":{"cursor_history":[1,2]}}""#,
-            r#""capture":{"status":"refused","reason":"user_record_not_found"}""#,
+            r#""capture":{"status":"captured","payload":{"cursor_history":[1,2]}}"#,
+            r#""capture":{"status":"refused","reason":"user_record_not_found"}"#,
         );
         let script = Script::from_replay(turn.as_bytes()).expect("refusal fixture decodes");
         let mut stream = script.open().expect("script opens");
