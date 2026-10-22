@@ -305,10 +305,7 @@ async fn conclude(
     next: Phase,
 ) -> Result<(), ServiceError> {
     let appended = host.record(summary, outcome, next == Phase::Planning).await;
-    match &appended {
-        Ok(()) => state.settle(host.session, next),
-        Err(_) => state.set_phase(host.session, Phase::Off),
-    }
+    state.settle(host.session, next);
     appended
 }
 
@@ -888,6 +885,27 @@ mod host_tests {
         assert_eq!(host.services.asked_count(), 1);
         assert_eq!(states(&host)?, [("submitted".to_owned(), true)]);
         assert_eq!(host.state.phase(host.session), Phase::Off);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plan_revise_record_failure_keeps_plan_mode() -> TestResult {
+        let host = ScriptedWorkHost::open();
+        host.plan_command("on");
+        host.services.script([
+            Scripted::Label("Revise"),
+            Scripted::Label("rename the tables"),
+        ]);
+        host.services.fail_appends([false, true]);
+        let args = plan_args("# Plan", "Ship it")?;
+        assert_eq!(host.plan(&args).await, "the journal write failed");
+        assert_eq!(host.services.asked_count(), 2);
+        assert_eq!(states(&host)?, [("submitted".to_owned(), true)]);
+        assert_eq!(host.state.phase(host.session), Phase::Planning);
+        assert_eq!(
+            host.guard("patch", ToolClass::Patch).await?,
+            Some(blocked("patch"))
+        );
         Ok(())
     }
 }
