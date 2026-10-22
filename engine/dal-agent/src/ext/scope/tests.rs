@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
@@ -24,6 +24,8 @@ use super::{Scope, ScopeError, ScopeValue, Shared, locked};
 use crate::error::ServiceError;
 use crate::ext::services::ServiceFuture;
 use crate::ext::{Caller, CallerKind, RawValue, Services, ToolOutcome};
+use crate::session::continuation::{ContinuationOwner, ContinuationSlot};
+use crate::session::tasks::SessionTasks;
 
 macro_rules! never {
     () => {
@@ -37,6 +39,10 @@ type AgentsResult = Result<AgentsReply, ServiceError>;
 
 struct Held {
     stream: Mutex<Option<EventStream>>,
+    /// Streams for inferences after the first, in call order.
+    spare: Mutex<VecDeque<EventStream>>,
+    /// The continuation slot each inference arrived with, in call order.
+    slots: Mutex<Vec<Option<Weak<ContinuationSlot>>>>,
     report: Mutex<VecDeque<oneshot::Receiver<AgentReport>>>,
     awaits: Mutex<VecDeque<AgentsResult>>,
     close_replies: Mutex<VecDeque<AgentsResult>>,
@@ -154,9 +160,13 @@ impl Services for Held {
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
         never!()
     }
-    fn infer_stream(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, EventStream> {
+    fn infer_stream(&self, who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, EventStream> {
         self.inferred.fetch_add(1, Ordering::SeqCst);
-        let stream = locked(&self.stream).take().expect("one scripted stream");
+        locked(&self.slots).push(who.continuation());
+        let first = locked(&self.stream).take();
+        let stream = first
+            .or_else(|| locked(&self.spare).pop_front())
+            .expect("a scripted stream");
         Box::pin(async move { Ok(stream) })
     }
     fn call_tool(
@@ -215,6 +225,10 @@ struct Rig {
 }
 
 fn rig_with(budget: Budget, price: Option<super::PriceFn>) -> Rig {
+    rig_as(caller(), budget, price)
+}
+
+fn rig_as(opener: Caller, budget: Budget, price: Option<super::PriceFn>) -> Rig {
     let (upstream, source) = mpsc::unbounded();
     let upstream_cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&upstream_cancelled);
@@ -222,6 +236,8 @@ fn rig_with(budget: Budget, price: Option<super::PriceFn>) -> Rig {
         stream: Mutex::new(Some(EventStream::new(source, move || {
             flag.store(true, Ordering::SeqCst);
         }))),
+        spare: Mutex::new(VecDeque::new()),
+        slots: Mutex::new(Vec::new()),
         report: Mutex::new(VecDeque::new()),
         awaits: Mutex::new(VecDeque::new()),
         close_replies: Mutex::new(VecDeque::new()),
@@ -234,7 +250,7 @@ fn rig_with(budget: Budget, price: Option<super::PriceFn>) -> Rig {
     let services: Arc<dyn Services> = held.clone();
     let scope = Scope::open(
         services,
-        caller(),
+        opener,
         CancellationToken::new(),
         &ScopeSpec {
             limit: 4,
@@ -883,5 +899,69 @@ async fn unreported_usage_in_a_child_scope_exhausts_the_parent_budget() {
     assert!(
         matches!(rig.scope.infer(request()), Err(ScopeError::Exhausted)),
         "the unmetered child spend propagates to the parent ledger"
+    );
+}
+
+/// An opener that carries its own continuation slot, which no member of its
+/// scope may borrow.
+fn opener_with_slot() -> (Caller, ContinuationOwner) {
+    let owner = ContinuationOwner::new(SessionTasks::new());
+    (caller().with_continuation(owner.downgrade()), owner)
+}
+
+#[tokio::test]
+async fn each_member_inference_runs_on_its_own_continuation_slot() {
+    let (opener, owner) = opener_with_slot();
+    let rig = rig_as(opener, Budget::default(), None);
+    let (second_upstream, second_source) = mpsc::unbounded();
+    locked(&rig.held.spare).push_back(EventStream::new(second_source, || {}));
+
+    let first = rig.scope.infer(request()).expect("admitted");
+    let second = rig.scope.infer(request()).expect("admitted");
+    finish_events(&rig.upstream);
+    finish_events(&second_upstream);
+    timed(first.result())
+        .await
+        .expect("the first member finishes");
+    timed(second.result())
+        .await
+        .expect("the second member finishes");
+
+    let slots = locked(&rig.held.slots).clone();
+    let [Some(one), Some(two)] = slots.as_slice() else {
+        panic!(
+            "both members reached the service with a slot: {} seen",
+            slots.len()
+        );
+    };
+    let opener_slot = owner.downgrade();
+    assert!(!Weak::ptr_eq(one, two), "members never share a slot");
+    assert!(
+        !Weak::ptr_eq(one, &opener_slot) && !Weak::ptr_eq(two, &opener_slot),
+        "a member never borrows the opener's slot"
+    );
+    assert!(
+        one.upgrade().is_none() && two.upgrade().is_none(),
+        "a finished member releases its slot"
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_scope_ends_the_slot_of_a_member_still_in_flight() {
+    let rig = rig();
+    let handle = collecting(&rig).await;
+    let slot = locked(&rig.held.slots)[0]
+        .clone()
+        .expect("the member carried a slot");
+    assert!(slot.upgrade().is_some(), "a running member holds its slot");
+
+    let Rig { scope, shared, .. } = rig;
+    drop(scope);
+    quiesced(&shared).await;
+
+    assert_eq!(handle.status(), HandleStatus::Cancelled);
+    assert!(
+        slot.upgrade().is_none(),
+        "the abandoned member's slot ends with its scope"
     );
 }

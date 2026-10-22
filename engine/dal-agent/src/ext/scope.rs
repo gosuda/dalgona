@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Instant;
 
 use dal_core::{
@@ -25,6 +25,8 @@ use super::synthetic::{self, Lineage};
 use super::{BoxFuture, Caller, Services};
 use crate::error::{ServiceError, deny_text};
 use crate::host::ops::request_reference;
+use crate::session::continuation::{ContinuationOwner, ContinuationSlot};
+use crate::session::tasks::SessionTasks;
 
 /// The lifecycle state of one scope handle.
 pub use dal_core::HandleStatus as ScopeStatus;
@@ -88,6 +90,18 @@ pub(crate) type PriceFn = Arc<dyn Fn(&ModelRoute) -> Option<ModelPrice> + Send +
 struct Runtime {
     services: Arc<dyn Services>,
     caller: Caller,
+    /// Fresh tasks owning one linear continuation owner per member infer.
+    /// Members run concurrently under the scope limit and each drives an
+    /// independent model run, so sharing the opener's slot would turn every
+    /// member after the first parked run into a Live-no-staged-step
+    /// `InvalidRequest`. Fresh per scope (relay precedent); each member
+    /// release ends its run, so no member work outlives the scope.
+    scope_tasks: SessionTasks,
+    /// Live member slots for the scope-end drain: each member infer
+    /// registers its slot here and unregisters on release, so scope drop
+    /// explicitly ends runs abandoned mid-flight instead of relying on the
+    /// owner Drop backstop alone.
+    member_slots: Arc<Mutex<Vec<Weak<ContinuationSlot>>>>,
     lineage: Lineage,
     price: Option<PriceFn>,
     /// In-flight member starts that outlive their handle's wait: closing
@@ -154,8 +168,17 @@ impl Runtime {
     ) -> BoxFuture<'static, Result<Inference, ScopeError>> {
         let services = Arc::clone(&self.services);
         let caller = self.caller.clone();
+        let member_tasks = self.scope_tasks.clone();
+        let member_slots = Arc::clone(&self.member_slots);
         let lineage = self.lineage.clone().with_ledger(ledger);
         Box::pin(synthetic::enter(lineage, async move {
+            // One linear owner per scope member: never the opener's slot,
+            // never shared between members. Without this, concurrent (or
+            // sequential-after-park) member infers collide on one slot.
+            let member_owner = ContinuationOwner::new(member_tasks);
+            let member_slot = member_owner.downgrade();
+            locked(&member_slots).push(member_slot.clone());
+            let caller = caller.with_continuation(member_slot.clone());
             let run = async {
                 let stream = services
                     .infer_stream(&caller, request)
@@ -169,10 +192,13 @@ impl Runtime {
                     }
                 })
             };
-            tokio::select! {
+            let outcome = tokio::select! {
                 result = run => result,
                 () = cancel.cancelled() => Err(ScopeError::Cancelled),
-            }
+            };
+            member_owner.release_if_live();
+            locked(&member_slots).retain(|held| !Weak::ptr_eq(held, &member_slot));
+            outcome
         }))
     }
 
@@ -567,6 +593,16 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        // Drain live member continuations first: abandoned members' futures
+        // are aborted below, but explicit release ends their runs
+        // deterministically now instead of via the owner Drop backstop
+        // alone. With every member released, the scope-fresh task group
+        // holds no live run work at scope end.
+        for slot in std::mem::take(&mut *locked(&self.shared.rt.member_slots)) {
+            if let Some(slot) = slot.upgrade() {
+                slot.release_if_live();
+            }
+        }
         let handles = std::mem::take(&mut locked(&self.shared.book).all);
         for handle in handles {
             let state = &handle.state;
@@ -612,6 +648,8 @@ impl Scope {
     /// `cancel` bounds every handle. USD budgets price routes from the
     /// compiled table only; a route without a compiled price is refused with
     /// [`ScopeError::UnpricedModel`].
+    /// Each member infer runs on its own continuation slot from scope-fresh
+    /// tasks; the opener's slot is never shared between members.
     ///
     /// # Errors
     /// Returns [`ScopeError::Spec`] for an invalid limit or budget.
@@ -648,6 +686,8 @@ impl Scope {
         let rt = Arc::new(Runtime {
             services,
             caller,
+            scope_tasks: SessionTasks::new(),
+            member_slots: Arc::new(Mutex::new(Vec::new())),
             lineage,
             price,
             cleanup: TaskTracker::new(),

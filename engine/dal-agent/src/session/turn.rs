@@ -6,10 +6,10 @@
 //! resolved model across a turn's requests.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dal_core::{
-    BlobId, ContextItem, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
+    BlobId, ContextItem, Family, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
     StreamChannel, StreamEvent,
 };
 use dal_provider::{
@@ -30,6 +30,11 @@ pub(crate) struct RequestDeps {
     pub host: Arc<HostState>,
     /// The turn's script host, absent for relay and service-only inference.
     pub script: Option<Arc<super::script::SessionScriptHost>>,
+    /// The continuation slot of the owning turn, invocation root, or relay
+    /// stream, when one owns this request. Cursor steps persist through it;
+    /// every other route ignores it. Absent for service-only inference and
+    /// until its owner threads its handle.
+    pub continuation: Option<Weak<super::continuation::ContinuationSlot>>,
 }
 
 /// Resolves one route without opening a provider stream or consuming a
@@ -81,15 +86,39 @@ pub(crate) async fn model_ready(
             ) => return Ok(None),
             Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         };
+        let provider_id = resolved.provider.clone();
+        let bedrock = matches!(
+            resolved.route,
+            ModelRoute::Api {
+                family: Family::Bedrock,
+                ..
+            }
+        );
         let provider = host.shared.providers.provider(resolved);
         if operation_cancel.is_cancelled() {
             return Err(ServiceError::Cancelled);
         }
         match provider {
-            Ok(_) => Ok(Some(model)),
-            Err(dal_provider::ProviderError::NoCredentials { .. }) => Ok(None),
-            Err(error) => Err(ServiceError::failed(None, error.to_string())),
+            Ok(_) => {}
+            Err(dal_provider::ProviderError::NoCredentials { .. }) => return Ok(None),
+            Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         }
+        if bedrock {
+            let available = runtime
+                .block_on(
+                    host.shared
+                        .providers
+                        .credential_source_available(&provider_id, &operation_cancel),
+                )
+                .map_err(|error| match error {
+                    dal_provider::ProviderError::Cancelled => ServiceError::Cancelled,
+                    error => ServiceError::failed(None, error.to_string()),
+                })?;
+            if !available {
+                return Ok(None);
+            }
+        }
+        Ok(Some(model))
     });
     let result = check
         .await
@@ -103,9 +132,9 @@ pub(crate) async fn model_ready(
 
 /// Opens one provider stream for a model request.
 ///
-/// Stored images are read back into the request first, so a registered
+/// Stored blobs are read back into the request first, so a registered
 /// model, the scripted provider, and a live provider all receive inline
-/// bytes. Scripted providers then bypass the catalog; live providers
+/// content. Scripted providers then bypass the catalog; live providers
 /// resolve through one catalog fetch. Hydration and open failures return a
 /// stream yielding the single error, so callers handle transport and
 /// content uniformly.
@@ -114,13 +143,13 @@ pub(crate) async fn infer_stream(
     mut req: ModelRequest,
     cancel: &CancellationToken,
 ) -> EventStream {
-    if let Err(error) = hydrate_images(deps, &mut req, cancel).await {
+    if let Err(error) = hydrate_blobs(deps, &mut req, cancel).await {
         return failed(error);
     }
     if let Some(found) = crate::ext::synthetic::find_route(&deps.host.shared, &req.model) {
         return crate::ext::synthetic::open(deps, found, req, cancel).await;
     }
-    match open_stream(deps, &req, cancel).await {
+    match open_stream(deps, req, cancel).await {
         Ok(stream) => crate::ext::synthetic::observe(stream),
         Err(error) => failed(error),
     }
@@ -132,20 +161,20 @@ fn failed(error: ProviderError) -> EventStream {
     EventStream::new(futures::stream::iter(items), || {})
 }
 
-/// Replaces every stored image of the request context with its bytes.
+/// Replaces every stored blob of the request context with its content.
 ///
-/// The session store moves an image of 16 KiB or more out of the journal,
+/// The session store moves content of 16 KiB or more out of the journal,
 /// and the projection then names it by digest. Neither a provider nor a
 /// registered model can read the store, so this is where those references
-/// become inline images again, before any route is chosen. Order, media
-/// types, and every other part are unchanged. A request that names no
-/// stored image is left as it is: nothing is cloned, and inline images are
-/// never copied.
+/// become inline images or text again, before any route is chosen. Order,
+/// media types, and every other part are unchanged. A request that names
+/// no stored image or text is left as it is: nothing is cloned, and
+/// inline content is never copied.
 ///
 /// A blob that is absent, unreadable, from a session that is not open, or
-/// not the recorded length refuses the request: the image is never
+/// not the recorded length refuses the request: the content is never
 /// skipped, and nothing is sent without it.
-async fn hydrate_images(
+async fn hydrate_blobs(
     deps: &RequestDeps,
     req: &mut ModelRequest,
     cancel: &CancellationToken,
@@ -154,7 +183,7 @@ async fn hydrate_images(
         .context
         .iter()
         .flat_map(|item| parts(item).iter())
-        .find_map(stored_image)
+        .find_map(stored_blob)
     else {
         return Ok(());
     };
@@ -176,7 +205,30 @@ async fn hydrate_images(
     Ok(())
 }
 
-/// Replaces `part` with the stored bytes when it names a stored image.
+/// The media type the projection gives an oversized text part.
+///
+/// `context::content_part` names a spilled `JournalPart::TextBlob` with this
+/// type, so it is how a stored blob is recognized as text.
+const TEXT_MIME: &str = "text/plain";
+
+/// Whether a stored blob of this media type is text.
+fn is_text(mime: &str) -> bool {
+    mime == TEXT_MIME
+}
+
+/// Whether a stored blob of this media type returns to the request as
+/// content: images as image bytes, plain text as text. Any other media type
+/// keeps its digest.
+fn is_hydrated(mime: &str) -> bool {
+    is_text(mime) || mime.starts_with("image/")
+}
+
+/// Replaces `part` with the stored content when it names a stored image or
+/// stored text.
+///
+/// An image returns as image bytes under its own media type. Text returns
+/// as UTF-8 and refuses the request when the stored bytes are not valid
+/// UTF-8: it is never sent with replacement characters.
 async fn hydrate_part(
     handle: &SessionHandle,
     part: &mut Part,
@@ -190,21 +242,33 @@ async fn hydrate_part(
     else {
         return Ok(());
     };
-    if !mime.starts_with("image/") {
+    if !is_hydrated(mime) {
         return Ok(());
     }
-    let bytes = read_image(handle, *blob_id, *recorded, cancel).await?;
-    *part = Part::Image {
-        mime: std::mem::take(mime),
-        bytes,
+    let id = *blob_id;
+    let bytes = read_blob(handle, id, *recorded, cancel).await?;
+    *part = if is_text(mime) {
+        let text = String::from_utf8(bytes).map_err(|error| {
+            fatal(format!(
+                "text blob {id} does not hold valid UTF-8 ({error}); the text was not sent."
+            ))
+        })?;
+        Part::Text {
+            text: text.into_boxed_str(),
+        }
+    } else {
+        Part::Image {
+            mime: std::mem::take(mime),
+            bytes: bytes.into_boxed_slice(),
+        }
     };
     Ok(())
 }
 
-/// The digest behind a part that names a stored image.
-fn stored_image(part: &Part) -> Option<BlobId> {
+/// The digest behind a part that names a stored image or stored text.
+fn stored_blob(part: &Part) -> Option<BlobId> {
     match part {
-        Part::Blob { blob_id, mime, .. } if mime.starts_with("image/") => Some(*blob_id),
+        Part::Blob { blob_id, mime, .. } if is_hydrated(mime) => Some(*blob_id),
         Part::Blob { .. } | Part::Text { .. } | Part::Image { .. } => None,
     }
 }
@@ -235,34 +299,32 @@ fn session_handle(deps: &RequestDeps) -> Option<SessionHandle> {
         .map(|entry| entry.handle.clone())
 }
 
-/// Reads one stored image through the session actor.
+/// Reads one stored blob through the session actor.
 ///
 /// A cancelled request stops waiting at once. An absent digest is the typed
 /// unresolved-blob refusal; every other failure, and a stored length that
 /// differs from the journal's record, is a fatal inference failure naming
 /// the blob.
-async fn read_image(
+async fn read_blob(
     handle: &SessionHandle,
     id: BlobId,
     recorded: u64,
     cancel: &CancellationToken,
-) -> Result<Box<[u8]>, ProviderError> {
+) -> Result<Vec<u8>, ProviderError> {
     let read = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(cancelled()),
         read = handle.blob(id) => read,
     };
     match read {
-        Ok(bytes) if u64::try_from(bytes.len()).is_ok_and(|length| length == recorded) => {
-            Ok(bytes.into_boxed_slice())
-        }
+        Ok(bytes) if u64::try_from(bytes.len()).is_ok_and(|length| length == recorded) => Ok(bytes),
         Ok(bytes) => Err(fatal(format!(
-            "image blob {id} holds {} bytes but its journal part records {recorded}; the image was not sent.",
+            "blob {id} holds {} bytes but its journal part records {recorded}; the blob was not sent.",
             bytes.len()
         ))),
         Err(AgentError::BlobNotFound { .. }) => Err(ProviderError::UnresolvedBlob { blob_id: id }),
         Err(error) => Err(fatal(format!(
-            "image blob {id} could not be read from the session store: {error}"
+            "blob {id} could not be read from the session store: {error}"
         ))),
     }
 }
@@ -281,15 +343,20 @@ fn fatal(message: String) -> ProviderError {
 }
 
 /// Opens the provider stream for one request.
+///
+/// A live provider binds one concrete API route, so a request that names its
+/// model another way (a catalog id such as `openai/gpt-6-luna`, which parses
+/// as a synthetic id, or a configured alias) opens under the route the
+/// catalog resolved it to. A request already on that route is sent as it is.
 async fn open_stream(
     deps: &RequestDeps,
-    req: &ModelRequest,
+    mut req: ModelRequest,
     cancel: &CancellationToken,
 ) -> Result<EventStream, dal_provider::ProviderError> {
     let providers = &deps.host.shared.providers;
     if let Some(script) = providers.scripted_provider() {
         return script
-            .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)
+            .open(deps.session, &req, &[], Arc::new(|_: String| {}), cancel)
             .await;
     }
     let catalog = providers.catalog().await?;
@@ -307,9 +374,16 @@ async fn open_stream(
                 message: error.to_string(),
             }
         })?;
+    let rebound = (resolved.route != req.model).then(|| resolved.route.clone());
     let provider = providers.provider(resolved)?;
+    if let Some(route) = rebound {
+        req.model = route;
+    }
+    if matches!(&req.model, ModelRoute::Api { family, .. } if *family == Family::Cursor) {
+        return super::continuation::open_step(deps, provider, &req, cancel).await;
+    }
     provider
-        .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)
+        .open(deps.session, &req, &[], Arc::new(|_: String| {}), cancel)
         .await
 }
 
