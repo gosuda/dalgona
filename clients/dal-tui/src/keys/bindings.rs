@@ -94,10 +94,40 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Dialog,
+        action: Action::DialogFocusRight,
+        label: "Next action",
+        default: key(KeyCode::Tab, NONE),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Dialog,
         action: Action::DialogActivate,
         label: "Activate action",
         default: key(KeyCode::Enter, NONE),
         legacy: Some(key(KeyCode::Enter, NONE)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogFocusLeft,
+        label: "Previous action",
+        // Legacy Shift+Tab arrives as CSI Z (BackTab); kitty CSI-u 9;2u
+        // arrives as Tab + SHIFT.
+        default: key(KeyCode::BackTab, NONE),
+        legacy: Some(key(KeyCode::Tab, SHIFT)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogScrollUp,
+        label: "Scroll up",
+        default: key(KeyCode::PageUp, NONE),
+        legacy: Some(key(KeyCode::PageUp, NONE)),
+    },
+    Binding {
+        owner: Owner::Dialog,
+        action: Action::DialogScrollDown,
+        label: "Scroll down",
+        default: key(KeyCode::PageDown, NONE),
+        legacy: Some(key(KeyCode::PageDown, NONE)),
     },
     Binding {
         owner: Owner::Picker,
@@ -108,10 +138,24 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Picker,
+        action: Action::PickerMoveUp,
+        label: "Move up",
+        default: key(KeyCode::Char('p'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Picker,
         action: Action::PickerMoveDown,
         label: "Move down",
         default: key(KeyCode::Down, NONE),
         legacy: Some(key(KeyCode::Char('j'), NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerMoveDown,
+        label: "Move down",
+        default: key(KeyCode::Char('n'), CTRL),
+        legacy: None,
     },
     Binding {
         owner: Owner::Picker,
@@ -122,10 +166,24 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Picker,
+        action: Action::PickerPageUp,
+        label: "Page up",
+        default: key(KeyCode::Char('b'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Picker,
         action: Action::PickerPageDown,
         label: "Page down",
         default: key(KeyCode::PageDown, NONE),
         legacy: Some(key(KeyCode::PageDown, NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerPageDown,
+        label: "Page down",
+        default: key(KeyCode::Char('f'), CTRL),
+        legacy: None,
     },
     Binding {
         owner: Owner::Picker,
@@ -161,6 +219,17 @@ pub const BINDINGS: &[Binding] = &[
         label: "Delete row",
         default: key(KeyCode::Char('d'), NONE),
         legacy: Some(key(KeyCode::Char('d'), NONE)),
+    },
+    Binding {
+        owner: Owner::Picker,
+        action: Action::PickerToggle,
+        label: "Toggle row",
+        // Spec contract: Space on an empty filter and Ctrl+Space (0x00)
+        // otherwise toggle a multi picker row. The dispatch does not route
+        // this yet — unmodified Space stays filter text and no picker is
+        // multi — so the row is contract-only until a multi picker wires it.
+        default: key(KeyCode::Char(' '), NONE),
+        legacy: Some(key(KeyCode::Char(' '), CTRL)),
     },
     Binding {
         owner: Owner::App,
@@ -301,6 +370,13 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         owner: Owner::Composer,
+        action: Action::AcceptCycleCompletion,
+        label: "Complete",
+        default: key(KeyCode::BackTab, NONE),
+        legacy: Some(key(KeyCode::Tab, SHIFT)),
+    },
+    Binding {
+        owner: Owner::Composer,
         action: Action::HistoryPrev,
         label: "Previous history",
         default: key(KeyCode::Up, NONE),
@@ -398,6 +474,13 @@ pub const BINDINGS: &[Binding] = &[
         legacy: Some(key(KeyCode::Char('_'), CTRL)),
     },
     Binding {
+        owner: Owner::Composer,
+        action: Action::Undo,
+        label: "Undo",
+        default: key(KeyCode::Char('-'), CTRL),
+        legacy: None,
+    },
+    Binding {
         owner: Owner::Editor,
         action: Action::CharLeft,
         label: "Move left",
@@ -430,6 +513,13 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::Undo,
         label: "Undo",
         default: key(KeyCode::Char('_'), CTRL),
+        legacy: None,
+    },
+    Binding {
+        owner: Owner::Editor,
+        action: Action::Undo,
+        label: "Undo",
+        default: key(KeyCode::Char('-'), CTRL),
         legacy: None,
     },
     Binding {
