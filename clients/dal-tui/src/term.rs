@@ -152,6 +152,12 @@ impl TermState {
         self.grapheme = enabled;
     }
 
+    /// Reports whether grapheme-width terminal mode is active.
+    #[must_use]
+    pub const fn grapheme(&self) -> bool {
+        self.grapheme
+    }
+
     /// Records alternate-screen ownership.
     pub fn set_fullscreen(&mut self, enabled: bool) {
         self.fullscreen = enabled;
