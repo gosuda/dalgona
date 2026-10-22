@@ -35,7 +35,7 @@ pub(crate) fn map_update(
             if Some(*turn) == prompt_turn {
                 vec![Value::from("prompt-turn")]
             } else {
-                turn_ended_notice(version, session, *turn, *stop)
+                turn_ended_notice(session, *turn, *stop)
             }
         }
         UpdateKind::Delta {
@@ -219,25 +219,19 @@ pub(crate) fn state_update_idle(stop: Option<Value>) -> Value {
     state_update("idle", stop)
 }
 
-/// Maps a non-prompt turn end to its notice or state update.
-fn turn_ended_notice(
-    version: AcpVersion,
-    session: SessionId,
-    turn: TurnId,
-    stop: Stop,
-) -> Vec<Value> {
-    match version {
-        AcpVersion::V1 => {
-            let kind = if matches!(stop, Stop::Failed) {
-                "warning"
-            } else {
-                "info"
-            };
-            let text = format!("turn {turn} ended: {}", stop_text(stop));
-            vec![notice_body(session, kind, &text)]
-        }
-        AcpVersion::V2 => vec![state_update("idle", Some(stop_literal(stop)))],
-    }
+/// Maps a non-prompt turn end to its notice.
+///
+/// Only the prompt turn's own end may report the idle state; background
+/// ends surface as notices on both versions so a v2 client never reads a
+/// mid-prompt idle as the prompt's terminal frame.
+fn turn_ended_notice(session: SessionId, turn: TurnId, stop: Stop) -> Vec<Value> {
+    let kind = if matches!(stop, Stop::Failed) {
+        "warning"
+    } else {
+        "info"
+    };
+    let text = format!("turn {turn} ended: {}", stop_text(stop));
+    vec![notice_body(session, kind, &text)]
 }
 
 /// Renders the wire stop text for notices.

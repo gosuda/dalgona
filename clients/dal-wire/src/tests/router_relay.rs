@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dal_core::{Family, RawJson, Usage};
+use dal_core::{ApprovalMode, Caps, Family, ModelInfo, ModelRoute, RawJson, Usage};
 use dal_provider::{
     EventStream, ProviderError, ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall,
 };
@@ -10,7 +12,10 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::router::RouterOptions;
 use crate::router::canonical_json;
+use crate::router::decode::{ResolvedModel, listed_ids, parse_route_id, resolve_model, route_id};
+use crate::router::harness::HarnessEvent;
 use crate::router::pass::{Relay, RelayMapper};
 use crate::router::sink::{SseEncoder, StreamSink};
 use crate::router::stream::{ChatEncoder, MessagesEncoder, ResponsesEncoder, TurnIds};
@@ -31,8 +36,8 @@ fn usage(input: u64, output: u64) -> StreamEvent {
             output_tokens: output,
             reasoning_tokens: None,
             cache_write_tokens: 0,
-            premium_requests: None,
             cost_usd: None,
+            premium_requests: None,
         },
     }
 }
@@ -546,4 +551,143 @@ async fn messages_relay_keeps_one_block_open_for_interleaved_calls() {
         event("message_stop", r#"{"type":"message_stop"}"#),
     ];
     assert_eq!(lines, expected);
+}
+
+/// Every API family with its wire namespace.
+fn api_families() -> [(Family, &'static str); 16] {
+    [
+        (Family::Chat, "openai-chat"),
+        (Family::Responses, "openai-responses"),
+        (Family::Codex, "openai-codex"),
+        (Family::Anthropic, "anthropic"),
+        (Family::Bedrock, "bedrock"),
+        (Family::Cursor, "cursor"),
+        (Family::Devin, "devin"),
+        (Family::Droid, "droid"),
+        (Family::GitLab, "gitlab"),
+        (Family::GoogleGenerativeAi, "google-generative-ai"),
+        (Family::GoogleVertex, "google-vertex"),
+        (Family::GoogleGeminiCli, "google-gemini-cli"),
+        (Family::GoogleAntigravity, "google-antigravity"),
+        (Family::Mistral, "mistral"),
+        (Family::Ollama, "ollama"),
+        (Family::PiMessages, "radius"),
+    ]
+}
+
+fn api_route(family: Family) -> ModelRoute {
+    ModelRoute::Api {
+        family,
+        model: "model".into(),
+    }
+}
+
+#[test]
+fn every_api_family_round_trips_through_its_wire_id() {
+    for (family, prefix) in api_families() {
+        let id = format!("{prefix}/model");
+        assert_eq!(route_id(&api_route(family)), id);
+        assert_eq!(parse_route_id(&id), Some(api_route(family)));
+    }
+}
+
+fn bare_options() -> RouterOptions {
+    RouterOptions {
+        bind: "127.0.0.1".to_owned(),
+        port: 0,
+        public: false,
+        a2a: false,
+        token_file: PathBuf::new(),
+        approval: ApprovalMode::Ask,
+        origins: Vec::new(),
+        aliases: BTreeMap::new(),
+        workspace: PathBuf::from("/"),
+    }
+}
+
+fn catalog_info(family: Family) -> ModelInfo {
+    ModelInfo {
+        route: api_route(family),
+        name: "model".into(),
+        caps: Caps {
+            context_window: None,
+            thinking: Box::new([]),
+            tool_use: true,
+            image_input: false,
+            custom_grammar: false,
+        },
+    }
+}
+
+#[test]
+fn newer_family_catalog_routes_list_and_resolve_to_themselves() {
+    let options = bare_options();
+    let catalog: Vec<ModelInfo> = api_families()
+        .iter()
+        .skip(4)
+        .map(|(family, _)| catalog_info(*family))
+        .collect();
+    let ids = listed_ids(&options.aliases, &catalog);
+    for entry in &catalog {
+        let id = route_id(&entry.route);
+        assert!(ids.contains(&id), "catalog route {id} is listed");
+        let ResolvedModel::Route(route) =
+            resolve_model(&options, &id).expect("listed catalog id resolves")
+        else {
+            panic!("catalog id {id} resolved away from its route");
+        };
+        assert_eq!(&route, &entry.route);
+    }
+}
+
+#[tokio::test]
+async fn a_full_stream_channel_drops_overflow_lines_without_waiting() {
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.try_send(Some("seed".to_owned()))
+        .expect("the single slot fills");
+    let mut sink = StreamSink::new(ChatEncoder::new("openai-chat/gpt", false), tx);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        sink.emit_now(&HarnessEvent::Text("hello".to_owned()));
+    })
+    .await
+    .expect("overflow lines are shed, never awaited");
+    assert_eq!(
+        rx.try_recv().expect("the seed line survives"),
+        Some("seed".to_owned())
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "overflow lines are dropped past capacity"
+    );
+}
+
+#[tokio::test]
+async fn collect_owns_tool_results_for_a_non_stream_turn() {
+    let shutdown = CancellationToken::new();
+    let relay = Relay::start(
+        scripted(vec![
+            Ok(text("Hi")),
+            Ok(started("call_1", "read")),
+            Ok(args("call_1", br#"{"p":1}"#)),
+            Ok(done("call_1", "read", r#"{"p":1}"#)),
+            Ok(usage(10, 3)),
+            Ok(StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            }),
+        ]),
+        RelayMapper::new(Some(Family::Chat), Family::Chat),
+        &shutdown,
+    )
+    .await
+    .expect("the relay starts");
+    let turn = tokio::time::timeout(Duration::from_secs(5), relay.collect(&shutdown))
+        .await
+        .expect("collection ends")
+        .expect("the turn collects");
+    assert_eq!(turn.text, "Hi");
+    assert_eq!((turn.input_tokens, turn.output_tokens), (10, 3));
+    assert_eq!(turn.calls.len(), 1);
+    assert_eq!(turn.calls[0].call, "call_1");
+    assert_eq!(turn.calls[0].name, "read");
+    assert_eq!(turn.calls[0].args, r#"{"p":1}"#);
 }

@@ -242,9 +242,7 @@ async fn pump_keeps_reading_updates_while_a_permission_is_outstanding() {
     let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
     assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), fx.peer.read_frame())
-            .await
-            .is_err(),
+        writer.take_queued_frame().is_none(),
         "no duplicate cancel after the resolved request"
     );
 }
@@ -426,9 +424,7 @@ async fn client_answer_completes_the_wait_inside_the_pump() {
     let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
     assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), fx.peer.read_frame())
-            .await
-            .is_err(),
+        writer.take_queued_frame().is_none(),
         "an answered request gets no cancel"
     );
 }
@@ -471,4 +467,208 @@ async fn text_deltas_become_agent_message_chunks() {
     let (end, chunks) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
     assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
     assert_eq!(chunks, "Hello");
+}
+
+#[tokio::test]
+async fn foreign_turn_end_does_not_terminate_the_pump() {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version: AcpVersion::V1,
+        prompt_turn: TURN,
+    };
+    let foreign = TurnId::new(NonZeroU64::new(7).expect("nonzero turn"));
+    let driver = async {
+        fx.push(UpdateKind::TurnEnded {
+            turn: foreign,
+            stop: Stop::EndTurn,
+        })
+        .await;
+        let notice = fx.frame().await;
+        assert_eq!(method(&notice), "session/update");
+        assert!(
+            sonic_rs::to_string(&notice)
+                .expect("encode")
+                .contains("end_turn"),
+            "a foreign turn end surfaces as a notice, not silence: {notice}"
+        );
+        fx.push(UpdateKind::Delta {
+            turn: TURN,
+            channel: StreamChannel::Text,
+            text: "still here".into(),
+        })
+        .await;
+        let chunk = fx.frame().await;
+        assert_eq!(
+            chunk["params"]["update"]["sessionUpdate"].as_str(),
+            Some("agent_message_chunk")
+        );
+        fx.push(ended()).await;
+    };
+    let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
+    assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
+}
+
+#[tokio::test]
+async fn closed_source_fails_the_pump_without_a_terminal_stop() {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version: AcpVersion::V1,
+        prompt_turn: TURN,
+    };
+    drop(fx.feed);
+    let end = prompt_pump(&ctx, source, &cancel).await;
+    assert!(
+        matches!(end, PromptEnd::Failed(_)),
+        "a closed delivery source must fail the pump, never report a stop"
+    );
+    let locked = state.lock().await;
+    assert!(
+        locked.pending.is_empty() && locked.outstanding.is_empty(),
+        "a failed pump holds no waits"
+    );
+}
+
+#[tokio::test]
+async fn vanished_client_wait_defaults_without_an_echoed_cancel() {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version: AcpVersion::V1,
+        prompt_turn: TURN,
+    };
+    let driver = async {
+        fx.push(UpdateKind::RequestOpened(approval())).await;
+        let request = fx.frame().await;
+        assert_eq!(method(&request), "session/request_permission");
+        let client = request["id"].as_str().expect("string id").to_owned();
+        // Mirrors the `$/cancel_request` path: the client is gone, so the
+        // wait must take the core default and must not echo a cancel back.
+        fx.state.lock().await.pending.remove(&client);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fx.open_count().await != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the vanished wait finishes while the pump runs");
+        fx.push(ended()).await;
+    };
+    let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
+    assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
+    assert!(
+        writer.take_queued_frame().is_none(),
+        "a vanished wait gets no echoed cancel"
+    );
+}
+
+#[tokio::test]
+async fn foreign_turn_end_never_reports_idle_mid_prompt() {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version: AcpVersion::V2,
+        prompt_turn: TURN,
+    };
+    let foreign = TurnId::new(NonZeroU64::new(7).expect("nonzero turn"));
+    let driver = async {
+        fx.push(UpdateKind::TurnEnded {
+            turn: foreign,
+            stop: Stop::EndTurn,
+        })
+        .await;
+        let frame = fx.frame().await;
+        assert_eq!(method(&frame), "session/update");
+        let update = &frame["params"]["update"];
+        assert_eq!(
+            update["_dal/notice"]["kind"].as_str(),
+            Some("info"),
+            "a foreign turn end must surface as a notice: {frame}"
+        );
+        assert!(
+            sonic_rs::to_string(update)
+                .expect("encode")
+                .contains("end_turn"),
+            "the notice carries the background stop: {frame}"
+        );
+        assert!(
+            update.get("state").is_none(),
+            "no idle state may precede the prompt's own end: {frame}"
+        );
+        fx.push(ended()).await;
+    };
+    let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
+    assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
+}
+
+#[tokio::test]
+async fn unresumable_lag_fails_the_pump_instead_of_inventing_a_stop() {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version: AcpVersion::V1,
+        prompt_turn: TURN,
+    };
+    let driver = async {
+        fx.feed
+            .send(Delivery::Resync {
+                generation: Gen::new(NonZeroU64::MIN),
+                seq: Seq::new(NonZeroU64::MIN),
+            })
+            .await
+            .expect("pump reads deliveries");
+        let warning = fx.frame().await;
+        assert_eq!(method(&warning), "session/update");
+        assert!(
+            sonic_rs::to_string(&warning)
+                .expect("encode")
+                .contains("too slowly"),
+            "lag warns before it fails: {warning}"
+        );
+    };
+    let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
+    assert!(
+        matches!(end, PromptEnd::Failed(_)),
+        "a pump that cannot resync must fail, never invent a terminal stop"
+    );
+    assert!(
+        writer.take_queued_frame().is_none(),
+        "no fabricated stop follows a resync failure"
+    );
 }
