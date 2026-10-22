@@ -1803,6 +1803,17 @@ fn stored_login(access: &str) -> Credential {
     })
 }
 
+/// A stored `WorkOS` device sign-in: this provider carries neither an ID token nor an account id.
+fn stored_workos_login(access: &str) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from(access),
+        refresh_token: SecretString::from("stored-refresh"),
+        expires_at: None,
+        id_token: None,
+        account_id: None,
+    })
+}
+
 /// The error of a lowering that had to refuse, for wire types without `Debug`.
 fn refusal<T>(result: Result<T, ProviderError>) -> ProviderError {
     match result {
@@ -2490,7 +2501,8 @@ async fn mistral_cancelled_before_start_sends_nothing() -> TestResult {
 }
 
 /// A conversations stream whose reasoning arrives as two signed chunks, each
-/// in its own event, ahead of the visible answer.
+/// in its own event with object-valued content (the official Conversations
+/// event shape), ahead of the visible answer.
 fn mistral_signed_reply() -> String {
     let mut body = String::new();
     for data in [
@@ -5511,14 +5523,12 @@ fn compact_request(model: &str) -> ModelRequest {
     compact
 }
 
-/// Rewrites a provider entry into one routed shape.
-type EntryShape = fn(&mut ProviderEntry);
-
 #[tokio::test]
 async fn azure_and_copilot_routed_entries_compact_locally_without_any_request() -> TestResult {
     // The `openai` row's remote-compaction capability describes api.openai.com.
     // Pointed at an Azure or Copilot surface it routes turns through that
     // adapter, and neither offers the plain `/responses/compact` wire.
+    type EntryShape = fn(&mut ProviderEntry);
     let shapes: [(&str, EntryShape); 2] = [
         ("openai", |entry| entry.auth = AuthStyle::ApiKey),
         ("github-copilot-responses", |_| {}),
@@ -5697,13 +5707,13 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
         (
             "factory-droid",
             Family::GoogleAntigravity,
-            Some(stored_login("ya29-test")),
+            Some(stored_workos_login("ya29-test")),
             true,
         ),
         (
             "factory-droid",
             Family::Droid,
-            Some(stored_login("workos-test")),
+            Some(stored_workos_login("workos-test")),
             true,
         ),
         ("factory-droid", Family::Droid, None, false),
@@ -5747,80 +5757,10 @@ async fn oauth_only_families_are_ready_only_with_a_stored_oauth_sign_in() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one fixture parks and drops the workflows of a session in place"
-)]
-async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult {
-    use crate::family::gitlab::workflow::support::{
-        RestCounts, action_frame, rest_router, test_timeouts,
-    };
-    use crate::family::gitlab::workflow::{WorkflowScope, WorkflowTurn, run_turn};
+fn end_session_tool_call() -> ContextItem {
     use dal_core::{AssistantPart, CallId, ReplaySource};
-    use futures::{SinkExt, StreamExt};
-    use std::sync::Mutex;
 
-    // Parks a workflow row in the set's own table through a real tool-action
-    // turn, then ends the session through the public ProviderSet call. The
-    // next turn must create a fresh workflow (creates == 2): without the
-    // forwarding line it would resume the parked row and creates would stay
-    // 1. The family proof covers the table seam directly; this covers the
-    // public call reaching it. Server rig is the family's shared support.
-    let dir = TestDir::new()?;
-    let rest = TcpListener::bind("127.0.0.1:0").await?;
-    let rest_base = format!("http://{}", rest.local_addr()?);
-    let ws = TcpListener::bind("127.0.0.1:0").await?;
-    let ws_base = format!("http://{}", ws.local_addr()?);
-    let counts = Arc::new(Mutex::new(RestCounts::default()));
-    counts.lock().unwrap().ws_base = ws_base;
-    let mut servers = tokio::task::JoinSet::new();
-    servers.spawn(rest_router(rest, Arc::clone(&counts)));
-    servers.spawn(async move {
-        // First socket: the parked turn. Read START, deliver the tool action,
-        // then hold until the client closes on end_session.
-        let (tcp, _) = ws.accept().await.unwrap();
-        let mut parked = tokio_tungstenite::accept_async(tcp).await.unwrap();
-        let start = parked.next().await.unwrap().unwrap().into_text().unwrap();
-        assert!(start.contains("\"startRequest\""));
-        parked
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                action_frame("r-1").into(),
-            ))
-            .await
-            .unwrap();
-        while parked.next().await.is_some() {}
-        // Second socket: the fresh workflow after end_session.
-        let (tcp, _) = ws.accept().await.unwrap();
-        let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
-        let start = fresh.next().await.unwrap().unwrap().into_text().unwrap();
-        assert!(start.contains("\"workflowID\":\"w-2\""), "{start}");
-        fresh
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                r#"{"status":"FINISHED"}"#.into(),
-            ))
-            .await
-            .unwrap();
-        while fresh.next().await.is_some() {}
-    });
-    let set = ProviderSet::new(
-        &config(vec![], 0),
-        identity(),
-        EnvSnapshot::test(&[]),
-        dir.path(),
-        dir.path(),
-    )?;
-    let client = crate::http::build_client();
-    let cancel = CancellationToken::new();
-    let session = SessionId::new_v7();
-    let scope = WorkflowScope {
-        root_namespace_id: "42".into(),
-        namespace_path: Some("g".into()),
-        project_id: Some("11".into()),
-        project_path: None,
-        workflow_definition: None,
-    };
-    let tool_call = || ContextItem::Assistant {
+    ContextItem::Assistant {
         source: ReplaySource {
             family: Family::GitLab,
             model: "duo-agent".into(),
@@ -5832,8 +5772,11 @@ async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult 
             replay: None,
         }],
         replay: None,
-    };
-    let turn_request = |context: Vec<ContextItem>| ModelRequest {
+    }
+}
+
+fn end_session_turn_request(context: Vec<ContextItem>) -> ModelRequest {
+    ModelRequest {
         purpose: Purpose::Turn,
         model: ModelRoute::Api {
             family: Family::GitLab,
@@ -5856,10 +5799,82 @@ async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult 
             max_output_tokens: None,
         },
         cache_key: None,
+    }
+}
+
+async fn serve_end_session_workflows(ws: TcpListener) {
+    use crate::family::gitlab::workflow::support::action_frame;
+    use futures::{SinkExt, StreamExt};
+
+    // First socket: the parked turn. Read START, deliver the tool action,
+    // then hold until the client closes on end_session.
+    let (tcp, _) = ws.accept().await.unwrap();
+    let mut parked = tokio_tungstenite::accept_async(tcp).await.unwrap();
+    let start = parked.next().await.unwrap().unwrap().into_text().unwrap();
+    assert!(start.contains("\"startRequest\""));
+    parked
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            action_frame("r-1").into(),
+        ))
+        .await
+        .unwrap();
+    while parked.next().await.is_some() {}
+    // Second socket: the fresh workflow after end_session.
+    let (tcp, _) = ws.accept().await.unwrap();
+    let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+    let start = fresh.next().await.unwrap().unwrap().into_text().unwrap();
+    assert!(start.contains("\"workflowID\":\"w-2\""), "{start}");
+    fresh
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"status":"FINISHED"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    while fresh.next().await.is_some() {}
+}
+
+#[tokio::test]
+async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult {
+    use crate::family::gitlab::workflow::support::{RestCounts, rest_router, test_timeouts};
+    use crate::family::gitlab::workflow::{WorkflowScope, WorkflowTurn, run_turn};
+    use std::sync::Mutex;
+
+    // Parks a workflow row in the set's own table through a real tool-action
+    // turn, then ends the session through the public ProviderSet call. The
+    // next turn must create a fresh workflow (creates == 2): without the
+    // forwarding line it would resume the parked row and creates would stay
+    // 1. The family proof covers the table seam directly; this covers the
+    // public call reaching it. Server rig is the family's shared support.
+    let dir = TestDir::new()?;
+    let rest = TcpListener::bind("127.0.0.1:0").await?;
+    let rest_base = format!("http://{}", rest.local_addr()?);
+    let ws = TcpListener::bind("127.0.0.1:0").await?;
+    let ws_base = format!("http://{}", ws.local_addr()?);
+    let counts = Arc::new(Mutex::new(RestCounts::default()));
+    counts.lock().unwrap().ws_base = ws_base;
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(rest_router(rest, Arc::clone(&counts)));
+    servers.spawn(serve_end_session_workflows(ws));
+    let set = ProviderSet::new(
+        &config(vec![], 0),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let client = crate::http::build_client();
+    let cancel = CancellationToken::new();
+    let session = SessionId::new_v7();
+    let scope = WorkflowScope {
+        root_namespace_id: "42".into(),
+        namespace_path: Some("g".into()),
+        project_id: Some("11".into()),
+        project_path: None,
+        workflow_definition: None,
     };
     // First turn parks on the tool action: the ToolUse stop proves the row
     // was put back, so the creates == 1 check below is not vacuous.
-    let parked_request = turn_request(vec![user_text("go"), tool_call()]);
+    let parked_request = end_session_turn_request(vec![user_text("go"), end_session_tool_call()]);
     let turn = WorkflowTurn {
         request: &parked_request,
         model: "duo-agent",
@@ -5893,7 +5908,7 @@ async fn provider_end_session_drops_its_parked_gitlab_workflows() -> TestResult 
     // the next turn starts a fresh workflow instead of resuming it. The
     // timeout turns a missing forward into a failure instead of a hang.
     set.end_session(&session);
-    let fresh_request = turn_request(vec![user_text("go again")]);
+    let fresh_request = end_session_turn_request(vec![user_text("go again")]);
     let turn = WorkflowTurn {
         request: &fresh_request,
         model: "duo-agent",
@@ -6168,7 +6183,6 @@ async fn openrouter_streams_responses_by_default_and_chat_only_when_the_env_name
     }
     Ok(())
 }
-
 #[tokio::test]
 async fn dispatch_verify_oauth_only_none_refuses_before_network() -> TestResult {
     // Adapted from the supplied Droid bind/turn smoke: admission now refuses
@@ -6232,7 +6246,10 @@ async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResul
     for family in [Family::Droid, Family::GoogleAntigravity] {
         let dir = TestDir::new()?;
         let mut store = crate::auth::credential::AuthStore::empty(dir.path().join("auth.json"));
-        store.set("factory-droid", stored_login("admission-only-access"))?;
+        store.set(
+            "factory-droid",
+            stored_workos_login("admission-only-access"),
+        )?;
         store.store()?;
         let mut row = entry(
             "factory-droid",

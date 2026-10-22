@@ -14,7 +14,9 @@
 //! `ToolCallsDone`, one `Usage`, and one `Stop`, or one error instead. Only
 //! choice index 0 is read. Tool calls are keyed by their delta `index`; the
 //! first id and name of an index win, argument text is kept as raw bytes and
-//! validated once when the response finishes. [`decode_events`] drives the
+//! validated once when the response finishes. A delta without an index
+//! resumes the call its id names, else the call that last spoke, and opens
+//! one only when it carries an unseen id. [`decode_events`] drives the
 //! decoder over an SSE event stream.
 
 use std::{
@@ -373,12 +375,17 @@ struct Delta {
     reasoning_content: Option<String>,
     // The reasoning spelling of `reasoning` servers.
     reasoning: Option<String>,
+    // The reasoning spelling of `reasoning_text` servers.
+    reasoning_text: Option<String>,
     tool_calls: Option<Vec<ToolDelta>>,
 }
 
 #[derive(Deserialize)]
 struct ToolDelta {
-    index: u32,
+    // The slot of the call in the response. Lossy hosts omit it; such a
+    // delta resumes the open call its id names, else the one that last
+    // spoke (`ChatDecoder::unkeyed_index`).
+    index: Option<u32>,
     id: Option<String>,
     function: Option<FunctionDelta>,
 }
@@ -513,6 +520,9 @@ pub(crate) struct ChatDecoder {
     budget: StreamBudget,
     /// Open calls by delta index; iteration order is index order.
     calls: BTreeMap<u32, OpenCall>,
+    /// The slot of the call that last spoke on the stream; the resume
+    /// target of a tool delta without an index.
+    spoken: Option<u32>,
     /// The last non-null usage.
     usage: Option<Usage>,
     /// The first non-null `finish_reason` of choice 0, mapped.
@@ -532,6 +542,7 @@ impl ChatDecoder {
             model: model.into(),
             budget: StreamBudget::default(),
             calls: BTreeMap::new(),
+            spoken: None,
             usage: None,
             stop: None,
             emitted: false,
@@ -543,10 +554,12 @@ impl ChatDecoder {
     ///
     /// `[DONE]` finishes the response. Any other data is one chunk: a
     /// non-null `usage` is kept, only choice index 0 is read, non-empty
-    /// reasoning, `content`, and `refusal` text become deltas, a tool delta
-    /// opens its index with its id and name (later ones are ignored) and its
-    /// non-empty argument text is appended as raw bytes, and the first
-    /// non-null `finish_reason` is kept.
+    /// reasoning (`reasoning_content`, `reasoning`, or `reasoning_text`),
+    /// `content`, and `refusal` text become deltas, a tool delta opens its
+    /// index with its id and name (later ones are ignored; a delta without
+    /// an index resumes or continues an open call, see
+    /// [`Self::unkeyed_index`]) and its non-empty argument text is appended
+    /// as raw bytes, and the first non-null `finish_reason` is kept.
     ///
     /// # Errors
     ///
@@ -626,6 +639,7 @@ impl ChatDecoder {
             .reasoning_content
             .filter(non_empty)
             .or_else(|| delta.reasoning.filter(non_empty))
+            .or_else(|| delta.reasoning_text.filter(non_empty))
         {
             out.push(StreamEvent::ReasoningDelta { text });
         }
@@ -636,12 +650,17 @@ impl ChatDecoder {
         }
         for tool in delta.tool_calls.into_iter().flatten() {
             let mut function = tool.function;
-            let call = match self.calls.entry(tool.index) {
+            let index = match tool.index {
+                Some(index) => index,
+                None => self.unkeyed_index(tool.id.as_deref()),
+            };
+            self.spoken = Some(index);
+            let call = match self.calls.entry(index) {
                 Entry::Occupied(open) => open.into_mut(),
                 Entry::Vacant(slot) => {
                     self.budget.admit_item()?;
                     let name = function.as_mut().and_then(|function| function.name.take());
-                    slot.insert(open_call(tool.index, tool.id, name, out)?)
+                    slot.insert(open_call(index, tool.id, name, out)?)
                 }
             };
             if let Some(fragment) = function
@@ -656,6 +675,25 @@ impl ChatDecoder {
             }
         }
         Ok(())
+    }
+
+    /// Resolves the slot of a tool-call delta that arrived without an
+    /// index: a known id resumes its own call wherever it was opened, an
+    /// unseen id opens the slot after the highest open one, and a delta
+    /// with neither continues the call that last spoke; with nothing open
+    /// that is slot 0, where [`open_call`] refuses a keyless opening
+    /// exactly as it does for a keyed one.
+    fn unkeyed_index(&self, id: Option<&str>) -> u32 {
+        let id = id.filter(|id| !id.is_empty());
+        if let Some(id) = id
+            && let Some((index, _)) = self.calls.iter().find(|(_, call)| call.id.as_str() == id)
+        {
+            return *index;
+        }
+        if id.is_some() {
+            return self.calls.keys().next_back().map_or(0, |last| *last + 1);
+        }
+        self.spoken.unwrap_or(0)
     }
 
     /// Emits the terminal group. Calls close in index order; empty argument

@@ -29,7 +29,7 @@ use crate::{
         devin::{
             PATH_ASSIGN, PATH_AUTH, PATH_CHAT, PATH_DISCOVERY,
             connect::{ConnectError, decode_unary},
-            decode::decode_discovery,
+            decode::{DiscoveredModel, decode_discovery},
             history::router_prompt,
             proto::{AssignModelResponse, GetUserJwtResponse},
             request::{
@@ -819,6 +819,87 @@ fn azure_parts(
     ))
 }
 
+/// Resolves the chat model for one Devin turn through the adapter's own
+/// discovery: only a row the server marks as a router (and never a
+/// composite) earns an `AssignModel` call; every other uid chats directly.
+/// Returns the serving uid with its assignment JWT, if any.
+async fn resolve_devin_chat_model(
+    context: &StreamContext,
+    credential: &Credential,
+    wire_key: &str,
+    router_uid: &str,
+    base: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<(String, Option<String>, Vec<DiscoveredModel>)>, AttemptFailure> {
+    let discovery_url =
+        http::endpoint(Family::Devin, base, PATH_DISCOVERY).map_err(AttemptFailure::Provider)?;
+    let discovery_response = devin_unary(
+        &context.client,
+        discovery_url,
+        UNARY_HEADERS,
+        discovery_body(wire_key),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(discovery_response) = discovery_response else {
+        return Ok(None);
+    };
+    let discovery_bytes = devin_body(discovery_response, credential, cancel).await?;
+    let Some(discovery_bytes) = discovery_bytes else {
+        return Ok(None);
+    };
+    let rows = decode_discovery(&discovery_bytes).map_err(AttemptFailure::Provider)?;
+    let routed = rows
+        .iter()
+        .find(|row| row.uid.as_str() == router_uid)
+        .is_some_and(|row| row.is_model_router && row.harness_count == 0);
+    if !routed {
+        return Ok(Some((router_uid.to_owned(), None, rows)));
+    }
+    let cascade_id = context.session.to_string();
+    let assign_url =
+        http::endpoint(Family::Devin, base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
+    let assign_response = devin_unary(
+        &context.client,
+        assign_url,
+        UNARY_HEADERS,
+        assign_body(
+            wire_key,
+            router_uid,
+            &cascade_id,
+            router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
+        ),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(assign_response) = assign_response else {
+        return Ok(None);
+    };
+    let assign_bytes = devin_body(assign_response, credential, cancel).await?;
+    let Some(assign_bytes) = assign_bytes else {
+        return Ok(None);
+    };
+    let assigned: AssignModelResponse =
+        decode_unary(&assign_bytes, "AssignModelResponse").map_err(|err| devin_protocol(&err))?;
+    let assignment = assigned
+        .assignment
+        .filter(|assignment| {
+            !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
+        })
+        .ok_or_else(|| {
+            AttemptFailure::Provider(ProviderError::InvalidRequest {
+                message: String::from("devin assignment did not resolve a serving model"),
+            })
+        })?;
+    Ok(Some((
+        assignment.model_uid,
+        Some(assignment.assignment_jwt),
+        rows,
+    )))
+}
+
 /// Runs one Devin turn: `GetUserJwt`, `AssignModel`, then one
 /// `GetChatMessage` stream.
 ///
@@ -857,42 +938,14 @@ async fn devin_attempt(
     // 2. Resolve the route through the adapter's own discovery: only a row
     // the server marks as a router (and never a composite) earns an
     // `AssignModel` call; every other uid chats directly.
-    let discovery_url =
-        http::endpoint(Family::Devin, &base, PATH_DISCOVERY).map_err(AttemptFailure::Provider)?;
-    let discovery_response = devin_unary(
-        &context.client,
-        discovery_url,
-        UNARY_HEADERS,
-        discovery_body(&wire_key),
-        &context.user_agent,
-        cancel,
-    )
-    .await?;
-    let Some(discovery_response) = discovery_response else {
+    let Some((chat_model_uid, assignment_jwt, rows)) =
+        resolve_devin_chat_model(context, credential, &wire_key, &router_uid, &base, cancel)
+            .await?
+    else {
         return Ok(None);
     };
-    let discovery_bytes = devin_body(discovery_response, credential, cancel).await?;
-    let Some(discovery_bytes) = discovery_bytes else {
-        return Ok(None);
-    };
-    let rows = decode_discovery(&discovery_bytes).map_err(AttemptFailure::Provider)?;
-    let routed = rows
-        .iter()
-        .find(|row| row.uid == router_uid)
-        .is_some_and(|row| row.is_model_router && row.harness_count == 0);
 
     let cascade_id = context.session.to_string();
-    let (chat_model_uid, assignment_jwt) = if routed {
-        let Some((chat_model_uid, assignment_jwt)) =
-            devin_assign(context, credential, cancel, &wire_key, &cascade_id, &base).await?
-        else {
-            return Ok(None);
-        };
-        (chat_model_uid, assignment_jwt)
-    } else {
-        (router_uid, None)
-    };
-
     let execution_id = Uuid::new_v4().to_string();
     // The server's own ceiling for the resolved serving uid wins over the
     // catalog row; the caller's explicit cap wins over both.
@@ -965,60 +1018,6 @@ async fn devin_attempt(
         None,
         secrets,
         None,
-    )))
-}
-
-/// Assigns the router model on Devin when the discovery marks it as a
-/// router: sends the `AssignModel` unary call and returns the serving
-/// model uid with its assignment JWT. `None` when the server stays silent
-/// (the caller then yields no stream).
-async fn devin_assign(
-    context: &StreamContext,
-    credential: &Credential,
-    cancel: &CancellationToken,
-    wire_key: &str,
-    cascade_id: &str,
-    base: &str,
-) -> Result<Option<(String, Option<String>)>, AttemptFailure> {
-    let router_uid = context.request.model.id().to_owned();
-    let assign_url =
-        http::endpoint(Family::Devin, base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
-    let assign_response = devin_unary(
-        &context.client,
-        assign_url,
-        UNARY_HEADERS,
-        assign_body(
-            wire_key,
-            &router_uid,
-            cascade_id,
-            router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
-        ),
-        &context.user_agent,
-        cancel,
-    )
-    .await?;
-    let Some(assign_response) = assign_response else {
-        return Ok(None);
-    };
-    let assign_bytes = devin_body(assign_response, credential, cancel).await?;
-    let Some(assign_bytes) = assign_bytes else {
-        return Ok(None);
-    };
-    let assigned: AssignModelResponse =
-        decode_unary(&assign_bytes, "AssignModelResponse").map_err(|err| devin_protocol(&err))?;
-    let assignment = assigned
-        .assignment
-        .filter(|assignment| {
-            !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
-        })
-        .ok_or_else(|| {
-            AttemptFailure::Provider(ProviderError::InvalidRequest {
-                message: String::from("devin assignment did not resolve a serving model"),
-            })
-        })?;
-    Ok(Some((
-        assignment.model_uid,
-        Some(assignment.assignment_jwt),
     )))
 }
 
@@ -1983,25 +1982,94 @@ type StreamRequestParts = (
     Option<Box<str>>,
 );
 
+fn build_chat_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
+            ProviderError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::chat::ENDPOINT_PATH,
+    )?;
+    let mut request = context.client.post(url);
+    // A credential-less row (a keyless local gateway such as
+    // llama.cpp, configured `auth = "none"`) sends no header.
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
+fn build_mistral_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::mistral::request_body(&context.request, &context.thinking).map_err(|error| {
+            ProviderError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::mistral::ENDPOINT_PATH,
+    )?;
+    let mut request = context.client.post(url);
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
+fn build_ollama_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
+    let policy =
+        family::ollama::WirePolicy::for_model(deployment, &context.model, &context.entry.thinking);
+    let body = family::ollama::request_body(&context.request, &context.thinking, policy).map_err(
+        |error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        },
+    )?;
+    let base = family::ollama::trim_api_suffix(&context.base_url);
+    let url = http::endpoint(context.family, base, family::ollama::ENDPOINT_PATH)?;
+    let mut request = context.client.post(url);
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
 pub(crate) fn build_stream_request(
     context: &StreamContext,
     credential: &Credential,
 ) -> Result<StreamRequestParts, ProviderError> {
     let route_family = context.family;
+    let user_agent = context.user_agent.clone();
     let secrets = credential_secrets(credential);
     match route_family {
-        Family::Chat => build_openai_compatible_stream(
-            context,
-            credential,
-            secrets,
-            family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
-                ProviderError::InvalidRequest {
-                    message: error.to_string(),
-                }
-            })?,
-            family::chat::ENDPOINT_PATH,
-            None,
-        ),
+        Family::Chat => build_chat_stream_request(context, credential, secrets, user_agent),
         Family::Responses => {
             let wire = build_responses_wire_from_context(context, credential)?;
             let url = http::endpoint(route_family, &context.base_url, "responses")?;
@@ -2042,38 +2110,8 @@ pub(crate) fn build_stream_request(
         Family::GoogleGeminiCli => Err(ProviderError::InvalidRequest {
             message: String::from("Gemini CLI requests use the dedicated subprocess adapter"),
         }),
-        Family::Mistral => build_openai_compatible_stream(
-            context,
-            credential,
-            secrets,
-            family::mistral::request_body(&context.request, &context.thinking).map_err(
-                |error| ProviderError::InvalidRequest {
-                    message: error.to_string(),
-                },
-            )?,
-            family::mistral::ENDPOINT_PATH,
-            None,
-        ),
-        Family::Ollama => {
-            let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
-            let policy = family::ollama::WirePolicy::for_model(
-                deployment,
-                &context.model,
-                &context.entry.thinking,
-            );
-            build_openai_compatible_stream(
-                context,
-                credential,
-                secrets,
-                family::ollama::request_body(&context.request, &context.thinking, policy).map_err(
-                    |error| ProviderError::InvalidRequest {
-                        message: error.to_string(),
-                    },
-                )?,
-                family::ollama::ENDPOINT_PATH,
-                Some(family::ollama::trim_api_suffix(&context.base_url)),
-            )
-        }
+        Family::Mistral => build_mistral_stream_request(context, credential, secrets, user_agent),
+        Family::Ollama => build_ollama_stream_request(context, credential, secrets, user_agent),
         Family::PiMessages => build_pi_messages_stream(context, credential, secrets),
         Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
@@ -2099,35 +2137,6 @@ fn build_pi_messages_stream(
     let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
     Ok((
         context.client.post(url).header(header, value).body(body),
-        context.user_agent.clone(),
-        secrets,
-        None,
-    ))
-}
-
-/// Builds the streaming request for the OpenAI-compatible families (Chat,
-/// Mistral, Ollama): one POST on the family endpoint with an optional auth
-/// header, the built body, and the standard user agent. A credential-less
-/// row (a keyless local gateway such as llama.cpp, configured
-/// `auth = "none"`) sends no header.
-fn build_openai_compatible_stream(
-    context: &StreamContext,
-    credential: &Credential,
-    secrets: Vec<Box<str>>,
-    body: Vec<u8>,
-    path: &'static str,
-    base_override: Option<&str>,
-) -> Result<StreamRequestParts, ProviderError> {
-    let base = base_override.unwrap_or(&context.base_url);
-    let url = http::endpoint(context.family, base, path)?;
-    let mut request = context.client.post(url);
-    if let Some((header, value)) =
-        optional_auth_header(context.auth, credential, context.family, &context.provider)?
-    {
-        request = request.header(header, value);
-    }
-    Ok((
-        request.body(body),
         context.user_agent.clone(),
         secrets,
         None,

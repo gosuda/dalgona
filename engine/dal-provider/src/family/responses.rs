@@ -567,8 +567,8 @@ fn usage(wire: Option<WireUsage>) -> Usage {
         cache_write_tokens: input
             .and_then(|details| details.cache_write_tokens)
             .unwrap_or(0),
-        premium_requests: None,
         cost_usd: None,
+        premium_requests: None,
     }
 }
 

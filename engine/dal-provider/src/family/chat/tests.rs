@@ -262,8 +262,8 @@ fn text_turn_decodes_over_any_network_split() {
             output_tokens: 7,
             reasoning_tokens: Some(3),
             cache_write_tokens: 0,
-            premium_requests: None,
             cost_usd: None,
+            premium_requests: None,
         },
         StopReason::EndTurn,
     ));
@@ -655,4 +655,108 @@ fn cumulative_tool_arguments_stop_at_the_stream_event_budget() {
         decoder.calls.get(&0).map(|call| call.args.len()),
         Some(crate::stream_budget::STREAM_EVENTS_LIMIT)
     );
+}
+
+#[test]
+fn reasoning_text_is_a_third_reasoning_alias_in_upstream_order() {
+    let wire = sse(&[
+        r#"{"choices":[{"index":0,"delta":{"reasoning_text":"pondering"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"reasoning_content":"first","reasoning_text":"second"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        "[DONE]",
+    ]);
+    let (events, error) = run(&wire, wire.len());
+    assert!(error.is_none(), "{error:?}");
+    let mut expected = vec![
+        StreamEvent::ReasoningDelta {
+            text: "pondering".into(),
+        },
+        StreamEvent::ReasoningDelta {
+            text: "first".into(),
+        },
+    ];
+    expected.extend(done(Vec::new(), NO_USAGE, StopReason::EndTurn));
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn unkeyed_tool_deltas_continue_the_last_spoken_call() {
+    let wire = sse(&[
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"a","arguments":""}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"b","arguments":""}}]}}]}"#,
+        // Argument deltas with neither index nor id fill the last-spoken slot.
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"y\":"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"2}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ]);
+    let (events, error) = run(&wire, wire.len());
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events[events.len() - 3..],
+        done(
+            vec![
+                ToolCall {
+                    id: "call_a".into(),
+                    name: "a".into(),
+                    args: ToolArgs::Parsed(raw("{}")),
+                },
+                ToolCall {
+                    id: "call_b".into(),
+                    name: "b".into(),
+                    args: ToolArgs::Parsed(raw(r#"{"y":2}"#)),
+                },
+            ],
+            NO_USAGE,
+            StopReason::ToolUse,
+        )
+    );
+}
+
+#[test]
+fn unkeyed_tool_deltas_resume_by_id_and_open_unseen_ids() {
+    let wire = sse(&[
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"a","arguments":""}}]}}]}"#,
+        // No index, unseen id: opens the slot after the highest open one.
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"b","arguments":""}}]}}]}"#,
+        // No index, no id: continues the last-spoken call.
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"b\":1}"}}]}}]}"#,
+        // No index, known id: resumes that call wherever it was opened.
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"{\"a\":2}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ]);
+    let (events, error) = run(&wire, wire.len());
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(
+        events[events.len() - 3..],
+        done(
+            vec![
+                ToolCall {
+                    id: "call_a".into(),
+                    name: "a".into(),
+                    args: ToolArgs::Parsed(raw(r#"{"a":2}"#)),
+                },
+                ToolCall {
+                    id: "call_b".into(),
+                    name: "b".into(),
+                    args: ToolArgs::Parsed(raw(r#"{"b":1}"#)),
+                },
+            ],
+            NO_USAGE,
+            StopReason::ToolUse,
+        )
+    );
+}
+
+#[test]
+fn an_unkeyed_tool_delta_without_an_open_call_is_a_protocol_error() {
+    let (events, error) = run(
+        &sse(&[
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{}"}}]}}]}"#,
+        ]),
+        64,
+    );
+    assert_eq!(events, []);
+    assert!(matches!(error, Some(ProviderError::Protocol { .. })));
 }
