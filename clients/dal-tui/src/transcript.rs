@@ -46,8 +46,10 @@ impl Transcript {
         self.tool_durations.get(call).copied()
     }
 
-    /// Appends settled rows for `entry_id` once; repeats return an empty vec.
+    /// Appends settled rows for `entry_id` once, dropping its live pending
+    /// placeholder; repeats return an empty vec.
     pub fn commit(&mut self, entry_id: &str, rows: &[String]) -> Vec<String> {
+        self.clear_pending(entry_id);
         if !self.committed.insert(entry_id.to_owned()) {
             return Vec::new();
         }
@@ -229,5 +231,23 @@ mod tests {
 
         transcript.clear_pending("e1");
         assert!(transcript.pending_rows().next().is_none());
+    }
+
+    #[test]
+    fn committing_an_entry_clears_its_live_pending_placeholder() {
+        let mut transcript = Transcript::default();
+        transcript.set_pending(
+            "e1",
+            vec![RenderRow::new("streaming placeholder", Role::Dim)],
+        );
+        assert!(transcript.pending_rows().next().is_some());
+
+        let settled = vec!["settled row".to_owned()];
+        assert_eq!(transcript.commit("e1", &settled), settled);
+        assert_eq!(transcript.rows(), &settled);
+        assert!(
+            transcript.pending_rows().next().is_none(),
+            "the settled entry must not linger in the live block"
+        );
     }
 }
