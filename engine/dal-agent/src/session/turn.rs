@@ -236,7 +236,7 @@ impl Stored {
 /// An image returns as image bytes under its own media type. Text returns
 /// as UTF-8 and refuses the request when the stored bytes are not valid
 /// UTF-8: it is never sent with replacement characters.
-async fn hydrate_part(
+pub(crate) async fn hydrate_part(
     handle: &SessionHandle,
     part: &mut Part,
     cancel: &CancellationToken,

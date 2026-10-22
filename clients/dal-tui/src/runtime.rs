@@ -1177,8 +1177,7 @@ where
         surfaces.live.spin(now);
         dialog_landed = surfaces.paint(io, state, &mut painter, opts, &theme)?;
         if !dialog_landed
-            && !(surfaces.dialog.is_open()
-                && !crate::render::below_floor(term_width, term_height))
+            && (!surfaces.dialog.is_open() || crate::render::below_floor(term_width, term_height))
         {
             surfaces.dialog.tick_without_dialog(Instant::now());
         }

@@ -50,7 +50,7 @@ use crate::session::dispatch::{
 use crate::session::projection::SnapshotArgs;
 use crate::session::shared::{ChildPromptPolicy, Shared};
 use crate::session::tasks::SessionTasks;
-use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
+use crate::session::turn::{RequestDeps, StreamConverter, hydrate_part, infer_stream};
 use crate::session::{SessionHandle, commands};
 
 /// Upper bound on concurrent reads in one read run.
@@ -837,11 +837,18 @@ impl Driver {
             .map(|resolved| resolved.call.clone())
             .collect();
         let entries = self.deps.shared.leaf_entries();
-        let Some(session_results) = Self::journaled_results_for_round(&entries, &order) else {
+        let Some(mut session_results) = Self::journaled_results_for_round(&entries, &order) else {
             return Some(dal_provider::ProviderError::InvalidRequest {
                 message: "this round's journaled tool result holds a part that cannot be returned to the provider; refusing to resume the parked run.".into(),
             });
         };
+        for result in &mut session_results {
+            for part in &mut result.parts {
+                if let Err(error) = hydrate_part(&self.deps.handle, part, cancel).await {
+                    return Some(error);
+                }
+            }
+        }
         slot.respond(session_results, cancel).await.err()
     }
 

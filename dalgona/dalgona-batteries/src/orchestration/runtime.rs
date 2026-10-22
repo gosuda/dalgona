@@ -3115,6 +3115,8 @@ fn salvage_argv_net_diff(dir: &str, base: &str) -> Vec<String> {
         dir.to_owned(),
         "diff".to_owned(),
         "--binary".to_owned(),
+        "--no-ext-diff".to_owned(),
+        "--no-textconv".to_owned(),
         base.to_owned(),
     ]
 }

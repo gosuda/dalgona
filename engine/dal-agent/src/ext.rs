@@ -207,6 +207,17 @@ impl Caller {
         self.continuation.clone()
     }
 
+    /// Drops the attached continuation slot, if any.
+    ///
+    /// Callers retained past their minting invocation must not carry its
+    /// slot: the owner is released at invocation end, and a later Cursor
+    /// inference through the dead handle fails instead of running one-shot.
+    #[must_use]
+    pub fn without_continuation(mut self) -> Self {
+        self.continuation = None;
+        self
+    }
+
     /// Borrows the owning extension name.
     ///
     /// A [`Services`] implementation reads this to scope a call to the

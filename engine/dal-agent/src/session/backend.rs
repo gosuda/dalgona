@@ -3048,6 +3048,33 @@ mod tests {
         host.close(child).await.expect("close child");
         host.close(root).await.expect("close session");
     }
+
+    #[tokio::test]
+    async fn infer_deps_for_stripped_setup_caller_runs_one_shot() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+
+        let owner = crate::session::continuation::ContinuationOwner::new(
+            crate::session::tasks::SessionTasks::new(),
+        );
+        let setup_caller = private_test_caller("focus", dal_core::Origin::User)
+            .with_continuation(owner.downgrade());
+        drop(owner);
+
+        let retained = setup_caller.without_continuation();
+        assert!(
+            retained.continuation().is_none(),
+            "a caller retained past setup must not carry the setup slot"
+        );
+        let deps = backend.infer_deps(&retained);
+        assert!(
+            deps.continuation.is_none(),
+            "a stripped setup caller infers one-shot instead of failing on the released owner"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
 }
 
 #[cfg(test)]

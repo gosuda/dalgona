@@ -5881,6 +5881,8 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
             dir.as_str(),
             "diff",
             "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
             SALVAGE_BASE,
         ]));
         expected.push(words(&[
@@ -5997,7 +5999,16 @@ fn assert_reopened_salvage(
                 "--untracked-files=all",
                 "--ignored"
             ]),
-            words(&["git", "-C", dir_text, "diff", "--binary", SALVAGE_BASE]),
+            words(&[
+                "git",
+                "-C",
+                dir_text,
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                SALVAGE_BASE
+            ]),
             words(&[
                 "git",
                 "-C",
@@ -6692,7 +6703,16 @@ fn assert_only_plain_tree_salvaged(
                 "--untracked-files=all",
                 "--ignored"
             ]),
-            words(&["git", "-C", plain_text, "diff", "--binary", SALVAGE_BASE]),
+            words(&[
+                "git",
+                "-C",
+                plain_text,
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                SALVAGE_BASE
+            ]),
             words(&[
                 "git",
                 "-C",
@@ -6924,6 +6944,27 @@ fn salvage_status_class_reports_only_untracked_and_ignored_entries() {
         super::salvage_status_class(b"M a.txt\n"),
         None,
         "a one-column entry is not a line git emits"
+    );
+}
+
+/// The net patch must carry original bytes: a configured textconv driver or
+/// external diff would rewrite or empty file contents in the capture, and the
+/// worktree is removed once the patch is durable. Both filters stay off.
+#[test]
+fn salvage_net_diff_disables_external_content_filters() {
+    assert_eq!(
+        super::salvage_argv_net_diff("/tree", SALVAGE_BASE),
+        vec![
+            "git".to_owned(),
+            "-C".to_owned(),
+            "/tree".to_owned(),
+            "diff".to_owned(),
+            "--binary".to_owned(),
+            "--no-ext-diff".to_owned(),
+            "--no-textconv".to_owned(),
+            SALVAGE_BASE.to_owned(),
+        ],
+        "the salvage capture keeps raw bytes past textconv and ext-diff"
     );
 }
 
