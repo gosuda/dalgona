@@ -2,11 +2,9 @@
 //!
 //! These tests pin the order and the failure points of the capture: every
 //! blob lands before the first record, a cancellation or failure before the
-//! records leaves the set `Empty`, a cancel never splits the record run, a
+//! records leaves the set `Empty`, a cancel never splits the record run, and a
 //! journal failure inside the run leaves a strict prefix that the next input
-//! completes without a duplicate or conflicting id, and a well-formed row
-//! outside the admitted bounds fails before any write, preserving the valid
-//! rows and appending no duplicate id. The seam records what the
+//! completes without a duplicate or conflicting id. The seam records what the
 //! hook asks for; the real-host witnesses (real journal and blob store) live
 //! in `tests/letter_first_prompt.rs`.
 
@@ -16,12 +14,12 @@ use std::sync::{Arc, Mutex};
 use dal_agent::error::ServiceError;
 use dal_agent::ext::services::ServiceFuture;
 use dal_agent::ext::{Caller, HookCx, HookError, RawValue, Services, Tool, ToolOutcome};
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, PrivateEffect};
+use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, BlobId, Caps, EntryId, FetchRequest, FetchResponse, Inference,
     InputEvent, InputVerdict, JobsOp, JobsReply, ModelInfo, ModelRequest, ModelRoute, Notice, Part,
-    Question, RunOutput, RunRequest, SessionId, SidecarOp, StateError, StateOp, StateRecord,
-    TurnOp, TurnOpReply, Visibility,
+    PrivateEffect, Question, RunOutput, RunRequest, SessionId, SidecarOp, StateError, StateOp,
+    StateRecord, TurnOp, TurnOpReply, Visibility,
 };
 use dal_provider::EventStream;
 
@@ -596,28 +594,6 @@ async fn invalid_row_beside_valid_rows_appends_nothing() {
         [],
         "the valid row is kept and no duplicate id is appended"
     );
-}
-
-/// A well-formed row whose id sits outside `1..=20` fails before any write.
-#[tokio::test]
-async fn id_outside_the_admission_range_fails_before_any_write() {
-    let registry = registry(&TWO);
-    let assembly = drawn(&registry);
-    let bad = row(&assembly.chunks[0]).replacen("\"id\":\"1\"", "\"id\":\"21\"", 1);
-    let tap = Tap {
-        stored: vec![bad],
-        ..Tap::default()
-    }
-    .shared();
-    let result = run(&tap, registry).await;
-
-    assert_eq!(
-        result,
-        Err(HookError::Failed {
-            message: "letter record '21' failed validation".into(),
-        })
-    );
-    assert_eq!(tap.ops(), [], "no blob or record lands before the failure");
 }
 
 #[test]

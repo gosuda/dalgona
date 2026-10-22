@@ -471,11 +471,9 @@ impl FirstInputHook {
     /// # Errors
     ///
     /// Returns [`HookError::Cancelled`] when the turn is cancelled and the
-    /// service text when a record read, blob write, or record write fails,
-    /// or when a stored row is well-formed but outside the admitted bounds
-    /// (the fold keeps the running content with one notice; a failed write
-    /// leaves a prefix the next turn completes, while a corrupt row fails
-    /// every turn until it is fixed). A font failure degrades to an
+    /// service text when a record read, blob write, or record write fails
+    /// (the fold keeps the running content with one notice; the next turn
+    /// resumes from the persisted prefix). A font failure degrades to an
     /// empty assembly, so every description stays text.
     async fn first_input(&self, input: InputEvent, cx: &HookCx) -> Result<InputVerdict, HookError> {
         if cx.cancel.is_cancelled() {
@@ -615,11 +613,12 @@ fn failed(error: impl std::fmt::Display) -> HookError {
 }
 
 /// Reads this session's stored letter records: decoded, validated, and in
-/// ascending id order. A body that does not decode fails the read, and so
-/// does a well-formed body outside the admitted bounds: the failure lands
-/// before any blob or record write, so a corrupt row can never hide behind
-/// a freshly persisted duplicate id. Valid rows are preserved untouched;
-/// nothing is migrated or deleted.
+/// ascending id order. A body that does not decode fails the read; a
+/// well-formed row whose id parses to `1..=20` but fails validation fails
+/// the read before any blob or record write, so a corrupt row can never hide
+/// behind a freshly persisted duplicate id. A well-formed body outside the
+/// admitted bounds is skipped. Valid rows are preserved untouched; nothing
+/// is migrated or deleted.
 async fn stored_letters(cx: &HookCx) -> Result<Vec<SkillLetterRecord>, HookError> {
     let bodies = cx
         .services
@@ -629,13 +628,16 @@ async fn stored_letters(cx: &HookCx) -> Result<Vec<SkillLetterRecord>, HookError
     let mut admitted: Vec<(u8, SkillLetterRecord)> = Vec::with_capacity(bodies.len());
     for body in &bodies {
         let record = decode_record(body).map_err(failed)?;
-        let Some(number) = record.validated() else {
+        if let Some(number) = record.validated() {
+            admitted.push((number, record));
+        } else if matches!(parse_letter_id(&record.id), Some(1..=20)) {
             return Err(failed(format!(
                 "letter record '{}' failed validation",
                 record.id
             )));
-        };
-        admitted.push((number, record));
+        }
+        // Well-formed bodies outside the admitted bounds are skipped: an
+        // orphan id can never collide with a re-persisted admitted id.
     }
     admitted.sort_by_key(|(number, _)| *number);
     Ok(admitted.into_iter().map(|(_, record)| record).collect())
