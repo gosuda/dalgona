@@ -33,7 +33,7 @@ async fn image_host(root: &Path, steps: &[String]) -> TestResult<Host> {
     let script = root.join("script.jsonl");
     std::fs::write(&script, steps.join("\n"))?;
     let user = format!(
-        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[plugin.history]\nshare = 0.4\n[providers.scripted]\nfixture = {:?}\n",
+        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[plugin.history]\nshare = 0.4\n[providers.scripted]\nfixture = {:?}\n",
         script.display().to_string()
     );
     let factory = dalgona::product();

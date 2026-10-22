@@ -25,7 +25,7 @@ async fn work_host(root: &Path, steps: &[String]) -> support::TestResult<Host> {
     let script = root.join("script.jsonl");
     std::fs::write(&script, steps.join("\n"))?;
     let user = format!(
-        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\"]\n[providers.scripted]\nfixture = {:?}\n",
+        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\"]\n[providers.scripted]\nfixture = {:?}\n",
         script.display().to_string()
     );
     let factory = dalgona::product();

@@ -137,7 +137,7 @@ async fn mcp_stdio_tools_are_listed_as_deferred() -> support::TestResult<()> {
     let script = root.join("script.jsonl");
     std::fs::write(&script, support::tool_step("entry-declined", ENTRY, "{}"))?;
     let user = format!(
-        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"history\", \"judged\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[providers.scripted]\nfixture = {:?}\n",
+        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\ndisabled_batteries = [\"ask\", \"history\", \"judged\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[providers.scripted]\nfixture = {:?}\n",
         script.display().to_string()
     );
     let config = Config::load(ConfigProduct::Dalgona, &root, factory.defaults, Some(&user))?;

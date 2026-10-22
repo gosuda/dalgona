@@ -8,10 +8,10 @@ the repository contract first, then use this file for product composition and ba
 - Keep the `dalgona` crate as the composition root. Let `product()` register defaults,
   compiled batteries, docs, and binary aliases. Do not put battery behavior in the entry
   crate.
-- Register the twelve batteries `orchestration`, `procs`, `history`, `quality`, `judged`,
-  `web`, `work`, `mcp`, `review`, `ask`, `skills`, and `ttsr-rules` as Rust extensions.
-  Keep the boot gate on this complete inventory. This rule prevents a missing battery
-  from becoming a silent product variant.
+- Register the batteries `orchestration`, `history`, `quality`, `judged`, `web`,
+  `work`, `mcp`, `review`, `ask`, `skills`, `procs`, and `ttsr-rules` as Rust extensions. Keep the
+  boot gate on this complete inventory. This rule prevents a missing battery from
+  becoming a silent product variant.
 - Keep `dalgona-batteries` as a set of extension constructors. Each constructor must
   return registration records without file, network, process, credential, inference,
   or child-session work. Effects begin only after the host starts a session.

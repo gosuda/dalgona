@@ -4,7 +4,7 @@ use dalgona_gates::support;
 
 /// Every battery other than `web` stays off so the scripted fetch below
 /// drives exactly the web tool under test.
-const WEB_ONLY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"work\"]";
+const WEB_ONLY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"work\"]";
 
 /// Runs one scripted `web_fetch` call through the real binary and returns its
 /// single `tool_result` record.

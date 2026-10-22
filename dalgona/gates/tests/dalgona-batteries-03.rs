@@ -29,9 +29,9 @@ fn control_positive() -> String {
 
 /// Batteries other than quality stay off so the scripted steps below drive
 /// exactly one provider response per model call.
-const ONLY_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const ONLY_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 /// The same isolation with the detectors rule set omitted.
-const SILENCED: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[rule_sets]\nenabled = []";
+const SILENCED: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]\n[rule_sets]\nenabled = []";
 
 /// Streams `text` as one model turn through the real binary and returns the
 /// `rule_fired` records the turn left in its session journal.

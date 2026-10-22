@@ -10,7 +10,7 @@ use dal_core::{ClientId, Command, Expect, Part, Workspace};
 const WAIT: Duration = Duration::from_secs(30);
 /// The product wires the guard through the quality battery, so the guard
 /// halves keep it while every other battery stays off.
-const WITH_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"procs\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const WITH_QUALITY: &str = "disabled_batteries = [\"ask\", \"history\", \"judged\", \"mcp\", \"orchestration\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 
 /// A new file whose shape crosses guard bands by construction: nesting depth
 /// six, more than fifty physical lines, and fifteen branch points.

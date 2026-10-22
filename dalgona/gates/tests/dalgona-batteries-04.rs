@@ -13,7 +13,7 @@ use dal_core::ext::BeforeRequest;
 use dal_core::{ClientId, Command, Expect, Origin, Part, RequestParams, ThinkingLevel, Workspace};
 
 const WAIT: Duration = Duration::from_secs(30);
-const NO_BATTERIES: &str = "disabled_batteries = [\"ask\", \"history\", \"mcp\", \"orchestration\", \"procs\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
+const NO_BATTERIES: &str = "disabled_batteries = [\"ask\", \"history\", \"mcp\", \"orchestration\", \"quality\", \"review\", \"skills\", \"ttsr-rules\", \"web\", \"work\"]";
 /// The judge's classification reply: the first thinking level.
 const JUDGE_STEP: &str = r#"{"kind":"events","events":[{"type":"text_delta","text":"{\"answers\":[0]}"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#;
 
