@@ -103,9 +103,9 @@
   Journals written by an earlier build read as before, including a `model`
   record without a provider.
 - API model routes name their provider. `ModelRoute::Api` gains an optional
-  `provider`. It is left out of JSON, journal `model` records, and
-  `[model_route]` when absent, so every existing record, command, and file
-  reads and writes exactly as before. A route that names its provider resolves
+  `provider`. It is left out of JSON and journal `model` records when absent,
+  so every existing record and command reads and writes exactly as before. A
+  route that names its provider resolves
   that provider's row and nothing else: not through a same-family provider
   that lists the same native id, and not through a registered synthetic model
   that spells the same id. When that provider is not configured, or serves
@@ -142,22 +142,10 @@
   `provider/model`. A row from a server that predates the members keeps its
   old selection by name, is not scoped, and the list is never refused for
   lacking them. The protocol version stays 1.
-- A default saved from a provider-carrying route writes `provider` in
-  `[model_route]`; the legacy `model` string never carries it, and a route
-  without a provider writes the same bytes as before. A dalgon from before this
-  change cannot load a `dal.toml` whose `[model_route]` has `provider`: its
-  table decoder rejects the unknown member, and one rejected setting makes the
-  whole file fail to load, so that version refuses to start and names the
-  config error until you delete the `provider` line. Do not share one
-  `dal.toml` between this version and an earlier one after saving a provider
-  default.
 - Model rows carry the catalog provider that resolved them (`ModelInfo.provider`,
   absent in older payloads and read as empty). Synthetic rows report their
   model-id namespace. Provider-qualified model scoping can now use the row's
   own provider instead of rebuilding it from a display label.
-- Publish the committed model scope with every settings update. A change to
-  thinking, mode, approval, or name no longer reads as "scope unset" to a
-  client that adopts the update as sent; an explicit clear stays an empty list.
 - Add `Host::delete_session`: it refuses a session that is live in the host,
   leaves a tree whose lock another process holds untouched, and fails with
   not-found for an unknown id.
@@ -215,12 +203,6 @@
   not change anything, and a failed save says why it did not persist; neither
   prints "Saved as the default." or the resume hint. A rejected prompt from a
   skill or review command now reads `rejected: …` instead of `save failed: …`.
-- Detached jobs carry the command that started them. `exec` detaches now
-  report the validated command text on their job row (`JobStatus::command`,
-  absent when the starter supplied none), it survives settlement and the job
-  ledger across restarts, and extension code holding the `jobs` grant can
-  query it. Commandless jobs keep `command: None` and `ToolCx::detach`
-  unchanged; command-bearing detachers use the new `ToolCx::detach_command`.
 - Complete the native Ollama and Mistral conversations wires. New built-in
   providers `ollama`, `ollama-cloud`, and `mistral` need no `[providers]`
   entry. Ollama model discovery joins `GET /api/tags` to a `POST /api/show`

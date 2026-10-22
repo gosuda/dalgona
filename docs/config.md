@@ -7,8 +7,7 @@ The table shows dal's built-in defaults before product TOML, user settings, and 
 | key | type | default | meaning |
 |---|---|---|---|
 | `mode` | string | `normal` | harness mode: `normal`, `eval-first`, or `eval-only`; `--mode` overrides it for one run; see [Tools](tools.md) |
-| `model` | string | `none` | the default model reference; dal writes it when you pick a model; `-m` overrides it for one run; `model_route` wins when both are set |
-| `model_route` | table | `none` | the structured default model; see below |
+| `model` | string | `none` | the default model reference; dal writes it when you pick a model; `-m` overrides it for one run |
 | `thinking` | string | `medium` | the default reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; `--thinking` overrides it for one run |
 | `approval` | string | `ask` | the approval policy for `patch` and `exec`: `ask` asks before each call, `edits` approves edits and asks for `exec`, `all` approves every call; `--approval` overrides it for one run; see [Tools](tools.md) |
 | `screen` | string | `inline` | the terminal surface: `inline` keeps terminal scrollback; `fullscreen` uses the alternate screen and replays the settled transcript on exit; `--screen` overrides it for one run; see [Terminal](terminal.md) |
@@ -74,8 +73,6 @@ A `[providers.<id>]` table sets connection and authentication settings:
 - `max_concurrent_requests`: maximum simultaneous requests for this provider, between 1 and 64 (default 4).
 - `api_version`: the `api-version` query value for an Azure-shaped entry. An entry value wins over `AZURE_OPENAI_API_VERSION`.
 - `deployments`: a table mapping catalog model ids to Azure deployment names. An entry value wins model by model over `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`; a model with no mapping is sent under its own id. Quote a model id that holds a dot (`"gpt-5.5" = "..."`), or TOML reads the dot as a table path.
-
-`[model_route]` is the authoritative default model when present. Saving a default writes it beside `model`. `kind = "api"` takes `family`, `model`, and an optional `provider`. The `provider` is the id of the configured provider the model belongs to. `kind = "synthetic"` or `"harness"` takes `id` and no other member. With `provider` set, the default resolves that provider alone. Another provider that lists the same model id is never used. A missing provider is an error. The `model` string stays the older family-qualified spelling and never carries the provider. A table without `provider` carries the same members earlier versions wrote. An earlier dalgon cannot load a `dal.toml` whose `[model_route]` has `provider`. It rejects the unknown member, and one rejected setting makes the whole file fail to load. That version refuses to start and names the config error until you delete the `provider` line. After that, `model` selects by family there.
 
 ## Tables with their own keys
 
@@ -145,7 +142,7 @@ compact_ratio = 0.8
 port = 8080
 ```
 
-This file approves edits without asking and still asks before `exec`. It raises the reasoning level, starts compaction at 80 percent of the context window, and moves the router to port 8080. Pick a model in the terminal, and dal saves `model` and `[model_route]` for you.
+This file approves edits without asking and still asks before `exec`. It raises the reasoning level, starts compaction at 80 percent of the context window, and moves the router to port 8080. Pick a model in the terminal, and dal saves `model` for you.
 
 Add a plugin name to `plugins` only after its directory exists under `<data-root>/plugins/`. A plugin that fails to load stops startup. After you write the plugin from [Write a first plugin](plugins.md#write-a-first-plugin), add this line at the top of the file:
 
