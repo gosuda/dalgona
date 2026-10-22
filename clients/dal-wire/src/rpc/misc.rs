@@ -125,6 +125,9 @@ pub(super) fn route_identity(route: &ModelRoute) -> (String, String) {
                 Family::Chat | Family::Responses => "openai",
                 Family::Codex => "openai-codex",
                 Family::Anthropic => "anthropic",
+                // These families bind through the general HTTP adapter (the
+                // subprocess variant for Gemini CLI); each arm names its
+                // display provider id.
                 Family::Bedrock => "bedrock",
                 Family::Cursor => "cursor",
                 Family::Devin => "devin",

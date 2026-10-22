@@ -456,9 +456,10 @@ pub(crate) fn resolve_model(
         })
 }
 
-/// Renders one route as its wire model id: `openai-chat/<model>`,
-/// `openai-responses/<model>`, `openai-codex/<model>`, `anthropic/<model>`,
-/// or the synthetic or harness id itself.
+/// Renders one route as its wire model id: one `<namespace>/<model>` per API
+/// family (`openai-chat`, `openai-responses`, `openai-codex`, `anthropic`,
+/// and one namespace for every newer family), or the synthetic or harness
+/// id itself.
 pub(crate) fn route_id(route: &ModelRoute) -> String {
     match route {
         ModelRoute::Api { family, model } => {
@@ -467,6 +468,9 @@ pub(crate) fn route_id(route: &ModelRoute) -> String {
                 Family::Responses => "openai-responses",
                 Family::Codex => "openai-codex",
                 Family::Anthropic => "anthropic",
+                // No provider adapter exists for these families yet
+                // (Provider::from_family refuses them); each leaves this
+                // arm for its display name when its adapter lands.
                 Family::Bedrock => "bedrock",
                 Family::Cursor => "cursor",
                 Family::Devin => "devin",
@@ -500,6 +504,18 @@ pub(crate) fn parse_route_id(id: &str) -> Option<ModelRoute> {
         "openai-responses" => Family::Responses,
         "openai-codex" => Family::Codex,
         "anthropic" => Family::Anthropic,
+        "bedrock" => Family::Bedrock,
+        "cursor" => Family::Cursor,
+        "devin" => Family::Devin,
+        "droid" => Family::Droid,
+        "gitlab" => Family::GitLab,
+        "google-generative-ai" => Family::GoogleGenerativeAi,
+        "google-vertex" => Family::GoogleVertex,
+        "google-gemini-cli" => Family::GoogleGeminiCli,
+        "google-antigravity" => Family::GoogleAntigravity,
+        "mistral" => Family::Mistral,
+        "ollama" => Family::Ollama,
+        "radius" => Family::PiMessages,
         _ => return ModelRoute::synthetic(id).ok(),
     };
     (!name.is_empty()).then(|| ModelRoute::Api {

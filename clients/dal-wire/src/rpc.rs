@@ -649,6 +649,9 @@ pub(crate) fn provider_label(route: &dal_core::ModelRoute) -> String {
             dal_core::Family::Chat | dal_core::Family::Responses => "openai".to_owned(),
             dal_core::Family::Codex => "openai-codex".to_owned(),
             dal_core::Family::Anthropic => "anthropic".to_owned(),
+            // These families bind through the general HTTP adapter (the
+            // subprocess variant for Gemini CLI); each arm names its
+            // display provider id.
             dal_core::Family::Bedrock => "bedrock".to_owned(),
             dal_core::Family::Cursor => "cursor".to_owned(),
             dal_core::Family::Devin => "devin".to_owned(),
