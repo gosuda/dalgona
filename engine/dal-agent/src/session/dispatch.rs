@@ -27,7 +27,7 @@ use super::context::{
 };
 use crate::broker::{Broker, Resolution, Resolved, Settled, default_timeout};
 use crate::ext::generation::Generation;
-use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
+use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_caller_with_continuation};
 use crate::ext::overlay::TurnTools;
 use crate::ext::tool::{
     Approved, CallSnapshot, Tool, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome,
@@ -37,6 +37,7 @@ use crate::jobs::JobTable;
 use crate::proc::{Proc, SpawnOpts, spawn_process};
 use crate::session::actor::TurnWork;
 use crate::session::contain::contained;
+use crate::session::continuation::ContinuationOwner;
 use crate::session::service_grants::{CallKey, Invocation, scope_roots};
 use crate::session::tasks::SessionTasks;
 
@@ -360,26 +361,35 @@ async fn run_one_inner(
         turn: ctx.turn,
         call: ready.call.clone(),
     });
+    let invocation = Invocation::next();
+    let tool_owner = ContinuationOwner::new(ctx.backend.tasks().clone());
     if let Err(error) = ctx
         .tools
-        .authorize_mcp(&ctx.generation, &ready.name, ctx.turn)
+        .authorize_mcp(
+            &ctx.generation,
+            &ready.name,
+            ctx.turn,
+            Some(tool_owner.downgrade()),
+        )
         .await
     {
+        tool_owner.release_if_live();
         return SettledOutcome::Err {
             text: error.to_string().into(),
         };
     }
     let args = match run_hooks(ctx, &event, ready.args.clone()).await {
         HookArgs::Blocked { reason } => {
+            tool_owner.release_if_live();
             return SettledOutcome::Err { text: reason };
         }
         HookArgs::Args(args) => args,
     };
     if let Some(outcome) = hook_rewrite_outcome(ctx, ready, &args) {
+        tool_owner.release_if_live();
         return outcome;
     }
-    let invocation = Invocation::next();
-    let caller = tool_caller(ctx, ready, invocation);
+    let caller = tool_caller(ctx, ready, invocation).with_continuation(tool_owner.downgrade());
     let approval_wait = Arc::new(AtomicU64::new(0));
     let runtime = CallRuntime::new(
         ctx,
@@ -410,6 +420,7 @@ async fn run_one_inner(
     let call = ToolCall::new(ready.call.as_str(), args);
     let started = Instant::now();
     let outcome = run_contained(&*tool, call, cx).await;
+    tool_owner.release_if_live();
     let waited = Duration::from_nanos(approval_wait.load(Ordering::Relaxed));
     *elapsed_ms = Some(execution_ms(started, waited));
     map_outcome(outcome)
@@ -438,8 +449,19 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
         turn_deadline: ctx.turn_deadline,
         script: ctx.script.clone(),
     };
-    for (index, extension, caller) in hook_fanout(&ctx.generation, Some(ctx.turn)) {
-        let dispatch = scope.cx(&caller, Some(ctx.turn));
+    for (index, extension) in ctx.generation.extensions.iter().enumerate() {
+        // One linear owner per hook iteration (decision b): hooks in one
+        // fanout run sequentially and each can reach model inference, so a
+        // shared slot would turn the second hook's independent call into a
+        // Live-no-staged-step InvalidRequest after the first hook parks.
+        let hook_owner = ContinuationOwner::new(ctx.backend.tasks().clone());
+        let Some(hook_caller) =
+            hook_caller_with_continuation(extension, Some(ctx.turn), Some(hook_owner.downgrade()))
+        else {
+            hook_owner.release_if_live();
+            continue;
+        };
+        let dispatch = scope.cx(&hook_caller, Some(ctx.turn));
         let step = dispatch_tool_call(
             extension.name(),
             &dispatch,
@@ -448,6 +470,7 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
             current,
         )
         .await;
+        hook_owner.release_if_live();
         if let Some(reason) = step.block {
             return HookArgs::Blocked {
                 reason: format!("blocked by {}: {reason}", extension.name()).into(),
@@ -683,28 +706,6 @@ struct CallRuntime {
     tasks: SessionTasks,
     /// The cancellation token bounding this call.
     cancel: CancellationToken,
-}
-
-impl CallRuntime {
-    /// Parks one detached child, attaching the command text the detaching
-    /// call ran when it did.
-    fn park_detached(&self, proc: Proc, command: Option<Arc<str>>) -> JobId {
-        let job = proc.job_id();
-        // A parked child never publishes again: the dispatch loop settles
-        // this call without the child, and detached output belongs to the
-        // job table, not to a live progress card.
-        let proc = proc.without_progress();
-        let park = ParkDetached {
-            jobs: Arc::clone(&self.jobs),
-            ledger: Arc::clone(&self.ledger),
-            call: self.call.clone(),
-            tool: self.tool.clone(),
-            command,
-            proc,
-        };
-        self.tasks.spawn(async move { park.run().await });
-        job
-    }
 }
 
 /// The bound digest of one approved call.
@@ -1238,11 +1239,20 @@ impl ToolCxRuntime for CallRuntime {
     }
 
     fn detach(&self, proc: Proc) -> JobId {
-        self.park_detached(proc, None)
-    }
-
-    fn detach_command(&self, proc: Proc, command: Arc<str>) -> JobId {
-        self.park_detached(proc, Some(command))
+        let job = proc.job_id();
+        // A parked child never publishes again: the dispatch loop settles
+        // this call without the child, and detached output belongs to the
+        // job table, not to a live progress card.
+        let proc = proc.without_progress();
+        let park = ParkDetached {
+            jobs: Arc::clone(&self.jobs),
+            ledger: Arc::clone(&self.ledger),
+            call: self.call.clone(),
+            tool: self.tool.clone(),
+            proc,
+        };
+        self.tasks.spawn(async move { park.run().await });
+        job
     }
 
     fn resolve(
@@ -2491,11 +2501,26 @@ fn checked_git_path(base: &Path, path: &std::ffi::OsStr, roots: &[PathBuf]) -> O
     let resolved = crate::session::backend::canonicalize_existing_prefix(&joined)?;
     roots
         .iter()
-        .any(|root| {
-            std::fs::canonicalize(root)
-                .is_ok_and(|canonical_root| resolved.starts_with(canonical_root))
-        })
+        .any(|root| path_in_canonical_root(&resolved, root))
         .then_some(resolved)
+}
+
+/// Reports whether a resolved path sits inside one grant root.
+///
+/// An existing root compares against its canonical form. A root the granted
+/// operation itself creates — `git worktree add` builds the whole
+/// `<root>/<session>/<task>` chain, so neither the root nor the target
+/// pre-exists — compares against the root's own canonical existing prefix
+/// instead of failing closed: the missing tail stays literal on both sides
+/// (an undecodable component refuses inside
+/// `canonicalize_existing_prefix`), so only paths genuinely below the
+/// granted root admit. A root that resolves nowhere still fails closed.
+fn path_in_canonical_root(path: &Path, root: &Path) -> bool {
+    if let Ok(canonical_root) = std::fs::canonicalize(root) {
+        return path.starts_with(canonical_root);
+    }
+    crate::session::backend::canonicalize_existing_prefix(root)
+        .is_some_and(|canonical_root| path.starts_with(canonical_root))
 }
 
 fn resolve_git_path(base: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
@@ -2521,8 +2546,6 @@ struct ParkDetached {
     call: CallId,
     /// The detaching tool.
     tool: Name,
-    /// The command text the detaching call ran, when it supplied one.
-    command: Option<Arc<str>>,
     /// The detached child.
     proc: Proc,
 }
@@ -2535,7 +2558,6 @@ impl ParkDetached {
             ledger,
             call,
             tool,
-            command,
             proc,
         } = self;
         // Every park entry arrives stripped: a parked child never publishes
@@ -2569,10 +2591,6 @@ impl ParkDetached {
         drop(ledger);
         let cancel = CancellationToken::new();
         let record = crate::jobs::JobRecord::new(job, tool.as_str(), log_path, cancel.clone());
-        let record = match command {
-            Some(command) => record.with_command(command),
-            None => record,
-        };
         let mut table = jobs.lock().await;
         if table.reserve(record).is_err() || table.adopt_detached(job).is_err() {
             return;
@@ -2621,6 +2639,7 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
             "unknown tool {name}."
         )));
     };
+    let direct_owner = ContinuationOwner::new(backend.tasks().clone());
     let caller = Caller::new(
         tool_name.clone(),
         dal_core::Origin::Builtin,
@@ -2628,7 +2647,8 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
         std::num::NonZeroU32::MIN,
         CallerKind::Tool,
         None,
-    );
+    )
+    .with_continuation(direct_owner.downgrade());
     let seed = NestedCall {
         name: tool_name,
         args,
@@ -2642,7 +2662,9 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
         shared: None,
         attached: None,
     };
-    direct_call_seeded(backend, seed).await
+    let outcome = direct_call_seeded(backend, seed).await;
+    direct_owner.release_if_live();
+    outcome
 }
 
 /// Finds the tool a nested call names.
@@ -4169,6 +4191,69 @@ mod tests {
             &outside,
             &inside_arg,
         );
+    }
+
+    #[test]
+    fn a_worktree_add_into_a_not_yet_created_grant_root_is_covered() {
+        // The orchestration grant names the worktree and isolation trees
+        // the first `git worktree add` itself creates: neither root exists
+        // yet, and the gate must not fail closed on that.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).expect("data");
+        let session = "01900000-0000-7000-8000-000000000001";
+        let worktrees = data.join("worktrees").join(session);
+        let isolation = data.join("isolation").join(session);
+        let approved = Approved::new(
+            CallId::new("worktree-add-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone(), worktrees.clone(), isolation.clone()]),
+            None,
+        );
+        let top = workspace.display().to_string();
+        let target = worktrees.join("task").display().to_string();
+        assert!(grant_covers(
+            &approved,
+            &[
+                "git".into(),
+                "-C".into(),
+                top.clone().into(),
+                "worktree".into(),
+                "add".into(),
+                "--detach".into(),
+                target.into(),
+                "HEAD".into(),
+            ],
+            &workspace
+        ));
+        // Genuine escapes stay refused: a sibling of the granted trees and
+        // a path outside the data root never pass, root or no root.
+        for outside in [
+            data.join("sessions").join("task").display().to_string(),
+            temp.path()
+                .join("outside")
+                .join("task")
+                .display()
+                .to_string(),
+        ] {
+            assert!(!grant_covers(
+                &approved,
+                &[
+                    "git".into(),
+                    "-C".into(),
+                    top.clone().into(),
+                    "worktree".into(),
+                    "add".into(),
+                    "--detach".into(),
+                    outside.into(),
+                    "HEAD".into(),
+                ],
+                &workspace
+            ));
+        }
     }
 
     #[test]
