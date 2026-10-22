@@ -7,6 +7,7 @@
 - Clear stale session-lock owner records before publishing a new owner.
 - Release abandoned grant questions and preserve revocations when a pending
   approval is saved.
+- Redact captured working-directory paths in provider debug output.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,
