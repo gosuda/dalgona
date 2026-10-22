@@ -292,6 +292,11 @@ fn error_display_texts() {
         ),
         (ProviderError::LoginCancelled, "sign-in cancelled.", None),
         (
+            ProviderError::Cancelled,
+            "provider operation cancelled.",
+            None,
+        ),
+        (
             ProviderError::UsageCheck {
                 reason: UsageCheckReason::Timeout,
             },
@@ -532,6 +537,8 @@ fn retryable_by_loop_names_only_the_four_replayable_failures() {
         ProviderError::AuthRejected {
             provider: String::from("openai"),
         },
+        ProviderError::LoginCancelled,
+        ProviderError::Cancelled,
     ];
     for error in terminal {
         assert!(!error.retryable_by_loop(), "{error}");

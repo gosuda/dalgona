@@ -827,7 +827,7 @@ async fn a_waiter_behind_a_busy_resolution_obeys_its_own_cancellation_and_deadli
             // Let the holder reach its helper and take the key's slot.
             tokio::time::sleep(Duration::from_millis(300)).await;
             let waiter_cancel = cancel();
-            let stop_waiter = waiter_cancel.clone();
+            let cancel_trigger = waiter_cancel.clone();
             let (cancelled, ()) = tokio::join!(
                 resolver_instance.resolve_credentials(
                     "amazon-bedrock",
@@ -837,7 +837,7 @@ async fn a_waiter_behind_a_busy_resolution_obeys_its_own_cancellation_and_deadli
                 ),
                 async {
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    stop_waiter.cancel();
+                    cancel_trigger.cancel();
                 },
             );
             let error = cancelled.expect_err("the cancelled waiter refuses");
