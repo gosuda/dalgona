@@ -111,7 +111,7 @@ fn status_notes_use_exact_count_grammar_and_product_names() {
 #[test]
 fn judge_and_retry_status_notes_match_the_deck() {
     assert_eq!(
-        judge_auto_off_note(2),
+        judge_auto_off_note("no judge model with usable credentials", 2),
         "rules: judge auto resolved to off: no judge model with usable credentials. 2 judged rules are not watched."
     );
     assert_eq!(

@@ -69,7 +69,10 @@ pub const JUDGE_ON_WITHOUT_CREDENTIALS: &str =
 /// Resolves the judged gate per the session-start rule.
 ///
 /// `judge_ready` is the judge handle's readiness at session start;
-/// `judged_count` is the number of judged rules in the set.
+/// `judged_count` is the number of judged rules in the set; `reason` is the
+/// already-resolved unavailability cause the caller derived once, reused here
+/// so this module derives no cause of its own. No notice is emitted when no
+/// judged rules are present.
 ///
 /// # Errors
 ///
@@ -79,13 +82,15 @@ pub fn gate_mode(
     mode: JudgeMode,
     judge_ready: bool,
     judged_count: usize,
+    reason: &str,
 ) -> Result<JudgeGate, JudgeGateError> {
     match (mode, judge_ready) {
         (JudgeMode::Off, _) => Ok(JudgeGate::Disabled { note: None }),
 
         (JudgeMode::On, false) => Err(JudgeGateError),
+        (JudgeMode::Auto, false) if judged_count == 0 => Ok(JudgeGate::Disabled { note: None }),
         (JudgeMode::Auto, false) => Ok(JudgeGate::Disabled {
-            note: Some(judge_auto_off_note(judged_count)),
+            note: Some(judge_auto_off_note(reason, judged_count)),
         }),
         (_, true) => Ok(JudgeGate::Enabled),
     }
@@ -117,7 +122,9 @@ impl JudgedLane {
     /// `interrupts` is whether the watch budget allows interrupts;
     /// `max_retries` bounds the waits this turn. The rule latches for the
     /// turn on every match; only the first interrupting match within budget
-    /// enters judge pending.
+    /// enters judge pending. The latch follows real turn ordering, not
+    /// match-call order: a stale match from an older turn reports without
+    /// disturbing the live turn's latch or wait count.
     pub fn matched(
         &mut self,
         rule: &str,
@@ -125,10 +132,14 @@ impl JudgedLane {
         interrupts: bool,
         max_retries: u32,
     ) -> MatchDecision {
-        if self.turn != Some(turn) {
-            self.turn = Some(turn);
-            self.latched.clear();
-            self.stops = 0;
+        match self.turn {
+            Some(current) if turn < current => return MatchDecision::ReportOnly,
+            Some(current) if turn == current => {}
+            _ => {
+                self.turn = Some(turn);
+                self.latched.clear();
+                self.stops = 0;
+            }
         }
         if !self.latched.insert(rule.into()) {
             return MatchDecision::ReportOnly;
@@ -182,19 +193,58 @@ mod tests {
     #[test]
     fn gate_resolution_table() {
         assert_eq!(
-            gate_mode(JudgeMode::Off, false, 2),
+            gate_mode(
+                JudgeMode::Off,
+                false,
+                2,
+                "no judge model with usable credentials"
+            ),
             Ok(JudgeGate::Disabled { note: None })
         );
         assert_eq!(
-            gate_mode(JudgeMode::Off, true, 2),
+            gate_mode(
+                JudgeMode::Off,
+                true,
+                2,
+                "no judge model with usable credentials"
+            ),
             Ok(JudgeGate::Disabled { note: None })
         );
-        assert_eq!(gate_mode(JudgeMode::On, true, 0), Ok(JudgeGate::Enabled));
-        assert_eq!(gate_mode(JudgeMode::On, false, 1), Err(JudgeGateError));
+        assert_eq!(
+            gate_mode(
+                JudgeMode::On,
+                true,
+                0,
+                "no judge model with usable credentials"
+            ),
+            Ok(JudgeGate::Enabled)
+        );
+        assert_eq!(
+            gate_mode(
+                JudgeMode::On,
+                false,
+                1,
+                "no judge model with usable credentials"
+            ),
+            Err(JudgeGateError)
+        );
         assert_eq!(JudgeGateError.to_string(), JUDGE_ON_WITHOUT_CREDENTIALS);
-        assert_eq!(gate_mode(JudgeMode::Auto, true, 3), Ok(JudgeGate::Enabled));
         assert_eq!(
-            gate_mode(JudgeMode::Auto, false, 2),
+            gate_mode(
+                JudgeMode::Auto,
+                true,
+                3,
+                "no judge model with usable credentials"
+            ),
+            Ok(JudgeGate::Enabled)
+        );
+        assert_eq!(
+            gate_mode(
+                JudgeMode::Auto,
+                false,
+                2,
+                "no judge model with usable credentials"
+            ),
             Ok(JudgeGate::Disabled {
                 note: Some(
                     "rules: judge auto resolved to off: no judge model with usable credentials. 2 judged rules are not watched.".to_owned()
@@ -202,12 +252,26 @@ mod tests {
             })
         );
         assert_eq!(
-            gate_mode(JudgeMode::Auto, false, 0),
+            gate_mode(
+                JudgeMode::Auto,
+                false,
+                1,
+                r#"unknown judge model "missing/model""#
+            ),
             Ok(JudgeGate::Disabled {
                 note: Some(
-                    "rules: judge auto resolved to off: no judge model with usable credentials. 0 judged rules are not watched.".to_owned()
+                    "rules: judge auto resolved to off: unknown judge model \"missing/model\". 1 judged rules are not watched.".to_owned()
                 ),
             })
+        );
+        assert_eq!(
+            gate_mode(
+                JudgeMode::Auto,
+                false,
+                0,
+                "no judge model with usable credentials"
+            ),
+            Ok(JudgeGate::Disabled { note: None })
         );
     }
 
@@ -264,6 +328,33 @@ mod tests {
         );
         assert_eq!(
             lane.matched("r", turn(2), true, 1),
+            MatchDecision::JudgePending
+        );
+        assert_eq!(lane.stops(), 1);
+    }
+    #[test]
+    fn stale_turn_match_keeps_the_live_turn_latch() {
+        let mut lane = JudgedLane::new();
+        assert_eq!(
+            lane.matched("r", turn(2), true, 3),
+            MatchDecision::JudgePending
+        );
+        // A late match from an older turn reports without resetting the
+        // live turn: the latch and wait count survive, and the stale rule
+        // never enters judge pending.
+        assert_eq!(
+            lane.matched("r", turn(1), true, 3),
+            MatchDecision::ReportOnly
+        );
+        assert_eq!(lane.stops(), 1);
+        assert_eq!(
+            lane.matched("r", turn(2), true, 3),
+            MatchDecision::ReportOnly
+        );
+        assert_eq!(lane.stops(), 1);
+        // A genuinely newer turn still re-arms the latch and budget.
+        assert_eq!(
+            lane.matched("r", turn(3), true, 3),
             MatchDecision::JudgePending
         );
         assert_eq!(lane.stops(), 1);
