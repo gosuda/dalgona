@@ -459,3 +459,254 @@ fn now_millis() -> String {
         .round(Unit::Millisecond)
         .map_or_else(|_| Timestamp::now().to_string(), |stamp| stamp.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use dal_agent::error::ServiceError;
+    use dal_agent::ext::services::ServiceFuture;
+    use dal_agent::ext::{Caller, Doc, EventStream, RawValue, Services, Tool, ToolCx, ToolOutcome};
+    use dal_core::ext::{
+        McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
+    };
+    use dal_core::{
+        AgentsOp, AgentsReply, Answer, DenyReason, EntryId, FetchRequest, FetchResponse, Inference,
+        JobId, JobsOp, JobsReply, ModelRequest, ModelRoute, Notice, Question, RunOutput,
+        RunRequest, SessionId, SidecarOp, TurnOp, TurnOpReply,
+    };
+    use dal_ext::judge::JudgeConfig;
+    use tokio::sync::mpsc;
+
+    use super::super::{Task, TaskMsg};
+    use super::EPHEMERAL_NOTICE;
+
+    fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records exactly what an ephemeral host would refuse and what the
+    /// dream task must never touch: no job spawn, no sidecar write, no
+    /// dream record; only the one exact unavailable notice.
+    #[derive(Default)]
+    struct EphemeralStub {
+        notices: Mutex<Vec<String>>,
+        jobs_spawned: Mutex<u32>,
+        sidecar_writes: Mutex<u32>,
+        records_appended: Mutex<u32>,
+    }
+
+    fn refused<T: Send + 'static>() -> ServiceFuture<'static, T> {
+        Box::pin(async {
+            Err(ServiceError::failed(
+                None,
+                "unavailable in the ephemeral dream stub",
+            ))
+        })
+    }
+
+    impl Services for EphemeralStub {
+        fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            refused()
+        }
+
+        fn fs_write(&self, _who: &Caller, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+            refused()
+        }
+
+        fn net(&self, _who: &Caller, _req: FetchRequest) -> ServiceFuture<'_, FetchResponse> {
+            refused()
+        }
+
+        fn run(&self, _who: &Caller, _req: RunRequest) -> ServiceFuture<'_, RunOutput> {
+            refused()
+        }
+
+        fn env(&self, _who: &Caller, _key: &str) -> ServiceFuture<'_, Option<String>> {
+            refused()
+        }
+
+        fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
+            refused()
+        }
+
+        fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
+            refused()
+        }
+
+        fn mcp_declarations(&self, _who: &Caller) -> ServiceFuture<'_, Vec<McpDeclaration>> {
+            refused()
+        }
+
+        fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+            refused()
+        }
+
+        fn jobs(&self, _who: &Caller, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
+            if matches!(op, JobsOp::Spawn { .. }) {
+                *locked(&self.jobs_spawned) += 1;
+                return Box::pin(async {
+                    Ok(JobsReply::Spawned {
+                        id: JobId::new_v7(),
+                    })
+                });
+            }
+            refused()
+        }
+
+        fn turn(&self, _who: &Caller, _op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
+            refused()
+        }
+
+        fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
+            refused()
+        }
+
+        fn private_outcomes(
+            &self,
+            _who: &Caller,
+        ) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
+            refused()
+        }
+
+        fn add_session_tools(
+            &self,
+            _who: &Caller,
+            _tools: Vec<(Arc<dyn Tool>, Visibility)>,
+        ) -> ServiceFuture<'_, ()> {
+            refused()
+        }
+
+        fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
+            refused()
+        }
+
+        fn scheme(&self, _who: &Caller, _uri: &str) -> ServiceFuture<'_, Option<Doc>> {
+            refused()
+        }
+
+        fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
+            refused()
+        }
+
+        fn blob_get(&self, _who: &Caller, _digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            refused()
+        }
+
+        fn state(
+            &self,
+            _who: &Caller,
+            _op: StateOp,
+        ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+            refused()
+        }
+
+        fn sidecar(&self, _who: &Caller, op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            match op {
+                SidecarOp::Read { .. } => Box::pin(async {
+                    Err(ServiceError::Denied(DenyReason::Unavailable {
+                        what: "sidecar (ephemeral session)".into(),
+                    }))
+                }),
+                SidecarOp::Write { .. } => {
+                    *locked(&self.sidecar_writes) += 1;
+                    Box::pin(async { Ok(None) })
+                }
+                _ => refused(),
+            }
+        }
+
+        fn model_ready(
+            &self,
+            _who: &Caller,
+            _model: ModelRoute,
+        ) -> ServiceFuture<'_, Option<ModelRoute>> {
+            refused()
+        }
+
+        fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
+            refused()
+        }
+
+        fn infer_stream(
+            &self,
+            _who: &Caller,
+            _req: ModelRequest,
+        ) -> ServiceFuture<'_, EventStream> {
+            refused()
+        }
+
+        fn call_tool(
+            &self,
+            _who: &Caller,
+            _name: &str,
+            _args: Box<RawValue>,
+        ) -> ServiceFuture<'_, ToolOutcome> {
+            refused()
+        }
+
+        fn notify(&self, _who: &Caller, notice: Notice) {
+            locked(&self.notices).push(notice.text.to_string());
+        }
+
+        fn append_record(
+            &self,
+            _who: &Caller,
+            _kind: &str,
+            _body: Box<RawValue>,
+        ) -> ServiceFuture<'_, EntryId> {
+            *locked(&self.records_appended) += 1;
+            Box::pin(async { Ok(EntryId::new(std::num::NonZeroU64::MIN)) })
+        }
+
+        fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_session_sends_the_exact_notice_without_a_job_or_sidecar_write() {
+        let stub = Arc::new(EphemeralStub::default());
+        let services: Arc<dyn Services> = stub.clone();
+        let cx = ToolCx::for_test(Arc::clone(&services));
+        let mut task = Task::new(
+            SessionId::new_v7(),
+            JudgeConfig::default(),
+            None,
+            "test-model".into(),
+            services,
+            cx.caller().clone(),
+        );
+        task.startup().await;
+        assert!(
+            task.unavailable,
+            "an ephemeral sidecar denial marks the session unavailable"
+        );
+        let (_held, mut rx) = mpsc::channel::<TaskMsg>(8);
+        task.submit(&mut rx).await;
+        assert_eq!(
+            locked(&stub.notices).as_slice(),
+            ["history: auto-dream is unavailable in an ephemeral session."],
+            "an ephemeral trigger sends exactly one notice with the exact text"
+        );
+        assert_eq!(
+            EPHEMERAL_NOTICE,
+            "history: auto-dream is unavailable in an ephemeral session."
+        );
+        assert_eq!(
+            *locked(&stub.jobs_spawned),
+            0,
+            "an ephemeral trigger spawns no dream job"
+        );
+        assert_eq!(
+            *locked(&stub.sidecar_writes),
+            0,
+            "an ephemeral trigger writes no sidecar"
+        );
+        assert_eq!(
+            *locked(&stub.records_appended),
+            0,
+            "an ephemeral trigger commits no dream record"
+        );
+    }
+}

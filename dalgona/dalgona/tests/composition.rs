@@ -489,6 +489,127 @@ fn an_invalid_history_section_does_not_rescue_a_bad_neighbour_section() -> Resul
     Ok(())
 }
 
+fn run_scripted_turn(
+    extra_toml: &str,
+    steps: &[&str],
+) -> Result<(std::process::Output, Option<String>), Box<dyn Error>> {
+    let root = Root::create()?;
+    let config = root.0.join("config/dalgona");
+    let data = root.0.join("data");
+    fs::create_dir_all(&config)?;
+    fs::create_dir_all(&data)?;
+    let fixture = root.0.join("stream.jsonl");
+    fs::write(&fixture, steps.join("\n") + "\n")?;
+    fs::write(
+        config.join("dal.toml"),
+        format!(
+            "model = \"openai-responses/gpt-6\"\ndisabled_batteries = [\"judged\"]\n[providers.scripted]\nfixture = {:?}\n{extra_toml}",
+            fixture.to_string_lossy()
+        ),
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_dalgona"))
+        .args([
+            "-p",
+            "--json",
+            "--approval",
+            "all",
+            "Return the supplied stream.",
+        ])
+        .current_dir(&root.0)
+        .env_clear()
+        .env("HOME", &root.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("XDG_CONFIG_HOME", root.0.join("config"))
+        .env("XDG_DATA_HOME", &data)
+        .output()?;
+    let journal = find_journal(&data)
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok());
+    Ok((output, journal))
+}
+
+#[test]
+fn invalid_history_section_composes_load_and_reply_with_typed_warning() -> Result<(), Box<dyn Error>>
+{
+    let (output, journal) =
+        run_scripted_turn("[plugin.history]\nshare = 0.9\n", &[CLEAN_STREAM_STEP])?;
+    assert!(
+        output.status.success(),
+        "invalid history section must not abort startup or reply: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("history: [plugin.history].share must be a number from 0.1 to 0.7."),
+        "startup emits the exact typed warning: {stderr}"
+    );
+    let journal = journal.ok_or("successful run produced a journal")?;
+    assert_eq!(
+        journal_assistant_text_count(&journal, "clean response")?,
+        1,
+        "reply was recorded in session history"
+    );
+    Ok(())
+}
+
+#[test]
+fn foreign_history_key_composes_load_and_reply_with_typed_warning() -> Result<(), Box<dyn Error>> {
+    let (output, journal) =
+        run_scripted_turn("[plugin.history]\nunknown = true\n", &[CLEAN_STREAM_STEP])?;
+    assert!(
+        output.status.success(),
+        "unknown history key must not abort startup or reply: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warning =
+        dalgona_batteries::history::HistoryConfigError::UnknownKey("unknown".into()).to_string();
+    assert_eq!(
+        stderr.lines().filter(|line| *line == warning).count(),
+        1,
+        "startup emits the typed warning exactly once: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(&warning),
+        "startup warnings must not contaminate reply stdout"
+    );
+    let journal = journal.ok_or("successful run produced a journal")?;
+    assert_eq!(
+        journal_assistant_text_count(&journal, "clean response")?,
+        1,
+        "reply was recorded in session history"
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_history_section_with_unrelated_config_error_still_fails() -> Result<(), Box<dyn Error>> {
+    let (output, journal) = run_scripted_turn(
+        "[plugin.history]\nshare = 0.9\n[plugin.web]\nbogus = 1\n",
+        &[CLEAN_STREAM_STEP],
+    )?;
+    assert!(
+        !output.status.success(),
+        "unrelated config error in the same load must fail startup"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bogus"),
+        "stderr must report the unrelated error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("history:"),
+        "no history warning is emitted when an unrelated config error fails the build"
+    );
+    assert!(
+        journal.is_none(),
+        "no journal or reply is produced when config load fails"
+    );
+    Ok(())
+}
+
 #[test]
 fn history_disabled_keeps_the_extension_without_a_compactor() -> Result<(), Box<dyn Error>> {
     let enabled = build("")?;
@@ -617,73 +738,42 @@ fn detector_set_controls_real_streams_without_removing_quality_tools() -> Result
     Ok(())
 }
 
-const SORTED_BUNDLED: &[&str] = &[
-    "ask",
-    "history",
-    "judged",
-    "mcp",
-    "orchestration",
-    "procs",
-    "quality",
-    "review",
-    "skills",
-    "ttsr-rules",
-    "web",
-    "work",
-];
-
-// The battery run is every bundled battery plus the Builtin dalgona
-// manual, which compose() sorts into the same run. The manual is pushed
-// first, so without the sort it would sit before ask instead of between
-// ask and history: this tail pins the sort as well as the order.
-const SORTED_RUN: &[&str] = &[
-    "ask",
-    "dalgona",
-    "history",
-    "judged",
-    "mcp",
-    "orchestration",
-    "procs",
-    "quality",
-    "review",
-    "skills",
-    "ttsr-rules",
-    "web",
-    "work",
-];
-
-// Runs after removing one battery via "disabled_batteries".
-const WITHOUT_HISTORY: &[&str] = &[
-    "ask",
-    "dalgona",
-    "judged",
-    "mcp",
-    "orchestration",
-    "procs",
-    "quality",
-    "review",
-    "skills",
-    "ttsr-rules",
-    "web",
-    "work",
-];
-const WITHOUT_QUALITY: &[&str] = &[
-    "ask",
-    "dalgona",
-    "history",
-    "judged",
-    "mcp",
-    "orchestration",
-    "procs",
-    "review",
-    "skills",
-    "ttsr-rules",
-    "web",
-    "work",
-];
-
 #[test]
 fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<dyn Error>> {
+    const SORTED_BUNDLED: &[&str] = &[
+        "ask",
+        "history",
+        "judged",
+        "mcp",
+        "orchestration",
+        "procs",
+        "quality",
+        "review",
+        "skills",
+        "ttsr-rules",
+        "web",
+        "work",
+    ];
+    // The battery run is every bundled battery plus the Builtin dalgona
+    // manual, which compose() sorts into the same run. The manual is pushed
+    // first, so without the sort it would sit before ask instead of between
+    // ask and history: this tail pins the sort as well as the order.
+    const SORTED_RUN: &[&str] = &[
+        "ask",
+        "dalgona",
+        "history",
+        "judged",
+        "mcp",
+        "orchestration",
+        "procs",
+        "quality",
+        "review",
+        "skills",
+        "ttsr-rules",
+        "web",
+        "work",
+    ];
+
     fn battery_run(user_toml: &str) -> Result<Vec<String>, Box<dyn Error>> {
         let product = build(user_toml)?;
         let full: Vec<&str> = product
@@ -711,6 +801,14 @@ fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<
     fn expected(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
+    fn sorted_run_without(name: &str) -> Vec<String> {
+        let survivors: Vec<&str> = SORTED_RUN
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != name)
+            .collect();
+        expected(&survivors)
+    }
 
     // Exact inventory in byte order, not just self-sorted.
     let product = build("")?;
@@ -726,11 +824,11 @@ fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<
     // in its sorted slot.
     assert_eq!(
         battery_run("disabled_batteries = [\"history\"]\n")?,
-        expected(WITHOUT_HISTORY),
+        sorted_run_without("history"),
     );
     assert_eq!(
         battery_run("disabled_batteries = [\"quality\"]\n")?,
-        expected(WITHOUT_QUALITY),
+        sorted_run_without("quality"),
     );
     // History disabled through its own switch stays registered and keeps its
     // sorted slot between dalgona and judged.
