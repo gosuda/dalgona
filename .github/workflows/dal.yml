@@ -1,7 +1,7 @@
 name: dal
 on:
   push:
-    paths:
+    paths: &ci_paths
       - "core/**"
       - "engine/**"
       - "extensions/**"
@@ -24,28 +24,7 @@ on:
       - "AGENTS.md"
       - "README.md"
   pull_request:
-    paths:
-      - "core/**"
-      - "engine/**"
-      - "extensions/**"
-      - "clients/**"
-      - "cli/**"
-      - "gates/**"
-      - "dalgona/**"
-      - "prices/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "dist-workspace.toml"
-      - "clippy.toml"
-      - "rustfmt.toml"
-      - "deny.toml"
-      - "scripts/**"
-      - ".github/workflows/dal.yml"
-      - "rust-toolchain.toml"
-      - ".gitignore"
-      - "LICENSE.md"
-      - "AGENTS.md"
-      - "README.md"
+    paths: *ci_paths
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -79,7 +58,7 @@ jobs:
   gates:
     strategy:
       fail-fast: false
-      matrix:
+      matrix: &native_targets
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
@@ -130,14 +109,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-15-intel, target: x86_64-apple-darwin }
-          - { os: macos-15, target: aarch64-apple-darwin }
-          - { os: windows-2022, target: x86_64-pc-windows-msvc }
-          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+      matrix: *native_targets
     runs-on: ${{ matrix.os }}
     env:
       DAL_TIMING_BUDGETS: "1"

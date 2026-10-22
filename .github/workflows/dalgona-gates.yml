@@ -15,7 +15,7 @@ jobs:
   functional:
     strategy:
       fail-fast: false
-      matrix:
+      matrix: &native_targets
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
@@ -75,14 +75,7 @@ jobs:
     # push/PR runners cannot hold them.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-15-intel, target: x86_64-apple-darwin }
-          - { os: macos-15, target: aarch64-apple-darwin }
-          - { os: windows-2022, target: x86_64-pc-windows-msvc }
-          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+      matrix: *native_targets
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

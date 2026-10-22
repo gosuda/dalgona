@@ -1,7 +1,7 @@
 name: dalgona
 on:
   push:
-    paths:
+    paths: &ci_paths
       - "core/**"
       - "engine/**"
       - "extensions/**"
@@ -24,28 +24,7 @@ on:
       - "AGENTS.md"
       - "README.md"
   pull_request:
-    paths:
-      - "core/**"
-      - "engine/**"
-      - "extensions/**"
-      - "clients/**"
-      - "cli/**"
-      - "gates/**"
-      - "dalgona/**"
-      - "prices/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "dist-workspace.toml"
-      - "clippy.toml"
-      - "rustfmt.toml"
-      - "deny.toml"
-      - "scripts/**"
-      - ".github/workflows/dalgona.yml"
-      - "rust-toolchain.toml"
-      - ".gitignore"
-      - "LICENSE.md"
-      - "AGENTS.md"
-      - "README.md"
+    paths: *ci_paths
 permissions:
   contents: read
 concurrency:
