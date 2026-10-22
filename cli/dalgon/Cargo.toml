@@ -51,7 +51,7 @@ crossterm = "=0.29.0"
 dal-tui = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["stdio"] }
+rustix = { workspace = true, features = ["stdio", "termios"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
