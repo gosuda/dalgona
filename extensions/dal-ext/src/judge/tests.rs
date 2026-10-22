@@ -168,8 +168,8 @@ fn inference_for(reply: &ScriptReply) -> Inference {
                 output_tokens: reply.output_tokens,
                 reasoning_tokens: None,
                 cache_write_tokens: 0,
-                premium_requests: None,
                 cost_usd: None,
+                premium_requests: None,
             }),
         ],
     }
@@ -531,6 +531,16 @@ async fn empty_batch() -> TestResult {
 }
 
 #[tokio::test]
+async fn open_resolves_readiness_without_generating() -> TestResult {
+    let services = Arc::new(FakeServices::new(vec![ready_probe("judge-model")], vec![]));
+    let judge = open_judge(Arc::clone(&services), test_config(), None).await;
+    assert!(matches!(judge.state(), Gate::Ready { .. }));
+    assert_eq!(services.completions(), 0);
+    assert_eq!(services.rows(), []);
+    Ok(())
+}
+
+#[tokio::test]
 async fn timeout_aborts_request() -> TestResult {
     let services = Arc::new(FakeServices::new(
         vec![ready_probe("judge-model")],
@@ -723,6 +733,114 @@ async fn budget_exhausted_call() -> TestResult {
     assert_eq!(services.row_statuses(), ["ok", "ok", "budget"]);
     assert_eq!(services.notices(), [] as [String; 0]);
     assert_eq!(services.completions(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reopen_reuses_live_handle_and_restart_resets_budget() -> TestResult {
+    let services = Arc::new(FakeServices::new(
+        vec![ready_probe("judge-model"), ready_probe("judge-model")],
+        vec![
+            FakeServices::scripted(r#"{"answers":[true]}"#),
+            FakeServices::scripted(r#"{"answers":[false]}"#),
+        ],
+    ));
+    let session = SessionId::new_v7();
+    let context = HookCx::for_test(Arc::clone(&services) as Arc<dyn Services>, session, None);
+    let config = JudgeConfig {
+        max_per_turn: 1,
+        ..test_config()
+    };
+    let open = || JudgeOpen {
+        session: context.session,
+        config: config.clone(),
+        services: Arc::clone(&context.services),
+        caller: context.caller.clone(),
+        session_route: Some(ModelRoute::from_id("test/model")),
+        session_model_id: Box::from("test-session-model"),
+    };
+    let first = Judge::open(open()).await.expect("judge opens");
+    // The live handle is reused without touching readiness again: a second
+    // resolution would pop the scripted queue a second time here.
+    let second = Judge::open(open())
+        .await
+        .expect("reopen reuses the live handle");
+    assert!(matches!(first.state(), Gate::Ready { .. }));
+    assert!(matches!(second.state(), Gate::Ready { .. }));
+    assert_eq!(
+        first
+            .judge("ttsr", "shared", bool_question("one?"), None, None)
+            .await?,
+        Verdict::Bool(true)
+    );
+    // The reopened handle shares the same turn window, so the single-call
+    // budget is already spent for it too.
+    let error = second
+        .judge("ttsr", "shared", bool_question("two?"), None, None)
+        .await
+        .expect_err("shared turn budget is exhausted");
+    assert!(matches!(
+        error,
+        JudgeError::BudgetExhausted { max_per_turn: 1 }
+    ));
+    drop(first);
+    drop(second);
+    // Once every handle is gone a reopen resolves fresh: it consumes the
+    // second readiness probe and the turn budget starts over.
+    let restarted = Judge::open(open())
+        .await
+        .expect("restart reopens after all handles drop");
+    assert_eq!(
+        restarted
+            .judge("ttsr", "shared", bool_question("two?"), None, None)
+            .await?,
+        Verdict::Bool(false)
+    );
+    assert_eq!(services.row_statuses(), ["ok", "budget", "ok"]);
+    assert_eq!(services.completions(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn aborted_call_ledgers_cancelled_row() -> TestResult {
+    let services = Arc::new(FakeServices::new(
+        vec![ready_probe("judge-model")],
+        vec![delayed(r#"{"answers":[true]}"#, Duration::from_secs(60))],
+    ));
+    let judge = open_judge(Arc::clone(&services), test_config(), None).await;
+    let worker = judge.clone();
+    let mut pending = tokio::task::JoinSet::new();
+    pending.spawn(async move {
+        worker
+            .judge("ttsr", "shared", bool_question("slow?"), None, None)
+            .await
+    });
+    // Abort only after the call has entered inference, so the abort lands
+    // mid-flight instead of racing request start.
+    let entered = tokio::time::timeout(Duration::from_secs(10), async {
+        while services.completions() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(entered.is_ok(), "judge call entered inference");
+    pending.abort_all();
+    let abandoned = pending
+        .join_next()
+        .await
+        .expect("aborted call never resolves")
+        .expect_err("aborted call never resolves");
+    assert!(abandoned.is_cancelled());
+    // The Drop-spawned cancelled row lands asynchronously; poll for it with
+    // a bounded deadline instead of a fixed sleep.
+    let landed = tokio::time::timeout(Duration::from_secs(10), async {
+        while services.rows().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(landed.is_ok(), "cancelled row landed");
+    assert_eq!(services.row_statuses(), ["cancelled"]);
     Ok(())
 }
 
