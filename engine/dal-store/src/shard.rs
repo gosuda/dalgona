@@ -1162,7 +1162,7 @@ mod tests {
     use dal_core::{Entry, EntryId, EntryKind, JournalPart, Record, SessionId};
     use tokio::task::yield_now;
 
-    use super::{Job, Lane, PendingBlob, QUEUE_CAPACITY, SHARD_COUNT, Shards, pin};
+    use super::{AppendCall, Job, Lane, PendingBlob, QUEUE_CAPACITY, SHARD_COUNT, Shards, pin};
     use crate::{
         blob::INLINE_LIMIT,
         error::{BlobError, JournalError, StoreError},
@@ -1342,6 +1342,105 @@ mod tests {
         assert_eq!(lane.slot, 0);
         lane.close().await.unwrap();
         assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
+    }
+
+    #[tokio::test]
+    async fn stale_blobs_published_after_slot_reuse_is_dropped() {
+        let temp = TempDir::new();
+        let shards = Shards::start().expect("start shards");
+        let session_a = session_on(0);
+        let session_b = session_on(0);
+        let (pending, _, _) = prepared_text_blob();
+        let mut lane_a = shards
+            .attach(
+                session_a,
+                journal(&temp.file(0), &Faults::default()),
+                Some(temp.0.clone()),
+            )
+            .await
+            .expect("register journal");
+
+        // Hold the worker so the blob-bearing append, the retire, and a
+        // second hold line up in FIFO order before anything runs.
+        let (first_started, first_started_rx) = std_mpsc::channel();
+        let (first_release, first_release_rx) = std_mpsc::channel();
+        shards.shards[pin(session_a)]
+            .queue
+            .push_control(Job::Hold(Box::new(move || {
+                let _ = first_started.send(());
+                let _ = first_release_rx.recv();
+            })));
+        first_started_rx.recv().unwrap();
+
+        let mut append = Box::pin(lane_a.append(b"stale batch\n".to_vec(), vec![pending]));
+        std::future::poll_fn(|context| match append.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("worker is held"),
+        })
+        .await;
+        drop(append);
+        lane_a.retire_holding(Box::new(()));
+        let (second_started, second_started_rx) = std_mpsc::channel();
+        let (second_release, second_release_rx) = std_mpsc::channel();
+        shards.shards[pin(session_a)]
+            .queue
+            .push_control(Job::Hold(Box::new(move || {
+                let _ = second_started.send(());
+                let _ = second_release_rx.recv();
+            })));
+        let _ = first_release.send(());
+        // The worker ran the append (parking its publishes on the syncer)
+        // and the retire before this hold starts, so the syncer's
+        // BlobsPublished can only land behind it, on a freed slot.
+        second_started_rx.recv().unwrap();
+        let _ = second_release.send(());
+
+        // Re-register on the reused slot. `attach` returns only after the
+        // worker ran the replacement Register, so every job queued after this
+        // point lands strictly behind the new generation.
+        let mut lane_b = shards
+            .attach(session_b, journal(&temp.file(1), &Faults::default()), None)
+            .await
+            .expect("register replacement journal");
+        assert_eq!(lane_b.slot, lane_a.slot);
+        assert_eq!(lane_b.generation, lane_a.generation.wrapping_add(1));
+
+        // Barrier delivery: this stale BlobsPublished is queued after the
+        // replacement Register ran, so the worker can only process it against
+        // the new generation. Without the generation check it would write
+        // the old batch into the new journal and resolve Ok.
+        let (stale_done, stale_reply) = tokio::sync::oneshot::channel();
+        shards.shards[pin(session_a)]
+            .queue
+            .push_control(Job::BlobsPublished(AppendCall {
+                session: session_a,
+                slot: lane_a.slot,
+                generation: lane_a.generation,
+                batch: b"stale batch\n".to_vec(),
+                done: stale_done,
+            }));
+        assert!(matches!(
+            stale_reply.await,
+            Ok(Err(StoreError::Journal(JournalError::ShardClosed { .. })))
+        ));
+
+        // The live parked append resolves the same way: the old caller learns
+        // the lane closed and neither journal gains bytes.
+        assert!(matches!(
+            lane_a.settle().await,
+            Some(Err(StoreError::Journal(JournalError::ShardClosed { .. })))
+        ));
+        assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
+        assert_eq!(fs::read(temp.file(1)).unwrap(), [] as [u8; 0]);
+
+        // The reused slot stays healthy for its new owner.
+        let receipt = lane_b
+            .append(b"fresh\n".to_vec(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!((receipt.offset, receipt.len), (0, 6));
+        lane_b.close().await.unwrap();
+        assert_eq!(fs::read(temp.file(1)).unwrap(), b"fresh\n");
     }
 
     #[tokio::test]
