@@ -1450,3 +1450,33 @@ fn the_signed_stream_runs_through_sse_framing_and_the_event_stream_guard() {
     .concat();
     assert_eq!(seen, expected);
 }
+
+#[test]
+fn single_chunk_object_content_decodes_and_captures_verbatim() {
+    // The official Conversations event shape carries one chunk object in
+    // `content`; the decoder captures its verbatim text for the replay item.
+    let datas = [
+        STARTED.to_owned(),
+        format!(
+            r#"{{"type":"message.output.delta","output_index":0,"id":"e1","content":{SIGNED_A}}}"#
+        ),
+        format!(
+            r#"{{"type":"message.output.delta","output_index":0,"id":"e2","content":{SIGNED_ONE}}}"#
+        ),
+        r#"{"type":"message.output.delta","output_index":0,"id":"e3","content":{"type":"text","text":"Answer."}}"#.to_owned(),
+        DONE.to_owned(),
+    ];
+    let (events, error) = run_all(&datas);
+    assert!(error.is_none(), "{error:?}");
+    let expected = [
+        vec![
+            reasoning("alpha "),
+            reasoning("one"),
+            replay_event(&format!("{SIGNED_A},{SIGNED_ONE}")),
+            visible("Answer."),
+        ],
+        five_two_done(Vec::new(), StopReason::EndTurn),
+    ]
+    .concat();
+    assert_eq!(events, expected);
+}
