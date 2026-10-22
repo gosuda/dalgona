@@ -152,6 +152,34 @@ impl Painter {
         self.image_order.clear();
     }
 
+    /// Parks the caret on the last row of the live block, so whatever the
+    /// host writes next (the exit line) starts below the block instead of
+    /// over one of its rows.
+    ///
+    /// A hidden caret rests at the block top while the composer is empty, and
+    /// the host's `\r\n` text continues from wherever the caret rests. A block
+    /// the last frame no longer describes (a resize landed after it) is
+    /// bottom-anchored, so the screen's last row stands in for it. Nothing
+    /// moves while the transcript overlay owns the alternate screen or before
+    /// the first frame.
+    pub(crate) fn rest_below_block(&self, io: &dyn TermIo) -> Result<(), TuiError> {
+        if self.overlay || !self.initialized || self.previous.is_empty() {
+            return Ok(());
+        }
+        let size = io.size().unwrap_or(self.size);
+        let last = if size == self.size {
+            self.anchor + self.previous.len() - 1
+        } else {
+            usize::from(size.1)
+        };
+        let row = last.clamp(1, usize::from(size.1).max(1));
+        io.write(format!("\x1b[{row};1H").as_bytes()).map_err(|error| {
+            TuiError::Terminal(format!(
+                "dalgon: cannot write the interface: {error}\nCheck that the terminal is still connected."
+            ))
+        })
+    }
+
     /// Renders one frame; settled rows are committed before the live block moves.
     ///
     /// After any resize the stale live block is located by measuring the
@@ -184,7 +212,19 @@ impl Painter {
             input.screen
         };
         let theme = input.theme;
-        let rows = frame_rows(FrameInput { screen, ..input }, size.0, size.1);
+        let mut rows = frame_rows(FrameInput { screen, ..input }, size.0, size.1);
+        if input.composer.is_empty()
+            && !input.dialog.is_open()
+            && input.live.expanded().is_none()
+            && input.signin.is_none()
+            && input.picker.is_none()
+            && input.exit_draft.is_none()
+            && input.help.is_none()
+        {
+            for row in &mut rows {
+                row.cursor = None;
+            }
+        }
         let committed_len = input.transcript.rows().len();
         let mut bytes = Vec::new();
         if overlay != self.overlay {
@@ -421,13 +461,15 @@ impl Painter {
         // new screen; a hidden-buffer realloc keeps the window ending
         // at that row. Measure it, then erase from there down.
         match Self::restore_top(io)? {
-            // The main block stays stale for one frame; the next
-            // frame relocates normally.
             Measured {
                 placement: Placement::Hold,
                 ..
             } => {
                 self.overlay = false;
+                if self.size == size && self.epoch == epoch {
+                    let top = u16::try_from(self.anchor.max(1)).unwrap_or(u16::MAX);
+                    return Ok(Some((size, epoch, Placement::Located(top))));
+                }
                 return Ok(None);
             }
             Measured {
@@ -1017,6 +1059,7 @@ mod tests {
     use crate::image::Rung;
     use crate::render::PixelImage;
     use crate::render::RenderRow;
+    use crate::term::TermIo as _;
 
     use super::Painter;
 
@@ -1215,7 +1258,6 @@ mod tests {
                     approval: dal_core::ApprovalMode::Ask,
                     mode: dal_core::Mode::Normal,
                     name: None,
-                    scoped_models: None,
                 },
                 open: Vec::new(),
                 changes: Vec::new(),
@@ -1278,12 +1320,20 @@ mod tests {
         }
 
         fn input(&self) -> crate::render::FrameInput<'_> {
+            self.input_with_composer("", 0)
+        }
+
+        fn input_with_composer<'a>(
+            &'a self,
+            composer: &'a str,
+            cursor: usize,
+        ) -> crate::render::FrameInput<'a> {
             crate::render::FrameInput {
                 view: &self.view,
                 screen: crate::Screen::Inline,
-                composer: "",
-                cursor: 0,
-                exit_draft: false,
+                composer,
+                cursor,
+                exit_draft: None,
                 branch: None,
                 popup: &[],
                 live: &self.live,
@@ -1294,7 +1344,11 @@ mod tests {
                 transcript: &self.transcript,
                 viewport: &self.viewport,
                 opts: &self.opts,
-                kitty_keyboard: false,
+                kitty_keyboard: self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .kitty(),
                 theme: &self.theme,
                 diagram_settings: crate::diagram::DiagramSettings::default(),
                 diagram_cache: &self.cache,
@@ -1435,10 +1489,56 @@ mod tests {
             .unwrap();
         assert_eq!(io.writes().len(), writes_before);
         io.push_report(crate::term::CursorReport::Position(21, 1));
+        let queries_before = io.queries();
+        let writes_held = io.writes().len();
         painter
             .paint(&io, &fixture.state, fixture.input(), false)
             .unwrap();
-        assert!(erase_rows(&last_write(&io)).iter().all(|r| *r >= 21));
+        assert_eq!(
+            io.queries(),
+            queries_before + 1,
+            "held frame measures again"
+        );
+        let bytes = last_write(&io);
+        assert!(!bytes.is_empty(), "a paired answer paints");
+        assert_eq!(
+            io.writes().len(),
+            writes_held + 1,
+            "a paired answer writes exactly one frame"
+        );
+        let scroll = b"\x1b[24;1H\r\n";
+        let split = bytes
+            .windows(scroll.len())
+            .position(|w| w == scroll)
+            .expect("overflow scrolls");
+        let pre = erase_rows(&bytes[..split]);
+        assert!(pre.contains(&21), "pre-scroll clears measured top: {pre:?}");
+        assert!(
+            pre.iter().all(|row| *row >= 21),
+            "pre-scroll touches nothing above measured top: {pre:?}"
+        );
+        let anchor = painter.anchor;
+        let height = 24_usize;
+        assert!(anchor <= 21, "scroll moves block up: anchor {anchor}");
+        assert!(
+            anchor + painter.previous.len().saturating_sub(1) <= height,
+            "scrolled block fits: anchor {anchor}, rows {}, height {height}",
+            painter.previous.len()
+        );
+        let post = erase_rows(&bytes[split..]);
+        assert!(
+            post.iter()
+                .all(|row| usize::from(*row) >= anchor && usize::from(*row) <= height),
+            "post-scroll repaint stays in scrolled block: {post:?} anchor {anchor}"
+        );
+        assert!(
+            !bytes.windows(3).any(|w| w == b"\x1b[J"),
+            "no erase-display: {bytes:?}"
+        );
+        assert!(
+            !bytes.windows(4).any(|w| w == b"\x1b[3J"),
+            "no scrollback clear: {bytes:?}"
+        );
     }
 
     #[test]
@@ -1497,15 +1597,69 @@ mod tests {
         let repaint = writes.last().cloned().unwrap_or_default();
         assert_eq!(exit_write, b"\x1b[r\x1b[?1049l");
         assert_eq!(io.queries(), 1, "one query after ?1049l");
+        let scroll = b"\x1b[26;1H\r\n";
+        let split = repaint
+            .windows(scroll.len())
+            .position(|w| w == scroll)
+            .expect("restore scrolls");
+        let pre = erase_rows(&repaint[..split]);
+        assert!(pre.contains(&24), "pre-scroll clears measured row: {pre:?}");
         assert!(
-            erase_rows(&repaint).iter().all(|row| *row >= 24),
-            "exit erase starts at the measured restored row: {:?}",
-            erase_rows(&repaint)
+            pre.iter().all(|row| *row >= 24),
+            "pre-scroll touches nothing above measured row: {pre:?}"
+        );
+        let height = usize::from(io.size().unwrap().1);
+        let anchor = painter.anchor;
+        assert!(
+            anchor <= 24,
+            "scroll moves restored block up: anchor {anchor}"
+        );
+        assert!(
+            anchor + painter.previous.len().saturating_sub(1) <= height,
+            "restored block fits: anchor {anchor}, rows {}, height {height}",
+            painter.previous.len()
+        );
+        let post = erase_rows(&repaint[split..]);
+        assert!(
+            post.iter()
+                .all(|row| usize::from(*row) >= anchor && usize::from(*row) <= height),
+            "post-scroll repaint stays in scrolled block: {post:?} anchor {anchor}"
         );
         assert!(
             !repaint.windows(3).any(|w| w == b"\x1b[J"),
             "no erase-display"
         );
+        assert!(
+            !repaint.windows(4).any(|w| w == b"\x1b[3J"),
+            "no scrollback clear"
+        );
+    }
+
+    #[test]
+    fn overlay_exit_at_unchanged_size_falls_back_to_parked_anchor_when_silent() {
+        let fixture = Fixture::new();
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+        first_paint(&fixture, &io, &mut painter);
+        let parked_anchor = u16::try_from(painter.anchor).expect("anchor fits u16");
+        painter
+            .paint(&io, &fixture.state, fixture.input(), true)
+            .unwrap();
+        let writes_before = io.writes().len();
+        // No resize occurred while the overlay was open, and the DSR query is silent.
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+        let writes = io.writes();
+        assert_eq!(
+            writes.len(),
+            writes_before + 2,
+            "leave_overlay writes ?1049l then repaints at parked anchor"
+        );
+        let repaint = writes.last().expect("repaint write");
+        let erases = erase_rows(repaint);
+        assert!(erases.contains(&parked_anchor));
+        assert!(erases.iter().all(|row| *row >= parked_anchor));
     }
 
     #[test]
@@ -1522,6 +1676,58 @@ mod tests {
             "hidden caret parks at the block top {anchor}: {bytes:?}"
         );
         assert_eq!(painter.caret_offset, 0);
+    }
+
+    #[test]
+    fn shrink_that_overflows_the_screen_scrolls_the_block_up_instead_of_off_it() {
+        let fixture = Fixture::new();
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+        first_paint(&fixture, &io, &mut painter);
+        io.set_size((80, 10));
+        io.bump_epoch();
+        // The terminal keeps the caret on its last row, so the measured top is
+        // the bottom row and the block cannot fit below it.
+        io.push_report(crate::term::CursorReport::Position(10, 1));
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+        let rows = painter.previous.len();
+        assert!(rows > 1, "the block spans several rows");
+        assert_eq!(
+            painter.anchor,
+            10 - rows + 1,
+            "the block ends on the last screen row"
+        );
+        assert!(
+            erase_rows(&last_write(&io)).iter().all(|row| *row <= 10),
+            "no row is painted below the screen: {:?}",
+            erase_rows(&last_write(&io))
+        );
+    }
+
+    #[test]
+    fn exit_rest_parks_the_caret_on_the_last_block_row() {
+        let fixture = Fixture::new();
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+        painter.rest_below_block(&io).unwrap();
+        assert!(io.writes().is_empty(), "nothing is painted before a frame");
+        first_paint(&fixture, &io, &mut painter);
+        let writes = io.writes().len();
+        painter.rest_below_block(&io).unwrap();
+        let last_row = painter.anchor + painter.previous.len() - 1;
+        assert_ne!(
+            last_row, painter.anchor,
+            "the empty composer hides the caret at the block top"
+        );
+        assert_eq!(io.writes().len(), writes + 1);
+        assert_eq!(last_write(&io), format!("\x1b[{last_row};1H").into_bytes());
+        // A resize after the last frame leaves the block unmeasured: the
+        // bottom row stands in for it.
+        io.set_size((80, 12));
+        painter.rest_below_block(&io).unwrap();
+        assert_eq!(last_write(&io), b"\x1b[12;1H");
     }
 
     #[test]
@@ -1551,12 +1757,14 @@ mod tests {
             timeout: std::time::Duration::from_secs(30),
             default: dal_core::Answer::Decline,
         }]);
+        let state = crate::term::TermState::new();
         let rows = dialog.rendered_rows(
             80,
             24,
             crate::WidthMode::Narrow,
             crate::diagram::DiagramSettings::default(),
             &crate::diagram::RenderCache::default(),
+            state.kitty(),
         );
         assert_ne!(rows.len(), 0, "the dialog renders rows");
         let mut output = Vec::new();
@@ -1588,6 +1796,1014 @@ mod tests {
         assert!(
             !output.contains("\u{1b}]"),
             "no OSC sequence opens from a payload: {output}"
+        );
+    }
+
+    /// Extracts the row from an `ESC[<row>;<col>H` or `ESC[<row>H` sequence.
+    fn parse_csi_row(tail: &[u8]) -> Option<u16> {
+        let sep = tail.iter().position(|&b| b == b';' || b == b'H')?;
+        let row_digits = &tail[..sep];
+        if row_digits.is_empty() || !row_digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let after_sep = &tail[sep..];
+        let h_pos = after_sep.iter().position(|&b| b == b'H')?;
+        let col_digits = &after_sep[1..h_pos];
+        if sep != h_pos && !col_digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(row_digits).ok()?.parse().ok()
+    }
+
+    /// Row numbers referenced by cursor positioning (`ESC[<row>;<col>H`)
+    /// or line erase (`ESC[<row>;1H ESC[2K`) sequences in emitted bytes.
+    fn targeted_rows(bytes: &[u8]) -> Vec<u16> {
+        let mut rows = Vec::new();
+        for (index, window) in bytes.windows(2).enumerate() {
+            if window != b"\x1b[" {
+                continue;
+            }
+            if let Some(row) = parse_csi_row(&bytes[index + 2..]) {
+                rows.push(row);
+            }
+        }
+        rows
+    }
+
+    fn test_reasoning_entry(id: u64, text: &str) -> dal_core::EntryView {
+        dal_core::EntryView {
+            id: dal_core::EntryId::new(std::num::NonZeroU64::new(id).unwrap()),
+            parent: None,
+            kind: dal_core::EntryKind::Assistant {
+                api: dal_core::Family::Chat,
+                model: "model".into(),
+                content: vec![dal_core::Block::Reasoning {
+                    text: text.into(),
+                    replay: dal_core::RawJson::null(),
+                }],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    premium_requests: None,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::Done,
+                route: None,
+                replay: None,
+            },
+        }
+    }
+
+    #[test]
+    fn newest_card_expansion_emits_zero_writes_above_live_block_top() {
+        let mut fixture = Fixture::new();
+
+        // 1. Setup committed transcript rows.
+        let committed_texts = vec![
+            "committed transcript line 1".to_string(),
+            "committed transcript line 2".to_string(),
+            "committed transcript line 3".to_string(),
+            "committed transcript line 4".to_string(),
+        ];
+        fixture.transcript.commit("entry-0", &committed_texts);
+
+        // 2. Setup an assistant entry with a reasoning block (eligible for card expansion).
+        let assistant_entry = test_reasoning_entry(
+            1,
+            "step one: analyzing problem\nstep two: calculating proof\nstep three: verifying bounds",
+        );
+        fixture.view.entries.items.push(assistant_entry);
+
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+
+        // Initial paint: commits the transcript rows and draws the initial collapsed live block.
+        first_paint(&fixture, &io, &mut painter);
+
+        let anchor_before = painter.anchor;
+        assert!(
+            anchor_before > 1,
+            "anchor before expand must leave room for committed transcript"
+        );
+        assert_eq!(painter.committed, committed_texts.len());
+
+        let writes_before = io.writes().len();
+
+        // Expand the newest card (Ctrl+O reasoning card)
+        let newest_entry = fixture
+            .view
+            .entries
+            .items
+            .last()
+            .expect("assistant entry exists");
+        let card =
+            crate::render::expanded_card(newest_entry, crate::diagram::DiagramSettings::default())
+                .expect("reasoning card expands");
+        assert!(matches!(card, crate::live::ExpandedCard::Reasoning { .. }));
+        let blob_ids = crate::render::expanded_blob_ids(newest_entry, card);
+        fixture.live.open_expand(card, blob_ids);
+
+        // Render the expanded frame in place
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+
+        let writes_after = io.writes();
+        assert_eq!(
+            writes_after.len(),
+            writes_before + 1,
+            "expand paint emitted exactly one frame write"
+        );
+        let expand_bytes = writes_after.last().unwrap();
+
+        let live_block_top = u16::try_from(painter.anchor).unwrap();
+        let targeted = targeted_rows(expand_bytes);
+
+        assert!(!targeted.is_empty(), "expand frame emitted targeted rows");
+
+        // Byte-boundary proof: every targeted row is at or below the live block top.
+        // There are ZERO writes to rows < live block top.
+        for &row in &targeted {
+            assert!(
+                row >= live_block_top,
+                "emitted write to row {row} < live block top {live_block_top}; all targeted: {targeted:?}"
+            );
+        }
+
+        // Erased rows must also be strictly at or below live block top.
+        let erases = erase_rows(expand_bytes);
+        for &row in &erases {
+            assert!(
+                row >= live_block_top,
+                "emitted erase to row {row} < live block top {live_block_top}; all erases: {erases:?}"
+            );
+        }
+
+        // None of the committed transcript text strings may appear in the expand frame bytes.
+        for committed in &committed_texts {
+            assert!(
+                !expand_bytes
+                    .windows(committed.len())
+                    .any(|w| w == committed.as_bytes()),
+                "committed transcript row '{committed}' was repainted during card expand"
+            );
+        }
+
+        // No erase-display or scrollback clear controls
+        assert!(!expand_bytes.windows(3).any(|w| w == b"\x1b[J"));
+        assert!(
+            !expand_bytes
+                .windows(4)
+                .any(|w| w == b"\x1b[2J" || w == b"\x1b[3J")
+        );
+
+        // Verify that the expanded card content was actually rendered into the frame.
+        let expand_output = String::from_utf8_lossy(expand_bytes);
+        assert!(
+            expand_output.contains("step one") || expand_output.contains("Thinking"),
+            "expanded card content was rendered in the live block: {expand_output}"
+        );
+    }
+
+    #[test]
+    fn newest_card_expansion_overflow_scroll_preserves_committed_rows() {
+        let mut fixture = Fixture::new();
+
+        // Many committed rows so the live block starts near the bottom of the screen.
+        let mut committed_texts = Vec::new();
+        for i in 1..=14 {
+            committed_texts.push(format!("committed transcript row {i}"));
+        }
+        fixture.transcript.commit("entry-0", &committed_texts);
+
+        let long_reasoning = (1..=20)
+            .map(|i| format!("step {i}: long reasoning step detailing execution"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let assistant_entry = test_reasoning_entry(1, &long_reasoning);
+        fixture.view.entries.items.push(assistant_entry);
+
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+
+        first_paint(&fixture, &io, &mut painter);
+
+        let writes_before = io.writes().len();
+
+        let newest_entry = fixture
+            .view
+            .entries
+            .items
+            .last()
+            .expect("assistant entry exists");
+        let card =
+            crate::render::expanded_card(newest_entry, crate::diagram::DiagramSettings::default())
+                .expect("reasoning card expands");
+        let blob_ids = crate::render::expanded_blob_ids(newest_entry, card);
+        fixture.live.open_expand(card, blob_ids);
+
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+
+        let writes_after = io.writes();
+        assert_eq!(writes_after.len(), writes_before + 1);
+        let expand_bytes = writes_after.last().unwrap();
+
+        let live_block_top = u16::try_from(painter.anchor).unwrap();
+        let targeted = targeted_rows(expand_bytes);
+
+        assert_ne!(targeted, [] as [u16; 0]);
+        for &row in &targeted {
+            assert!(
+                row >= live_block_top,
+                "emitted write to row {row} < live block top {live_block_top}; all targeted: {targeted:?}"
+            );
+        }
+
+        let erases = erase_rows(expand_bytes);
+        for &row in &erases {
+            assert!(
+                row >= live_block_top,
+                "emitted erase to row {row} < live block top {live_block_top}; all erases: {erases:?}"
+            );
+        }
+
+        for committed in &committed_texts {
+            assert!(
+                !expand_bytes
+                    .windows(committed.len())
+                    .any(|w| w == committed.as_bytes()),
+                "committed transcript row '{committed}' was repainted during card expand"
+            );
+        }
+
+        assert!(!expand_bytes.windows(3).any(|w| w == b"\x1b[J"));
+        assert!(
+            !expand_bytes
+                .windows(4)
+                .any(|w| w == b"\x1b[2J" || w == b"\x1b[3J")
+        );
+    }
+
+    #[test]
+    fn newest_card_collapse_emits_zero_writes_above_live_block_top() {
+        let mut fixture = Fixture::new();
+
+        let committed_texts = vec![
+            "committed transcript line 1".to_string(),
+            "committed transcript line 2".to_string(),
+        ];
+        fixture.transcript.commit("entry-0", &committed_texts);
+
+        let assistant_entry = test_reasoning_entry(1, "step one\nstep two");
+        fixture.view.entries.items.push(assistant_entry);
+
+        let io = FakeIo::new((80, 24));
+        let mut painter = Painter::default();
+
+        first_paint(&fixture, &io, &mut painter);
+
+        // Expand
+        let newest_entry = fixture
+            .view
+            .entries
+            .items
+            .last()
+            .expect("assistant entry exists");
+        let card =
+            crate::render::expanded_card(newest_entry, crate::diagram::DiagramSettings::default())
+                .expect("reasoning card expands");
+        let blob_ids = crate::render::expanded_blob_ids(newest_entry, card);
+        fixture.live.open_expand(card, blob_ids);
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+
+        // Collapse (Ctrl+O again)
+        let writes_before = io.writes().len();
+        assert!(fixture.live.close_expand());
+        painter
+            .paint(&io, &fixture.state, fixture.input(), false)
+            .unwrap();
+
+        let writes_after = io.writes();
+        assert_eq!(writes_after.len(), writes_before + 1);
+        let collapse_bytes = writes_after.last().unwrap();
+
+        let live_block_top = u16::try_from(painter.anchor).unwrap();
+        let targeted = targeted_rows(collapse_bytes);
+
+        assert_ne!(targeted, [] as [u16; 0]);
+        for &row in &targeted {
+            assert!(
+                row >= live_block_top,
+                "emitted write to row {row} < live block top {live_block_top}; all targeted: {targeted:?}"
+            );
+        }
+
+        for committed in &committed_texts {
+            assert!(
+                !collapse_bytes
+                    .windows(committed.len())
+                    .any(|w| w == committed.as_bytes()),
+                "committed transcript row '{committed}' was repainted during card collapse"
+            );
+        }
+
+        assert!(!collapse_bytes.windows(3).any(|w| w == b"\x1b[J"));
+        assert!(
+            !collapse_bytes
+                .windows(4)
+                .any(|w| w == b"\x1b[2J" || w == b"\x1b[3J")
+        );
+    }
+
+    /// Scrolling terminal that replays the painter's bytes: a main and an
+    /// alternate screen, scrollback, deferred wrap, and the controls the
+    /// painter writes. A resize keeps the caret row on screen, so rows above
+    /// it scroll into the scrollback and rows below it fall off the bottom;
+    /// `pulls` also lets a grow take scrollback rows back, like xterm. Rows
+    /// clip at the new width, never reflow.
+    struct Sim {
+        columns: usize,
+        rows: usize,
+        main: Vec<Vec<char>>,
+        alt: Option<Vec<Vec<char>>>,
+        scrollback: Vec<String>,
+        row: usize,
+        column: usize,
+        wrap_pending: bool,
+        saved: (usize, usize),
+        pulls: bool,
+        erase_display: u32,
+    }
+
+    impl Sim {
+        fn new((columns, rows): (u16, u16), pulls: bool) -> Self {
+            let (columns, rows) = (usize::from(columns), usize::from(rows));
+            Self {
+                columns,
+                rows,
+                main: vec![vec![' '; columns]; rows],
+                alt: None,
+                scrollback: Vec::new(),
+                row: 0,
+                column: 0,
+                wrap_pending: false,
+                saved: (0, 0),
+                pulls,
+                erase_display: 0,
+            }
+        }
+
+        fn grid(&mut self) -> &mut Vec<Vec<char>> {
+            self.alt.as_mut().unwrap_or(&mut self.main)
+        }
+
+        fn text(line: &[char]) -> String {
+            line.iter().collect::<String>().trim_end().to_owned()
+        }
+
+        /// The rows a person sees: the alternate screen while it is open.
+        fn visible(&self) -> Vec<String> {
+            self.alt
+                .as_ref()
+                .unwrap_or(&self.main)
+                .iter()
+                .map(|line| Self::text(line))
+                .collect()
+        }
+
+        fn line_feed(&mut self) {
+            if self.row + 1 < self.rows {
+                self.row += 1;
+                return;
+            }
+            let columns = self.columns;
+            let top = self.grid().remove(0);
+            self.grid().push(vec![' '; columns]);
+            if self.alt.is_none() {
+                self.scrollback.push(Self::text(&top));
+            }
+        }
+
+        fn put(&mut self, c: char) {
+            if self.wrap_pending {
+                self.column = 0;
+                self.line_feed();
+                self.wrap_pending = false;
+            }
+            let (row, column) = (self.row, self.column);
+            self.grid()[row][column] = c;
+            if column + 1 == self.columns {
+                self.wrap_pending = true;
+            } else {
+                self.column += 1;
+            }
+        }
+
+        fn clear(&mut self, row: usize, columns: std::ops::Range<usize>) {
+            for cell in &mut self.grid()[row][columns] {
+                *cell = ' ';
+            }
+        }
+
+        fn csi(&mut self, params: &str, last: char) {
+            self.wrap_pending = false;
+            if params.starts_with('?') {
+                match (params, last) {
+                    ("?1049", 'h') => {
+                        self.saved = (self.row, self.column);
+                        self.alt = Some(vec![vec![' '; self.columns]; self.rows]);
+                    }
+                    ("?1049", 'l') => {
+                        self.alt = None;
+                        self.row = self.saved.0.min(self.rows - 1);
+                        self.column = self.saved.1.min(self.columns - 1);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            let nums: Vec<usize> = params.split(';').map(|p| p.parse().unwrap_or(0)).collect();
+            let arg = |index: usize| nums.get(index).copied().filter(|n| *n > 0).unwrap_or(1);
+            let (last_row, last_column) = (self.rows - 1, self.columns - 1);
+            match last {
+                'H' | 'f' => {
+                    self.row = (arg(0) - 1).min(last_row);
+                    self.column = (arg(1) - 1).min(last_column);
+                }
+                'A' => self.row = self.row.saturating_sub(arg(0)),
+                'B' => self.row = (self.row + arg(0)).min(last_row),
+                'C' => self.column = (self.column + arg(0)).min(last_column),
+                'D' => self.column = self.column.saturating_sub(arg(0)),
+                'K' => {
+                    let (row, column) = (self.row, self.column);
+                    match nums[0] {
+                        0 => self.clear(row, column..self.columns),
+                        1 => self.clear(row, 0..column + 1),
+                        _ => self.clear(row, 0..self.columns),
+                    }
+                }
+                'J' => {
+                    self.erase_display += 1;
+                    for row in 0..self.rows {
+                        self.clear(row, 0..self.columns);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            let text = String::from_utf8_lossy(bytes);
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\x1b' => match chars.next() {
+                        Some('[') => {
+                            let mut params = String::new();
+                            while let Some(next) = chars.next_if(|c| ('\x20'..='\x3f').contains(c))
+                            {
+                                params.push(next);
+                            }
+                            if let Some(last) = chars.next() {
+                                self.csi(&params, last);
+                            }
+                        }
+                        Some(']') => {
+                            while let Some(next) = chars.next() {
+                                if next == '\x07' || (next == '\x1b' && chars.next().is_some()) {
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    '\r' => {
+                        self.column = 0;
+                        self.wrap_pending = false;
+                    }
+                    '\n' => {
+                        self.wrap_pending = false;
+                        self.line_feed();
+                    }
+                    c if !c.is_control() => self.put(c),
+                    _ => {}
+                }
+            }
+        }
+
+        /// Fits the main buffer to `rows`, keeping the `caret` row on screen,
+        /// and returns the caret row's new position.
+        fn refit(&mut self, caret: usize, rows: usize, columns: usize) -> usize {
+            let pulls = self.pulls;
+            let blank = vec![' '; columns];
+            let scrollback = &mut self.scrollback;
+            let grid = &mut self.main;
+            let height = grid.len();
+            let mut caret = caret;
+            if rows < height {
+                let dropped = (caret + 1).saturating_sub(rows);
+                for line in grid.drain(..dropped) {
+                    scrollback.push(Self::text(&line));
+                }
+                caret -= dropped;
+                grid.truncate(rows);
+            } else if rows > height {
+                let pulled = if pulls {
+                    scrollback.len().min(rows - height)
+                } else {
+                    0
+                };
+                let from = scrollback.len() - pulled;
+                let restored: Vec<Vec<char>> = scrollback
+                    .drain(from..)
+                    .map(|line| {
+                        let mut cells: Vec<char> = line.chars().collect();
+                        cells.resize(columns, ' ');
+                        cells
+                    })
+                    .collect();
+                grid.splice(..0, restored);
+                caret += pulled;
+                grid.resize_with(rows, || blank.clone());
+            }
+            for line in grid.iter_mut() {
+                line.resize(columns, ' ');
+            }
+            caret
+        }
+
+        fn resize(&mut self, (columns, rows): (u16, u16)) {
+            let (columns, rows) = (usize::from(columns).max(1), usize::from(rows).max(1));
+            if self.alt.is_some() {
+                self.saved.0 = self.refit(self.saved.0, rows, columns);
+                self.alt = Some(vec![vec![' '; columns]; rows]);
+            } else {
+                self.row = self.refit(self.row, rows, columns);
+            }
+            self.columns = columns;
+            self.rows = rows;
+            self.row = self.row.min(rows - 1);
+            self.column = self.column.min(columns - 1);
+            self.saved = (self.saved.0.min(rows - 1), self.saved.1.min(columns - 1));
+            self.wrap_pending = false;
+        }
+    }
+
+    /// `TermIo` over a [`Sim`]: bytes replay into the emulator, and a caret
+    /// query answers with the emulator's real caret.
+    struct SimIo {
+        sim: Mutex<Sim>,
+        epoch: Mutex<u64>,
+    }
+
+    impl SimIo {
+        fn new(size: (u16, u16), pulls: bool) -> Self {
+            Self {
+                sim: Mutex::new(Sim::new(size, pulls)),
+                epoch: Mutex::new(0),
+            }
+        }
+
+        fn resize(&self, size: (u16, u16)) {
+            self.sim.lock().unwrap().resize(size);
+            *self.epoch.lock().unwrap() += 1;
+        }
+
+        fn visible(&self) -> Vec<String> {
+            self.sim.lock().unwrap().visible()
+        }
+
+        fn scrollback(&self) -> Vec<String> {
+            self.sim.lock().unwrap().scrollback.clone()
+        }
+    }
+
+    impl crate::term::TermIo for SimIo {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn disable_raw(&self) {}
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            let sim = self.sim.lock().unwrap();
+            Ok((
+                u16::try_from(sim.columns).unwrap(),
+                u16::try_from(sim.rows).unwrap(),
+            ))
+        }
+        fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+            self.sim.lock().unwrap().feed(bytes);
+            Ok(())
+        }
+        fn read(&self, _timeout: std::time::Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn raise_tstp(&self) {}
+        fn resize_epoch(&self) -> u64 {
+            *self.epoch.lock().unwrap()
+        }
+        fn cursor_position(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> std::io::Result<crate::term::CursorReport> {
+            let sim = self.sim.lock().unwrap();
+            Ok(crate::term::CursorReport::Position(
+                u16::try_from(sim.row + 1).unwrap(),
+                u16::try_from(sim.column + 1).unwrap(),
+            ))
+        }
+    }
+
+    fn paint_on(io: &SimIo, fixture: &Fixture, painter: &mut Painter) {
+        painter
+            .paint(io, &fixture.state, fixture.input(), false)
+            .unwrap();
+    }
+
+    /// Paints with a non-empty composer, so the caret stays visible on the
+    /// composer row and later resizes must relocate with a nonzero offset.
+    fn paint_with_composer(
+        io: &SimIo,
+        fixture: &Fixture,
+        painter: &mut Painter,
+        composer: &str,
+        cursor: usize,
+    ) {
+        let input = fixture.input_with_composer(composer, cursor);
+        painter.paint(io, &fixture.state, input, false).unwrap();
+    }
+
+    fn paint_overlay_draft(io: &SimIo, fixture: &Fixture, painter: &mut Painter, composer: &str) {
+        let input = fixture.input_with_composer(composer, 12);
+        painter.paint(io, &fixture.state, input, true).unwrap();
+    }
+
+    /// Opens the transcript overlay, resizes while on the alternate screen,
+    /// settles new rows behind it, then exits back to the main screen.
+    fn overlay_resize_sequence(sizes: [(u16, u16); 3], pulls: bool) -> Result<(), String> {
+        let mut fixture = Fixture::new();
+        let mut committed = committed_rows(8);
+        fixture.transcript.commit("entry-0", &committed);
+        assert!(
+            fixture
+                .live
+                .apply_update(&tool_started_update("call-1", "exec"))
+        );
+        fixture.live.notice("local note");
+        let io = SimIo::new(sizes[0], pulls);
+        let mut painter = Painter::default();
+        let draft = "draft preserved across overlay resize";
+        paint_with_composer(&io, &fixture, &mut painter, draft, 12);
+        let mut faults = live_block_faults(&io, &painter, &committed);
+        paint_overlay_draft(&io, &fixture, &mut painter, draft);
+        for (step, size) in sizes[1..].iter().enumerate() {
+            io.resize(*size);
+            let more = vec![format!("settled behind overlay {}", step + 1)];
+            fixture
+                .transcript
+                .commit(&format!("entry-{}", step + 1), &more);
+            committed.extend(more);
+            paint_overlay_draft(&io, &fixture, &mut painter, draft);
+        }
+        paint_with_composer(&io, &fixture, &mut painter, draft, 12);
+        for fault in live_block_faults(&io, &painter, &committed) {
+            faults.push(format!("after overlay exit at {:?}: {fault}", sizes[2]));
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "overlay sizes {sizes:?}, pulls {pulls}: {faults:?}
+{}",
+                dump(&io)
+            ))
+        }
+    }
+
+    /// Shrink then grow with a visible caret mid-block: the composer holds a
+    /// draft, a tool works above it, and entries settle across the resizes.
+    fn visible_caret_sequence(sizes: [(u16, u16); 3], pulls: bool) -> Result<(), String> {
+        let mut fixture = Fixture::new();
+        let mut committed = committed_rows(10);
+        fixture.transcript.commit("entry-0", &committed);
+        assert!(
+            fixture
+                .live
+                .apply_update(&tool_started_update("call-1", "exec"))
+        );
+        fixture.live.notice("local note");
+        let io = SimIo::new(sizes[0], pulls);
+        let mut painter = Painter::default();
+        let draft = "start typing a draft here";
+        paint_with_composer(&io, &fixture, &mut painter, draft, 10);
+        if painter.caret_offset == 0 {
+            return Err(format!(
+                "composer caret stayed hidden, the sequence proves nothing\n{}",
+                dump(&io)
+            ));
+        }
+        let mut faults = live_block_faults(&io, &painter, &committed);
+        for (step, size) in sizes[1..].iter().enumerate() {
+            io.resize(*size);
+            let more = vec![format!("settled across resize {}", step + 1)];
+            fixture
+                .transcript
+                .commit(&format!("entry-{}", step + 1), &more);
+            committed.extend(more);
+            paint_with_composer(&io, &fixture, &mut painter, draft, 10);
+            for fault in live_block_faults(&io, &painter, &committed) {
+                faults.push(format!("after resize to {size:?}: {fault}"));
+            }
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "sizes {sizes:?}, pulls {pulls}: {faults:?}\n{}",
+                dump(&io)
+            ))
+        }
+    }
+
+    /// Occurrences of `row` across the visible screen and the scrollback.
+    fn occurrences(io: &SimIo, row: &str) -> (usize, usize) {
+        let on_screen = io.visible().iter().filter(|line| *line == row).count();
+        let in_scrollback = io.scrollback().iter().filter(|line| *line == row).count();
+        (on_screen, in_scrollback)
+    }
+
+    /// Violations of the one-live-block contract on the emulated terminal:
+    /// the block's last row (the status line) shows exactly once on screen,
+    /// at the row the painter's anchor predicts, and every committed row
+    /// exists exactly once on screen or in scrollback.
+    fn live_block_faults(io: &SimIo, painter: &Painter, committed: &[String]) -> Vec<String> {
+        let mut faults = Vec::new();
+        let status = painter
+            .previous
+            .last()
+            .map(|row| row.text.trim_end().to_owned());
+        if let Some(status) = status {
+            let (screen, scrollback) = occurrences(io, &status);
+            if screen != 1 {
+                faults.push(format!("live status row shows {screen} times on screen"));
+            }
+            if scrollback != 0 {
+                faults.push(format!(
+                    "live status row reached scrollback {scrollback} times"
+                ));
+            }
+            let status_row = io
+                .visible()
+                .iter()
+                .rposition(|line| *line == status)
+                .map(|index| index + 1);
+            let expected = painter.anchor + painter.previous.len().saturating_sub(1);
+            if status_row != Some(expected) {
+                faults.push(format!(
+                    "live status row on screen at {status_row:?}, anchor predicts {expected}"
+                ));
+            }
+        }
+        for row in committed {
+            let (screen, scrollback) = occurrences(io, row);
+            if screen + scrollback != 1 {
+                faults.push(format!(
+                    "committed {row:?} shows {screen} on screen and {scrollback} in scrollback"
+                ));
+            }
+        }
+        faults
+    }
+
+    fn committed_rows(count: usize) -> Vec<String> {
+        (1..=count)
+            .map(|n| format!("committed transcript row {n}"))
+            .collect()
+    }
+
+    fn dump(io: &SimIo) -> String {
+        io.visible()
+            .iter()
+            .enumerate()
+            .map(|(index, line)| format!("{:>2}|{line}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn delta_update(text: &str) -> dal_core::Update {
+        use std::num::NonZeroU64;
+        dal_core::Update {
+            r#gen: dal_core::Gen::new(NonZeroU64::MIN),
+            seq: dal_core::Seq::new(NonZeroU64::MIN),
+            kind: dal_core::UpdateKind::Delta {
+                turn: dal_core::TurnId::new(NonZeroU64::MIN),
+                channel: dal_core::StreamChannel::Text,
+                text: text.into(),
+            },
+        }
+    }
+
+    fn tool_started_update(call: &str, tool: &str) -> dal_core::Update {
+        use std::num::NonZeroU64;
+        dal_core::Update {
+            r#gen: dal_core::Gen::new(NonZeroU64::MIN),
+            seq: dal_core::Seq::new(NonZeroU64::MIN),
+            kind: dal_core::UpdateKind::ToolStarted {
+                call: dal_core::CallId::new(call),
+                tool: tool.into(),
+                args: dal_core::RawJson::null(),
+            },
+        }
+    }
+
+    fn pending_row() -> RenderRow {
+        RenderRow::new("pending row about to settle", crate::theme::Role::Text)
+    }
+
+    /// One shrink then one grow while the live block carries streamed prose,
+    /// a working tool, a notice and pending rows, and the transcript keeps
+    /// settling entries across the resizes — including one entry that was
+    /// pending when the shrink landed.
+    fn live_resize_sequence(sizes: [(u16, u16); 3], pulls: bool) -> Result<(), String> {
+        let mut fixture = Fixture::new();
+        let mut committed = committed_rows(6);
+        fixture.transcript.commit("entry-0", &committed);
+        for chunk in [
+            "streaming line one\n",
+            "a second live line with a very long tail that clips at narrow widths xxxxxxxxxx\n",
+            "third live line\n",
+        ] {
+            assert!(fixture.live.apply_update(&delta_update(chunk)));
+        }
+        assert!(
+            fixture
+                .live
+                .apply_update(&tool_started_update("call-1", "exec"))
+        );
+        fixture.live.notice("local note");
+        fixture
+            .transcript
+            .set_pending("pending-1", vec![pending_row()]);
+        let io = SimIo::new(sizes[0], pulls);
+        let mut painter = Painter::default();
+        paint_on(&io, &fixture, &mut painter);
+        let mut faults = live_block_faults(&io, &painter, &committed);
+        io.resize(sizes[1]);
+        let shrunk = vec![
+            "settled across the shrink 1".to_owned(),
+            "settled across the shrink 2".to_owned(),
+        ];
+        fixture.transcript.commit("entry-1", &shrunk);
+        committed.extend(shrunk);
+        fixture
+            .transcript
+            .commit_rendered("pending-1", &[pending_row()]);
+        committed.push("pending row about to settle".to_owned());
+        paint_on(&io, &fixture, &mut painter);
+        for fault in live_block_faults(&io, &painter, &committed) {
+            faults.push(format!("after resize to {:?}: {fault}", sizes[1]));
+        }
+        io.resize(sizes[2]);
+        let grown = vec!["settled across the grow".to_owned()];
+        fixture.transcript.commit("entry-2", &grown);
+        committed.extend(grown);
+        paint_on(&io, &fixture, &mut painter);
+        for fault in live_block_faults(&io, &painter, &committed) {
+            faults.push(format!("after resize to {:?}: {fault}", sizes[2]));
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "sizes {sizes:?}, pulls {pulls}: {faults:?}\n{}",
+                dump(&io)
+            ))
+        }
+    }
+
+    /// Commits carrying a row longer than the screen, then shrinks and grows:
+    /// the wrapped row must not drift the anchor or duplicate the live block.
+    /// The overlong text itself is excluded from the once-only check — only
+    /// its effect on the live geometry is asserted.
+    fn overlong_commit_sequence(sizes: [(u16, u16); 3], pulls: bool) -> Result<(), String> {
+        let mut fixture = Fixture::new();
+        let mut committed = committed_rows(18);
+        fixture.transcript.commit("entry-0", &committed);
+        fixture.transcript.commit(
+            "entry-1",
+            &["x".repeat(100), "after the long row".to_owned()],
+        );
+        committed.push("after the long row".to_owned());
+        let io = SimIo::new(sizes[0], pulls);
+        let mut painter = Painter::default();
+        paint_on(&io, &fixture, &mut painter);
+        let mut faults = live_block_faults(&io, &painter, &committed);
+        for size in &sizes[1..] {
+            io.resize(*size);
+            paint_on(&io, &fixture, &mut painter);
+            for fault in live_block_faults(&io, &painter, &committed) {
+                faults.push(format!("after resize to {size:?}: {fault}"));
+            }
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "sizes {sizes:?}, pulls {pulls}: {faults:?}\n{}",
+                dump(&io)
+            ))
+        }
+    }
+
+    /// One shrink then one grow on a terminal that follows its caret.
+    fn shrink_then_grow(
+        committed: usize,
+        sizes: [(u16, u16); 3],
+        pulls: bool,
+    ) -> Result<(), String> {
+        let mut fixture = Fixture::new();
+        let rows = committed_rows(committed);
+        if !rows.is_empty() {
+            fixture.transcript.commit("entry-0", &rows);
+        }
+        let io = SimIo::new(sizes[0], pulls);
+        let mut painter = Painter::default();
+        paint_on(&io, &fixture, &mut painter);
+        let mut faults = live_block_faults(&io, &painter, &rows);
+        for size in &sizes[1..] {
+            io.resize(*size);
+            paint_on(&io, &fixture, &mut painter);
+            for fault in live_block_faults(&io, &painter, &rows) {
+                faults.push(format!("after resize to {size:?}: {fault}"));
+            }
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "committed {committed}, sizes {sizes:?}, pulls {pulls}: {faults:?}\n{}",
+                dump(&io)
+            ))
+        }
+    }
+
+    #[test]
+    fn resize_matrix_keeps_one_live_block() {
+        let mut failures = Vec::new();
+        for pulls in [true, false] {
+            for sizes in [
+                [(80, 24), (80, 16), (80, 32)],
+                [(80, 24), (80, 10), (80, 40)],
+                [(80, 24), (80, 12), (80, 24)],
+                [(80, 24), (60, 16), (80, 24)],
+            ] {
+                for committed in [0, 3, 10, 14, 20, 30] {
+                    if let Err(failure) = shrink_then_grow(committed, sizes, pulls) {
+                        failures.push(failure);
+                    }
+                }
+            }
+            for sizes in [
+                [(80, 24), (80, 16), (80, 32)],
+                [(80, 24), (40, 24), (100, 24)],
+                [(80, 24), (60, 12), (100, 40)],
+            ] {
+                if let Err(failure) = live_resize_sequence(sizes, pulls) {
+                    failures.push(failure);
+                }
+            }
+            for sizes in [
+                [(80, 24), (80, 16), (80, 32)],
+                [(100, 24), (60, 24), (100, 24)],
+            ] {
+                if let Err(failure) = overlong_commit_sequence(sizes, pulls) {
+                    failures.push(failure);
+                }
+            }
+            for sizes in [
+                [(80, 24), (80, 16), (80, 32)],
+                [(80, 24), (80, 10), (80, 40)],
+                [(80, 24), (60, 24), (100, 24)],
+            ] {
+                if let Err(failure) = visible_caret_sequence(sizes, pulls) {
+                    failures.push(failure);
+                }
+                if let Err(failure) = overlay_resize_sequence(sizes, pulls) {
+                    failures.push(failure);
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{}\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
         );
     }
 }

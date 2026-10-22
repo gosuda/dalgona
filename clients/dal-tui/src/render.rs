@@ -7,7 +7,7 @@ use std::sync::Arc;
 use dal_core::{BlobId, Block, EntryId, EntryKind, EntryView, JournalPart, TurnState, View};
 
 use crate::diagram::{ArtRole, DiagramKind, DiagramSettings, RenderCache, WiredBlock, wire_block};
-use crate::dialog::DialogUi;
+use crate::dialog::{DialogUi, DraftChoice};
 use crate::frame::{RegionBudget, RegionRequest};
 use crate::live::{BlobRead, ExpandedCard, ExpandedView, Live};
 use crate::picker::PickerUi;
@@ -25,8 +25,9 @@ pub(crate) struct FrameInput<'a> {
     pub(crate) composer: &'a str,
     /// Byte offset of the caret within `composer`.
     pub(crate) cursor: usize,
-    /// Whether the discard-draft question owns the composer and hint rows.
-    pub(crate) exit_draft: bool,
+    /// The discard-draft question's focused verb when it owns the composer
+    /// and hint rows; `None` when no draft-confirm is open.
+    pub(crate) exit_draft: Option<DraftChoice>,
     /// The checked-out git branch of the workspace, when it has one.
     pub(crate) branch: Option<&'a str>,
     pub(crate) popup: &'a [String],
@@ -140,6 +141,14 @@ impl RenderRow {
     }
 }
 
+/// True while the surface is below the usable floor: the frame shows only
+/// the narrow warning plus status and input admission must fail closed.
+/// Mirrors the `RegionBudget::floor` thresholds (`h < 8` or `w < 12`) so
+/// rendering and admission share one predicate.
+pub(crate) fn below_floor(width: u16, height: u16) -> bool {
+    height < crate::copy::ids::MIN_ROWS || width < crate::copy::ids::MIN_COLS
+}
+
 /// Renders the bottom stack in inline mode or the whole screen in fullscreen mode.
 pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<RenderRow> {
     let w = usize::from(width);
@@ -153,13 +162,10 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .map(|model| escape(model.id()))
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
-    let floor = if h < 8 {
-        Some(crate::copy::ids::NARROW_ROWS)
-    } else if w < 12 {
-        Some(crate::copy::ids::NARROW_COLS)
-    } else {
-        None
-    };
+    let floor = (height < crate::copy::ids::MIN_ROWS)
+        .then_some(crate::copy::ids::NARROW_ROWS)
+        .or((width < crate::copy::ids::MIN_COLS).then_some(crate::copy::ids::NARROW_COLS));
+    debug_assert_eq!(floor.is_some(), below_floor(width, height));
     if let Some(warning) = floor {
         return resolve_colors(
             vec![
@@ -310,7 +316,8 @@ fn paint_fullscreen_selection(
 /// The rows the interactive tail takes in place of the composer, if any.
 fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<usize> {
     if input.dialog.is_open() {
-        Some(6)
+        // Six content rows plus the DESIGN dialog boundary's two blanks.
+        Some(8)
     } else if input.screen == Screen::Inline
         && let Some(view) = input.live.expanded()
     {
@@ -323,21 +330,27 @@ fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<u
         Some(signin.rows(w, mode, usize::MAX).len())
     } else if let Some(picker) = input.picker {
         Some(picker.visible_len().max(1) + 2)
-    } else if input.exit_draft {
+    } else if input.exit_draft.is_some() {
         Some(1)
     } else {
         input.help.map(crate::help::HelpUi::height)
     }
 }
 
-/// The newest `count` notices as clipped dim rows.
-fn notice_rows(notices: &[String], count: usize, w: usize, mode: WidthMode) -> Vec<RenderRow> {
+/// The newest `count` notices as clipped rows, each in the role its
+/// severity chose at push time so error notices keep their error role.
+fn notice_rows(
+    notices: &[crate::live::NoticeRow],
+    count: usize,
+    w: usize,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
     notices
         .iter()
         .rev()
         .take(count)
         .rev()
-        .map(|row| RenderRow::new(escape(row), Role::Dim).clipped(w, mode))
+        .map(|notice| RenderRow::new(escape(&notice.text), notice.role).clipped(w, mode))
         .collect()
 }
 
@@ -442,41 +455,100 @@ fn expanded_overlay_rows(
 /// options, then the hint. The no-match `/model {id}` fallback is a
 /// selectable row like the options: it needs the same `>` focus marker, not
 /// just a color.
-fn picker_overlay_rows(picker: &PickerUi) -> Vec<RenderRow> {
-    let mut rows = vec![RenderRow::new(picker.title.clone(), Role::Accent)];
-    if let Some(id) = picker.model_filter_fallback() {
-        let selected = picker.is_selected(picker.selected_fallback_index());
-        rows.push(RenderRow::new(
-            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
-            if selected { Role::Accent } else { Role::Dim },
-        ));
-    } else {
-        let range = picker.visible_range();
-        if picker.is_empty() {
-            rows.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
-        }
-        for index in range {
-            if let Some(option) = picker.visible_option(index) {
-                let selected = picker.is_selected(index);
-                rows.push(RenderRow::new(
-                    format!(
-                        "{} {}",
-                        if selected { ">" } else { " " },
-                        escape(&option.label)
-                    ),
-                    if selected { Role::Accent } else { Role::Dim },
-                ));
-            }
-        }
-    }
-    rows.push(RenderRow::new(
+///
+/// Focus is reverse video plus the `>` marker, never color alone (DESIGN.md
+/// Focus and overlays / Accessibility): the focused row selects its whole
+/// text, so `NO_COLOR` still paints the theme's reversed selection style.
+///
+/// The window never exceeds `overlay_budget`, the sibling arms' contract:
+/// title plus hint keep one row each and the middle keeps a selection-
+/// centered window of the remainder, so every option stays reachable
+/// through the arrows at shrunk sizes and the status row keeps the last row.
+fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRow> {
+    let title = RenderRow::new(picker.title.clone(), Role::Accent);
+    let hint = RenderRow::new(
         if picker.is_settings() {
             crate::copy::ids::SETTINGS_HINT
         } else {
             crate::copy::ids::PICKER_HINT
         },
         Role::Dim,
-    ));
+    );
+    let option_row = |text: String, selected: bool| {
+        let mut row = RenderRow::new(text, if selected { Role::Accent } else { Role::Dim });
+        if selected {
+            row.selected.push(0..row.text.len());
+        }
+        row
+    };
+    let mut middle: Vec<RenderRow> = Vec::new();
+    let mut selected_pos = 0;
+    if let Some(id) = picker.model_filter_fallback() {
+        let selected = picker.is_selected(picker.selected_fallback_index());
+        middle.push(option_row(
+            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
+            selected,
+        ));
+    } else {
+        let range = picker.visible_range();
+        if picker.is_empty() {
+            middle.push(RenderRow::new(crate::copy::ids::PICKER_EMPTY, Role::Dim));
+        }
+        for index in range {
+            let Some(option) = picker.visible_option(index) else {
+                continue;
+            };
+            let selected = picker.is_selected(index);
+            if selected {
+                selected_pos = middle.len();
+            }
+            // Multi-select rows carry the check marker the request dialogs
+            // use ([x]/[ ]); single-select rows keep the plain gutter.
+            let check = if picker.is_multi() {
+                {
+                    if picker.is_checked(index) {
+                        "[x] "
+                    } else {
+                        "[ ] "
+                    }
+                }
+            } else {
+                Default::default()
+            };
+            middle.push(option_row(
+                format!(
+                    "{} {check}{}",
+                    if selected { ">" } else { " " },
+                    escape(&option.label)
+                ),
+                selected,
+            ));
+        }
+    }
+    if overlay_budget == 0 {
+        return Vec::new();
+    }
+    if middle.len() + 2 <= overlay_budget {
+        let mut rows = Vec::with_capacity(middle.len() + 2);
+        rows.push(title);
+        rows.extend(middle);
+        rows.push(hint);
+        return rows;
+    }
+    if overlay_budget == 1 {
+        return vec![title];
+    }
+    if overlay_budget == 2 {
+        return vec![title, hint];
+    }
+    let allowed = overlay_budget.saturating_sub(2).max(1).min(middle.len());
+    let start = selected_pos
+        .saturating_sub(allowed / 2)
+        .min(middle.len().saturating_sub(allowed));
+    let mut rows = Vec::with_capacity(overlay_budget);
+    rows.push(title);
+    rows.extend(middle.into_iter().skip(start).take(allowed));
+    rows.push(hint);
     rows
 }
 
@@ -490,13 +562,29 @@ fn overlay_rows(
     bottom: &mut Vec<RenderRow>,
 ) {
     if input.dialog.is_open() {
-        bottom.extend(input.dialog.rendered_rows(
+        // DESIGN.md dialog boundary: one blank row above and below the
+        // dialog. The blanks come out of the overlay budget — rows outside
+        // it would overflow the region — so they only paint once the budget
+        // still leaves the dialog a title row and its action row; below
+        // that the content rows win over the chrome.
+        let bordered = budget.overlay >= 4;
+        let mut rows = input.dialog.rendered_rows(
             w,
-            budget.overlay,
+            if bordered {
+                budget.overlay - 2
+            } else {
+                budget.overlay
+            },
             mode,
             input.diagram_settings,
             input.diagram_cache,
-        ));
+            input.kitty_keyboard,
+        );
+        if bordered {
+            rows.insert(0, RenderRow::plain(String::new(), Role::Text));
+            rows.push(RenderRow::plain(String::new(), Role::Text));
+        }
+        bottom.extend(rows);
     } else if input.screen == Screen::Inline
         && let Some(view) = input.live.expanded()
     {
@@ -512,16 +600,20 @@ fn overlay_rows(
     } else if let Some(signin) = input.signin {
         bottom.extend(signin.rows(w, mode, budget.overlay));
     } else if let Some(picker) = input.picker {
-        bottom.extend(picker_overlay_rows(picker));
-    } else if input.exit_draft {
-        bottom.push(RenderRow::plain(
-            format!(
-                "[y] {}   [n] {}",
-                crate::copy::ids::EXIT_DRAFT_TITLE,
-                crate::copy::ids::EXIT_KEEP_EDITING
-            ),
-            Role::Accent,
-        ));
+        bottom.extend(picker_overlay_rows(picker, budget.overlay));
+    } else if let Some(choice) = input.exit_draft {
+        // The focused verb paints the selection range and leads the row, so
+        // a narrow frame can never clip the verb Enter activates. The
+        // bracketed key cue is the same token the confirm dialogs carry.
+        let discard = format!("[y] {}", crate::copy::ids::EXIT_DRAFT_TITLE);
+        let keep = format!("[n] {}", crate::copy::ids::EXIT_KEEP_EDITING);
+        let (focused, other) = match choice {
+            DraftChoice::Discard => (discard, keep),
+            DraftChoice::Keep => (keep, discard),
+        };
+        let mut row = RenderRow::plain(format!("{focused}   {other}"), Role::Accent);
+        row.selected.push(0..focused.len());
+        bottom.push(row);
     } else if let Some(help) = input.help {
         bottom.extend(help.rows(budget.overlay));
     } else {
@@ -1228,10 +1320,9 @@ pub(crate) fn entry_rows_timed(
                             diagram_cache,
                         ));
                     }
-                    Block::Reasoning { .. } => rows.push(RenderRow::new(
-                        "Thinking · ctrl+o to show reasoning",
-                        Role::Dim,
-                    )),
+                    Block::Reasoning { .. } => {
+                        rows.push(RenderRow::new(collapsed_thinking_text(), Role::Dim));
+                    }
                     // The call settles into one card from its result entry.
                     Block::ToolCall { .. } => {}
                 }
@@ -1673,21 +1764,24 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
         let text = escape(&cell.text);
         let start = row.text.len();
         row.text.push_str(&text);
-        let role = match cell.role {
-            ArtRole::Border => Role::Dim,
-            ArtRole::Text => Role::Text,
-            ArtRole::Edge | ArtRole::Title => Role::Accent,
-            ArtRole::EdgeLabel => Role::Warning,
+        // DESIGN.md Diagrams: border dim, text text, edge accent, edge label
+        // dim, title accent and bold.
+        let (role, bold) = match cell.role {
+            ArtRole::Text => (Role::Text, false),
+            ArtRole::Edge => (Role::Accent, false),
+            ArtRole::Border | ArtRole::EdgeLabel => (Role::Dim, false),
+            ArtRole::Title => (Role::Accent, true),
         };
         if let Some(span) = row.spans.last_mut()
             && span.role == role
+            && span.bold == bold
         {
             span.range.end = row.text.len();
         } else {
             row.spans.push(RenderSpan {
                 range: start..row.text.len(),
                 role,
-                bold: false,
+                bold,
             });
         }
     }
@@ -1730,6 +1824,14 @@ fn tool_card_row(
         line
     };
     RenderRow::new(line, Role::Text)
+}
+
+/// The deck's collapsed thinking row. Reasoning blocks carry no timing, so
+/// `{dur}` renders empty and its doubled space collapses — the same collapse
+/// the expanded header performs for an empty duration.
+fn collapsed_thinking_text() -> String {
+    crate::copy::render(crate::copy::ids::THINKING_COLLAPSED, &[("dur", "")], 1)
+        .replace("  ·", " ·")
 }
 
 fn user_row(row: RenderRow) -> RenderRow {
@@ -1855,7 +1957,7 @@ mod tests {
             on_transcript
                 .row_data(0)
                 .is_some_and(|(_, spans)| !spans.is_empty()),
-            "a user card is not Ctrl+O-eligible, so no header pushes the art to the second row"
+            "a user card is not Ctrl+O-eligible, so no header shifts the art to the first terminal row"
         );
         assert_eq!(on_cache.renders(), 1);
     }
@@ -2206,7 +2308,7 @@ mod tests {
             screen: crate::Screen::Inline,
             composer: "",
             cursor: 0,
-            exit_draft: false,
+            exit_draft: None,
             branch: None,
             popup: &[],
             live,
@@ -2307,7 +2409,6 @@ mod tests {
                 approval: dal_core::ApprovalMode::Ask,
                 mode: dal_core::Mode::Normal,
                 name: None,
-                scoped_models: None,
             },
             open: Vec::new(),
             changes: Vec::new(),
@@ -2443,5 +2544,376 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         live.close_expand();
+    }
+
+    /// Twenty `provider/model-nn` rows for the shrunk-overlay tests.
+    fn twenty_model_picker() -> crate::picker::PickerUi {
+        use crate::picker::{PickerAction, PickerOption};
+
+        let options: Vec<PickerOption> = (0..20)
+            .map(|n| PickerOption {
+                label: format!("model-{n:02}"),
+                action: PickerAction::Command(dal_core::Command::Run {
+                    name: "model".into(),
+                    args: format!("provider/model-{n:02}").into(),
+                    expected: None,
+                }),
+            })
+            .collect();
+        crate::picker::PickerUi::new("Pick a model", "", options)
+    }
+
+    #[test]
+    fn picker_overlay_rows_stay_within_region_budget_at_shrunk_sizes() {
+        let picker = twenty_model_picker();
+        assert_eq!(picker.visible_len(), 20);
+
+        let full = super::picker_overlay_rows(&picker, 15);
+        assert_eq!(
+            full.len(),
+            8,
+            "title + 6-option window + hint at usable sizes: {:?}",
+            full.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+        let shrunk = super::picker_overlay_rows(&picker, 5);
+        assert_eq!(
+            shrunk.len(),
+            5,
+            "80x10 overlay budget is 5 rows, emission must not exceed it"
+        );
+        assert!(
+            shrunk.iter().any(|row| row.text.contains("model-00")),
+            "the selected row stays visible in the shrunk window: {:?}",
+            shrunk
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(super::picker_overlay_rows(&picker, 1).len(), 1);
+        assert_eq!(super::picker_overlay_rows(&picker, 2).len(), 2);
+
+        let mut moved = picker.clone();
+        for _ in 0..10 {
+            moved.move_selection(true);
+        }
+        let window = super::picker_overlay_rows(&moved, 5);
+        assert_eq!(window.len(), 5);
+        assert!(
+            window.iter().any(|row| row.text.contains("model-10")),
+            "a mid-list selection recenters instead of clipping away: {:?}",
+            window
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shrunk_live_block_keeps_picker_within_region_cap() {
+        use crate::frame::{RegionBudget, RegionRequest};
+
+        let picker = twenty_model_picker();
+
+        let budget = RegionBudget::allocate(
+            80,
+            10,
+            RegionRequest {
+                overlay: Some(picker.visible_len().max(1) + 2),
+                ..RegionRequest::default()
+            },
+        );
+        assert_eq!(budget.overlay, 5);
+        assert_eq!(budget.cap, 6);
+
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        let input = super::FrameInput {
+            view: &view,
+            screen: crate::Screen::Inline,
+            composer: "",
+            cursor: 0,
+            exit_draft: None,
+            branch: None,
+            popup: &[],
+            live: &live,
+            dialog: &dialog,
+            picker: Some(&picker),
+            help: None,
+            signin: None,
+            transcript: &transcript,
+            viewport: &viewport,
+            opts: &opts,
+            kitty_keyboard: false,
+            theme: &theme,
+            diagram_settings: DiagramSettings::default(),
+            diagram_cache: &cache,
+        };
+        let rows = super::frame_rows(input, 80, 10);
+        assert!(
+            rows.len() <= budget.cap,
+            "shrunk live block must not exceed its cap: {} > {}",
+            rows.len(),
+            budget.cap
+        );
+        assert!(
+            rows.iter().any(|row| row.text.contains("model-")),
+            "the picker stays painted at shrunk sizes: {:?}",
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn picker_focus_paints_reverse_video_not_color_alone() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..4)
+            .map(|n| PickerOption {
+                label: format!("opt-{n}"),
+                action: PickerAction::Noop,
+            })
+            .collect();
+        let mut picker = PickerUi::new("Pick", "", options);
+        picker.move_selection(true);
+        let rows = super::picker_overlay_rows(&picker, 12);
+        let selected: Vec<&super::RenderRow> =
+            rows.iter().filter(|row| !row.selected.is_empty()).collect();
+        assert_eq!(
+            selected.len(),
+            1,
+            "exactly the focused row carries the reverse-video selection"
+        );
+        assert_eq!(selected[0].selected, vec![0..selected[0].text.len()]);
+        assert_eq!(selected[0].text, "> opt-1");
+    }
+
+    #[test]
+    fn picker_fallback_row_paints_the_same_focus() {
+        use crate::picker::model_picker;
+
+        let picker = model_picker(&[], "acme/gpt-6");
+        assert_eq!(picker.model_filter_fallback(), Some("acme/gpt-6"));
+        let rows = super::picker_overlay_rows(&picker, 12);
+        let fallback = rows
+            .iter()
+            .find(|row| row.text.contains("/model acme/gpt-6"))
+            .expect("the typed-id fallback row paints");
+        assert_eq!(
+            fallback.selected,
+            vec![0..fallback.text.len()],
+            "the selectable fallback gets the same reverse-video focus: {fallback:?}"
+        );
+    }
+
+    #[test]
+    fn art_cells_follow_the_design_role_map() {
+        use crate::diagram::{ArtCell, ArtRole};
+        use crate::theme::Role;
+
+        let cells: Vec<ArtCell> = [
+            (ArtRole::Border, "+"),
+            (ArtRole::Text, "x"),
+            (ArtRole::Edge, ">"),
+            (ArtRole::EdgeLabel, "label"),
+            (ArtRole::Title, "title"),
+        ]
+        .into_iter()
+        .map(|(role, text)| ArtCell {
+            text: text.to_owned(),
+            role,
+        })
+        .collect();
+        let row = super::art_row(&cells);
+        let styled: Vec<(&str, Role, bool)> = row
+            .spans
+            .iter()
+            .map(|span| (&row.text[span.range.clone()], span.role, span.bold))
+            .collect();
+        assert_eq!(
+            styled,
+            [
+                ("+", Role::Dim, false),
+                ("x", Role::Text, false),
+                (">", Role::Accent, false),
+                ("label", Role::Dim, false),
+                ("title", Role::Accent, true),
+            ],
+            "DESIGN.md Diagrams: border dim, text text, edge accent, edge label dim, title accent+bold"
+        );
+        // Adjacent same-role cells merge; a bold boundary never does.
+        let merged = super::art_row(&[
+            ArtCell {
+                text: "ab".to_owned(),
+                role: ArtRole::EdgeLabel,
+            },
+            ArtCell {
+                text: "cd".to_owned(),
+                role: ArtRole::EdgeLabel,
+            },
+        ]);
+        assert_eq!(merged.spans.len(), 1, "same-role cells share one span");
+    }
+
+    #[test]
+    fn a_multi_picker_paints_check_markers_and_the_same_focus() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..3)
+            .map(|n| PickerOption {
+                label: format!("opt-{n}"),
+                action: PickerAction::Noop,
+            })
+            .collect();
+        let mut picker = PickerUi::new("Pick", "", options);
+        picker.with_multi([0]);
+        let rows = super::picker_overlay_rows(&picker, 12);
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|text| text.starts_with("> [x] ")),
+            "the focused checked row carries focus plus the checked marker: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .filter(|text| text.starts_with("  [ ] "))
+                .count()
+                == 2,
+            "unchecked multi rows paint the empty marker: {texts:?}"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| !row.selected.is_empty())
+                .all(|row| {
+                    matches!(row.selected.as_slice(), [range] if *range == (0..row.text.len()))
+                }),
+            "reverse video still covers the whole focused row"
+        );
+
+        // A single picker keeps the unmarked gutter.
+        let single = PickerUi::new(
+            "Pick",
+            "",
+            (0..2)
+                .map(|n| PickerOption {
+                    label: format!("opt-{n}"),
+                    action: PickerAction::Noop,
+                })
+                .collect(),
+        );
+        let texts: Vec<String> = super::picker_overlay_rows(&single, 12)
+            .iter()
+            .map(|row| row.text.clone())
+            .collect();
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("[ ]") || text.contains("[x]")),
+            "no check markers on a single picker: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_draft_confirm_leads_with_the_focused_verb() {
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        for choice in [
+            crate::dialog::DraftChoice::Keep,
+            crate::dialog::DraftChoice::Discard,
+        ] {
+            let mut input = expanded_frame(
+                &view,
+                &live,
+                &transcript,
+                &viewport,
+                &opts,
+                &theme,
+                &dialog,
+                &cache,
+            );
+            input.exit_draft = Some(choice);
+            let rows = super::frame_rows(input, 80, 24);
+            let row = rows
+                .iter()
+                .find(|row| !row.selected.is_empty())
+                .expect("the focused verb paints the selection range");
+            let focused = &row.text[..row.selected[0].end.min(row.text.len())];
+            let want = match choice {
+                crate::dialog::DraftChoice::Keep => "[n]",
+                crate::dialog::DraftChoice::Discard => "[y]",
+            };
+            assert!(
+                focused.starts_with(want),
+                "{choice:?}: the focused verb heads the row so clipping can never hide it: {row:?}"
+            );
+        }
+        // The focused verb still heads the row at a starved width.
+        let mut input = expanded_frame(
+            &view,
+            &live,
+            &transcript,
+            &viewport,
+            &opts,
+            &theme,
+            &dialog,
+            &cache,
+        );
+        input.exit_draft = Some(crate::dialog::DraftChoice::Discard);
+        let narrow = super::frame_rows(input, 20, 10);
+        assert!(
+            narrow
+                .iter()
+                .any(|row| row.text.starts_with("[y]") && !row.selected.is_empty()),
+            "narrow frame keeps the focused verb first and selected: {:?}",
+            narrow
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_collapsed_thinking_row_reads_the_copy_deck() {
+        let rows = entry_rows(
+            &scroll_path_reasoning_entry(),
+            80,
+            WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+        let thinking = rows
+            .iter()
+            .find(|row| row.text.contains("Thinking"))
+            .expect("the reasoning block commits its collapsed row");
+        assert_eq!(
+            thinking.text, "  Thinking · ctrl+o to show reasoning",
+            "reasoning carries no duration, so the deck's duration slot collapses"
+        );
     }
 }
