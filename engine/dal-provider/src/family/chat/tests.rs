@@ -41,6 +41,7 @@ fn request(tools: Vec<ModelToolSpec>, context: Vec<ContextItem>) -> ModelRequest
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         system: "You are terse.".into(),
         tools: tools.into(),
@@ -182,6 +183,7 @@ fn request_body_rejects_what_chat_cannot_carry() {
     other.model = ModelRoute::Api {
         family: Family::Responses,
         model: "gpt-6-astra".into(),
+        provider: None,
     };
     assert_eq!(
         request_body(&other, &plan(None, None)),
@@ -759,4 +761,68 @@ fn an_unkeyed_tool_delta_without_an_open_call_is_a_protocol_error() {
     );
     assert_eq!(events, []);
     assert!(matches!(error, Some(ProviderError::Protocol { .. })));
+}
+
+/// The `Usage` event of the response the decoder produced for `wire`.
+fn usage_of(wire: &str) -> Usage {
+    let (events, error) = run(wire, wire.len());
+    assert!(error.is_none(), "{error:?}");
+    events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Usage { usage } => Some(*usage),
+            _ => None,
+        })
+        .expect("a finished response carries one usage")
+}
+
+#[test]
+fn finish_reasons_map_to_stop_reasons_and_unknown_ones_pass_through_verbatim() {
+    for (finish, expected) in [
+        ("stop", StopReason::EndTurn),
+        ("length", StopReason::MaxTokens),
+        ("content_filter", StopReason::Refusal),
+        ("function_call", StopReason::Other("function_call".into())),
+        ("STOP", StopReason::Other("STOP".into())),
+        ("length ", StopReason::Other("length ".into())),
+    ] {
+        let chunk = format!(
+            r#"{{"choices":[{{"index":0,"delta":{{"content":"x"}},"finish_reason":"{finish}"}}]}}"#
+        );
+        let (events, error) = run(&sse(&[chunk.as_str(), "[DONE]"]), 64);
+        assert!(error.is_none(), "{finish:?}: {error:?}");
+        assert_eq!(
+            events.last(),
+            Some(&StreamEvent::Stop { reason: expected }),
+            "{finish:?}"
+        );
+    }
+}
+
+#[test]
+fn reasoning_beyond_the_completion_count_leaves_zero_output_and_cache_writes_survive() {
+    // (completion, reasoning, output): below, at, and above the boundary
+    // where reasoning would consume the whole completion count.
+    for (completion, reasoning, output) in [(3_u64, 9_u64, 0_u64), (9, 9, 0), (10, 9, 1)] {
+        let chunk = format!(
+            r#"{{"choices":[{{"index":0,"delta":{{"content":"x"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":10,"completion_tokens":{completion},"prompt_tokens_details":{{"cached_tokens":2,"cache_write_tokens":6}},"completion_tokens_details":{{"reasoning_tokens":{reasoning}}}}}}}"#
+        );
+        assert_eq!(
+            usage_of(&sse(&[chunk.as_str(), "[DONE]"])),
+            Usage {
+                input_tokens: 10,
+                cached_input_tokens: 2,
+                output_tokens: output,
+                reasoning_tokens: Some(reasoning),
+                cache_write_tokens: 6,
+                premium_requests: None,
+                cost_usd: None,
+            },
+            "completion {completion}, reasoning {reasoning}"
+        );
+    }
+    // Without a reasoning split the whole completion count is output.
+    let plain = r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":7}}"#;
+    let usage = usage_of(&sse(&[plain, "[DONE]"]));
+    assert_eq!((usage.output_tokens, usage.reasoning_tokens), (7, None));
 }

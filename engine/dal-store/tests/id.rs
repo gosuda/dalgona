@@ -1,5 +1,7 @@
 //! Session identifier shape, parsing, and ordering.
 
+use std::collections::HashSet;
+
 use dal_core::SessionId;
 
 fn shape(text: &str) {
@@ -8,6 +10,11 @@ fn shape(text: &str) {
         match index {
             8 | 13 | 18 | 23 => assert_eq!(byte, b'-', "hyphen at position {index}"),
             14 => assert_eq!(byte, b'7', "UUIDv7 version nibble"),
+            19 => assert!(
+                matches!(byte, b'8' | b'9' | b'a' | b'b'),
+                "RFC 4122 variant nibble at position {index}, got {}",
+                char::from(byte)
+            ),
             _ => assert!(
                 byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
                 "lowercase hex at position {index}"
@@ -17,7 +24,7 @@ fn shape(text: &str) {
 }
 
 #[test]
-fn uuidv7_id_shape_and_order() {
+fn uuidv7_id_shape() {
     let first = SessionId::new_v7();
     let second = SessionId::new_v7();
     for id in [first, second] {
@@ -29,18 +36,58 @@ fn uuidv7_id_shape_and_order() {
             "parse round-trips"
         );
     }
-    let earlier =
-        SessionId::parse("0192aa00-0000-7000-8000-000000000001").expect("earlier fixture parses");
-    let later =
-        SessionId::parse("0192aa00-0001-7000-8000-000000000001").expect("later fixture parses");
-    assert!(
-        earlier.to_string() < later.to_string(),
-        "earlier timestamp orders first"
-    );
-    assert!(
-        first.to_string() <= second.to_string(),
-        "monotonic generator never goes backward"
-    );
+}
+
+/// Listing and `newest` order sessions by id text, so a burst of ids from one
+/// process must be unique and strictly increasing in text order, not just
+/// ordered across two samples taken a moment apart.
+#[test]
+fn burst_of_ids_is_unique_strictly_increasing_and_round_trips() {
+    const BURST: usize = 4096;
+    let mut previous: Option<String> = None;
+    let mut seen = HashSet::with_capacity(BURST);
+    for index in 0..BURST {
+        let id = SessionId::new_v7();
+        let text = id.to_string();
+        shape(&text);
+        assert_eq!(
+            SessionId::parse(&text).expect("generated id parses"),
+            id,
+            "id {index} round-trips"
+        );
+        if let Some(earlier) = &previous {
+            assert!(
+                earlier.as_str() < text.as_str(),
+                "id {index} ({text}) must sort after its predecessor ({earlier})"
+            );
+        }
+        assert!(seen.insert(id), "id {index} ({text}) repeats an earlier id");
+        previous = Some(text);
+    }
+    assert_eq!(seen.len(), BURST, "every id in the burst is distinct");
+}
+
+#[test]
+fn ids_from_concurrent_threads_never_collide() {
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 2048;
+    let workers: Vec<_> = (0..THREADS)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..PER_THREAD)
+                    .map(|_| SessionId::new_v7())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    for worker in workers {
+        for id in worker.join().expect("generator thread joins") {
+            shape(&id.to_string());
+            assert!(seen.insert(id), "{id} was generated twice");
+        }
+    }
+    assert_eq!(seen.len(), THREADS * PER_THREAD);
 }
 
 #[test]
@@ -53,4 +100,84 @@ fn reject_wrong_uuid_forms() {
         SessionId::parse("550e8400-e29b-41d4-a716-446655440000").is_err(),
         "version-4 UUID is rejected"
     );
+}
+
+const CANONICAL: &str = "0192aa00-0000-7000-8000-000000000001";
+
+#[test]
+fn parse_refuses_every_near_miss_of_the_canonical_form() {
+    let near_misses = [
+        ("", "empty text"),
+        ("0192aa00-0000-7000-8000-00000000000", "one character short"),
+        (
+            "0192aa00-0000-7000-8000-0000000000010",
+            "one character long",
+        ),
+        (
+            "0192aa00-0000-7000-8000-0000000000 1",
+            "space in place of a digit",
+        ),
+        (
+            "0192aa00000070008000000000000001",
+            "simple form without hyphens",
+        ),
+        ("{0192aa00-0000-7000-8000-000000000001}", "braced form"),
+        ("urn:uuid:0192aa00-0000-7000-8000-000000000001", "urn form"),
+        (
+            "0192aa00-0000-7000-8000-00000000000A",
+            "one uppercase hex digit",
+        ),
+        (
+            "0192aa00-0000-7000-8000-00000000000g",
+            "non-hex character in the last position",
+        ),
+        (
+            "0192aa000-000-7000-8000-000000000001",
+            "hyphens at the wrong positions",
+        ),
+        (" 0192aa00-0000-7000-8000-000000000001", "leading space"),
+        ("0192aa00-0000-7000-8000-000000000001 ", "trailing space"),
+        ("0192aa00-0000-7000-8000-000000000001\n", "trailing newline"),
+        ("00000000-0000-0000-0000-000000000000", "the nil UUID"),
+        ("0192aa00-0000-6000-8000-000000000001", "version 6"),
+        ("0192aa00-0000-8000-8000-000000000001", "version 8"),
+        (
+            "0192aa00-0000-7000-7000-000000000001",
+            "variant nibble 7 (below RFC 4122)",
+        ),
+        (
+            "0192aa00-0000-7000-c000-000000000001",
+            "variant nibble c (above RFC 4122)",
+        ),
+        (
+            "0192aa00-0000-7000-0000-000000000001",
+            "variant nibble 0 (NCS)",
+        ),
+        (
+            "0192aa00-0000-7000-f000-000000000001",
+            "variant nibble f (reserved)",
+        ),
+    ];
+    for (text, why) in near_misses {
+        assert!(
+            SessionId::parse(text).is_err(),
+            "{why}: {text:?} must not parse as a session id"
+        );
+    }
+}
+
+#[test]
+fn parse_accepts_exactly_the_rfc4122_variant_nibbles() {
+    assert_eq!(
+        SessionId::parse(CANONICAL)
+            .expect("canonical fixture parses")
+            .to_string(),
+        CANONICAL
+    );
+    for nibble in ['8', '9', 'a', 'b'] {
+        let text = format!("0192aa00-0000-7000-{nibble}000-000000000001");
+        let id = SessionId::parse(&text)
+            .unwrap_or_else(|error| panic!("variant nibble {nibble} must parse: {error}"));
+        assert_eq!(id.to_string(), text, "variant nibble {nibble} round-trips");
+    }
 }

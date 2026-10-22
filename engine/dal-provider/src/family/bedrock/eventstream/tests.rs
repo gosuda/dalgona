@@ -157,17 +157,163 @@ fn prelude_crc_mismatch_fails_before_any_payload_read() {
 #[test]
 fn truncation_reports_declared_and_available() {
     let wire = event_frame("metadata", "{}");
+    let total = u32::try_from(wire.len()).unwrap_or(u32::MAX);
+    // A cut anywhere after the prelude names the frame's own declared total
+    // and the bytes that did arrive, from one byte short down to the bare
+    // prelude.
+    for cut in PRELUDE_LEN..wire.len() {
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(
+            decoder.push(&wire[..cut]),
+            Pushed::default(),
+            "an incomplete frame is neither a frame nor a failure (cut {cut})"
+        );
+        assert_eq!(
+            decoder.finish(),
+            Err(FrameError::Truncated {
+                declared: total,
+                available: cut,
+            }),
+            "cut {cut}"
+        );
+    }
+    // A cut inside the prelude declares nothing yet: the bytes buffered stand
+    // in for both numbers.
+    for cut in 1..PRELUDE_LEN {
+        let mut decoder = FrameDecoder::new();
+        assert_eq!(decoder.push(&wire[..cut]), Pushed::default(), "cut {cut}");
+        let buffered = u32::try_from(cut).unwrap_or(u32::MAX);
+        assert_eq!(
+            decoder.finish(),
+            Err(FrameError::Truncated {
+                declared: buffered,
+                available: cut,
+            }),
+            "prelude cut {cut}"
+        );
+    }
+    // The whole frame is not truncated.
     let mut decoder = FrameDecoder::new();
+    assert_eq!(decoder.push(&wire).frames.len(), 1);
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+#[test]
+fn the_smallest_frame_is_sixteen_bytes_and_decodes_empty() {
+    // No headers and no payload: the prelude plus the message CRC is the
+    // least a frame can be. One byte fewer is refused as a length pair the
+    // framing cannot produce, so this is the exact accepted edge.
+    let wire = raw_frame(&[], b"");
+    assert_eq!(wire.len(), MESSAGE_OVERHEAD);
+    let frames = decode_all(vec![wire]).unwrap_or_else(|_| panic!("the 16-byte frame decodes"));
     assert_eq!(
-        decoder.push(&wire[..wire.len() - 3]),
-        Pushed::default(),
-        "an incomplete frame is neither a frame nor a failure"
+        frames,
+        vec![Frame {
+            headers: BTreeMap::new(),
+            payload: Vec::new(),
+        }]
     );
-    let error = decoder
-        .finish()
-        .err()
-        .unwrap_or_else(|| panic!("a partial frame truncates"));
-    assert!(matches!(error, FrameError::Truncated { .. }));
+}
+
+#[test]
+fn a_frame_of_exactly_the_maximum_length_decodes() {
+    // The limit is on the declared total, inclusive: 8 MiB exactly is
+    // accepted (one byte more is refused by the oversize test above).
+    let payload_len = usize::try_from(MAX_FRAME_LEN).unwrap_or(usize::MAX) - MESSAGE_OVERHEAD;
+    let wire = raw_frame(&[], &vec![b'x'; payload_len]);
+    assert_eq!(wire.len(), payload_len + MESSAGE_OVERHEAD);
+    let frames = decode_all(vec![wire]).unwrap_or_else(|_| panic!("a frame at the limit decodes"));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].payload.len(), payload_len);
+}
+
+#[test]
+fn a_header_block_of_exactly_the_maximum_length_decodes() {
+    // The limit is on the declared header length, inclusive. Each string
+    // header costs name length (1) + name (1) + type (1) + value length (2)
+    // + value, so two one-letter names with these value lengths fill the
+    // block to exactly MAX_HEADERS_LEN bytes.
+    let max = usize::try_from(MAX_HEADERS_LEN).unwrap_or(usize::MAX);
+    let first = usize::from(u16::MAX);
+    let second = max - 10 - first;
+    let mut block = Vec::new();
+    for (name, length) in [("a", first), ("b", second)] {
+        let mut value = vec![7];
+        value.extend_from_slice(&u16::try_from(length).unwrap_or(u16::MAX).to_be_bytes());
+        value.extend(std::iter::repeat_n(b'v', length));
+        block.extend_from_slice(&typed(name, &value));
+    }
+    assert_eq!(block.len(), max);
+    let frames = decode_all(vec![raw_frame(&block, b"p")])
+        .unwrap_or_else(|_| panic!("a header block at the limit decodes"));
+    assert_eq!(frames[0].payload, b"p");
+    assert_eq!(
+        frames[0]
+            .headers
+            .get("a")
+            .and_then(HeaderValue::as_str)
+            .map(str::len),
+        Some(first)
+    );
+    assert_eq!(
+        frames[0]
+            .headers
+            .get("b")
+            .and_then(HeaderValue::as_str)
+            .map(str::len),
+        Some(second)
+    );
+}
+
+#[test]
+fn a_header_block_cut_anywhere_never_reads_into_the_payload() {
+    // The payload is the rest of a valid header block, so a parser that read
+    // past the declared block end would find the missing bytes there and
+    // succeed. Cut on an entry boundary the shorter block is valid; cut
+    // anywhere inside an entry it must fail at that entry's offset.
+    let entries = [
+        typed("bool", &[0]),
+        typed("byte", &[2, 0xFB]),
+        typed("short", &[3, 0x12, 0x34]),
+        typed("int", &[4, 0x12, 0x34, 0x56, 0x78]),
+        typed("long", &[5, 1, 2, 3, 4, 5, 6, 7, 8]),
+        typed("blob", &[6, 0, 2, 0xAA, 0xBB]),
+        typed("text", &[7, 0, 2, b'o', b'k']),
+        typed("stamp", &[8, 0, 0, 0, 0, 0, 0, 0, 1]),
+        typed(
+            "uuid",
+            &[9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        ),
+    ];
+    let block = entries.concat();
+    let mut boundaries = vec![0];
+    let mut end = 0;
+    for entry in &entries {
+        end += entry.len();
+        boundaries.push(end);
+    }
+    for cut in 0..=block.len() {
+        let result = decode_all(vec![raw_frame(&block[..cut], &block[cut..])]);
+        if let Some(complete) = boundaries.iter().position(|boundary| *boundary == cut) {
+            let frames = result.unwrap_or_else(|_| panic!("cut {cut} is an entry boundary"));
+            assert_eq!(frames[0].headers.len(), complete, "cut {cut}");
+            assert_eq!(frames[0].payload, block[cut..], "cut {cut}");
+        } else {
+            let entry_start = boundaries
+                .iter()
+                .copied()
+                .filter(|boundary| *boundary < cut)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                result,
+                Err(FrameError::Header {
+                    offset: entry_start
+                }),
+                "cut {cut}"
+            );
+        }
+    }
 }
 
 /// Rewrites the declared total length and reseals the prelude CRC, so the

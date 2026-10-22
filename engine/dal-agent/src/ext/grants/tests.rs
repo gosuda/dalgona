@@ -670,7 +670,12 @@ async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
         answer_and_release(&broker, request, Answer::Approve, tui());
     });
     assert!(granted.expect("first approval").persistent());
-    assert!(store.ensure(&caller, Service::Net, &cancel).await.is_ok());
+    let reused = store
+        .ensure(&caller, Service::Net, &cancel)
+        .await
+        .expect("the stored row satisfies the same code at the same root");
+    assert!(reused.persistent(), "reuse rides the persistent row");
+    assert_eq!(broker.open_requests(), [], "reuse asks nothing");
 
     store.set_answerer(Arc::new(|| false));
     let mut replaced_code = caller.clone();
@@ -692,6 +697,288 @@ async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
         moved_workspace.ensure(&caller, Service::Net, &cancel).await,
         Err(ServiceError::Denied(DenyReason::NotGranted))
     ));
+}
+
+fn keyed_extension(origin: Origin, inject: ServiceSet) -> crate::ext::Extension {
+    crate::ext::ExtensionBuilder::new("focus", "1.0.0", inject)
+        .expect("builder")
+        .with_origin(origin, None)
+        .with_source_digest("code-under-test".into())
+        .build()
+        .expect("extension")
+}
+
+#[test]
+fn for_extension_keys_only_verified_user_and_bundled_code_at_an_absolute_utf8_root() {
+    let inject = ServiceSet::from_names(["ask", "fs.read", "run"]).expect("inject");
+    let root = std::env::temp_dir();
+    for origin in [Origin::User, Origin::Bundled] {
+        let key = GrantKey::for_extension(&keyed_extension(origin, inject), &root)
+            .expect("a verified extension at an absolute root has a key");
+        assert_eq!(key.extension.as_str(), "focus");
+        assert_eq!(key.origin, origin);
+        assert_eq!(
+            key.services.iter().collect::<Vec<_>>(),
+            vec![Service::FsRead, Service::Run],
+            "ask is never part of a grant key"
+        );
+        assert_eq!(key.digest.len(), 64);
+        assert_eq!(key.workspace, root);
+    }
+    assert!(
+        GrantKey::for_extension(&keyed_extension(Origin::Builtin, inject), &root).is_none(),
+        "builtin code needs no grant"
+    );
+    assert!(
+        GrantKey::for_extension(
+            &keyed_extension(Origin::User, inject),
+            std::path::Path::new("relative/root"),
+        )
+        .is_none(),
+        "a relative root has no grant"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let hostile = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff-root"));
+        assert!(
+            GrantKey::for_extension(&keyed_extension(Origin::User, inject), &hostile).is_none(),
+            "a root that is not UTF-8 has no grant"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grant_refuses_every_key_no_later_load_would_accept_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = GrantStore::new(dir.path().to_path_buf());
+    let base = GrantKey {
+        extension: "focus".parse().expect("name"),
+        origin: Origin::User,
+        services: ServiceSet::from_names(["run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
+    };
+    let at = Timestamp::now();
+    let hostile = [
+        (
+            "empty service set",
+            GrantKey {
+                services: ServiceSet::EMPTY,
+                ..base.clone()
+            },
+        ),
+        (
+            "builtin origin",
+            GrantKey {
+                origin: Origin::Builtin,
+                ..base.clone()
+            },
+        ),
+        (
+            "digest one short",
+            GrantKey {
+                digest: "a".repeat(63).into_boxed_str(),
+                ..base.clone()
+            },
+        ),
+        (
+            "digest one long",
+            GrantKey {
+                digest: "a".repeat(65).into_boxed_str(),
+                ..base.clone()
+            },
+        ),
+        (
+            "digest not hex",
+            GrantKey {
+                digest: "g".repeat(64).into_boxed_str(),
+                ..base.clone()
+            },
+        ),
+        (
+            "relative workspace",
+            GrantKey {
+                workspace: std::path::PathBuf::from("relative"),
+                ..base.clone()
+            },
+        ),
+    ];
+    for (label, key) in hostile {
+        assert!(
+            matches!(
+                store.grant(key, tui(), at).await,
+                Err(GrantStoreError::Malformed { .. })
+            ),
+            "{label} must be refused as malformed"
+        );
+    }
+    assert!(
+        !dir.path().join("grants.toml").exists(),
+        "a refused key writes nothing"
+    );
+    assert!(
+        store
+            .grant(base, tui(), at)
+            .await
+            .expect("the valid control key lands"),
+        "the control proves the refusals were about the keys"
+    );
+}
+
+#[tokio::test]
+async fn list_orders_rows_by_extension_then_origin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = GrantStore::new(dir.path().to_path_buf());
+    let at = Timestamp::now();
+    let key = |extension: &str, origin| GrantKey {
+        extension: extension.parse().expect("name"),
+        origin,
+        services: ServiceSet::from_names(["run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
+    };
+    for (extension, origin) in [
+        ("zeta", Origin::User),
+        ("alpha", Origin::User),
+        ("alpha", Origin::Bundled),
+    ] {
+        assert!(
+            store
+                .grant(key(extension, origin), tui(), at)
+                .await
+                .expect("grant")
+        );
+    }
+    let order: Vec<(String, Origin)> = store
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|grant| (grant.key.extension.to_string(), grant.key.origin))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("alpha".to_owned(), Origin::Bundled),
+            ("alpha".to_owned(), Origin::User),
+            ("zeta".to_owned(), Origin::User),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn persistent_approvals_last_ninety_days_and_a_future_stamp_never_counts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = GrantStore::new(dir.path().to_path_buf());
+    let now = Timestamp::now().as_second();
+    let day = 24 * 60 * 60;
+    for (index, (label, offset, active)) in [
+        ("approved just now", 0, true),
+        ("approved a day short of expiry", -89 * day, true),
+        (
+            "approved 30 seconds inside the window",
+            -90 * day + 30,
+            true,
+        ),
+        ("approved 30 seconds past the window", -90 * day - 30, false),
+        ("approved a year ago", -365 * day, false),
+        ("stamped an hour in the future", 3_600, false),
+        ("stamped a day in the future", day, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = GrantKey {
+            extension: "focus".parse().expect("name"),
+            origin: Origin::User,
+            services: ServiceSet::from_names(["run"]).expect("set"),
+            digest: format!("{index:064x}").into_boxed_str(),
+            workspace: dir.path().to_path_buf(),
+        };
+        let at = Timestamp::from_second(now + offset).expect("in range");
+        assert!(
+            store.grant(key.clone(), tui(), at).await.expect("grant"),
+            "{label}: a fresh key writes a row"
+        );
+        assert_eq!(
+            store.contains(&key).await.expect("contains"),
+            active,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_front_gates_answer_before_any_question_is_asked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let cancel = CancellationToken::new();
+    let bound = Duration::from_secs(3);
+
+    let run_only = test_caller(ServiceSet::from_names(["run"]).expect("inject"));
+    let denied = tokio::time::timeout(bound, store.ensure(&run_only, Service::Net, &cancel))
+        .await
+        .expect("a service the extension never declared is refused at once");
+    assert!(
+        matches!(denied, Err(ServiceError::Denied(DenyReason::NotInjected))),
+        "undeclared services are NotInjected"
+    );
+
+    let builtin = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::Builtin,
+        ServiceSet::from_names(["net"]).expect("inject"),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Hook,
+        Some(TurnId::new(std::num::NonZeroU64::MIN)),
+    )
+    .with_test_digest();
+    let free = tokio::time::timeout(bound, store.ensure(&builtin, Service::Net, &cancel))
+        .await
+        .expect("builtin code is never asked")
+        .expect("builtin code is granted");
+    assert!(!free.persistent(), "a builtin pass stores nothing");
+
+    let asker = test_caller(ServiceSet::from_names(["ask", "run"]).expect("inject"));
+    let asking = tokio::time::timeout(bound, store.ensure(&asker, Service::Ask, &cancel))
+        .await
+        .expect("the ask service is never itself asked")
+        .expect("ask is granted");
+    assert!(!asking.persistent());
+
+    assert_eq!(broker.open_requests(), [], "no gate opened a question");
+    assert!(!dir.path().join("grants.toml").exists());
+}
+
+#[tokio::test]
+async fn a_caller_without_a_verified_code_identity_is_denied_without_a_question() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let cancel = CancellationToken::new();
+    let inject = ServiceSet::from_names(["net"]).expect("inject");
+    for digest in [
+        None,
+        Some(""),
+        Some("a"),
+        Some(&"a".repeat(63)[..]),
+        Some(&"a".repeat(65)[..]),
+        Some(&"z".repeat(64)[..]),
+    ] {
+        let mut caller = test_caller(inject);
+        caller.grant_digest = digest.map(Box::from);
+        let denied = tokio::time::timeout(
+            Duration::from_secs(3),
+            store.ensure(&caller, Service::Net, &cancel),
+        )
+        .await
+        .expect("an unverified identity is refused at once");
+        assert!(
+            matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))),
+            "digest {digest:?} must be NotGranted"
+        );
+    }
+    assert_eq!(broker.open_requests(), [], "no question for a stranger");
 }
 
 #[tokio::test]

@@ -451,25 +451,47 @@ fn signer_owned_and_unsolicited_headers_never_join_the_signature() {
     );
     assert!(!signed.authorization.contains("user-agent"));
     assert!(!signed.authorization.contains("x-amzn-trace-id"));
+    // At the signature level the ignored headers change nothing, even a
+    // caller `X-Amz-Date` naming another instant than the signer's own.
+    let baseline = SignedRequest {
+        headers: &[("Content-Type", String::from("application/json"))],
+        ..request.clone()
+    }
+    .sign(b"{}");
+    assert_eq!(signed.authorization, baseline.authorization);
+    assert_eq!(signed, baseline);
 }
 
 #[test]
 fn header_values_are_trimmed_and_folded_before_signing() {
     let credential = credential();
-    let request = SignedRequest {
-        method: "POST",
-        host: "bedrock-runtime.us-east-1.amazonaws.com",
-        path: "/model/m/converse-stream",
-        query: None,
-        headers: &[("Content-Type", String::from("  application/json\t"))],
-        service: SERVICE,
-        region: "us-east-1",
-        credential: &credential,
-        date: date("20260115T120000Z"),
+    let sign = |value: &str| {
+        SignedRequest {
+            method: "POST",
+            host: "bedrock-runtime.us-east-1.amazonaws.com",
+            path: "/model/m/converse-stream",
+            query: None,
+            headers: &[("Content-Type", String::from(value))],
+            service: SERVICE,
+            region: "us-east-1",
+            credential: &credential,
+            date: date("20260115T120000Z"),
+        }
+        .sign(b"{}")
+        .authorization
     };
-    let signed = request.sign(b"{}");
-    // The canonical header line carries the folded value.
-    assert!(signed.authorization.contains("Signature="));
+    let clean = sign("application/json");
+    // Space and tab padding at either end signs the same bytes as no padding.
+    for padded in [
+        "  application/json",
+        "application/json\t",
+        " \t application/json \t ",
+    ] {
+        assert_eq!(sign(padded), clean, "{padded:?}");
+    }
+    // A different value still signs differently, so the equalities above are
+    // not an artifact of the header being ignored.
+    assert_ne!(sign("application/xml"), clean);
 }
 
 #[test]

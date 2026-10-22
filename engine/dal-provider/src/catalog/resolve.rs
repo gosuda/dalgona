@@ -36,25 +36,49 @@ pub fn resolve(
 
 /// Resolves the model a route names.
 ///
-/// A route keeps its API family but not the provider prefix its model was
-/// configured with, so `openai-responses/gpt-6` becomes the bare id `gpt-6`.
-/// A catalog built without a model list resolves only provider-qualified
-/// ids. The bare id therefore resolves first, and an unknown bare id retries
-/// under the catalog's single configured owner for that family, or not at
-/// all. Synthetic and harness routes
-/// resolve by their id.
+/// A route that names its provider selects exactly that provider's row:
+/// aliases, the bare-id search, and the family retry never run, so another
+/// provider listing the same native id is never bound in its place. When the
+/// provider is not configured or serves another API family the route fails
+/// typed ([`ResolveError::UnknownProvider`],
+/// [`ResolveError::ProviderFamilyMismatch`]) instead of resolving elsewhere.
+///
+/// A route without a provider keeps its API family but not the provider
+/// prefix its model was configured with, so `openai-responses/gpt-6`
+/// becomes the bare id `gpt-6`. A catalog built without a model list
+/// resolves only provider-qualified ids. The bare id therefore resolves
+/// first. When it is unknown, or ambiguous between providers of the family,
+/// the route retries under the catalog's single configured owner for that
+/// family. Among several providers of one family, a Chat or Responses route
+/// retries under `openai`, the provider the `openai-chat/` and
+/// `openai-responses/` references name, when that row is configured, serves
+/// the family and resolves the id. That includes an id several providers
+/// list. A retry resolves like a qualified id, so a catalog that lists
+/// models still rejects an id its owner does not list. Every other case
+/// keeps the bare error, so custom providers that share a family and an id
+/// stay ambiguous. Synthetic and harness routes resolve by their id.
 ///
 /// # Errors
 /// Returns the bare-id error when both spellings fail, or when the only
-/// match belongs to a different API family than the route.
+/// match belongs to a different API family than the route; for a route that
+/// names its provider, the typed provider error or the model error of that
+/// provider's own row.
 pub fn resolve_route(
     catalog: &Catalog,
     aliases: &[(Box<str>, Box<str>)],
     route: &ModelRoute,
 ) -> Result<ResolvedModel, ResolveError> {
-    let ModelRoute::Api { family, model } = route else {
+    let ModelRoute::Api {
+        family,
+        model,
+        provider,
+    } = route
+    else {
         return resolve(catalog, aliases, route.id());
     };
+    if let Some(provider) = provider {
+        return resolve_provider_route(catalog, *family, provider, model);
+    }
     let in_family = |resolved: ResolvedModel| {
         matches!(&resolved.route, ModelRoute::Api { family: found, .. } if found == family)
             .then_some(resolved)
@@ -67,7 +91,18 @@ pub fn resolve_route(
     ) {
         return bare;
     }
-    let Some(owner) = single_family_owner(catalog, *family) else {
+
+    // Every family retries under the catalog's single configured owner for
+    // that family when there is one; a lone custom Chat or Responses owner
+    // serves typed routes without guessing. When several owners share the
+    // family, Chat and Responses retry under `openai`, the owner the
+    // `openai-chat/` and `openai-responses/` references name, when that row
+    // serves the family; the retry also settles an id several owners list.
+    // Other families, and several owners without that row, keep the bare
+    // error.
+    let owner =
+        single_family_owner(catalog, *family).or_else(|| canonical_family_owner(catalog, *family));
+    let Some(owner) = owner else {
         return bare;
     };
     if model.is_empty() {
@@ -80,6 +115,37 @@ pub fn resolve_route(
         Some(resolved) => Ok(resolved),
         None => bare,
     }
+}
+
+/// Resolves the exact row a provider-scoped route names.
+///
+/// The provider is looked up by id before anything else; the native id is
+/// never alias-expanded or searched across providers, and a provider that
+/// serves another family than the route is refused rather than reinterpreted.
+fn resolve_provider_route(
+    catalog: &Catalog,
+    family: Family,
+    provider: &str,
+    model: &str,
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(entry) = catalog
+        .providers
+        .iter()
+        .find(|(candidate, _)| candidate.id.as_ref() == provider)
+        .map(|(entry, _)| entry)
+    else {
+        return Err(ResolveError::UnknownProvider {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    };
+    if entry.family != family {
+        return Err(ResolveError::ProviderFamilyMismatch {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    }
+    resolve_qualified(catalog, entry, model, &format!("{provider}/{model}"))
 }
 
 fn expand_alias<'a>(aliases: &'a [(Box<str>, Box<str>)], reference: &'a str) -> &'a str {
@@ -127,7 +193,7 @@ fn resolve_expanded(
 /// and `ollama-cloud` share a family but not an endpoint, so a family-wide
 /// guess would bind cloud ids to the local row. It must also not prefer a
 /// built-in row the catalog does not configure. Zero or several owners mean no
-/// retry and the bare error stands.
+/// census retry; only `canonical_family_owner` may still name one.
 fn single_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
     let mut owners = catalog
         .providers
@@ -136,6 +202,24 @@ fn single_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
         .map(|(provider, _)| provider.id.as_ref());
     let only = owners.next()?;
     owners.next().is_none().then_some(only)
+}
+
+/// The configured catalog entry for the family's canonical owner, when the
+/// route grammar names one. `openai-responses` and `openai-chat` both bind
+/// to `openai`; the family check rejects a custom `openai` row that no
+/// longer serves the requested family.
+fn canonical_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
+    let prefix = match family {
+        Family::Chat => "openai-chat",
+        Family::Responses => "openai-responses",
+        _ => return None,
+    };
+    let (owner, owner_family) = family_provider(prefix)?;
+    catalog
+        .providers
+        .iter()
+        .find(|(candidate, _)| candidate.id.as_ref() == owner && candidate.family == owner_family)
+        .map(|(provider, _)| provider.id.as_ref())
 }
 
 /// Maps a family-qualified route prefix to the provider that serves it.
@@ -194,7 +278,9 @@ fn resolve_qualified(
                 .find(|entry| entry.provider == provider.id && entry.id.as_ref() == candidate)
         });
     let mut entry = if let Some(entry) = listed {
-        entry.clone()
+        let mut entry = entry.clone();
+        entry.id = id.into();
+        entry
     } else {
         if has_hidden_entry_elsewhere(catalog, provider, id)
             || catalog.source_for(&provider.id) != CatalogSource::Typed
@@ -207,6 +293,7 @@ fn resolve_qualified(
     let route = ModelRoute::Api {
         family: provider.family,
         model: id.into(),
+        provider: Some(provider.id.clone()),
     };
     Ok(ResolvedModel {
         provider: provider.id.clone(),

@@ -3,18 +3,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use dal_core::ext::{ExportId, ExportKind, OpSet};
 use dal_core::{
     Caps, Claimant, ContextItem, DenyReason, Inference, ModelId, ModelRequest, ModelRoute,
-    ModelToolSpec, Name, Origin, Purpose, RegistrationError, RequestParams, ScopeSpec, ServiceSet,
-    SkillRecord,
+    ModelToolSpec, Name, Origin, Purpose, RawJson, RegistrationError, RequestParams, RuleRecord,
+    ScopeSpec, ServiceSet, SkillRecord,
 };
 use dal_provider::EventStream;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    BoxFuture, Caller, ExtensionBuilder, ModelCx, ModelCxRuntime, ModelError, ModelHandler,
-    ModelRecord, PromptSection, Scope, ScopeError, SessionInstalls, StatusCx, StatusPoll,
-    StatusSnapshot,
+    BoxFuture, Caller, ExportSpec, ExtensionBuilder, ModelCx, ModelCxRuntime, ModelError,
+    ModelHandler, ModelRecord, PromptSection, Scope, ScopeError, SessionInstalls, StatusCx,
+    StatusPoll, StatusSnapshot,
 };
 
 fn builder() -> ExtensionBuilder {
@@ -256,9 +257,32 @@ fn builder_accepts_valid_synthetic_model_id() {
 }
 
 #[test]
-fn builder_rejects_invalid_synthetic_model_id() {
-    let err = ModelId::parse("not a model id!").expect_err("invalid id");
-    assert!(matches!(err, RegistrationError::InvalidModelId { .. }));
+fn synthetic_model_id_grammar_holds_at_every_edge() {
+    for id in ["a/b", "acme/model-1.0", "0-9/x._-", "ac-me/under_score"] {
+        assert_eq!(
+            ModelId::parse(id)
+                .expect("a valid spelling parses")
+                .as_str(),
+            id
+        );
+    }
+    for id in [
+        "not a model id!",
+        "",
+        "acme",
+        "acme/",
+        "/model",
+        "a/b/c",
+        "Acme/model",
+        "acme/Model",
+        "ac_me/model",
+        "acme/mo del",
+    ] {
+        let Err(RegistrationError::InvalidModelId { id: rejected }) = ModelId::parse(id) else {
+            panic!("{id:?} must be an invalid synthetic model id");
+        };
+        assert_eq!(&*rejected, id, "the rejection echoes the offending id");
+    }
 }
 
 #[test]
@@ -329,6 +353,238 @@ fn builder_rejects_doc_scheme_outside_scheme_grammar() {
             "{name}: {err}"
         );
     }
+}
+
+/// One export declaration with an empty `uses` set.
+fn export(plugin: &str, kind: ExportKind, local: &str) -> ExportSpec {
+    ExportSpec {
+        id: ExportId {
+            plugin: plugin.parse().expect("plugin name"),
+            kind,
+            local: local.parse().expect("local name"),
+        },
+        uses: OpSet::EMPTY,
+        input: RawJson::parse(r#"{"type":"object"}"#).expect("schema"),
+        description: "test export".into(),
+    }
+}
+
+/// Requires `result` to be an invalid-export rejection naming `id` and `wire`.
+fn assert_invalid_export(
+    result: Result<super::Extension, RegistrationError>,
+    id: &str,
+    wire: &str,
+) {
+    match result {
+        Err(RegistrationError::InvalidExport {
+            id: rejected,
+            wire: required,
+        }) => {
+            assert_eq!(&*rejected, id, "the rejection names the export");
+            assert_eq!(&*required, wire, "the rejection names the wire name");
+        }
+        Err(other) => panic!("expected an invalid export for {id}, got {other:?}"),
+        Ok(_) => panic!("the export {id} must be rejected"),
+    }
+}
+
+#[test]
+fn builder_identity_grammar_holds_at_both_edges() {
+    let longest = "a".repeat(64);
+    for name in ["a", "a1", "a-b_c", longest.as_str()] {
+        assert!(
+            ExtensionBuilder::new(name, "1.0.0", ServiceSet::EMPTY).is_ok(),
+            "{name:?} is a valid extension name"
+        );
+    }
+    let too_long = "a".repeat(65);
+    for name in [
+        "",
+        "1abc",
+        "Abc",
+        "aBc",
+        "_a",
+        "-a",
+        "a b",
+        "a.b",
+        "a/b",
+        "a\u{e9}",
+        too_long.as_str(),
+    ] {
+        let Err(RegistrationError::InvalidName { name: rejected }) =
+            ExtensionBuilder::new(name, "1.0.0", ServiceSet::EMPTY)
+        else {
+            panic!("{name:?} must be an invalid extension name");
+        };
+        assert_eq!(&*rejected, name, "the rejection echoes the offending name");
+    }
+}
+
+#[test]
+fn builder_identity_checks_the_name_before_the_version() {
+    let Err(RegistrationError::InvalidVersion { version }) =
+        ExtensionBuilder::new("focus", "1.2", ServiceSet::EMPTY)
+    else {
+        panic!("a two-part version must be invalid");
+    };
+    assert_eq!(&*version, "1.2");
+    assert!(ExtensionBuilder::new("focus", "1.2.3-rc.1+build.5", ServiceSet::EMPTY).is_ok());
+    assert!(
+        matches!(
+            ExtensionBuilder::new("Focus", "1.2", ServiceSet::EMPTY),
+            Err(RegistrationError::InvalidName { .. })
+        ),
+        "a bad name wins over a bad version"
+    );
+}
+
+#[test]
+fn builder_rejects_duplicate_rules_but_lets_a_skill_and_a_rule_share_a_name() {
+    let rule = |name: &str| RuleRecord {
+        name: name.parse().expect("valid rule name"),
+        patterns: vec!["needle".into()],
+        text: "reminder".into(),
+        judge: None,
+        scope: None,
+        globs: None,
+        agents: None,
+        mode: None,
+        repeat_mode: None,
+        repeat_gap: None,
+        always_apply: false,
+        report: false,
+        enabled: true,
+    };
+    let err = builder()
+        .rule(rule("dup"))
+        .rule(rule("dup"))
+        .build()
+        .expect_err("two rules with one name");
+    let RegistrationError::Conflict { kind, name, .. } = err else {
+        panic!("expected a conflict, got {err:?}");
+    };
+    assert_eq!(kind, "rule");
+    assert_eq!(name.as_str(), "dup");
+
+    let ext = builder()
+        .skill(skill("shared"))
+        .rule(rule("shared"))
+        .build()
+        .expect("a skill and a rule may share a name");
+    assert_eq!(ext.skills().len(), 1);
+    assert_eq!(ext.rules().len(), 1);
+}
+
+#[test]
+fn a_hook_export_of_another_plugin_is_rejected() {
+    assert_invalid_export(
+        builder()
+            .hook_export(export("other", ExportKind::Hook, "audit"))
+            .build(),
+        "hooks.other.audit",
+        "other__audit",
+    );
+    let ext = builder()
+        .hook_export(export("focus", ExportKind::Hook, "audit"))
+        .build()
+        .expect("an export of the extension's own plugin is accepted");
+    let [(spec, wire)] = ext.exports() else {
+        panic!("one export registers: {:?}", ext.exports().len());
+    };
+    assert_eq!(spec.id.local.as_str(), "audit");
+    assert_eq!(wire.as_str(), "focus__audit");
+}
+
+#[test]
+fn declared_exports_are_commands_or_hooks_only() {
+    assert_invalid_export(
+        builder()
+            .hook_export(export("focus", ExportKind::Tool, "t"))
+            .build(),
+        "tools.focus.t",
+        "focus__t",
+    );
+    assert_invalid_export(
+        builder()
+            .hook_export(export("focus", ExportKind::Model, "m"))
+            .build(),
+        "models.focus.m",
+        "focus__m",
+    );
+    let ext = builder()
+        .hook_export(export("focus", ExportKind::Command, "run"))
+        .hook_export(export("focus", ExportKind::Hook, "run"))
+        .build()
+        .expect("a command and a hook may share a local name");
+    assert_eq!(ext.exports().len(), 2);
+}
+
+#[test]
+fn a_declared_export_identity_registers_once() {
+    assert_invalid_export(
+        builder()
+            .hook_export(export("focus", ExportKind::Hook, "audit"))
+            .hook_export(export("focus", ExportKind::Hook, "audit"))
+            .build(),
+        "hooks.focus.audit",
+        "focus__audit",
+    );
+}
+
+#[test]
+fn a_model_export_is_this_plugins_model_kind_and_unique() {
+    let model = |id: &str, export: ExportId| ModelRecord {
+        id: ModelId::parse(id).expect("valid model id"),
+        caps: caps(),
+        handler: Arc::new(TestHandler),
+        export: Some(export),
+    };
+    let export_id = |plugin: &str, kind: ExportKind, local: &str| ExportId {
+        plugin: plugin.parse().expect("plugin name"),
+        kind,
+        local: local.parse().expect("local name"),
+    };
+    assert_invalid_export(
+        builder()
+            .model(model(
+                "acme/m1",
+                export_id("other", ExportKind::Model, "route"),
+            ))
+            .build(),
+        "models.other.route",
+        "other__route",
+    );
+    assert_invalid_export(
+        builder()
+            .model(model(
+                "acme/m1",
+                export_id("focus", ExportKind::Tool, "route"),
+            ))
+            .build(),
+        "tools.focus.route",
+        "focus__route",
+    );
+    assert_invalid_export(
+        builder()
+            .model(model(
+                "acme/m1",
+                export_id("focus", ExportKind::Model, "route"),
+            ))
+            .model(model(
+                "acme/m2",
+                export_id("focus", ExportKind::Model, "route"),
+            ))
+            .build(),
+        "models.focus.route",
+        "focus__route",
+    );
+    builder()
+        .model(model(
+            "acme/m1",
+            export_id("focus", ExportKind::Model, "route"),
+        ))
+        .build()
+        .expect("a model export of the extension's own plugin registers");
 }
 
 #[test]

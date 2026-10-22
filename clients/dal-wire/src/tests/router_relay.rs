@@ -579,6 +579,7 @@ fn api_route(family: Family) -> ModelRoute {
     ModelRoute::Api {
         family,
         model: "model".into(),
+        provider: None,
     }
 }
 
@@ -608,6 +609,7 @@ fn bare_options() -> RouterOptions {
 fn catalog_info(family: Family) -> ModelInfo {
     ModelInfo {
         route: api_route(family),
+        provider: "".into(),
         name: "model".into(),
         caps: Caps {
             context_window: None,

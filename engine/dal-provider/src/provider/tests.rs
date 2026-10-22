@@ -11,7 +11,7 @@ use crate::{
         credential::{Credential, OAuthCredential, SecretString},
         login::{LoginIo, LoginSite, Method, login},
     },
-    catalog::{CatalogEntry, CatalogSource, ResolvedModel},
+    catalog::{Catalog, CatalogEntry, CatalogSource, ResolvedModel},
     compact::{CompactOutcome, CompactedHistory},
     error::ProviderError,
     family::devin::{
@@ -79,9 +79,27 @@ async fn server(
     task.spawn(async move {
         let mut requests = Vec::with_capacity(replies.len());
         for reply in replies {
-            let (mut socket, _) = listener.accept().await?;
-            requests.push(read_request(&mut socket).await?);
-            write_reply(&mut socket, reply).await?;
+            loop {
+                let (mut socket, _) = listener.accept().await?;
+                let Ok(request) = read_request(&mut socket).await else {
+                    continue;
+                };
+                // Stray loopback probes ask for `/` and are not API traffic:
+                // refuse them without consuming a scripted reply or being
+                // recorded, so they never masquerade as client contact.
+                let root_probe = request.starts_with(b"GET / ")
+                    || request.starts_with(b"HEAD / ")
+                    || (!request.starts_with(b"POST ") && !request.starts_with(b"GET "));
+                if root_probe {
+                    let refused =
+                        "HTTP/1.1 404 Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                    let _ = socket.write_all(refused.as_bytes()).await;
+                    continue;
+                }
+                requests.push(request);
+                write_reply(&mut socket, reply).await?;
+                break;
+            }
         }
         Ok(requests)
     });
@@ -207,6 +225,7 @@ fn resolved(provider: &str, family: Family, model: &str) -> ResolvedModel {
         route: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         entry,
     }
@@ -218,6 +237,7 @@ fn request(family: Family, model: &str, context: Vec<ContextItem>) -> ModelReque
         model: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("Follow the request."),
         tools: Arc::<[ModelToolSpec]>::from(Vec::new()),
@@ -1803,7 +1823,10 @@ fn stored_login(access: &str) -> Credential {
     })
 }
 
-/// A stored `WorkOS` device sign-in: this provider carries neither an ID token nor an account id.
+/// A stored OAuth login as the `WorkOS` device sign-in saves it: both tokens,
+/// no ID token and no account. That is the only OAuth member the
+/// `factory-droid` row can hold; `AuthStore::set` refuses one that binds an
+/// account, which only the Codex sign-in does.
 fn stored_workos_login(access: &str) -> Credential {
     Credential::OAuth(OAuthCredential {
         access_token: SecretString::from(access),
@@ -4848,6 +4871,60 @@ async fn bedrock_bearer_token_rides_authorization_header_unsigned() -> TestResul
 }
 
 #[tokio::test]
+async fn bedrock_auth_none_sends_no_credentials_to_proxy() -> TestResult {
+    let dir = TestDir::new()?;
+    store_groq_key(&dir)?;
+    let (base, mut server) = bytes_server(vec![BytesReply {
+        status: 200,
+        content_type: "application/vnd.amazon.eventstream",
+        body: bedrock_text_turn(),
+    }])
+    .await?;
+    let mut row = bedrock_override_entry();
+    row.base_url = base.into();
+    row.auth = AuthStyle::None;
+    let set = ProviderSet::new(
+        &config(vec![row], 0),
+        identity(),
+        // Both bearer sources are present on purpose: the explicit
+        // `auth = "none"` entry must win before either is read.
+        bedrock_env(&[("AWS_BEARER_TOKEN_BEDROCK", "CANARY-env-bearer")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(bedrock_resolved("groq", "anthropic.claude-test"))?;
+    let events = collect(
+        provider
+            .open(
+                SessionId::new_v7(),
+                &request(
+                    Family::Bedrock,
+                    "anthropic.claude-test",
+                    vec![user_text("Say hello.")],
+                ),
+                &[],
+                notice_sink(),
+                &CancellationToken::new(),
+            )
+            .await?,
+    )
+    .await?;
+    assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    let captured = server.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1);
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("post /model/anthropic.claude-test/converse-stream "));
+    assert!(
+        !head.contains("authorization:"),
+        "auth=none must send no authorization header: {head}"
+    );
+    assert!(!head.contains("x-amz-date:"));
+    assert!(!head.contains("x-amz-content-sha256:"));
+    assert!(!head.contains("x-amz-security-token:"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn bedrock_unauthorized_invalidates_and_retries_once() -> TestResult {
     let dir = TestDir::new()?;
     let (base, mut server) = bytes_server(vec![
@@ -5781,6 +5858,7 @@ fn end_session_turn_request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GitLab,
             model: "duo-agent".into(),
+            provider: None,
         },
         system: "Be terse.".into(),
         tools: vec![ModelToolSpec {
@@ -6322,4 +6400,557 @@ async fn dispatch_verify_oauth_signin_and_optional_auth_admission() -> TestResul
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn models_rows_carry_the_entry_provider_on_their_routes() -> TestResult {
+    // The loopback list decodes one row; every projected row must name its
+    // producing provider on the route, equal to the `ModelInfo` provider.
+    let dir = TestDir::new()?;
+    let (base, mut asked) = server(
+        "/v1",
+        vec![Reply {
+            status: 200,
+            content_type: "application/json",
+            body: br#"{"data":[{"id":"probe-model"}]}"#.to_vec(),
+        }],
+    )
+    .await?;
+    let openai = entry(
+        "openai",
+        Family::Responses,
+        base,
+        Some("MODELS_KEY"),
+        1,
+        Transport::Https,
+    );
+    let set = ProviderSet::new(
+        &config(vec![openai], 0),
+        identity(),
+        EnvSnapshot::test(&[("MODELS_KEY", "models-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("openai", Family::Responses, "probe-model"))?;
+    let models = provider.models().await?;
+    assert_eq!(models.len(), 1, "the loopback list decodes one row");
+    assert_eq!(models[0].provider.as_ref(), "openai");
+    assert_eq!(models[0].route.provider(), Some("openai"));
+    assert_eq!(
+        models[0].route.provider(),
+        Some(models[0].provider.as_ref()),
+        "the route provider equals the ModelInfo provider",
+    );
+    let captured = asked.join_next().await.expect("server completes")??;
+    assert_eq!(captured.len(), 1, "the catalog fetch hit the loopback list");
+    let head = String::from_utf8_lossy(&captured[0]).to_ascii_lowercase();
+    assert!(head.starts_with("get /v1/models "), "{head}");
+    assert!(
+        head.contains("authorization: bearer models-secret"),
+        "{head}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ensure_request_refuses_a_route_naming_another_provider() -> TestResult {
+    // The bound openai row accepts a provider-less request and the matching
+    // provider route, and refuses a request naming another provider: the
+    // guard `Provider::open` enforces before any wire bytes exist.
+    let dir = TestDir::new()?;
+    let openai = entry(
+        "openai",
+        Family::Responses,
+        String::from("https://api.openai.com/v1"),
+        Some("ENSURE_KEY"),
+        1,
+        Transport::Https,
+    );
+    let set = ProviderSet::new(
+        &config(vec![openai], 0),
+        identity(),
+        EnvSnapshot::test(&[("ENSURE_KEY", "ensure-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let bound = set.provider(resolved("openai", Family::Responses, "probe-ensure"))?;
+    let Provider::Responses(http) = &bound else {
+        return Err(io::Error::other("the openai row binds the Responses variant").into());
+    };
+    let plain = request(Family::Responses, "probe-ensure", Vec::new());
+    super::request::ensure_request(http, &plain).expect("provider-less route is accepted");
+    let mut matching = plain.clone();
+    matching.model = matching.model.with_provider("openai");
+    super::request::ensure_request(http, &matching).expect("matching provider is accepted");
+    let mut foreign = plain.clone();
+    foreign.model = foreign.model.with_provider("other");
+    let error = super::request::ensure_request(http, &foreign).unwrap_err();
+    assert!(
+        matches!(&error, ProviderError::InvalidRequest { .. }),
+        "unexpected refusal: {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the bound provider route"),
+        "unexpected refusal: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn suffix_alias_binds_the_requested_model_and_foreign_models_stay_refused() -> TestResult {
+    // A listed base row admits its `-YYYYMMDD` alias under the requested id:
+    // resolution carries the alias on both route and entry, so binding and
+    // `ensure_request` accept it, while a genuinely different model is still
+    // refused before any wire bytes exist.
+    let dir = TestDir::new()?;
+    let openai = entry(
+        "openai",
+        Family::Responses,
+        String::from("https://api.openai.com/v1"),
+        Some("ENSURE_KEY"),
+        1,
+        Transport::Https,
+    );
+    let set = ProviderSet::new(
+        &config(vec![openai.clone()], 0),
+        identity(),
+        EnvSnapshot::test(&[("ENSURE_KEY", "ensure-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let catalog = Catalog::with_sources(
+        vec![(openai, CatalogSource::Cache)],
+        vec![CatalogEntry {
+            provider: "openai".into(),
+            id: "probe-base".into(),
+            display: "probe-base".into(),
+            listing: crate::catalog::Listing::Listed,
+            context_window: Some(32_000),
+            max_output: Some(4_096),
+            thinking: ThinkingSupport::OpenAi {
+                accepted: vec![ThinkingLevel::Low, ThinkingLevel::Medium],
+                none_supported: true,
+            },
+            image_input: false,
+            image_profile: None,
+            remote_compact: false,
+            supports_reasoning_summaries: false,
+            tool_support: crate::catalog::ToolSupport::Any,
+            custom_grammar: false,
+            temperature_allowed: true,
+            display_supported: false,
+            premium_multiplier: None,
+            price: None,
+        }],
+    );
+    let resolved = crate::resolve(&catalog, &[], "openai/probe-base-20260101")
+        .expect("dated alias resolves against its base row");
+    assert_eq!(resolved.route.id(), "probe-base-20260101");
+    assert_eq!(resolved.entry.id.as_ref(), "probe-base-20260101");
+    assert_eq!(resolved.entry.context_window, Some(32_000));
+    let bound = set.provider(resolved)?;
+    let Provider::Responses(http) = &bound else {
+        return Err(io::Error::other("the openai row binds the Responses variant").into());
+    };
+    assert_eq!(http.model(), "probe-base-20260101");
+    let alias = request(Family::Responses, "probe-base-20260101", Vec::new());
+    super::request::ensure_request(http, &alias).expect("the bound alias is admitted");
+    let foreign = request(Family::Responses, "probe-other", Vec::new());
+    let error = super::request::ensure_request(http, &foreign).unwrap_err();
+    assert!(
+        matches!(&error, ProviderError::InvalidRequest { .. }),
+        "unexpected refusal: {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the bound provider route"),
+        "unexpected refusal: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn error_fields_rank_members_and_cut_the_message_at_its_first_line_within_three_hundred_bytes() {
+    use super::transport::error_fields;
+
+    // The code is the error object's `code`, then its `type`, then the
+    // body's own `code`, then its `type`.
+    for (body, code) in [
+        (
+            r#"{"error":{"code":"a","type":"b"},"code":"c","type":"d"}"#,
+            Some("a"),
+        ),
+        (r#"{"error":{"type":"b"},"code":"c","type":"d"}"#, Some("b")),
+        (r#"{"error":{},"code":"c","type":"d"}"#, Some("c")),
+        (r#"{"error":{"message":"m"},"type":"d"}"#, Some("d")),
+        (r#"{"message":"m"}"#, None),
+    ] {
+        assert_eq!(error_fields(body).0.as_deref(), code, "{body}");
+    }
+
+    // The message is the error object's, then the body's `message`, then
+    // `detail`, then the first line of a body that names none.
+    for (body, message) in [
+        (
+            r#"{"error":{"message":"e"},"message":"m","detail":"d"}"#,
+            "e",
+        ),
+        (r#"{"error":{},"message":"m","detail":"d"}"#, "m"),
+        (r#"{"detail":"d"}"#, "d"),
+        ("{}", "{}"),
+        ("plain text\nsecond line", "plain text"),
+    ] {
+        assert_eq!(error_fields(body).1, message, "{body}");
+    }
+
+    // One line, at most 300 bytes, never splitting a character.
+    let message_of = |text: &str| {
+        let body = format!(
+            r#"{{"message":{}}}"#,
+            sonic_rs::to_string(text).expect("the text escapes")
+        );
+        error_fields(&body).1
+    };
+    assert_eq!(message_of("first\nsecond"), "first");
+    assert_eq!(message_of("first\r\nsecond"), "first");
+    let at_the_limit = "a".repeat(300);
+    assert_eq!(message_of(&at_the_limit), at_the_limit);
+    assert_eq!(message_of(&"a".repeat(301)), at_the_limit);
+    let two_byte_fits = format!("{}é", "a".repeat(298));
+    assert_eq!(message_of(&two_byte_fits), two_byte_fits);
+    let two_byte_straddles = format!("{}é", "a".repeat(299));
+    assert_eq!(message_of(&two_byte_straddles), "a".repeat(299));
+    let four_byte_straddles = format!("{}😀", "a".repeat(298));
+    assert_eq!(message_of(&four_byte_straddles), "a".repeat(298));
+}
+
+#[tokio::test]
+async fn a_rejected_response_keeps_its_retry_after_and_yields_nothing_once_cancelled() {
+    let rejected = |retry_after: Option<&str>| {
+        let mut builder = hyper::http::Response::builder()
+            .status(429)
+            .header("content-type", "application/json");
+        if let Some(value) = retry_after {
+            builder = builder.header("retry-after", value);
+        }
+        reqwest::Response::from(
+            builder
+                .body(reqwest::Body::from(r#"{"error":{"message":"slow down"}}"#))
+                .expect("a valid response"),
+        )
+    };
+    let credential = api_key_credential("k");
+    for (header, expected) in [
+        (Some("7"), Some("7")),
+        (
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        ),
+        (None, None),
+    ] {
+        let failure = super::request::status_failure(
+            rejected(header),
+            Family::Chat,
+            &credential,
+            &[],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("status_failure errored"))
+        .expect("not cancelled");
+        let crate::lifecycle::AttemptFailure::Response {
+            status,
+            retry_after,
+            message,
+            ..
+        } = failure
+        else {
+            panic!("expected a response failure, got {failure:?}");
+        };
+        assert_eq!((status, message.as_str()), (429, "slow down"));
+        assert_eq!(retry_after.as_deref(), expected, "{header:?}");
+    }
+
+    // A cancelled turn never reads the body or reports a failure.
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcome = super::request::status_failure(
+        rejected(Some("7")),
+        Family::Chat,
+        &credential,
+        &[],
+        &cancel,
+    )
+    .await;
+    assert!(matches!(outcome, Ok(None)), "{outcome:?}");
+}
+
+/// A loopback chat server that answers its first `failures` requests with a
+/// 429 carrying `retry_after` and every later request with a good stream. It
+/// counts the requests it served, so a request past the budget shows even
+/// when it succeeds.
+async fn flaky_server(
+    failures: usize,
+    retry_after: &'static str,
+) -> io::Result<(
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinSet<io::Result<()>>,
+)> {
+    use std::sync::atomic::Ordering;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    let mut task = tokio::task::JoinSet::new();
+    task.spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await?;
+            let Ok(request) = read_request(&mut socket).await else {
+                continue;
+            };
+            if !request.starts_with(b"POST ") {
+                continue;
+            }
+            if counted.fetch_add(1, Ordering::SeqCst) < failures {
+                let body = r#"{"error":{"message":"busy"}}"#;
+                let head = format!(
+                    "HTTP/1.1 429 Test\r\ncontent-type: application/json\r\nretry-after: {retry_after}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await?;
+                socket.write_all(body.as_bytes()).await?;
+                socket.flush().await?;
+            } else {
+                write_reply(&mut socket, stream_reply(chat_reply())).await?;
+            }
+        }
+    });
+    Ok((format!("http://{address}/v1"), hits, task))
+}
+
+/// One chat turn against `base` under a stream retry budget of `budget`.
+/// Returns what the turn ended with and the retry notices it announced.
+async fn chat_turn_under_budget(
+    dir: &TestDir,
+    base: String,
+    budget: u32,
+) -> Result<(Result<Vec<StreamEvent>, ProviderError>, Vec<String>), Box<dyn Error>> {
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "chat-test",
+                Family::Chat,
+                base,
+                Some("CHAT_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            budget,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("CHAT_TEST_KEY", "chat-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+    let provider = set.provider(resolved("chat-test", Family::Chat, "gpt-chat-test"))?;
+    let notices = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink: NoticeSink = {
+        let notices = Arc::clone(&notices);
+        Arc::new(move |text| notices.lock().expect("notices").push(text))
+    };
+    let opened = provider
+        .open(
+            SessionId::new_v7(),
+            &request(Family::Chat, "gpt-chat-test", vec![user_text("go")]),
+            &[],
+            sink,
+            &CancellationToken::new(),
+        )
+        .await;
+    let outcome = match opened {
+        Ok(stream) => collect(stream).await,
+        Err(error) => Err(error),
+    };
+    let retries = notices
+        .lock()
+        .expect("notices")
+        .iter()
+        .filter(|text| text.starts_with("Retrying in"))
+        .cloned()
+        .collect();
+    Ok((outcome, retries))
+}
+
+#[tokio::test]
+async fn stream_retries_stop_exactly_at_the_configured_budget() -> TestResult {
+    use std::sync::atomic::Ordering;
+
+    let dir = TestDir::new()?;
+    // (budget, failures before the good reply): inside the budget, at it, and
+    // one past it, for budgets of 2, 1 and 0. A `Retry-After` of 0 makes each
+    // retry immediate and shows in the notice, so the header is honored.
+    for (budget, failures) in [(2_u32, 1_usize), (2, 2), (2, 3), (1, 1), (1, 2), (0, 1)] {
+        let (base, hits, _server) = flaky_server(failures, "0").await?;
+        let (outcome, retries) = chat_turn_under_budget(&dir, base, budget).await?;
+        let allowed = usize::try_from(budget)?;
+        let label = format!("budget {budget}, {failures} failures");
+        let announced: Vec<String> = (1..=failures.min(allowed))
+            .map(|attempt| format!("Retrying in 0.0s (attempt {attempt}/{budget})."))
+            .collect();
+        assert_eq!(retries, announced, "{label}");
+        if failures <= allowed {
+            let events = outcome.map_err(|error| io::Error::other(format!("{label}: {error}")))?;
+            assert!(
+                matches!(events.last(), Some(StreamEvent::Stop { .. })),
+                "{label}"
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), failures + 1, "{label}");
+        } else {
+            assert!(
+                matches!(outcome, Err(ProviderError::RateLimited { .. })),
+                "{label}: {outcome:?}"
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), allowed + 1, "{label}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retry_after_over_the_wait_cap_ends_the_turn_after_one_request() -> TestResult {
+    use std::sync::atomic::Ordering;
+
+    let dir = TestDir::new()?;
+    for (value, seconds) in [("61", 61_u64), ("86400", 86_400)] {
+        // A budget of 3 would allow three retries; the refusal ignores it.
+        let (base, hits, _server) = flaky_server(5, value).await?;
+        let (outcome, retries) = chat_turn_under_budget(&dir, base, 3).await?;
+        assert!(
+            matches!(
+                &outcome,
+                Err(ProviderError::RetryAfterTooLong { seconds: found, .. }) if *found == seconds
+            ),
+            "{value}: {outcome:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{value}");
+        assert_eq!(retries, Vec::<String>::new(), "{value}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_fails_over_on_the_rest_of_the_documented_transient_set_and_stops_at_its_edges()
+-> TestResult {
+    // The documented set is 408, 429, 500, 502, 503, 504 and 529; the sweep
+    // above covers four of them.
+    for status in [502, 504, 529] {
+        let (first, mut first_task) = server("", vec![json_reply(status, "{}")]).await?;
+        let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+        let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        let Ok(Some(stream)) = result else {
+            return Err(io::Error::other(format!("{status} did not fail over")).into());
+        };
+        let events = collect(stream).await?;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hi")),
+            "{status}: {events:?}"
+        );
+        first_task.join_next().await.expect("first answered")??;
+        second_task.join_next().await.expect("second answered")??;
+    }
+    // The statuses next to the set, below and above each member, and the
+    // other 4xx and 5xx neighbours stay the attempt's own failure.
+    for status in [402, 407, 409, 422, 501, 505, 528, 530] {
+        let (first, mut first_task) = server("", vec![json_reply(status, "{}")]).await?;
+        let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+        let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+        match result {
+            Err(crate::lifecycle::AttemptFailure::Response { status: seen, .. }) => {
+                assert_eq!(seen, status);
+            }
+            Ok(_) => return Err(io::Error::other(format!("{status} was served")).into()),
+            Err(other) => return Err(io::Error::other(format!("{status}: {other:?}")).into()),
+        }
+        first_task.join_next().await.expect("first answered")??;
+        assert!(
+            never_contacted(&mut second_task).await,
+            "{status} failed over"
+        );
+        second_task.abort_all();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn antigravity_account_verification_stays_terminal_even_on_a_transient_status() -> TestResult
+{
+    // A second endpoint cannot clear account state, so the verification
+    // failure ends the attempt although 503 is otherwise transient.
+    let url = "https://accounts.example.com/verify/abc";
+    let body = format!(
+        "{{\"error\":{{\"code\":503,\"status\":\"UNAVAILABLE\",\"message\":\"verification needed\",\"details\":[{{\"reason\":\"VALIDATION_REQUIRED\",\"metadata\":{{\"validation_url\":\"{url}\"}}}}]}}}}"
+    );
+    let (first, mut first_task) = server("", vec![json_reply(503, &body)]).await?;
+    let (second, mut second_task) = server("", vec![stream_reply(google_cca_reply())]).await?;
+    let result = run_antigravity_failover(&[first, second], &CancellationToken::new()).await;
+    match result {
+        Err(crate::lifecycle::AttemptFailure::Response {
+            status, message, ..
+        }) => {
+            assert_eq!(status, 503);
+            assert!(
+                message.starts_with("Account verification required. Visit "),
+                "{message}"
+            );
+            assert!(message.contains(url), "{message}");
+        }
+        Ok(_) => return Err(io::Error::other("the verification failure failed over").into()),
+        Err(other) => return Err(io::Error::other(format!("{other:?}")).into()),
+    }
+    first_task.join_next().await.expect("first answered")??;
+    assert!(
+        never_contacted(&mut second_task).await,
+        "verification failed over"
+    );
+    second_task.abort_all();
+    Ok(())
+}
+
+#[test]
+fn only_an_eight_digit_suffix_makes_a_dated_alias_of_a_listed_row() {
+    let openai = entry(
+        "openai",
+        Family::Responses,
+        String::from("https://api.openai.com/v1"),
+        Some("ENSURE_KEY"),
+        1,
+        Transport::Https,
+    );
+    let base = resolved("openai", Family::Responses, "probe-base").entry;
+    let catalog = Catalog::with_sources(vec![(openai, CatalogSource::Cache)], vec![base]);
+    let inherits = |id: &str| {
+        crate::resolve(&catalog, &[], &format!("openai/{id}"))
+            .is_ok_and(|resolved| resolved.entry.context_window == Some(32_000))
+    };
+    assert!(inherits("probe-base"));
+    assert!(inherits("probe-base-20260101"));
+    // One digit short, one digit long, a letter among eight characters, a
+    // date written with dashes, and an empty suffix: none is the listed
+    // row's alias, so none inherits its window.
+    for near_miss in [
+        "probe-base-2026010",
+        "probe-base-202601011",
+        "probe-base-2026010a",
+        "probe-base-2026-01-01",
+        "probe-base-",
+    ] {
+        assert!(!inherits(near_miss), "{near_miss} inherited the listed row");
+    }
 }

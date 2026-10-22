@@ -168,13 +168,17 @@ impl DraftConfirm {
         use crate::keys::{Action, Owner, resolve_in};
         use crossterm::event::{KeyCode, KeyModifiers};
         match (key.code, key.modifiers) {
+            // Plain text reaches the decoder as the character itself, an
+            // uppercase letter included and with no modifier; a terminal that
+            // reports Shift as well is accepted too, so `y`, `Y`, `n`, and `N`
+            // answer exactly as the committed quit confirmation did.
             (KeyCode::Char('y'), KeyModifiers::NONE)
-            | (KeyCode::Char('Y'), KeyModifiers::SHIFT) => {
+            | (KeyCode::Char('Y'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.focused = DraftChoice::Discard;
                 Some(DraftChoice::Discard)
             }
             (KeyCode::Esc | KeyCode::Char('n'), KeyModifiers::NONE)
-            | (KeyCode::Char('N'), KeyModifiers::SHIFT) => {
+            | (KeyCode::Char('N'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.focused = DraftChoice::Keep;
                 Some(DraftChoice::Keep)
             }
@@ -451,7 +455,8 @@ impl DialogUi {
         self.queue.keys_disabled
     }
 
-    /// Advances the arming clock; call once per frame just before painting.
+    /// Advances the arming clock; call once per frame just before painting,
+    /// and only when the previous frame landed with this dialog on screen.
     ///
     /// The first call after a dialog appears starts the delay, and the call that
     /// finds [`ARM_DELAY`] elapsed arms it, so the frame painted right after
@@ -466,6 +471,16 @@ impl DialogUi {
             }
             _ => {}
         }
+    }
+
+    /// Advances the arming clock after a frame that did not land with the
+    /// dialog on screen: one held while the caret measure went unanswered,
+    /// discarded on a resize, or below the usable floor. The question is not
+    /// on screen, so arming resets and answer keys stay closed no matter how
+    /// long the request has been open.
+    pub fn tick_without_dialog(&mut self, now: Instant) {
+        self.arming = Arming::Fresh;
+        self.now = Some(now);
     }
 
     /// Whole minutes left on the shown request, from its raise instant.
@@ -533,15 +548,17 @@ impl DialogUi {
         self.queue.mark_answered(id).then_some((id, answer))
     }
 
-    /// Normalizes a key for the binding table: Shift+letter resolves as the
-    /// unmodified letter so `Y` answers like `y`, Shift+Tab arriving as
-    /// kitty `BackTab` resolves like the legacy unmodified `CSI Z`, and the
-    /// dialog owner alone sees the key.
+    /// Normalizes a key for the binding table: an uppercase ASCII letter
+    /// resolves as the unmodified letter so `Y` answers like `y`, whether the
+    /// terminal reports Shift (kitty) or only the uppercase character (the
+    /// legacy decoder, or Caps Lock); Shift+Tab arriving as kitty `BackTab`
+    /// resolves like the legacy unmodified `CSI Z`, and the dialog owner
+    /// alone sees the key.
     fn resolve(key: crate::keys::Key) -> Option<crate::keys::Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if let KeyCode::Char(ch) = key.code
             && ch.is_ascii_uppercase()
-            && key.modifiers == KeyModifiers::SHIFT
+            && (key.modifiers == KeyModifiers::SHIFT || key.modifiers == KeyModifiers::NONE)
         {
             let plain =
                 crate::keys::Key::new(KeyCode::Char(ch.to_ascii_lowercase()), KeyModifiers::NONE);
@@ -879,18 +896,32 @@ impl DialogUi {
         // keeps a window centered on the focused choice; the last pinned
         // row is the always-present Other action, so it is popped before
         // the window and restored after, never counted off-screen.
-        let other = pinned.pop();
-        // One slot for the Other row comes off the option window's budget;
-        // when the body is empty (a bare select, no preview) the Other row
-        // alone is reserved, so the choice window keeps a count slot too.
-        let other_is_some = usize::from(other.is_some());
-        let body_reserve = usize::from(!body.is_empty());
-        let option_cap = visible.saturating_sub(other_is_some + body_reserve);
+        let mut other = pinned.pop();
+        // One slot for the Other row, and one for the scrollable body when
+        // it has rows (a preview or the open Other text row), come off the
+        // option window's budget. A select with neither has no body to
+        // reserve for, so its choices take every row left.
+        let body_slot = usize::from(!body.is_empty());
+        if self.text_mode && visible == 1 {
+            // The typed text is what the user acts on: with one row left it
+            // keeps that row, not the Other label.
+            other = None;
+        }
+        let mut option_cap = visible.saturating_sub(usize::from(other.is_some()) + body_slot);
+        if option_cap == 0 && self.focused < pinned.len() {
+            // No row is left for a choice. Enter answers the focused one, so
+            // it takes Other's row rather than painting nowhere; Other
+            // paints again as soon as focus reaches it.
+            other = None;
+            option_cap = 1;
+        }
         let mut pinned = window_pinned(pinned, self.focused, option_cap);
         if let Some(other) = other {
             pinned.push(other);
         }
-        let room = visible.saturating_sub(pinned.len()).max(1);
+        // Pinned rows outrank the body: with no row left over, the preview
+        // paints none rather than pushing the block past its height.
+        let room = visible.saturating_sub(pinned.len());
         let hidden = body.len().saturating_sub(room);
         let scroll = if self.expanded {
             self.scroll.min(hidden)
@@ -1268,43 +1299,19 @@ fn fold_hint_ranges(
 /// Keeps at most `cap` of the pinned choice rows, centered on the
 /// `focused` row, which is never scrolled out. Hidden options keep their
 /// keys — arrows still reach them — and one `... n more` slot at either
-/// end counts what the window hides; a two-slot window keeps the focused
-/// choice plus the count of what its far side hides. `focused` may name the
-/// Other row popped by the caller (index == len): the window then keeps the
-/// last choice so Other, appended after, stays adjacent to it.
+/// end counts what the window hides.
 fn window_pinned(mut pinned: Vec<RenderRow>, focused: usize, cap: usize) -> Vec<RenderRow> {
     if pinned.len() <= cap {
         return pinned;
     }
-    if cap < 2 {
-        // No room even for a count row: the row nearest the focus.
-        let focused = focused.min(pinned.len() - 1);
-        return pinned.drain(focused..=focused).collect();
-    }
-    if cap == 2 {
-        // One choice row and one count row: the focused choice (or the
-        // last choice when the focus sits on the popped Other row) plus
-        // the count of what the window hides on its far side.
-        let other = focused >= pinned.len();
-        let focused = focused.min(pinned.len() - 1);
-        let above = focused;
-        let below = pinned.len() - focused - 1;
-        let head = other || above >= below;
-        let (index, count) = if head {
-            (focused, above)
-        } else {
-            (focused, below)
-        };
-        let row = pinned.remove(index);
-        return if head {
-            vec![RenderRow::new(format!("... {count} more"), Role::Dim), row]
-        } else {
-            vec![row, RenderRow::new(format!("... {count} more"), Role::Dim)]
-        };
+    let focused = focused.min(pinned.len() - 1);
+    if cap < 3 {
+        // No room for count rows: a tight window on the focused row.
+        let start = focused.saturating_sub(cap / 2).min(pinned.len() - cap);
+        return pinned.drain(start..start + cap).collect();
     }
     // Center the focus, then trade one slot per hidden side for the row
     // that counts it.
-    let focused = focused.min(pinned.len() - 1);
     let mut start = focused.saturating_sub(cap / 2);
     let mut end = (start + cap).min(pinned.len());
     start = end.saturating_sub(cap);
@@ -2276,11 +2283,123 @@ mod tests {
         assert_eq!(focused(&dialog), ["> ( ) Other"]);
     }
 
-    /// A select whose choices outnumber the rows keeps a window centered on
-    /// the focus plus end counts, so the pinned block never overruns the
-    /// overlay.
+    /// A select whose choices outnumber the rows keeps a window around the
+    /// focus. At every height down to the title, one row and the actions,
+    /// the block stays inside the height, spends all of it while choices
+    /// are hidden and paints exactly one focused row: the choice or Other
+    /// that Enter answers. Other stays on screen whenever a row is left
+    /// beside the focused choice, and once a row is left for it, the
+    /// window's end counts name every hidden choice.
     #[test]
     fn more_choices_than_rows_window_the_pinned_block() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        const CHOICES: usize = 7;
+        let options = (1..=CHOICES)
+            .map(|index| Choice {
+                label: format!("Option {index}").into(),
+                description: None,
+            })
+            .collect();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options,
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        arm(&mut dialog);
+        // Focus walks every choice, then Other, one Down at a time.
+        for focus in 0..=CHOICES {
+            let label = if focus == CHOICES {
+                "( ) Other".to_owned()
+            } else {
+                format!("(*) Option {}", focus + 1)
+            };
+            for height in 3..=12 {
+                let rows = dialog.rows(60, height, crate::WidthMode::Narrow);
+                let at = format!("focus {focus}, height {height}: {rows:?}");
+                assert!(rows.len() <= height, "{at}");
+                assert_eq!(rows.first().map(String::as_str), Some("pick"), "{at}");
+                assert!(
+                    rows.last().is_some_and(|row| row.contains("esc dismiss")),
+                    "{at}"
+                );
+                let focused: Vec<&str> = rows
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|row| row.starts_with("> "))
+                    .collect();
+                assert_eq!(focused, [format!("> {label}").as_str()], "{at}");
+                // Three rows hold the title, the focused row and the actions:
+                // beside a focused choice there is no row left for Other.
+                if height > 3 || focus == CHOICES {
+                    assert!(rows.iter().any(|row| row.ends_with("( ) Other")), "{at}");
+                }
+                let shown = rows.iter().filter(|row| row.contains("Option ")).count();
+                if shown < CHOICES {
+                    assert_eq!(rows.len(), height, "no row sits unused: {at}");
+                }
+                // Four rows leave one choice row and five leave two, with no
+                // room to count the rest; from six the ends carry counts.
+                if height >= 6 {
+                    let counted: usize = rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.strip_prefix("... ")?
+                                .strip_suffix(" more")?
+                                .parse::<usize>()
+                                .ok()
+                        })
+                        .sum();
+                    assert_eq!(shown + counted, CHOICES, "{at}");
+                }
+            }
+            press(&mut dialog, KeyCode::Down);
+        }
+    }
+
+    /// A clipped preview never costs the focused row its place nor pushes
+    /// the block past its height: with only a few rows left, what Enter
+    /// answers outranks the preview's rows, which paint none at three.
+    #[test]
+    fn a_tight_preview_select_keeps_the_focused_row_on_screen() {
+        use crossterm::event::KeyCode;
+
+        let mut dialog = select_with_preview();
+        arm(&mut dialog);
+        for label in [
+            "> (*) SQLite - Embedded, zero config",
+            "> (*) Postgres",
+            "> ( ) Other",
+        ] {
+            for height in 3..=7 {
+                let rows = select_rows(&dialog, height);
+                let focused: Vec<&str> = rows
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|row| row.starts_with("> "))
+                    .collect();
+                assert_eq!(focused, [label], "height {height}: {rows:?}");
+                assert!(rows.len() <= height, "height {height}: {rows:?}");
+            }
+            press(&mut dialog, KeyCode::Down);
+        }
+    }
+
+    /// While the Other text row is open, the typed text stays on screen and
+    /// inside the height: at three rows it keeps the one row left, ahead of
+    /// the Other label.
+    #[test]
+    fn the_open_other_row_keeps_the_typed_text_on_screen() {
         use crossterm::event::KeyCode;
         use dal_core::{Choice, Owner, Question, Request, RequestId};
 
@@ -2305,29 +2424,25 @@ mod tests {
             default: Answer::Cancel,
         });
         arm(&mut dialog);
-        let rows = dialog.rows(60, 5, crate::WidthMode::Narrow);
-        assert_eq!(rows.len(), 5, "{rows:?}");
-        assert!(
-            rows.iter().any(|row| row.contains("> (*) Option 1")),
-            "{rows:?}"
-        );
-        assert!(
-            rows.iter().any(|row| row.contains("6 more")),
-            "the tail counts hidden choices: {rows:?}"
-        );
         for _ in 0..7 {
             press(&mut dialog, KeyCode::Down);
         }
-        let rows = dialog.rows(60, 5, crate::WidthMode::Narrow);
-        assert_eq!(rows.len(), 5, "{rows:?}");
-        assert!(
-            rows.iter().any(|row| row.contains("> ( ) Other")),
-            "the focused Other row stays in the window: {rows:?}"
-        );
-        assert!(
-            rows.iter().any(|row| row.contains("more")),
-            "the head counts hidden choices: {rows:?}"
-        );
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        press(&mut dialog, KeyCode::Char('a'));
+        press(&mut dialog, KeyCode::Char('b'));
+        for height in 3..=8 {
+            let rows = dialog.rows(60, height, crate::WidthMode::Narrow);
+            assert!(rows.len() <= height, "height {height}: {rows:?}");
+            assert_eq!(
+                rows.first().map(String::as_str),
+                Some("pick"),
+                "height {height}: {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row == "> ab"),
+                "height {height}: {rows:?}"
+            );
+        }
     }
 
     /// Pasted bytes carry the answer but can never write terminal commands:
@@ -2687,5 +2802,72 @@ mod tests {
             None
         );
         assert_eq!(confirm.focused(), DraftChoice::Discard);
+    }
+
+    /// The letters of the committed quit confirmation still answer, in both
+    /// cases and with or without a reported Shift, and Esc answers Keep; the
+    /// default focus stays on the choice that loses nothing.
+    #[test]
+    fn the_draft_confirm_keeps_the_committed_letter_answers() {
+        use super::{DraftChoice, DraftConfirm};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let key = |code, modifiers| crate::keys::Key::new(code, modifiers);
+        for (letter, modifiers, expected) in [
+            ('y', KeyModifiers::NONE, DraftChoice::Discard),
+            ('Y', KeyModifiers::NONE, DraftChoice::Discard),
+            ('Y', KeyModifiers::SHIFT, DraftChoice::Discard),
+            ('n', KeyModifiers::NONE, DraftChoice::Keep),
+            ('N', KeyModifiers::NONE, DraftChoice::Keep),
+            ('N', KeyModifiers::SHIFT, DraftChoice::Keep),
+        ] {
+            let mut confirm = DraftConfirm::default();
+            assert_eq!(
+                confirm.key(key(KeyCode::Char(letter), modifiers)),
+                Some(expected),
+                "{letter:?} {modifiers:?}"
+            );
+        }
+        let mut confirm = DraftConfirm::default();
+        assert_eq!(
+            confirm.key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(DraftChoice::Keep)
+        );
+        for other in ['x', 'q', ' '] {
+            let mut confirm = DraftConfirm::default();
+            assert_eq!(
+                confirm.key(key(KeyCode::Char(other), KeyModifiers::NONE)),
+                None,
+                "{other:?} is ignored"
+            );
+            assert_eq!(confirm.focused(), DraftChoice::Keep);
+        }
+    }
+
+    /// An uppercase answer letter answers an approval like its lowercase
+    /// form whether the terminal reports Shift or only the uppercase
+    /// character: the legacy decoder and Caps Lock send no modifier, and the
+    /// committed dialog matched `Y`, `A`, `N`, and `V` either way.
+    #[test]
+    fn uppercase_answer_letters_answer_an_approval_with_or_without_shift() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            for (letter, expected) in [
+                ('Y', Answer::Approve),
+                ('A', Answer::ApproveForSession),
+                ('N', Answer::Decline),
+            ] {
+                let id = dal_core::RequestId::new_v7();
+                let mut dialog = super::DialogUi::default();
+                dialog.opened(approval(id));
+                arm(&mut dialog);
+                let answered = dialog.key(crate::keys::Key::new(KeyCode::Char(letter), modifiers));
+                assert!(
+                    matches!(&answered, Some((who, answer)) if *who == id && *answer == expected),
+                    "{letter:?} {modifiers:?} answers {expected:?}, got {answered:?}"
+                );
+            }
+        }
     }
 }

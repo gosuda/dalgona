@@ -437,17 +437,28 @@ pub(super) fn purpose_member(member: &Member<'_>) -> Result<InferredPurpose, Dec
 }
 
 /// Reads a model record's route: either the format-1 `api` and `model`
-/// pair or one `route` member, never both.
+/// pair (with an optional `provider`) or one `route` member, never both.
+/// A record without `provider` decodes as a route that names none.
 pub(super) fn model_route_members(members: &mut Members<'_>) -> Result<ModelRoute, DecodeError> {
     let route = want(members, "route");
     let api = want(members, "api");
     let model = want(members, "model");
+    let provider = want(members, "provider");
     match (route, api, model) {
         (None, Some(api), Some(model)) => Ok(ModelRoute::Api {
             family: json_member(&api)?,
             model: model_id_member(&model)?,
+            provider: provider
+                .map(|member| provider_id_member(&member))
+                .transpose()?,
         }),
-        (Some(route), None, None) => route_member(&route),
+        (Some(route), None, None) => match provider {
+            Some(provider) => Err(invalid(
+                provider.offset,
+                "member `provider` cannot appear with `route`",
+            )),
+            None => route_member(&route),
+        },
         (Some(route), _, _) => Err(invalid(
             route.offset,
             "member `route` cannot appear with `api` or `model`",
@@ -455,6 +466,17 @@ pub(super) fn model_route_members(members: &mut Members<'_>) -> Result<ModelRout
         (None, None, _) => Err(invalid(0, "missing member `api`")),
         (None, Some(_), None) => Err(invalid(0, "missing member `model`")),
     }
+}
+
+/// Reads a `provider` id member; an empty id cannot name a configured
+/// provider, and `null` is malformed rather than absent.
+pub(super) fn provider_id_member(member: &Member<'_>) -> Result<Box<str>, DecodeError> {
+    let offset = member.offset;
+    let provider = text_member(member, "provider")?;
+    if provider.is_empty() {
+        return Err(invalid(offset, "member `provider` must not be empty"));
+    }
+    Ok(provider)
 }
 
 /// Reads a `model` id member; an empty id cannot name a provider model.

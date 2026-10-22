@@ -201,6 +201,11 @@ pub struct Config {
     pub(super) ask_clamp: Option<AskTimeoutClamp>,
     pub(super) aliases: std::collections::BTreeMap<Box<str>, Box<str>>,
     pub(super) serve: ServeConfig,
+    /// Whether any configuration layer supplied `serve.bind`; `false` when
+    /// the address still is the built-in default.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub(super) serve_bind_explicit: bool,
     pub(super) prices: std::collections::BTreeMap<Box<str>, crate::model::ModelPrice>,
     pub(super) disabled_batteries: Vec<Box<str>>,
     pub(super) experimental_batteries: Vec<Box<str>>,

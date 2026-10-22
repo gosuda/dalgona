@@ -89,6 +89,7 @@ fn resolved() -> ResolvedModel {
         route: ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         entry: entry(),
     }
@@ -101,6 +102,7 @@ fn chat_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([]),
@@ -126,6 +128,7 @@ fn snapshot_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from(vec![

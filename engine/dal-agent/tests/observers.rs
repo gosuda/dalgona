@@ -834,6 +834,105 @@ impl dal_agent::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for ReadRep
     }
 }
 
+/// A turn-end hook that parks until the test releases it, then journals one
+/// extension record from the still-settled turn.
+struct HeldEndWriter {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    written: Arc<AtomicBool>,
+}
+
+impl ObserveHook<TurnEnd> for HeldEndWriter {
+    fn call(&self, _input: TurnEnd, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        let written = Arc::clone(&self.written);
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            let body = dal_core::RawJson::parse(r#"{"late":true}"#).expect("record body");
+            let stored = cx
+                .services
+                .append_record(&cx.caller, "late_fire", Box::new(body))
+                .await
+                .is_ok();
+            written.store(stored, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+/// Closing the session right after `TurnEnded` must not drop a turn-end
+/// hook's journal write: the close parks on the turn settle barrier until
+/// the driver confirms the turn, so records stay durable.
+#[tokio::test]
+async fn close_after_turn_end_keeps_the_turn_end_hook_record() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let written = Arc::new(AtomicBool::new(false));
+    let extension = ExtensionBuilder::new("ordered", "0.1.0", dal_core::ServiceSet::EMPTY)
+        .expect("builder")
+        .on_turn_end(HeldEndWriter {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            written: Arc::clone(&written),
+        })
+        .build()
+        .expect("extension");
+    let (_tmp, host, agent) = start_session_with(vec![extension], STEP_END.to_owned()).await;
+    let mut subscription = agent.subscribe(None).expect("subscription");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "write late".into(),
+            }],
+        })
+        .await
+        .expect("prompt accepted");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(delivery) = subscription.next().await {
+            if let dal_agent::Delivery::Update(update) = delivery
+                && let dal_core::UpdateKind::TurnEnded { stop, .. } = update.kind
+            {
+                assert_eq!(stop, Stop::EndTurn);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("turn ends");
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("turn-end hook entered");
+    let view = agent.view(dal_core::PageReq::default()).expect("view");
+    let session = view.session.id;
+    let mut closing = tokio::task::JoinSet::new();
+    closing.spawn({
+        let host = host.clone();
+        async move { host.close(session).await }
+    });
+    // The close must park on the held turn-end hook rather than abort it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        closing.try_join_next().is_none(),
+        "the close waits for the held turn-end hook"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(15), closing.join_next())
+        .await
+        .expect("close finishes after the release")
+        .expect("close task")
+        .expect("close")
+        .expect("close result");
+    assert!(
+        written.load(Ordering::SeqCst),
+        "the held turn-end hook journaled its record"
+    );
+    drop(agent);
+    drop(host);
+}
+
 #[tokio::test]
 async fn next_turn_reads_the_completed_previous_turn_report() {
     let report = Arc::new(HeldTurnReport::default());

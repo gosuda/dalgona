@@ -256,3 +256,34 @@ fn korean_wraps_syllable_clusters_at_the_margin() {
     assert_eq!(take_cells("한국어", 5, N), "한국");
     assert_eq!(take_cells("한국어", 3, N), "한");
 }
+
+/// The locale picks CJK widths by the whole language subtag, not by a prefix:
+/// Konkani (`kok_IN`) and Jamaican Creole (`jam_JM`) merely start with `ko` and
+/// `ja`, and measuring their ambiguous glyphs two cells wide would desync every
+/// caret and wrap in those sessions.
+#[test]
+fn locale_selection_matches_the_whole_language_subtag_not_a_prefix() {
+    // The bare language codes select CJK, with or without a territory or codeset.
+    for cjk in ["ja", "zh", "ko", "ja.UTF-8", "zh_CN", "ko-KR", "ja_JP"] {
+        assert_eq!(WidthMode::from_locale([cjk, "", ""]), W, "locale {cjk:?}");
+    }
+    // One character longer or shorter than a CJK code is another language.
+    for narrow in [
+        "kok_IN.UTF-8",
+        "kok",
+        "jam_JM",
+        "jaa",
+        "zha_CN",
+        "zhx",
+        "kon_CD",
+        "j",
+        "z",
+        "k",
+    ] {
+        assert_eq!(
+            WidthMode::from_locale([narrow, "", ""]),
+            N,
+            "locale {narrow:?}"
+        );
+    }
+}

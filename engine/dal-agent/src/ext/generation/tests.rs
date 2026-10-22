@@ -8,16 +8,18 @@ use std::sync::Arc;
 
 use dal_core::ext::{McpBlock, McpEndpoint, McpServerDecl};
 use dal_core::{
-    Caps, Claimant, CommandName, CommandSpec, Mode, ModelId, ModelInfo, ModelRoute, Name, Origin,
-    RawJson, RegistrationError, Reply, ServiceSet, SkillRecord, ToolCallEvent, ToolCallVerdict,
-    ToolClass, ToolSpec, Visibility, Workspace,
+    Caps, Claimant, CommandName, CommandSpec, Mode, ModelId, ModelInfo, ModelRequest, ModelRoute,
+    Name, Origin, RawJson, RegistrationError, Reply, RuleRecord, ServiceSet, SkillRecord,
+    ToolCallEvent, ToolCallVerdict, ToolClass, ToolSpec, Visibility, Workspace,
 };
+use dal_provider::EventStream;
 
 use super::super::scheme::{Doc, SchemeCx, SchemeResolver};
 use super::super::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
 use super::super::{
     BoxFuture, CommandCx, CommandHandler, CompactError, CompactInput, Compaction, Compactor,
-    ExtensionBuilder, Hook, HookCx, HookError, Services,
+    ExtensionBuilder, Hook, HookCx, HookError, ModelCx, ModelError, ModelHandler, ModelRecord,
+    Services, StatusCx, StatusPoll, StatusSnapshot,
 };
 use super::{Generation, ValidatedExtensions};
 use crate::error::{SchemeError, ServiceError};
@@ -100,6 +102,7 @@ fn model_info() -> ModelInfo {
     ModelInfo {
         route: ModelRoute::from_id("acme/test"),
         name: "test-model".into(),
+        provider: "".into(),
         caps: Caps {
             context_window: Some(8192),
             thinking: Box::default(),
@@ -609,6 +612,371 @@ fn reload_splice_keeps_rebuilt_builtins_at_their_startup_position() {
         .map(super::super::Extension::name)
         .collect();
     assert_eq!(order, vec!["a", "skills", "b", "battery", "p2"]);
+}
+
+/// A model handler that never runs; only the registration matters.
+struct NoModel;
+
+impl ModelHandler for NoModel {
+    fn run<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _cx: ModelCx<'a>,
+    ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        Box::pin(async { Err(ModelError::PrivateRounds) })
+    }
+}
+
+/// A status poll that reports quiet; only its kind name matters.
+struct QuietStatus;
+
+impl StatusPoll for QuietStatus {
+    fn snapshot(&self, _cx: &StatusCx) -> StatusSnapshot {
+        StatusSnapshot {
+            quiet: true,
+            text: None,
+        }
+    }
+}
+
+fn skill_record(name: &str) -> SkillRecord {
+    SkillRecord {
+        name: name.parse().expect("valid skill name"),
+        description: "test skill".into(),
+        body: "body".into(),
+        letter2image: false,
+        mcp: None,
+    }
+}
+
+fn rule_record(name: &str) -> RuleRecord {
+    RuleRecord {
+        name: name.parse().expect("valid rule name"),
+        patterns: vec!["needle".into()],
+        text: "reminder".into(),
+        judge: None,
+        scope: None,
+        globs: None,
+        agents: None,
+        mode: None,
+        repeat_mode: None,
+        repeat_gap: None,
+        always_apply: false,
+        report: false,
+        enabled: true,
+    }
+}
+
+fn model_record(id: &str) -> ModelRecord {
+    ModelRecord {
+        id: ModelId::parse(id).expect("valid model id"),
+        caps: model_info().caps,
+        handler: Arc::new(NoModel),
+        export: None,
+    }
+}
+
+type Register = fn(ExtensionBuilder) -> ExtensionBuilder;
+
+#[test]
+fn every_record_kind_claims_its_name_across_extensions() {
+    let kinds: [(&str, Register); 5] = [
+        ("skill", |builder| builder.skill(skill_record("shared"))),
+        ("rule", |builder| builder.rule(rule_record("shared"))),
+        ("model", |builder| {
+            builder.model(model_record("acme/shared"))
+        }),
+        ("compactor", |builder| {
+            builder.compactor("shared", Arc::new(DecliningCompactor))
+        }),
+        ("status", |builder| {
+            builder.status_kind("shared", Arc::new(QuietStatus))
+        }),
+    ];
+    for (kind, register) in kinds {
+        let first = register(ext("aaa", Origin::User))
+            .build()
+            .expect("valid extension");
+        let second = register(ext("bbb", Origin::User))
+            .build()
+            .expect("valid extension");
+        let err = ValidatedExtensions::validate(vec![second, first], None)
+            .expect_err("the second claimant of one name conflicts");
+        let RegistrationError::Conflict {
+            kind: reported,
+            claimant,
+            rival,
+            ..
+        } = err
+        else {
+            panic!("{kind}: expected a conflict, got {err:?}");
+        };
+        assert_eq!(reported, kind);
+        assert_eq!(
+            claimant,
+            Claimant::Plugin("aaa".parse().expect("valid extension name")),
+            "{kind}: canonical order makes the earlier name the claimant"
+        );
+        assert_eq!(
+            rival,
+            Claimant::Plugin("bbb".parse().expect("valid extension name")),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn one_name_under_different_record_kinds_never_conflicts() {
+    let tool_owner = ext("aaa", Origin::User)
+        .tool(stub_tool("shared"), Visibility::Model)
+        .build()
+        .expect("valid extension");
+    let other_kinds = ext("bbb", Origin::User)
+        .skill(skill_record("shared"))
+        .rule(rule_record("shared"))
+        .compactor("shared", Arc::new(DecliningCompactor))
+        .status_kind("shared", Arc::new(QuietStatus))
+        .command(
+            CommandSpec {
+                name: CommandName::parse("shared").expect("valid command name"),
+                summary: "Test command.".into(),
+                args_hint: None,
+            },
+            Arc::new(StubCommand),
+        )
+        .build()
+        .expect("valid extension");
+    ValidatedExtensions::validate(vec![tool_owner, other_kinds], None)
+        .expect("record kinds claim names in separate ledgers");
+}
+
+#[test]
+fn a_batch_record_shadowing_the_previous_generation_names_the_previous_owner() {
+    let previous = Generation::build(
+        ValidatedExtensions::validate(
+            vec![
+                ext("core", Origin::Builtin)
+                    .skill(skill_record("shared"))
+                    .build()
+                    .expect("valid extension"),
+            ],
+            None,
+        )
+        .expect("the previous generation validates"),
+    );
+    let rival = ext("focus", Origin::User)
+        .skill(skill_record("shared"))
+        .build()
+        .expect("valid extension");
+    let err = ValidatedExtensions::validate(vec![rival], Some(&previous))
+        .expect_err("a skill already live in the previous generation conflicts");
+    let RegistrationError::Conflict {
+        kind,
+        claimant,
+        rival,
+        ..
+    } = err
+    else {
+        panic!("expected a conflict, got {err:?}");
+    };
+    assert_eq!(kind, "skill");
+    assert_eq!(
+        claimant,
+        Claimant::Builtin("core".parse().expect("valid extension name"))
+    );
+    assert_eq!(
+        rival,
+        Claimant::Plugin("focus".parse().expect("valid extension name"))
+    );
+}
+
+/// A mapped MCP tool: its name encodes `<skill>.<server>.<tool>` and it
+/// names the extension whose skill declares the server.
+struct MappedTool {
+    name: Name,
+    declaring: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl Tool for MappedTool {
+    fn declaring_extension(&self) -> Option<Name> {
+        Some(self.declaring.clone())
+    }
+
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async { ToolOutcome::Interrupted })
+    }
+}
+
+fn mapped_tool(name: &str, declaring: &str) -> Arc<MappedTool> {
+    let name = Name::parse_mapped_tool(name).expect("mapped tool name");
+    Arc::new(MappedTool {
+        spec: Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "mapped test tool".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).expect("valid schema"),
+            grammar: None,
+        }),
+        name,
+        declaring: declaring.parse().expect("declaring extension name"),
+    })
+}
+
+#[test]
+fn mapped_mcp_tools_are_rejected_with_the_reason_each_declaration_fails() {
+    let docs = ext("docs", Origin::User)
+        .skill(SkillRecord {
+            name: "docs".parse().expect("skill name"),
+            description: "Documentation tools".into(),
+            body: "Use docs tools".into(),
+            letter2image: false,
+            mcp: Some(McpBlock {
+                servers: [(
+                    "web".into(),
+                    McpServerDecl::Http {
+                        endpoint: McpEndpoint::parse("https://docs.example/mcp")
+                            .expect("fixture endpoint"),
+                    },
+                )]
+                .into(),
+            }),
+        })
+        .build()
+        .expect("valid extension");
+    let notes = ext("notes", Origin::User)
+        .skill(skill_record("memo"))
+        .build()
+        .expect("valid extension");
+    let shape = "mapped tool name must be <skill>.<server>.<tool>";
+    let empty = "server and remote tool names must be non-empty";
+    for (tool, declaring, reason) in [
+        ("docs", "docs", shape),
+        ("docs.web", "docs", shape),
+        ("docs..list", "docs", empty),
+        ("docs.web.", "docs", empty),
+        ("dOcs.web.list", "docs", "mapped tool skill name is invalid"),
+        (
+            "docs.web.list",
+            "ghost",
+            "declaring extension is not loaded",
+        ),
+        ("ghost.web.list", "docs", "declaring skill is not loaded"),
+        (
+            "memo.web.list",
+            "notes",
+            "declaring skill has no MCP servers",
+        ),
+        ("docs.ghost.list", "docs", "declared server is missing"),
+    ] {
+        let battery = ext("battery", Origin::User)
+            .tool(mapped_tool(tool, declaring), Visibility::Model)
+            .build()
+            .expect("valid extension");
+        let err = ValidatedExtensions::validate(vec![battery, docs.clone(), notes.clone()], None)
+            .expect_err("a bad declaration is refused before publish");
+        let RegistrationError::InvalidMcpTool {
+            tool: rejected,
+            extension,
+            reason: reported,
+        } = err
+        else {
+            panic!("{tool}: expected InvalidMcpTool, got {err:?}");
+        };
+        assert_eq!(&*rejected, tool);
+        assert_eq!(extension.as_str(), declaring, "{tool}");
+        assert_eq!(reported, reason, "{tool}");
+    }
+    let battery = ext("battery", Origin::User)
+        .tool(mapped_tool("docs.web.list", "docs"), Visibility::Model)
+        .build()
+        .expect("valid extension");
+    ValidatedExtensions::validate(vec![battery, docs, notes], None)
+        .expect("a declared server validates");
+}
+
+/// A tool whose schema text names the route it was asked for.
+struct RouteTool {
+    name: Name,
+}
+
+impl Tool for RouteTool {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::new(ToolSpec {
+            name: self.name.clone(),
+            description: format!("{:?}", model.route).into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).expect("valid schema"),
+            grammar: None,
+        })
+    }
+
+    fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async { ToolOutcome::Interrupted })
+    }
+}
+
+#[test]
+fn the_spec_cache_never_shares_a_schema_between_routes_under_one_model_id() {
+    let tool_name: Name = "route_aware".parse().expect("valid tool name");
+    let generation = Generation::build(
+        ValidatedExtensions::validate(
+            vec![
+                ext("core", Origin::Builtin)
+                    .tool(
+                        Arc::new(RouteTool {
+                            name: tool_name.clone(),
+                        }),
+                        Visibility::Model,
+                    )
+                    .build()
+                    .expect("valid extension"),
+            ],
+            None,
+        )
+        .expect("validates"),
+    );
+    let model_id = model_id();
+    let on_route = |id: &str| ModelInfo {
+        route: ModelRoute::from_id(id),
+        ..model_info()
+    };
+    let first = generation
+        .tool_spec(&tool_name, &on_route("acme/a"), &model_id)
+        .expect("route a resolves");
+    let again = generation
+        .tool_spec(&tool_name, &on_route("acme/a"), &model_id)
+        .expect("route a resolves again");
+    assert!(
+        Arc::ptr_eq(&first, &again),
+        "one route under one id hits the cache"
+    );
+    let other = generation
+        .tool_spec(&tool_name, &on_route("acme/b"), &model_id)
+        .expect("route b resolves");
+    assert_ne!(
+        first.description, other.description,
+        "a second route under the same model id gets its own schema"
+    );
+    assert!(!Arc::ptr_eq(&first, &other));
 }
 
 #[test]

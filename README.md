@@ -1,4 +1,4 @@
-# dal and dalgona
+# dal and dalgona: a terminal coding agent with one extension door
 
 Dal is a complete terminal coding agent. Dalgona is dal with opinionated batteries, switched on through the same public extension door.
 
@@ -21,11 +21,15 @@ Dalgona reuses dal through the public extension interface and turns on batteries
 
 Binaries are `dalgon` (aliases `dal`, `dl`) and `dalgona` (alias `dg`). A plugin that loads in dalgon loads in dalgona.
 
-Everything extends dal through one door. In process, the Host and Agent seam carries one snapshot, one change stream, one command path, one request and answer pair, and one blob read. Across processes, the same operations travel as JSON-RPC over stdio or a local socket. The manuals live behind that door at `dal://` and `dalgona://`.
+Everything extends dal through one door. The door is one public interface. Plugins, other programs, and dalgona's batteries use it, and so does dal's own terminal.
+
+In process, the Host and Agent seam carries one snapshot, one change stream, one command path, one request and answer pair, and one blob read. In plain words, a client reads the session state, follows its updates, sends a command, answers a request from the agent, and fetches stored data. A `Host` owns the live sessions. An `Agent` is a handle to one session.
+
+Across processes, the same operations travel as JSON-RPC over stdio or a local socket. The manuals live behind that door at `dal://` and `dalgona://`. [Philosophy](docs/philosophy.md) explains why dal has one door.
 
 ## Install
 
-In a POSIX shell, build from source. The install guide in this checkout describes a source route and lists no registry version to install.
+Build from source. No tagged release exists, so the registry and installer channels have nothing to fetch yet. [Install dal and dalgona](docs/install.md) has the details for each OS.
 
 You need git, the latest stable Rust toolchain, and a C toolchain. The symbol grammars compile through `cc`.
 
@@ -37,26 +41,40 @@ cargo build --release --locked -p dalgon -p dalgona
 export PATH="$PWD/target/release:$PATH"
 ```
 
-The binaries land in `target/release/` (`dalgon` with `dal` and `dl`, plus `dalgona` with `dg`), assuming the default Cargo target directory (`CARGO_TARGET_DIR` and `--target-dir` move it). The `export` line assumes POSIX `sh`; PowerShell needs different syntax to extend `PATH`.
+In PowerShell, run the first four commands. Then extend `PATH` with this line instead of `export`:
 
-Supported platforms are Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published. Configuration and data use per-OS roots; on POSIX defaults these are `~/.config/dal/` and `~/.local/share/dal/`, and dalgona uses its own family directories. Plugins need no toolchain.
+```powershell
+$env:PATH = "$PWD\target\release;$env:PATH"
+```
+
+The binaries land in `target/release/` (`dalgon` with `dal` and `dl`, plus `dalgona` with `dg`), assuming the default Cargo target directory (`CARGO_TARGET_DIR` and `--target-dir` move it). Run `dalgon --version` to check the install.
+
+Supported platforms are Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published. Configuration and data use the same XDG-style layout on every OS: `$XDG_CONFIG_HOME/dal/` and `$XDG_DATA_HOME/dal/`. Without those variables, the defaults are `~/.config/dal/` and `~/.local/share/dal/` under your home directory. On Windows, the home directory is `HOME`, `USERPROFILE`, or `HOMEDRIVE` with `HOMEPATH`. Dalgona uses `dalgona` in place of `dal`. Plugins need no toolchain.
 
 ## Quick start
 
-The outputs below summarize checked-in CLI help and docs.
+Sign in, pick a model, and run one prompt. [Quickstart: run your first dal agent turn](docs/quickstart.md) walks through each step.
+
+```sh
+dalgon login
+dalgon
+dalgon -p "Summarize this repository's README"
+```
+
+`dalgon login` signs in to a provider. `dalgon` opens the terminal; type `/model` to pick a model, then send a prompt. `dalgon -p` runs one turn and exits; it needs a model. Dal asks before every `patch` and every `exec`.
+
+To verify the install, run these checks. Each comment names the start of the real output or the exit code.
 
 ```sh
 dalgon docs
 # prints the dal manual index starting with `# dal://`
 dalgon docs dal://cli
-# prints the command-line page titled `The command line`
+# prints the command-line page
 dalgon login --help
 # prints sign-in usage starting with `Sign in to a provider`
 dalgon login status
 # exit 1 with no credentials; lists providers as `not configured`
 ```
-
-Run `dal` for the terminal once a provider is ready. Sign in with `dalgon login`, then pick a model.
 
 ## Features
 
@@ -157,6 +175,8 @@ The same pages live inside the binaries and in the checkout. Use `dalgon docs` f
 
 Core use:
 
+- [Quickstart](docs/quickstart.md)
+- [Install](docs/install.md)
 - [Command line](docs/cli.md)
 - [Slash commands](docs/commands.md)
 - [Settings in dal.toml](docs/config.md)
@@ -166,9 +186,11 @@ Core use:
 Extension and session control:
 
 - [Plugins](docs/plugins.md)
+- [Port a pi extension](docs/convert-pi.md)
 - [Rules](docs/rules.md)
 - [Symbols and structural editing](docs/symbols.md)
 - [Sandbox](docs/sandbox.md)
+- [Complexity guard](docs/guard.md)
 - [System prompt](docs/prompt.md)
 - [Sessions and compaction](docs/sessions.md)
 - [Terminal and keys](docs/terminal.md)
@@ -180,7 +202,7 @@ Clients and embedding:
 - [Embed in Rust](docs/sdk.md)
 - [Build a client](docs/integrate.md)
 - [Example plugins](docs/examples.md)
-- [Philosophy: one door](docs/philosophy.md)
+- [Philosophy: why dal has one extension door](docs/philosophy.md)
 
 Dalgona product:
 
@@ -197,6 +219,7 @@ Project contracts:
 - [Design](DESIGN.md)
 - [Branding and names](BRANDING.md)
 - [Changelog](CHANGELOG.md)
+- [Product requirements (maintainer spec)](docs/requirements.md)
 - [License](LICENSE.md)
 
 ## Development

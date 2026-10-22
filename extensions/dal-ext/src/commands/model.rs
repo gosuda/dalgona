@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use dal_agent::ext::command::{CommandCx, SaveError};
+use dal_agent::ext::command::{CatalogView, CommandCx, SaveError};
 use dal_agent::login::{find_provider, login_providers};
 use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
 use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
@@ -63,7 +63,10 @@ pub(super) async fn model(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply
             provider,
             id,
             route,
-        } => apply_route(cx, &provider, &id, route).await,
+        } => {
+            let route = exact_route(catalog.as_ref(), &provider, &id, route)?;
+            apply_route(cx, &provider, &id, route).await
+        }
         ModelResolution::Unknown => {
             // Config aliases (and nothing else) resolve through the host,
             // which consults the cached catalog plus aliases without fetching.
@@ -82,6 +85,55 @@ pub(super) async fn model(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply
                 Err(_) => Err(unknown_model(word)),
             }
         }
+    }
+}
+
+/// Gives a cached `provider/id` row the API family its provider serves.
+///
+/// The cached rows carry no family, and [`provider_family`] can only name the
+/// families of built-in providers, so its answer is provisional. The catalog
+/// view lists every configured provider with its own family, with no
+/// synthetic-model or scope step in between, so a custom Responses provider
+/// keeps its family. A provider the view does not list cannot serve the row
+/// (a request would fail typed on every turn), so the selection is refused
+/// before anything is saved.
+///
+/// # Errors
+/// Returns the unavailable-provider triple when `view` is absent or does not
+/// list `provider`.
+pub(super) fn exact_route(
+    view: Option<&CatalogView>,
+    provider: &str,
+    id: &str,
+    route: ModelRoute,
+) -> Result<ModelRoute, ErrorTriple> {
+    let family = view.and_then(|view| {
+        view.providers
+            .iter()
+            .find(|(known, _)| &**known == provider)
+            .map(|(_, family)| *family)
+    });
+    match (family, route) {
+        (
+            Some(family),
+            ModelRoute::Api {
+                model,
+                provider: named,
+                ..
+            },
+        ) => Ok(ModelRoute::Api {
+            family,
+            model,
+            provider: named,
+        }),
+        (Some(_), other) => Ok(other),
+        (None, _) => Err(super::error_triple(
+            format!("Provider \"{provider}\" is not configured"),
+            format!(
+                "the model list names {provider}/{id}, but dal.toml configures no provider with that id"
+            ),
+            "Type /model to pick from the list, or add the provider to dal.toml.",
+        )),
     }
 }
 
@@ -293,9 +345,18 @@ async fn apply_route(
 }
 
 /// Renders the saved route as the `provider/id` the model lines print.
+///
+/// An API route that names its provider prints that provider. A route
+/// without one (an older record) prints the family label, which can name
+/// only the API family, not the configured provider.
 fn route_origin(route: &ModelRoute) -> (String, String) {
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api {
+            provider: Some(provider),
+            model,
+            ..
+        } => (provider.to_string(), model.to_string()),
+        ModelRoute::Api { family, model, .. } => {
             let provider = match family {
                 Family::Anthropic => "anthropic",
                 Family::Codex => "openai-codex",
@@ -343,7 +404,8 @@ pub(super) enum ModelResolution {
     },
 }
 
-/// Maps a provider id to the API family its models route through.
+/// Maps a provider id to the API family a built-in provider uses: the
+/// provisional family of a typed row until [`exact_route`] reads the catalog's.
 fn provider_family(provider: &str) -> Family {
     find_provider(provider).map_or(Family::Chat, |def| def.family)
 }
@@ -371,6 +433,7 @@ pub(super) fn resolve_model(pairs: &[(&str, &str)], arg: &str) -> ModelResolutio
                 route: ModelRoute::Api {
                     family: provider_family(p),
                     model: (*i).into(),
+                    provider: Some((*p).into()),
                 },
             };
         }
@@ -388,6 +451,7 @@ pub(super) fn resolve_model(pairs: &[(&str, &str)], arg: &str) -> ModelResolutio
             route: ModelRoute::Api {
                 family: provider_family(p),
                 model: (*i).into(),
+                provider: Some((*p).into()),
             },
         },
         (Some((first, _)), Some((second, _))) => ModelResolution::Ambiguous {

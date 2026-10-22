@@ -142,6 +142,7 @@ async fn invalid_config_installs_only_a_compactor_that_refuses_with_its_exact_me
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "test".into(),
+            provider: None,
         },
         session: SessionId::new_v7(),
         instructions: "",
@@ -264,6 +265,143 @@ fn record_rejects_letter_span_and_cell_caps() {
         .spans(),
         &[]
     );
+}
+
+fn cap_entry() -> EntryId {
+    entry_id(10).expect("nonzero entry")
+}
+
+fn cap_span(earlier: u64, len: u32) -> Span {
+    Span {
+        entry: entry_id(earlier).expect("nonzero"),
+        part: 0,
+        off: 0,
+        len,
+    }
+}
+
+fn cap_compaction(spans: Vec<Span>, letters: usize, cell: [u8; 2], blob: String) -> LetterRecord {
+    LetterRecord::Compaction {
+        v: 1,
+        id: "history/1.1".to_string(),
+        png_blob: blob,
+        png_bytes: 10,
+        width: 100,
+        height: 100,
+        cell,
+        spans,
+        letters: vec![1; letters],
+    }
+}
+
+fn cap_digest() -> String {
+    "a".repeat(64)
+}
+
+#[test]
+fn a_compaction_record_holds_4096_letters_and_refuses_4097() {
+    let letters = |count| cap_compaction(vec![cap_span(1, 1)], count, [11, 16], cap_digest());
+    assert_eq!(LetterRecord::check(&letters(0), cap_entry()), Ok(()));
+    assert_eq!(LetterRecord::check(&letters(4095), cap_entry()), Ok(()));
+    assert_eq!(LetterRecord::check(&letters(4096), cap_entry()), Ok(()));
+    assert_eq!(
+        LetterRecord::check(&letters(4097), cap_entry()),
+        Err(RecordError::TooManyLetters { count: 4097 })
+    );
+}
+
+#[test]
+fn a_dream_record_holds_4096_letters_and_refuses_4097() {
+    let dream = |letters: usize| LetterRecord::Dream {
+        v: 1,
+        id: "dream/1".to_string(),
+        letters: vec!["history/1.1".to_string(); letters],
+        summary: "s".to_string(),
+    };
+    assert_eq!(LetterRecord::check(&dream(4096), cap_entry()), Ok(()));
+    assert_eq!(
+        LetterRecord::check(&dream(4097), cap_entry()),
+        Err(RecordError::TooManyLetters { count: 4097 })
+    );
+}
+
+#[test]
+fn a_compaction_record_holds_65536_spans_and_refuses_65537() {
+    let spans = |count| cap_compaction(vec![cap_span(1, 1); count], 1, [11, 16], cap_digest());
+    assert_eq!(LetterRecord::check(&spans(65_535), cap_entry()), Ok(()));
+    assert_eq!(LetterRecord::check(&spans(65_536), cap_entry()), Ok(()));
+    assert_eq!(
+        LetterRecord::check(&spans(65_537), cap_entry()),
+        Err(RecordError::TooManySpans { count: 65_537 })
+    );
+}
+
+#[test]
+fn a_cell_side_is_one_through_sixty_four() {
+    let with_cell = |cell| cap_compaction(vec![], 0, cell, cap_digest());
+    for cell in [[1, 1], [64, 64], [1, 64], [64, 1]] {
+        assert_eq!(
+            LetterRecord::check(&with_cell(cell), cap_entry()),
+            Ok(()),
+            "{cell:?}"
+        );
+    }
+    for cell in [[0, 16], [11, 0], [65, 16], [11, 65], [0, 0], [255, 255]] {
+        assert_eq!(
+            LetterRecord::check(&with_cell(cell), cap_entry()),
+            Err(RecordError::BadCell {
+                width: cell[0],
+                height: cell[1]
+            }),
+            "{cell:?}"
+        );
+    }
+}
+
+#[test]
+fn a_span_must_name_bytes_of_a_strictly_earlier_entry() {
+    let with_span =
+        |earlier, len| cap_compaction(vec![cap_span(earlier, len)], 0, [11, 16], cap_digest());
+    assert_eq!(
+        LetterRecord::check(&with_span(9, 1), cap_entry()),
+        Ok(()),
+        "a span may name the entry just before the record"
+    );
+    assert_eq!(LetterRecord::check(&with_span(1, 1), cap_entry()), Ok(()));
+    for (earlier, len) in [(10, 1), (11, 1), (u64::MAX, 1), (9, 0), (1, 0)] {
+        assert_eq!(
+            LetterRecord::check(&with_span(earlier, len), cap_entry()),
+            Err(RecordError::BadSpan {
+                entry: earlier,
+                part: 0,
+                off: 0,
+                len
+            }),
+            "entry {earlier} len {len}"
+        );
+    }
+}
+
+#[test]
+fn a_png_digest_is_exactly_sixty_four_lowercase_hex_digits() {
+    let with_blob = |blob: String| cap_compaction(vec![], 0, [11, 16], blob);
+    let hex = "0123456789abcdef".repeat(4);
+    assert_eq!(LetterRecord::check(&with_blob(hex), cap_entry()), Ok(()));
+    for bad in [
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        format!("{}g", "a".repeat(63)),
+        String::new(),
+    ] {
+        assert_eq!(
+            LetterRecord::check(&with_blob(bad.clone()), cap_entry()),
+            Err(RecordError::BadDigest {
+                digest: bad.clone()
+            }),
+            "{bad:?}"
+        );
+    }
 }
 
 #[test]
@@ -577,13 +715,21 @@ fn role_marks_cover_all_journal_roles() {
         Role::Reasoning,
     ];
     let marks: Vec<Option<Box<str>>> = roles.iter().map(Role::mark).collect();
-    assert!(marks[0].is_some());
-    assert!(marks[1].is_some());
-    assert!(marks[2].is_some());
-    assert!(marks[3].is_some());
-    assert!(marks[4].is_some());
-    assert!(marks[5].is_some());
-    assert!(marks[6].is_none());
+    let texts: Vec<Option<&str>> = marks.iter().map(Option::as_deref).collect();
+    assert_eq!(
+        texts,
+        [
+            Some("¶user: "),
+            Some("¶ai: "),
+            Some("¶call:tool "),
+            Some("¶out:tool "),
+            Some("¶failed:tool "),
+            Some("¶note: "),
+            None,
+        ]
+    );
+    let distinct: std::collections::BTreeSet<_> = texts.iter().flatten().collect();
+    assert_eq!(distinct.len(), 6, "no two roles may share a mark");
 }
 
 #[test]

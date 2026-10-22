@@ -86,6 +86,24 @@ fn the_against_file_sits_on_top_of_the_user_file_key_by_key() {
 fn no_file_means_the_product_defaults_and_no_model() {
     let loaded = config(None, None, None);
     assert_eq!(loaded.model(), None);
+    assert_eq!(loaded.disabled_batteries().len(), 0);
+    assert_eq!(loaded.experimental_batteries().len(), 0);
+    let web = loaded.section("plugin.web").expect("the web defaults load");
+    assert_eq!(
+        web.get("provider").and_then(toml::Value::as_str),
+        Some("brave")
+    );
+    assert_eq!(
+        web.get("max_redirects").and_then(toml::Value::as_integer),
+        Some(10)
+    );
+    assert_eq!(
+        loaded
+            .section("plugin.history")
+            .and_then(|history| history.get("share"))
+            .and_then(toml::Value::as_float),
+        Some(0.4)
+    );
 }
 
 #[test]
@@ -110,6 +128,13 @@ fn a_cost_is_the_sum_of_the_reported_costs_and_unknown_when_none_is() {
     assert_eq!(add_cost(None, Some(0.5)), Some(0.5));
     assert_eq!(add_cost(Some(0.5), None), Some(0.5));
     assert_eq!(add_cost(Some(0.5), Some(0.25)), Some(0.75));
+}
+
+#[test]
+fn every_other_stop_is_a_failed_run() {
+    for stop in [Stop::Length, Stop::Filter, Stop::MaxSteps, Stop::Failed] {
+        assert_eq!(exit_of(stop), Exit::Failed, "{stop:?}");
+    }
 }
 
 #[test]

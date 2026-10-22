@@ -55,6 +55,8 @@ const WAIT: Duration = Duration::from_secs(15);
 /// What the product writes after a resize to find its live block: a
 /// cursor-position request, then the status request that orders the answer.
 const POSITION_QUERY: &[u8] = b"\x1b[6n\x1b[5n";
+const SLICE: Duration = Duration::from_millis(5);
+const CARET_QUERY: &[u8] = b"\x1b[6n";
 
 /// One scripted provider step that streams `deltas` and ends the turn.
 fn text_step(deltas: &[&str]) -> FixtureResult {
@@ -89,6 +91,7 @@ struct Screen {
     term: PtyProcess,
     vt: VtRecorder,
     fed: usize,
+    scanned: usize,
 }
 
 impl Screen {
@@ -116,20 +119,21 @@ impl Screen {
             term,
             vt: VtRecorder::new(columns, rows),
             fed: 0,
+            scanned: 0,
         };
         screen.until(|text| text.contains(dal_tui::copy::ids::COMPOSER_PLACEHOLDER))?;
         Ok(screen)
     }
 
-    /// Reads output for `millis`, feeding the emulated screen and answering
-    /// every position query the way a terminal does. The product holds its
-    /// frames until the answer arrives, so the answer must come within the
-    /// slice the query was written in, not after the whole window.
+    /// Feeds the screen for `millis` and answers each caret-position request.
     fn pump(&mut self, millis: u64) -> TestResult {
         let deadline = Instant::now() + Duration::from_millis(millis);
         loop {
-            self.term.collect_for(Duration::from_millis(5))?;
-            self.absorb()?;
+            self.term.collect_for(SLICE)?;
+            let output = self.term.output();
+            self.vt.feed(&output[self.fed..]);
+            self.fed = output.len();
+            self.answer_caret_queries()?;
             if Instant::now() >= deadline {
                 return Ok(());
             }
@@ -162,6 +166,18 @@ impl Screen {
             self.term
                 .write(format!("\x1b[{};{}R\x1b[0n", row + 1, column + 1).as_bytes())?;
         }
+    }
+
+    fn answer_caret_queries(&mut self) -> TestResult {
+        let from = self.scanned.saturating_sub(CARET_QUERY.len() - 1);
+        let asked = pty::occurrences(&self.term.output()[from..self.fed], CARET_QUERY);
+        self.scanned = self.fed;
+        for _ in 0..asked {
+            let (column, row) = self.vt.cursor();
+            let answer = format!("\x1b[{};{}R\x1b[0n", row + 1, column + 1);
+            self.term.write(answer.as_bytes())?;
+        }
+        Ok(())
     }
 
     /// Resizes the pseudo-terminal and the emulated screen the way a
@@ -251,7 +267,10 @@ impl Screen {
         for _ in 0..6 {
             self.term.write(b"\x04")?;
             match self.term.wait_for_exit(Duration::from_secs(3)) {
-                Ok(_) => return Ok(()),
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => {
+                    return Err(format!("dalgon quit with {status}, not a clean exit").into());
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(error) => return Err(error.into()),
             }

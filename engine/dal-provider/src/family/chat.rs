@@ -203,6 +203,7 @@ pub(crate) fn request_body(
     let ModelRoute::Api {
         family: Family::Chat,
         model,
+        ..
     } = &request.model
     else {
         return Err(ChatBodyError::NotChat {

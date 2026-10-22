@@ -616,23 +616,66 @@ fn skill_body_that_is_not_utf8_is_refused() {
     );
 }
 
+fn rule_plugin(rule: &str) -> String {
+    format!(
+        "plugin = dal.plugin(name = \"probe\", version = \"0.1.0\", rules = {{\"r\": {rule}}})\n"
+    )
+}
+
 #[test]
-fn rules_reject_missing_trigger_and_bad_policy_words() {
-    for rule in [
-        "dal.rule(text = \"t\")",
-        "dal.rule(text = \"t\", pattern = \"x\", scope = [])",
-        "dal.rule(text = \"t\", pattern = \"x\", scope = [\"nonsense\"])",
-        "dal.rule(text = \"t\", pattern = \"x\", interrupt_mode = \"sometimes\")",
-        "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"twice\")",
-        "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"after-gap\", repeat_gap = 0)",
-        "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"after-gap\", repeat_gap = 1001)",
-        "dal.rule(text = \"t\", pattern = \"x\", judge = lambda: 1)",
+fn rules_reject_each_malformed_field_by_name_and_the_valid_controls_load() {
+    // A rule with no trigger fails while the constructor evaluates.
+    assert_eval(
+        &rejected(&rule_plugin("dal.rule(text = \"t\")")),
+        "rule: give a pattern, or set always_apply = True",
+    );
+    // Every other malformed rule is a located plugin-descriptor refusal whose
+    // message names the rule and the field the author has to change.
+    for (rule, message) in [
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", scope = [])",
+            "rule `r`: scope needs one or more of text, thinking, tool, or tool:<name>",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", scope = [\"nonsense\"])",
+            "rule `r`: scope needs one or more of text, thinking, tool, or tool:<name>",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", interrupt_mode = \"sometimes\")",
+            "rule `r`: interrupt_mode \"sometimes\" is invalid; use always, prose-only, tool-only, or never",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"twice\")",
+            "rule `r`: repeat_mode \"twice\" is invalid; use once or after-gap",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"after-gap\", repeat_gap = 0)",
+            "rule `r`: repeat_gap 0 is invalid; use a whole number from 1 to 1000",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", repeat_mode = \"after-gap\", repeat_gap = 1001)",
+            "rule `r`: repeat_gap 1001 is invalid; use a whole number from 1 to 1000",
+        ),
+        (
+            "dal.rule(text = \"t\", pattern = \"x\", judge = lambda: 1)",
+            "rule `r` judge must be instruction text; callable judges are not a v1 surface",
+        ),
     ] {
-        let source = format!(
-            "{HEADER}plugin = dal.plugin(name = \"probe\", version = \"0.1.0\", rules = {{\"r\": {rule}}})\n"
-        );
-        let (_data, result) = load_named("probe", &source, &config());
-        assert!(result.is_err(), "{rule} must be rejected");
+        let error = rejected(&rule_plugin(rule));
+        let LoadError::InvalidPlugin { path, message: got } = &error else {
+            panic!("{rule}: expected InvalidPlugin, got {error:?}");
+        };
+        assert!(path.ends_with("plugin.star"), "{rule}: {path:?}");
+        assert_eq!(got.as_ref(), message, "{rule}");
+    }
+    // The same constructors with valid values are accepted.
+    for rule in [
+        "dal.rule(text = \"t\", pattern = \"x\")",
+        "dal.rule(text = \"t\", pattern = \"x\", judge = \"is it risky\")",
+        "dal.rule(text = \"t\", always_apply = True)",
+        "dal.rule(text = \"t\", pattern = \"x\", scope = [\"thinking\", \"tool:exec\"], interrupt_mode = \"never\", repeat_mode = \"once\")",
+    ] {
+        accepted(&rule_plugin(rule));
     }
 }
 

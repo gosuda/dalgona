@@ -20,6 +20,8 @@
 //!
 //! No `dal-tui/src` edits.
 
+#![cfg(test)]
+
 use std::num::NonZeroU64;
 
 use dal_core::{
@@ -145,30 +147,24 @@ fn assert_one_bracket_pair(bytes: &[u8], label: &str) {
     );
 }
 
-fn user_entry(id: u64, text: &str) -> Result<dal_core::EntryView, dal_tui::TuiError> {
-    let nonzero = NonZeroU64::new(id).ok_or_else(|| {
-        dal_tui::TuiError::Terminal(format!("entry id must be nonzero, got {id}"))
-    })?;
-    Ok(dal_core::EntryView {
-        id: EntryId::new(nonzero),
+fn user_entry(id: u64, text: &str) -> dal_core::EntryView {
+    dal_core::EntryView {
+        id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
         parent: None,
         kind: EntryKind::User {
             parts: vec![JournalPart::Text { text: text.into() }],
         },
-    })
+    }
 }
 
-fn unicode_view() -> Result<View, dal_tui::TuiError> {
-    let terminal = |error: &dyn std::fmt::Display| {
-        dal_tui::TuiError::Terminal(format!("narrow_unicode fixture: {error}"))
-    };
-    let workspace = Workspace::new(std::env::temp_dir()).map_err(|error| terminal(&error))?;
-    Ok(View {
+fn unicode_view() -> View {
+    let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+    View {
         r#gen: Gen::new(NonZeroU64::MIN),
         seq: Seq::new(NonZeroU64::MIN),
         session: SessionInfo {
             id: SessionId::parse("018f0f62-3b00-7000-8000-000000000001")
-                .map_err(|error| terminal(&error))?,
+                .expect("fixture session id is valid"),
             name: None,
             preview: "".into(),
             workspace,
@@ -176,17 +172,15 @@ fn unicode_view() -> Result<View, dal_tui::TuiError> {
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {
             items: COMMITTED_UNICODE
                 .iter()
                 .enumerate()
-                .map(|(index, text)| {
-                    let id = u64::try_from(index + 1).map_err(|error| terminal(&error))?;
-                    user_entry(id, text)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+                .map(|(index, text)| user_entry(u64::try_from(index + 1).expect("entry id"), text))
+                .collect(),
             next_before: None,
         },
         tree: TreeOutline {
@@ -221,16 +215,12 @@ fn unicode_view() -> Result<View, dal_tui::TuiError> {
             dropped_observations: 0,
             auto_compaction: AutoCompaction::Off,
         },
-    })
+    }
 }
 
-fn test_options(
-    rt: &tokio::runtime::Handle,
-    mode: WidthMode,
-) -> Result<dal_tui::TuiOptions, dal_tui::TuiError> {
-    let workspace = Workspace::new(std::env::temp_dir())
-        .map_err(|error| dal_tui::TuiError::Terminal(format!("test workspace: {error}")))?;
-    Ok(dal_tui::TuiOptions {
+fn test_options(rt: &tokio::runtime::Handle, mode: WidthMode) -> dal_tui::TuiOptions {
+    let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+    dal_tui::TuiOptions {
         session: dal_agent::SessionRef::Ephemeral { workspace },
         screen: dal_tui::Screen::Inline,
         theme_request: dal_tui::ThemeRequest::Palette,
@@ -248,53 +238,44 @@ fn test_options(
             ..dal_tui::EnvFacts::default()
         },
         rt: rt.clone(),
-    })
+    }
 }
 
-fn drawn_text(
-    width_cells: u16,
-    height_cells: u16,
-    mode: WidthMode,
-) -> Result<String, dal_tui::TuiError> {
-    let failed = |error: &dyn std::fmt::Display| {
-        dal_tui::TuiError::Terminal(format!("narrow_unicode draw: {error}"))
-    };
+fn drawn_text(width_cells: u16, height_cells: u16, mode: WidthMode) -> String {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
-        .map_err(|error| failed(&error))?;
-    let opts = test_options(runtime.handle(), mode)?;
+        .expect("probe runtime");
+    let opts = test_options(runtime.handle(), mode);
     let backend = ratatui::backend::TestBackend::new(width_cells, height_cells);
-    let mut terminal = ratatui::Terminal::new(backend).map_err(|error| failed(&error))?;
-    let view = unicode_view()?;
-    dal_tui::draw_frame(&mut terminal, dal_tui::Screen::Inline, &view, &opts)?;
-    Ok(terminal
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let view = unicode_view();
+    dal_tui::draw_frame(&mut terminal, dal_tui::Screen::Inline, &view, &opts).expect("frame draws");
+    terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(ratatui::buffer::Cell::symbol)
-        .collect())
+        .collect()
 }
 
-fn drawn_fullscreen_text(width_cells: u16, height_cells: u16) -> Result<String, dal_tui::TuiError> {
-    let failed = |error: &dyn std::fmt::Display| {
-        dal_tui::TuiError::Terminal(format!("narrow_unicode draw: {error}"))
-    };
+fn drawn_fullscreen_text(width_cells: u16, height_cells: u16) -> String {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
-        .map_err(|error| failed(&error))?;
-    let opts = test_options(runtime.handle(), WidthMode::Narrow)?;
+        .expect("probe runtime");
+    let opts = test_options(runtime.handle(), WidthMode::Narrow);
     let backend = ratatui::backend::TestBackend::new(width_cells, height_cells);
-    let mut terminal = ratatui::Terminal::new(backend).map_err(|error| failed(&error))?;
-    let view = unicode_view()?;
-    dal_tui::draw_frame(&mut terminal, dal_tui::Screen::Fullscreen, &view, &opts)?;
-    Ok(terminal
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let view = unicode_view();
+    dal_tui::draw_frame(&mut terminal, dal_tui::Screen::Fullscreen, &view, &opts)
+        .expect("frame draws");
+    terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(ratatui::buffer::Cell::symbol)
-        .collect())
+        .collect()
 }
 
 /// DES-02 (a): the F1 action list across every usable narrow width.
@@ -564,10 +545,7 @@ fn unicode_transcript_commits_once_and_reaches_the_frame() {
     // second cell as filler, so the frame is normalized by dropping exactly
     // the one filler space after each two-cell cluster before comparing
     // (byte-identity itself is proven at the `Transcript` level above).
-    let frame = without_cell_padding(
-        &drawn_fullscreen_text(40, 24).expect("frame draws"),
-        WidthMode::Narrow,
-    );
+    let frame = without_cell_padding(&drawn_fullscreen_text(40, 24), WidthMode::Narrow);
     for text in COMMITTED_UNICODE {
         assert!(
             frame.contains(text),
@@ -633,13 +611,8 @@ fn narrow_shrink_cycle_preserves_unicode_bytes_with_zero_repaints() {
         !has(&shrink, b"\x1b[?1049h") && !has(&shrink, b"\x1b[?1049l"),
         "byte driver must not enter the alternate screen"
     );
-    // A fold, not filter().count(): the buffer is tiny and bytecount is not
-    // a dependency, so the naive-bytecount lint's suggested crate is out of
-    // reach here.
     assert_eq!(
-        shrink
-            .iter()
-            .fold(0_usize, |count, byte| count + usize::from(*byte == b'K')),
+        count_token(&shrink, b"K"),
         usize::from(surplus),
         "shrink erases exactly the surplus rows"
     );
@@ -687,20 +660,20 @@ fn narrow_shrink_cycle_preserves_unicode_bytes_with_zero_repaints() {
 fn sub_floor_frame_with_unicode_content_warns_without_panic() {
     // Below MIN_COLS the columns warning owns the frame even with Unicode
     // entries: the clipped warning prefix, not wide content, is visible.
-    let narrow = drawn_text(10, 24, WidthMode::Narrow).expect("frame draws");
+    let narrow = drawn_text(10, 24, WidthMode::Narrow);
     assert!(
         narrow.contains(&take_cells(NARROW_COLS, 10, WidthMode::Narrow)),
         "10-column frame must show the clipped columns warning: {narrow:?}"
     );
     // Below MIN_ROWS the rows warning owns the frame.
-    let short = drawn_text(80, 7, WidthMode::Narrow).expect("frame draws");
+    let short = drawn_text(80, 7, WidthMode::Narrow);
     assert!(
         short.contains(NARROW_ROWS),
         "7-row frame must show the rows warning: {short:?}"
     );
     // At the documented minimum width the frame renders content: neither
     // floor warning appears with the same Unicode view.
-    let minimum = drawn_text(20, 24, WidthMode::Narrow).expect("frame draws");
+    let minimum = drawn_text(20, 24, WidthMode::Narrow);
     assert!(
         !minimum.contains(NARROW_ROWS) && !minimum.contains(NARROW_COLS),
         "20-column frame must not floor with Unicode content: {minimum:?}"

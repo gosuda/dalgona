@@ -127,6 +127,24 @@ pub enum ResolveError {
     },
     /// No model was given and no default model is configured.
     NoDefault,
+    /// A route names a provider the catalog does not configure.
+    ///
+    /// A route that names its provider never falls back to another provider
+    /// that happens to list the same native model id.
+    UnknownProvider {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
+    /// A route names a provider that serves a different API family than the
+    /// route's own.
+    ProviderFamilyMismatch {
+        /// The provider id the route names.
+        provider: String,
+        /// The provider-native model id the route names.
+        model: String,
+    },
 }
 
 impl ResolveError {
@@ -141,6 +159,9 @@ impl ResolveError {
                 let first = candidates.split(", ").next().unwrap_or_default();
                 Some(format!("Use {first}."))
             }
+            Self::UnknownProvider { .. } | Self::ProviderFamilyMismatch { .. } => Some(
+                String::from("Configure that provider or pick another model with /model."),
+            ),
             Self::NoDefault => None,
         }
     }
@@ -154,6 +175,13 @@ impl fmt::Display for ResolveError {
                 write!(f, "model id {id} matches several providers: {candidates}")
             }
             Self::NoDefault => f.write_str("no default model is configured"),
+            Self::UnknownProvider { provider, model } => {
+                write!(f, "provider {provider} is not configured for model {model}")
+            }
+            Self::ProviderFamilyMismatch { provider, model } => write!(
+                f,
+                "provider {provider} does not serve the API family of model {model}"
+            ),
         }
     }
 }

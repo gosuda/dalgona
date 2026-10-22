@@ -116,6 +116,7 @@ fn chat_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([]),
@@ -138,6 +139,7 @@ fn anthropic_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: "claude-test-1".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([]),
@@ -228,6 +230,7 @@ async fn drive(
         route: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         entry,
     };

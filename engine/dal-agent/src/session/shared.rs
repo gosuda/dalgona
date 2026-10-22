@@ -90,9 +90,10 @@ struct SharedInner {
 }
 
 impl Shared {
-    /// Returns the sequence of the most recently published update; zero
-    /// before the first publish. Observation cutoffs and delivery marks
-    /// share this cursor.
+    /// Returns the sequence of the most recently published update; one
+    /// before the first publish (the empty-snapshot sentinel; no update
+    /// carries it). Observation cutoffs and delivery marks share this
+    /// cursor.
     pub(crate) fn cursor(&self) -> u64 {
         self.inner
             .lock()
@@ -119,7 +120,7 @@ impl Shared {
                 generation,
                 projection: Projection::seed(thinking, approval, mode),
                 ring: ReplayRing::new(caps, generation, None),
-                next_seq: 1,
+                next_seq: 2,
                 subscribers: Vec::new(),
             }),
             ext: Mutex::new(ExtSnap {
@@ -430,6 +431,10 @@ impl Shared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.projection.apply(&kind);
+        let kind = match kind {
+            UpdateKind::Settings(_) => UpdateKind::Settings(inner.projection.effective_settings()),
+            other => other,
+        };
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
         inner.next_seq = inner.next_seq.max(1).saturating_add(1);
         inner.projection.note_seq(seq);

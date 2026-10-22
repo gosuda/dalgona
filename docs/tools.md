@@ -1,16 +1,16 @@
 # Tools, modes, and approval
 
-Modes: `normal`, `eval-first`, and `eval-only` list the same tools: `read`, `search`, `patch`, `exec`, and `eval`. The eval modes additionally reach plugin tools and prompt sections marked `eval_only`. Other modes hide them, and calls to hidden tools fail. Each tool takes typed parameters with limits. Edit styles: `anchor` by default; per-model table picks `replace`, `apply_patch`, `anchor`, `hashline`, `hashline-light`, or `hashline-enhanced`; tiers `simple`, `balanced`, `strict`. Search modes are `find`, `grep`, and `symbol`; no LSP. The approval ladder `--approval ask|edits|all` carries ask, edits, all; by default dal asks before every `patch` and every `exec`; when no person can answer, dal denies and says why. Approval previews show control and bidirectional characters as visible escape sequences instead of sending them to the terminal. Call-scoped argv-prefix grants allow one command prefix. Background jobs run detached; subagents are off by default in dal. Read schemes: `dal://`, plus plugin schemes.
+Modes: `normal`, `eval-first`, and `eval-only` list the same tools: `read`, `search`, `patch`, `exec`, and `eval`. The eval modes additionally reach plugin tools and prompt sections marked `eval_only`. Other modes hide them. Calls to hidden tools fail. Each tool takes typed parameters with limits. Edit styles: `anchor` by default. The per-model table picks `replace`, `apply_patch`, `anchor`, `hashline`, `hashline-light`, or `hashline-enhanced`. Tiers: `simple`, `balanced`, `strict`. Search modes are `find`, `grep`, and `symbol`. There is no LSP. The approval ladder `--approval ask|edits|all` carries ask, edits, all. By default, dal asks before every `patch` and every `exec`. When no person can answer, dal denies the operation and says why. Approval previews show control and bidirectional characters as visible escape sequences instead of sending them to the terminal. Call-scoped argv-prefix grants allow one command prefix. Background jobs run detached. Subagents are off by default in dal. Read schemes: `dal://`, plus plugin schemes.
 
 ## Recover from a failed patch
 
-If a patch fails after changing files, dal tries to restore each completed operation. If restoration fails, the error names every affected path and any retained backup. Inspect those paths and restore the affected files before retrying. Keep the backups until recovery is complete.
+If a patch fails after changing files, dal tries to restore each completed operation. If restoration fails, the error names every affected path and any retained backup. Inspect those paths. Restore the affected files before retrying. Keep the backups until recovery is complete.
 
 ## The eval tool
 
-`eval` runs one Starlark cell per call. Nothing but Starlark runs in it, and every effect a cell requests goes through the same approval as the tool of that name. A call you deny outside `eval` is denied inside it. `eval` is not a sandbox.
+`eval` runs one Starlark cell per call. Nothing but Starlark runs in it. Every effect a cell requests goes through the same approval as the tool of that name. A call you deny outside `eval` is denied inside it. `eval` is not a sandbox.
 
-The request has one required field and two optional ones, and nothing else:
+The request has one required field and two optional ones. It takes nothing else:
 
 ```json
 {"code": "tools.search(\"TODO\", path = \"src\")", "uses": ["tools.search"], "data": {"limit": 20}}
@@ -18,25 +18,25 @@ The request has one required field and two optional ones, and nothing else:
 
 - `code` is the cell.
 - `uses` narrows the operations the cell may request.
-- `data` is any JSON value. The cell reads it as `data`; it is `None` when absent.
+- `data` is any JSON value. The cell reads it as `data`. It is `None` when absent.
 
-A cell inherits its operations from `eval.uses` in `dal.toml`. Leave out `uses` and the cell may request all of them. Give `uses` and the cell may request only those, and each must be in `eval.uses`; an id outside it stops the cell with `scope_exceeded`. Give `uses = []` and the cell can only compute: no tools, network, state, or child sessions. With no `eval.uses`, every cell can only compute.
+A cell inherits its operations from `eval.uses` in `dal.toml`. If you leave out `uses`, the cell may request all of them. If you give `uses`, the cell may request only those. Each must be in `eval.uses`. An id outside `eval.uses` stops the cell with `scope_exceeded`. If you give `uses = []`, the cell can only compute: no tools, network, state, or child sessions. With no `eval.uses`, every cell can only compute.
 
-Each cell starts fresh. It has three names: `ctx`, `tools` (the same as `ctx.tools`), and `data`. It needs no `load` and no wrapper function, and it keeps no globals for the next cell. The last expression is the result. If the last statement is not an expression, the result is `None`. There is no `return`.
+Each cell starts fresh. It has three names: `ctx`, `tools` (the same as `ctx.tools`), and `data`. It needs no `load` and no wrapper function. It keeps no globals for the next cell. The last expression is the result. If the last statement is not an expression, the result is `None`. There is no `return`.
 
 ```starlark
 page = tools.search("TODO", path = "src")
 {"count": len(page.matches), "truncated": page.truncated}
 ```
 
-Calls return their values directly, and a failed call stops the cell. To inspect an expected failure, pass the operation itself to `ctx.try_call`, not the result of calling it:
+Calls return their values directly. A failed call stops the cell. To inspect an expected failure, pass the operation itself to `ctx.try_call`, not the result of calling it:
 
 ```starlark
 r = ctx.try_call(tools.exec, "cargo test")
 {"exit_ok": r.ok}
 ```
 
-Denial, cancellation, and hard limits stop the cell and cannot be caught. A patch that ran before a later failure is not undone.
+Denial, cancellation, and hard limits stop the cell. You cannot catch them. A patch that ran before a later failure is not undone.
 
 A pure cell reads only its data:
 
@@ -44,7 +44,7 @@ A pure cell reads only its data:
 sorted(data["names"])
 ```
 
-Send it with `"uses": []`. To call a plugin tool from a cell, write `tools["quality.todos"](path = "src")`; the cell needs the tool's id and the operations it declares, as the `plugins` page explains. To run calls at the same time, open a scope with a limit from 1 to 64, then collect the results in submission order:
+Send it with `"uses": []`. To call a plugin tool from a cell, write `tools["quality.todos"](path = "src")`. The cell needs the tool's id and the operations it declares. [Plugins](plugins.md#call-a-plugin-tool-from-eval) explains this. To run calls at the same time, open a scope with a limit from 1 to 64. Then collect the results in submission order:
 
 ```starlark
 s = ctx.scope(limit = 2)
@@ -66,3 +66,9 @@ The reply is an envelope, not just the value:
 | `observer_errors` | hooks that failed while watching the cell |
 
 A `completed` status means the code finished. It does not mean the goal was met, that a test passed, or that every handled failure succeeded.
+
+## Next
+
+- [Plugins](plugins.md): register tools and hooks that `eval` can reach.
+- [Sandbox](sandbox.md): limit where `exec` children can write.
+- [Symbols and structural editing](symbols.md): use `search` mode `symbol` and structural `patch`.

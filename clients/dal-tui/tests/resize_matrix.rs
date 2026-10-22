@@ -1,47 +1,39 @@
 //! Resize-review R5 behavioral matrix.
 //!
-//! This file deliberately reuses the real scripted terminal harness from
-//! `resize_probe.rs`; unlike unit tests, every assertion below observes the
-//! bytes emitted by `run_backend`.
+//! This file reuses the shared scripted terminal harness in `common`
+//! for width-cycle evidence; every assertion observes the bytes emitted
+//! by `run_backend`.
 
-#[path = "resize_probe.rs"]
-mod resize_probe;
+#![cfg(test)]
 
+mod common;
+
+use common::{
+    Action, Chunk, Gate, Log, PROBE_REPLIES, ProbeAgent, ProbeHost, ProbeIo, SERIAL, probe_options,
+};
 use dal_core::{Command, ModelRoute};
 use dal_tui::picker::ModelOption;
-use resize_probe::{
-    Action, Chunk, Frame, Gate, Log, PROBE_REPLIES, ProbeAgent, ProbeHost, ProbeIo, SERIAL,
-    probe_options,
-};
+use dal_tui::term::CursorReport;
 
-pub(crate) enum MatrixAction {
+/// Actions exposed to the matrix without exposing the probe's private
+/// implementation types to the integration-test parent module.
+enum MatrixAction {
     Input(&'static [u8]),
-    Resize(u16, u16, dal_tui::term::CursorReport),
-    ResizeWhenPicker(u16, u16, dal_tui::term::CursorReport),
+    Resize(u16, u16, CursorReport),
 }
 
-fn picker_painted(frames: &[Frame]) -> bool {
-    frames
-        .iter()
-        .any(|frame| has(&frame.bytes, b"Pick a model"))
+struct MatrixReport {
+    frames: Vec<Vec<u8>>,
+    events: Vec<String>,
+    resize_marks: Vec<(usize, u16)>,
 }
 
-pub(crate) struct MatrixReport {
-    pub frames: Vec<Vec<u8>>,
-    pub events: Vec<String>,
-    pub size: (u16, u16),
-}
-
-pub(crate) fn matrix_drive(
-    actions: Vec<(Gate, MatrixAction)>,
-) -> Result<MatrixReport, dal_tui::TuiError> {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn matrix_drive(actions: Vec<(usize, MatrixAction)>) -> MatrixReport {
+    let _serial = SERIAL.lock().expect("probe serial");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| dal_tui::TuiError::Terminal(format!("resize matrix runtime: {error}")))?;
+        .expect("probe runtime");
     let log = Log::default();
     let host = ProbeHost {
         agent: ProbeAgent { log: log.clone() },
@@ -52,23 +44,14 @@ pub(crate) fn matrix_drive(
         .map(|reply| Chunk {
             gate: Gate::Open,
             action: Action::Input((*reply).to_vec()),
-            ready: None,
         })
-        .chain(actions.into_iter().map(|(gate, action)| match action {
-            MatrixAction::Input(bytes) => Chunk {
-                gate,
-                action: Action::Input(bytes.to_vec()),
-                ready: None,
-            },
-            MatrixAction::Resize(width, height, report) => Chunk {
-                gate,
-                action: Action::Resize(width, height, report),
-                ready: None,
-            },
-            MatrixAction::ResizeWhenPicker(width, height, report) => Chunk {
-                gate,
-                action: Action::Resize(width, height, report),
-                ready: Some(picker_painted),
+        .chain(actions.into_iter().map(|(gate, action)| Chunk {
+            gate: Gate::Frames(gate),
+            action: match action {
+                MatrixAction::Input(bytes) => Action::Input(bytes.to_vec()),
+                MatrixAction::Resize(width, height, report) => {
+                    Action::Resize(width, height, report)
+                }
             },
         }))
         .collect();
@@ -83,6 +66,7 @@ pub(crate) fn matrix_drive(
                     },
                     save: dal_core::command::Save::SessionAndDefault,
                 },
+                scoped_id: None,
             },
             ModelOption {
                 label: "beta · t-beta".into(),
@@ -92,21 +76,18 @@ pub(crate) fn matrix_drive(
                     },
                     save: dal_core::command::Save::SessionAndDefault,
                 },
+                scoped_id: None,
             },
         ])
-    })?;
-    let mut state = io
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Ok(MatrixReport {
+    })
+    .expect("resize matrix loop exits cleanly");
+    let mut state = io.state.lock().expect("probe state");
+    MatrixReport {
         frames: state.frames.drain(..).map(|frame| frame.bytes).collect(),
         events: io.log.events(),
-        size: io.size().unwrap_or((0, 0)),
-    })
+        resize_marks: state.resize_marks.clone(),
+    }
 }
-
-use dal_tui::term::{CursorReport, TermIo};
 
 const COMMITTED: [&[u8]; 3] = [
     b"resize-probe committed alpha 01",
@@ -123,6 +104,140 @@ fn count(bytes: &[u8], needle: &[u8]) -> usize {
         .windows(needle.len())
         .filter(|window| *window == needle)
         .count()
+}
+
+/// The last frame the live loop painted: paints carry the sync-update bracket
+/// the probe reply enables, while the cursor-park and exit-line writes that
+/// end the recording carry none.
+fn last_live_frame(report: &MatrixReport) -> &[u8] {
+    report
+        .frames
+        .iter()
+        .rfind(|frame| has(frame, b"\x1b[?2026h"))
+        .expect("the loop painted a live frame")
+}
+
+/// Parses one `ESC[<row>;<col>H` / `ESC[<row>H` target; `None` when the
+/// bytes at `index` open no cursor-positioning sequence.
+fn parse_cup_at(bytes: &[u8], index: usize) -> Option<(u16, usize)> {
+    if bytes.get(index) != Some(&0x1b) || bytes.get(index + 1) != Some(&b'[') {
+        return None;
+    }
+    let mut end = index + 2;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end == index + 2 {
+        return None;
+    }
+    let row = std::str::from_utf8(bytes.get(index + 2..end)?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
+    if bytes.get(end) == Some(&b'H') {
+        return Some((row, end + 1));
+    }
+    if bytes.get(end) != Some(&b';') {
+        return None;
+    }
+    let mut col_end = end + 1;
+    while bytes.get(col_end).is_some_and(u8::is_ascii_digit) {
+        col_end += 1;
+    }
+    if bytes.get(col_end) != Some(&b'H') {
+        return None;
+    }
+    Some((row, col_end + 1))
+}
+
+/// Every cursor-positioning sequence in paint order: row, start, end offsets.
+fn cups(bytes: &[u8]) -> Vec<(u16, usize, usize)> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 2 <= bytes.len() {
+        let Some((row, next)) = parse_cup_at(bytes, index) else {
+            index += 1;
+            continue;
+        };
+        out.push((row, index, next));
+        index = next;
+    }
+    out
+}
+
+/// Row numbers referenced by `ESC[<row>;<col>H` / `ESC[<row>H` sequences.
+fn targeted_rows(bytes: &[u8]) -> Vec<u16> {
+    cups(bytes).into_iter().map(|(row, _, _)| row).collect()
+}
+
+/// Painted live rows of one frame: each addressed row whose write carries
+/// bytes beyond the erase, in paint order with its payload. Positions stay
+/// absolute; callers check origins per run and payloads across runs. Blank
+/// rows carry no bytes and are not listed.
+fn live_block(frame: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let positioned = cups(frame);
+    let mut rows = Vec::new();
+    for (i, &(row, _, end)) in positioned.iter().enumerate() {
+        let stop = positioned
+            .get(i + 1)
+            .map_or(frame.len(), |&(_, start, _)| start);
+        let mut payload = &frame[end..stop];
+        if let Some(stripped) = payload.strip_prefix(b"\x1b[2K") {
+            payload = stripped;
+        }
+        while payload.len() >= 3 && payload[0] == 0x1b && payload[1] == b'[' {
+            let mut sgr = 2;
+            while sgr < payload.len() && (payload[sgr].is_ascii_digit() || payload[sgr] == b';') {
+                sgr += 1;
+            }
+            if payload.get(sgr) != Some(&b'm') {
+                break;
+            }
+            payload = &payload[sgr + 1..];
+        }
+        if !payload.is_empty() && payload[0] != 0x1b {
+            rows.push((row, payload.to_vec()));
+        }
+    }
+    rows
+}
+
+/// Checks one converged live frame against the inline anchor rule: contiguous
+/// rows inside the screen from the rule-assigned origin, hidden caret parked
+/// at the block top. `top` is the last measured top; `prev_h`/`new_h` are the
+/// painted heights around the last resize, which bottom-anchors on change.
+fn assert_live_block(live: &[u8], top: u16, prev_h: u16, new_h: u16) {
+    let block = live_block(live);
+    assert!(!block.is_empty(), "the live frame painted no live rows");
+    let rows: Vec<u16> = block.iter().map(|(row, _)| *row).collect();
+    assert!(
+        rows.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "live rows are not one contiguous block: {rows:?}"
+    );
+    let origin = if prev_h == new_h {
+        top
+    } else {
+        let bottom = new_h
+            .saturating_sub(u16::try_from(block.len()).expect("small live block"))
+            .saturating_add(1);
+        top.max(bottom)
+    };
+    assert_eq!(
+        rows[0], origin,
+        "live origin breaks the anchor rule for top {top}, heights {prev_h}->{new_h}"
+    );
+    assert!(
+        *rows.last().expect("live block is not empty") <= new_h,
+        "live rows escape the screen: {rows:?}"
+    );
+    let caret = targeted_rows(live)
+        .last()
+        .copied()
+        .expect("the caret parked somewhere");
+    assert_eq!(
+        caret, rows[0],
+        "caret not parked at the block top: caret {caret}, block {rows:?}"
+    );
 }
 
 fn assert_safe_frames(report: &MatrixReport) {
@@ -160,19 +275,24 @@ fn assert_committed_once(report: &MatrixReport) {
 #[test]
 fn cjk_and_emoji_draft_survives_shrink_and_grow_without_committed_repaint() {
     let report = matrix_drive(vec![
-        (Gate::Frames(2), MatrixAction::Input("日本語🙂".as_bytes())),
+        (2, MatrixAction::Input("日本語🙂".as_bytes())),
         (
-            Gate::Frames(3),
+            3,
             MatrixAction::Resize(10, 24, CursorReport::Position(20, 1)),
         ),
         (
-            Gate::Frames(4),
+            4,
             MatrixAction::Resize(80, 24, CursorReport::Position(18, 1)),
         ),
-        (Gate::Frames(6), MatrixAction::Input(b"\x7f\x7f\x7f\x7f")),
-        (Gate::Frames(6), MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
+        // Ctrl+D quits only on an empty composer (DESIGN.md: "Quit (composer
+        // empty)"); over a draft it deletes forward and the loop keeps running.
+        // One Backspace removes one grapheme, so four clear the four clusters
+        // typed above, and only then does Ctrl+D leave the loop. Gate 0 is no
+        // frame wait: the loop paints once per pass, so the frame for the
+        // resize above is written before either chunk is read.
+        (0, MatrixAction::Input(b"\x7f\x7f\x7f\x7f")),
+        (0, MatrixAction::Input(b"\x04")),
+    ]);
     assert_safe_frames(&report);
     assert_committed_once(&report);
     let draft = "日本語🙂".as_bytes();
@@ -189,24 +309,25 @@ fn cjk_and_emoji_draft_survives_shrink_and_grow_without_committed_repaint() {
 #[test]
 fn floor_frames_paint_warning_while_picker_is_open() {
     let report = matrix_drive(vec![
-        (Gate::Frames(2), MatrixAction::Input(b"/model\r")),
+        (2, MatrixAction::Input(b"/model\r")),
         (
-            Gate::Open,
-            MatrixAction::ResizeWhenPicker(11, 24, CursorReport::Position(20, 1)),
+            3,
+            MatrixAction::Resize(11, 24, CursorReport::Position(20, 1)),
         ),
-        (Gate::Open, MatrixAction::Input(b"\x1b[B")),
+        (4, MatrixAction::Input(b"\x1b[B")),
+        (5, MatrixAction::Resize(80, 7, CursorReport::Position(6, 1))),
         (
-            Gate::Open,
-            MatrixAction::Resize(80, 7, CursorReport::Position(6, 1)),
-        ),
-        (
-            Gate::Open,
+            6,
             MatrixAction::Resize(80, 24, CursorReport::Position(18, 1)),
         ),
-        (Gate::Open, MatrixAction::Input(b"\x1b[27;1u")),
-        (Gate::Open, MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
+        // Gate 0, as in the CJK scenario, is no frame wait; the harness holds
+        // the Ctrl+D back until the Esc has closed the picker. An absolute
+        // frame count here only restates how many frames the painter writes
+        // for the steps above, and a count that is never reached leaves the
+        // picker open, where Ctrl+D is inert.
+        (0, MatrixAction::Input(b"\x1b")),
+        (0, MatrixAction::Input(b"\x04")),
+    ]);
     assert_safe_frames(&report);
     assert!(
         report.frames.iter().any(|frame| has(frame, b"dalgon need")),
@@ -229,15 +350,14 @@ fn floor_frames_paint_warning_while_picker_is_open() {
 #[test]
 fn picker_resize_keeps_one_live_block_and_preserves_committed_rows() {
     let report = matrix_drive(vec![
-        (Gate::Frames(2), MatrixAction::Input(b"/model\r")),
+        (2, MatrixAction::Input(b"/model\r")),
         (
-            Gate::Open,
-            MatrixAction::ResizeWhenPicker(40, 12, CursorReport::Position(10, 1)),
+            3,
+            MatrixAction::Resize(40, 12, CursorReport::Position(10, 1)),
         ),
-        (Gate::Open, MatrixAction::Input(b"\x1b[27;1u")),
-        (Gate::Open, MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
+        (0, MatrixAction::Input(b"\x1b")),
+        (0, MatrixAction::Input(b"\x04")),
+    ]);
     assert_safe_frames(&report);
     assert_committed_once(&report);
     assert!(
@@ -252,15 +372,11 @@ fn picker_resize_keeps_one_live_block_and_preserves_committed_rows() {
 #[test]
 fn silent_dsr_on_overlay_exit_has_bounded_hold() {
     let report = matrix_drive(vec![
-        (Gate::Frames(2), MatrixAction::Input(b"/model\r")),
-        (
-            Gate::Open,
-            MatrixAction::ResizeWhenPicker(40, 12, CursorReport::Silent),
-        ),
-        (Gate::Open, MatrixAction::Input(b"\x1b[27;1u")),
-        (Gate::Open, MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
+        (2, MatrixAction::Input(b"/model\r")),
+        (3, MatrixAction::Resize(40, 12, CursorReport::Silent)),
+        (0, MatrixAction::Input(b"\x1b")),
+        (0, MatrixAction::Input(b"\x04")),
+    ]);
     assert_safe_frames(&report);
     assert!(
         report
@@ -282,198 +398,74 @@ fn silent_dsr_on_overlay_exit_has_bounded_hold() {
 #[test]
 fn resize_storm_converges_to_last_size_without_repainting_committed_rows() {
     let report = matrix_drive(vec![
+        // Equal frame gates intentionally queue all three size changes before
+        // the next rendered frame, exercising the same-tick resize storm.
         (
-            Gate::Frames(2),
+            2,
             MatrixAction::Resize(60, 24, CursorReport::Position(20, 1)),
         ),
         (
-            Gate::Frames(2),
+            2,
             MatrixAction::Resize(40, 20, CursorReport::Position(16, 1)),
         ),
         (
-            Gate::Frames(2),
+            2,
             MatrixAction::Resize(100, 24, CursorReport::Position(18, 1)),
         ),
-        (Gate::Frames(6), MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
+        (6, MatrixAction::Input(b"\x04")),
+    ]);
     assert_safe_frames(&report);
     assert_committed_once(&report);
-    assert_eq!(
-        report.size,
-        (100, 24),
-        "storm did not settle on its final size"
-    );
-    let final_paint = last_paint(&report).expect("storm captured no paint frame");
+    // The recording ends with the cursor-park and exit-line writes, which are
+    // not paints: geometry is read from the last live frame, where no
+    // committed row may appear again and no row may sit above the last
+    // measured top.
+    let live = last_live_frame(&report);
+    for row in COMMITTED {
+        assert!(
+            !has(live, row),
+            "committed row {row:?} repainted in the final live frame"
+        );
+    }
+    let (_, top) = report
+        .resize_marks
+        .last()
+        .copied()
+        .expect("each storm resize measured once");
+    for row in targeted_rows(live) {
+        assert!(
+            row >= top,
+            "final live frame writes row {row} above measured top {top}"
+        );
+    }
+    // The storm's last resize changed height, the lone resize did not, so the
+    // anchor rule assigns different origins to identical live text.
+    assert_live_block(live, top, 20, 24);
     let baseline = matrix_drive(vec![
         (
-            Gate::Frames(2),
+            2,
             MatrixAction::Resize(100, 24, CursorReport::Position(18, 1)),
         ),
-        (Gate::Frames(4), MatrixAction::Input(b"\x04")),
-    ])
-    .expect("resize matrix loop exits cleanly");
-    assert_eq!(baseline.size, (100, 24));
+        (4, MatrixAction::Input(b"\x04")),
+    ]);
+    let base_live = last_live_frame(&baseline);
+    let (_, base_top) = baseline
+        .resize_marks
+        .last()
+        .copied()
+        .expect("the lone resize measured once");
+    assert_live_block(base_live, base_top, 24, 24);
+    // Same live text at convergence; origins legitimately differ.
+    let text = live_block(live)
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect::<Vec<_>>();
+    let base_text = live_block(base_live)
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect::<Vec<_>>();
     assert_eq!(
-        final_paint,
-        last_paint(&baseline).expect("baseline captured no paint frame"),
-        "storm final paint differs from a single resize to its last size"
-    );
-}
-
-fn last_paint(report: &MatrixReport) -> Option<&[u8]> {
-    report
-        .frames
-        .iter()
-        .rev()
-        .find(|frame| has(frame, b"\x1b[?2026h"))
-        .map(Vec::as_slice)
-}
-
-use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
-
-struct PanicIo {
-    size: Mutex<(u16, u16)>,
-    replies: Mutex<VecDeque<Vec<u8>>>,
-    idle_reads: AtomicUsize,
-    panicked: AtomicBool,
-}
-
-impl PanicIo {
-    fn new() -> Self {
-        Self {
-            size: Mutex::new((80, 24)),
-            replies: Mutex::new(PROBE_REPLIES.iter().map(|reply| reply.to_vec()).collect()),
-            idle_reads: AtomicUsize::new(0),
-            panicked: AtomicBool::new(false),
-        }
-    }
-}
-
-impl TermIo for PanicIo {
-    fn enable_raw(&self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn disable_raw(&self) {}
-
-    fn size(&self) -> std::io::Result<(u16, u16)> {
-        Ok(*self
-            .size
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner))
-    }
-
-    fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    #[expect(
-        clippy::panic,
-        reason = "panic-hook proof: the scripted terminal panic must unwind through run_backend to prove the hook runs"
-    )]
-    fn read(&self, timeout: Duration) -> std::io::Result<Vec<u8>> {
-        if let Some(reply) = self
-            .replies
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front()
-        {
-            return Ok(reply);
-        }
-        if self.idle_reads.fetch_add(1, Ordering::SeqCst) >= 4 {
-            self.panicked.store(true, Ordering::SeqCst);
-            panic!("panic_hook_unwind: scripted terminal panic inside the run loop");
-        }
-        std::thread::sleep(timeout.min(Duration::from_millis(5)));
-        Ok(Vec::new())
-    }
-
-    fn raise_tstp(&self) {}
-
-    fn cursor_position(&self, _timeout: Duration) -> std::io::Result<CursorReport> {
-        Ok(CursorReport::Position(24, 1))
-    }
-}
-
-#[expect(
-    clippy::panic,
-    reason = "panic-hook proof: the second panic must be a real panic to prove the restored hook runs"
-)]
-fn panic_hook_child() -> Result<(), dal_tui::TuiError> {
-    static HOOK_HITS: AtomicUsize = AtomicUsize::new(0);
-    let original = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_info| {
-        HOOK_HITS.fetch_add(1, Ordering::SeqCst);
-    }));
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| {
-            dal_tui::TuiError::Terminal(format!("panic-hook child runtime: {error}"))
-        })?;
-    let log = Log::default();
-    let host = ProbeHost {
-        agent: ProbeAgent { log: log.clone() },
-    };
-    let opts = probe_options(runtime.handle());
-    let io = PanicIo::new();
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = dal_tui::run_backend(&host, &opts, &io, || Ok(Vec::new()));
-    }));
-    assert!(
-        caught.is_err(),
-        "the scripted loop panic did not propagate out of run_backend"
-    );
-    assert!(
-        io.panicked.load(Ordering::SeqCst),
-        "the scripted terminal panic never fired inside the loop"
-    );
-    let before = HOOK_HITS.load(Ordering::SeqCst);
-    let _ = std::panic::catch_unwind(|| panic!("second panic probes the restored hook"));
-    let after = HOOK_HITS.load(Ordering::SeqCst);
-    assert!(
-        after > before,
-        "the previous hook was not restored after the caught loop panic"
-    );
-    std::panic::set_hook(original);
-    println!("panic-hook-child-ok");
-    Ok(())
-}
-
-#[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "panic-hook proof: the test isolates the hook-restore probe in a child test executable via its own env flag"
-)]
-fn panic_in_loop_restores_hook_without_aborting() {
-    if std::env::var_os("DAL_TUI_PANIC_HOOK_CHILD").is_some() {
-        panic_hook_child().expect("panic-hook child setup");
-        return;
-    }
-    let exe = std::env::current_exe().expect("current test executable");
-    let output = std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "panic_in_loop_restores_hook_without_aborting",
-            "--nocapture",
-        ])
-        .env("DAL_TUI_PANIC_HOOK_CHILD", "1")
-        .output()
-        .expect("spawn panic-hook child");
-    assert!(
-        output.status.success(),
-        "child aborted or failed (SIGABRT regression): status={:?}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("panic-hook-child-ok"),
-        "child never reached the restored-hook assertion"
+        text, base_text,
+        "resize storm and single resize converge to different live text"
     );
 }

@@ -63,6 +63,16 @@ fn the_hosted_glm_cards_name_their_own_ladders() {
 }
 
 #[test]
+fn a_hosted_glm_card_that_does_not_reason_has_no_ladder() {
+    // The card's flag decides before the id does: `reasoning: false` on a glm
+    // id must not borrow the glm ladder.
+    for id in ["zai-glm-5-2", "zai-glm-5-3"] {
+        let entry = card(id, r#""completion_chat":true,"reasoning":false"#);
+        assert_eq!(ladder(&entry), (Vec::new(), false), "{id}");
+    }
+}
+
+#[test]
 fn a_typed_mistral_id_sends_no_reasoning_control_while_other_families_keep_none() {
     // `reasoning_effort: none` is only valid on a model that reasons, and a
     // typed id has no card to say so; the Ollama `think: false` spelling is

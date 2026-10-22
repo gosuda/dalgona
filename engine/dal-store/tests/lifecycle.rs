@@ -1,5 +1,4 @@
 #![expect(clippy::expect_used, reason = "integration tests fail loudly")]
-#![expect(clippy::collapsible_if, reason = "integration tests fail loudly")]
 #![expect(clippy::too_many_lines, reason = "integration tests fail loudly")]
 //! Session lifecycles: leaves, branches, compaction, labels, fork, and clone.
 
@@ -410,7 +409,7 @@ async fn leaf_move_survives_reopen() {
                     entry.id.get() == want,
                 _ => false,
             }),
-            "all four entries remain"
+            "all three entries remain"
         );
     }
     assert!(
@@ -466,7 +465,7 @@ async fn synthetic_result_on_unresolved_branch() {
     assert_eq!(
         dal_store::MISSING_ON_BRANCH,
         "This tool call has no result on this branch.",
-        "the fold supplies the exact projection text"
+        "the exported constant keeps its wording (no fold or caller emits it yet)"
     );
     journal.close().await.expect("session closes");
 }
@@ -1072,10 +1071,10 @@ async fn fork_and_clone_edge_matrix() {
         .await
         .expect("first-user fork works");
     assert_eq!(lazy_text, "lone", "first-user fork returns its text");
-    let lazy_dir = data_root.join("sessions").join(lazy.id().to_string());
+    assert!(lazy.is_lazy(), "first-user fork stays lazy");
     assert!(
-        !lazy_dir.exists() || fs::read_dir(&lazy_dir).is_err(),
-        "first-user fork stays lazy"
+        !store.session_file(lazy.id()).exists(),
+        "a lazy first-user fork has written no journal"
     );
     early.close().await.expect("early session closes");
 
@@ -1106,6 +1105,7 @@ async fn fork_and_clone_edge_matrix() {
                 route: dal_core::ModelRoute::Api {
                     family: Family::Chat,
                     model: "m".into(),
+                    provider: None,
                 },
             },
         })])
@@ -1198,7 +1198,7 @@ async fn fork_and_clone_edge_matrix() {
 }
 
 #[tokio::test]
-async fn mail_cursor_reads_without_consuming() {
+async fn mail_records_reopen_in_append_order() {
     let (_temp, store) = setup("life-mail-cursor");
     let id = SessionId::new_v7();
     let from = SessionId::new_v7();
@@ -1207,7 +1207,7 @@ async fn mail_cursor_reads_without_consuming() {
         .append(vec![user(1, "start")])
         .await
         .expect("user appends");
-    for (index, text) in ["one", "two"].into_iter().enumerate() {
+    for text in ["one", "two"] {
         journal
             .append(vec![Record::Mail(dal_core::Mail {
                 at: timestamp(),
@@ -1219,32 +1219,22 @@ async fn mail_cursor_reads_without_consuming() {
             })])
             .await
             .expect("mail appends");
-        let _ = index;
     }
     journal.close().await.expect("session closes");
-    let read_after = |records: &[Record], cursor: u64| -> (Vec<String>, u64) {
-        let mut scanned = 0u64;
-        let mut out = Vec::new();
-        for record in records {
-            let line = encode(record).expect("record encodes");
-            let end = scanned + u64::try_from(line.len()).expect("line fits memory");
-            if end > cursor {
-                if let Record::Mail(mail) = record {
-                    out.push(mail.text.to_string());
-                }
-            }
-            scanned = end;
-        }
-        (out, scanned)
-    };
     let (reopened, _) = store.open_session(id).await.expect("session reopens");
-    let (first, next) = read_after(reopened.records(), 0);
-    let (second, again) = read_after(reopened.records(), 0);
-    assert_eq!(first, vec!["one", "two"], "mail reads after the cursor");
-    assert_eq!(second, first, "a second read returns the same records");
-    assert_eq!(again, next, "and the same next cursor");
-    let (partial, _) = read_after(reopened.records(), next);
-    assert!(partial.is_empty(), "reading past the end returns nothing");
+    let mail: Vec<(String, SessionId, SessionId)> = reopened
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            Record::Mail(mail) => Some((mail.text.to_string(), mail.from, mail.to)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        mail,
+        vec![("one".to_owned(), from, id), ("two".to_owned(), from, id)],
+        "mail reopens in append order with its sender and recipient"
+    );
 }
 
 #[tokio::test]
@@ -1840,7 +1830,11 @@ mod closed_read {
                 .parent,
             Some(entry_id(1))
         );
-        assert!(Store::read_session_entry(&root, id, entry_id(1)).is_ok());
+        let anchor = Store::read_session_entry(&root, id, entry_id(1))
+            .expect("the root of the leaf path reads");
+        assert_eq!(anchor.id, entry_id(1));
+        assert_eq!(anchor.parent, None);
+        assert_eq!(anchor.kind, user_kind("root"));
         let off_branch = Store::read_session_entry(&root, id, entry_id(2))
             .expect_err("an entry off the leaf path stays missing");
         assert!(

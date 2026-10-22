@@ -930,6 +930,339 @@ fn mint_raw_refuses_overflow() {
     );
 }
 
+#[test]
+fn mint_raw_hands_out_the_last_handle_below_overflow_then_refuses() {
+    let mut next = u64::MAX - 1;
+    let last = mint_raw(&mut next, "scope_ids").expect("one below the overflow edge still mints");
+    assert_eq!(last.get(), u64::MAX - 1);
+    assert_eq!(next, u64::MAX, "the counter advances to the overflow edge");
+    assert!(
+        matches!(
+            mint_raw(&mut next, "scope_ids"),
+            Err(HostTerminal::LimitExceeded { what: "scope_ids" })
+        ),
+        "the edge itself refuses"
+    );
+    assert_eq!(
+        next,
+        u64::MAX,
+        "a refused mint does not advance the counter"
+    );
+}
+
+/// Settles one response carrying `spend` in a fresh scope under `budget`
+/// and reports whether that scope still admits work.
+fn admits_after(budget: &Budget, spend: Usage) -> bool {
+    let (mut table, scope) = bounded(budget.clone());
+    settle_model(&mut table, scope, Some(spend));
+    admits(&mut table, scope)
+}
+
+#[test]
+fn input_token_limit_exhausts_exactly_at_the_limit() {
+    let budget = Budget {
+        input_tokens: Some(100),
+        ..Budget::default()
+    };
+    let spend = |input_tokens| Usage {
+        input_tokens,
+        output_tokens: 1,
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, spend(99)),
+        "one token under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(100)),
+        "reaching the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, spend(101)),
+        "one token past the limit is exhausted"
+    );
+}
+
+#[test]
+fn output_token_limit_counts_reasoning_tokens_and_exhausts_at_the_limit() {
+    let budget = Budget {
+        output_tokens: Some(100),
+        ..Budget::default()
+    };
+    let spend = |output_tokens, reasoning_tokens| Usage {
+        input_tokens: 1,
+        output_tokens,
+        reasoning_tokens,
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, spend(99, None)),
+        "one output token under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(100, None)),
+        "reaching the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, spend(101, None)),
+        "one output token past the limit is exhausted"
+    );
+    assert!(
+        admits_after(&budget, spend(60, Some(39))),
+        "60 output plus 39 reasoning is 99 and stays open"
+    );
+    assert!(
+        !admits_after(&budget, spend(60, Some(40))),
+        "reasoning tokens spend the output limit: 60 plus 40 reaches 100"
+    );
+}
+
+#[test]
+fn usd_limit_exhausts_exactly_at_the_limit_and_sums_across_responses() {
+    let budget = Budget {
+        usd: Some(1.0),
+        ..Budget::default()
+    };
+    let costing = |cost_usd| Usage {
+        input_tokens: 1,
+        cost_usd: Some(cost_usd),
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&budget, costing(0.999_999)),
+        "a cost under the limit stays open"
+    );
+    assert!(
+        !admits_after(&budget, costing(1.0)),
+        "a cost equal to the limit exhausts the scope"
+    );
+    assert!(
+        !admits_after(&budget, costing(1.000_001)),
+        "a cost past the limit is exhausted"
+    );
+
+    let (mut table, scope) = bounded(budget);
+    settle_model(&mut table, scope, Some(costing(0.5)));
+    assert!(
+        admits(&mut table, scope),
+        "half of the limit leaves the scope open"
+    );
+    settle_model(&mut table, scope, Some(costing(0.5)));
+    assert!(
+        !admits(&mut table, scope),
+        "two halves sum to the limit and exhaust the scope"
+    );
+}
+
+#[test]
+fn a_provider_cost_that_is_not_a_valid_amount_exhausts_a_usd_budget() {
+    let budget = Budget {
+        usd: Some(1.0),
+        ..Budget::default()
+    };
+    for cost_usd in [-1.0, -0.000_001] {
+        let spend = Usage {
+            input_tokens: 1,
+            cost_usd: Some(cost_usd),
+            ..UNREPORTED
+        };
+        assert!(
+            !admits_after(&budget, spend),
+            "a reported cost of {cost_usd} is unknown spend, never free spend"
+        );
+    }
+    let tokens_only = Budget {
+        input_tokens: Some(1_000),
+        ..Budget::default()
+    };
+    let spend = Usage {
+        input_tokens: 1,
+        cost_usd: Some(-1.0),
+        ..UNREPORTED
+    };
+    assert!(
+        admits_after(&tokens_only, spend),
+        "an unknown cost only matters to a usd limit"
+    );
+}
+
+#[test]
+fn invocation_byte_budget_admits_exactly_the_cap_and_refuses_one_byte_more() {
+    let host_bytes = Arc::new(AtomicUsize::new(0));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let first = queued(&mut table, scope);
+    let second = queued(&mut table, scope);
+    let third = queued(&mut table, scope);
+    table
+        .complete(first, ok_outcome(&table, first), MAX_RESULT_BYTES - 1)
+        .expect("one byte under the cap lands");
+    table
+        .complete(second, ok_outcome(&table, second), 1)
+        .expect("filling the cap exactly lands");
+    assert_eq!(host_bytes.load(Ordering::SeqCst), MAX_RESULT_BYTES);
+    let error = table
+        .complete(third, ok_outcome(&table, third), 1)
+        .expect_err("one byte past the cap refuses");
+    assert!(
+        matches!(
+            error,
+            HostTerminal::LimitExceeded {
+                what: "result_bytes"
+            }
+        ),
+        "the 4 MiB invocation cap names itself: {error}"
+    );
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        MAX_RESULT_BYTES,
+        "the refused byte is not counted"
+    );
+}
+
+#[test]
+fn host_byte_budget_admits_exactly_the_cap_and_refuses_one_byte_more() {
+    let host_bytes = Arc::new(AtomicUsize::new(super::MAX_HOST_RESULT_BYTES - 8));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let fits = queued(&mut table, scope);
+    let over = queued(&mut table, scope);
+    table
+        .complete(fits, ok_outcome(&table, fits), 8)
+        .expect("filling the host cap exactly lands");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        super::MAX_HOST_RESULT_BYTES
+    );
+    let error = table
+        .complete(over, ok_outcome(&table, over), 1)
+        .expect_err("one byte past the host cap refuses");
+    assert!(
+        matches!(
+            error,
+            HostTerminal::LimitExceeded {
+                what: "result_bytes"
+            }
+        ),
+        "the 16 MiB host cap names itself: {error}"
+    );
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        super::MAX_HOST_RESULT_BYTES,
+        "the refused byte is not counted"
+    );
+}
+
+#[test]
+fn outstanding_slot_frees_on_delivery_not_on_completion() {
+    let mut table = table();
+    let scope = open(&mut table, MAX_SCOPE_CONCURRENCY.into());
+    let ids: Vec<TaskId> = (0..MAX_OUTSTANDING)
+        .map(|_| queued(&mut table, scope))
+        .collect();
+    let first = ids[0];
+    table
+        .complete(first, ok_outcome(&table, first), 0)
+        .expect("complete");
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Terminal(HostTerminal::LimitExceeded {
+                what: "outstanding"
+            }))
+        ),
+        "a completed but undelivered result still holds its slot"
+    );
+    assert!(table.deliver(first).is_some());
+    assert!(admits(&mut table, scope), "delivery frees one slot");
+    assert!(
+        matches!(
+            table.submit(scope, tool_req(), None),
+            Ok(Submit::Terminal(HostTerminal::LimitExceeded {
+                what: "outstanding"
+            }))
+        ),
+        "delivery frees exactly one slot"
+    );
+}
+
+#[test]
+fn next_deadline_publishes_the_earliest_live_wall_and_forgets_closed_scopes() {
+    use tokio::time::Instant;
+
+    let mut table = table();
+    let walled = |seconds| {
+        let mut walled = spec(1);
+        walled.budget.wall = Some(Duration::from_secs(seconds));
+        walled
+    };
+    let near = table
+        .open(walled(60), CancellationToken::new())
+        .expect("near scope opens");
+    let far = table
+        .open(walled(3_600), CancellationToken::new())
+        .expect("far scope opens");
+    open(&mut table, 1);
+
+    let published = table.next_deadline().expect("two walls publish");
+    assert!(
+        published <= Instant::now() + Duration::from_secs(61),
+        "the earliest wall wins: {published:?}"
+    );
+    assert!(table.seal(near).expect("seal").is_empty());
+    let published = table.next_deadline().expect("the far wall remains");
+    assert!(
+        published > Instant::now() + Duration::from_mins(50),
+        "a closed scope no longer publishes its wall: {published:?}"
+    );
+    assert_eq!(table.cancel(CancelTarget::Scope(far)), []);
+    assert!(
+        table.next_deadline().is_none(),
+        "a cancelled scope publishes no wall"
+    );
+}
+
+#[test]
+fn cleanup_reports_only_unfinished_calls_and_releases_retained_bytes() {
+    let host_bytes = Arc::new(AtomicUsize::new(0));
+    let mut table = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut table, 4);
+    let done = queued(&mut table, scope);
+    let pending = queued(&mut table, scope);
+    let also_done = queued(&mut table, scope);
+    table
+        .complete(done, ok_outcome(&table, done), 500)
+        .expect("complete");
+    table
+        .complete(also_done, ok_outcome(&table, also_done), 300)
+        .expect("complete");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        800,
+        "undelivered results stay retained"
+    );
+    let (complete, unfinished) = table.cleanup();
+    assert!(!complete, "a queued task leaves the cleanup incomplete");
+    let expected = table.call_id(pending).expect("call id");
+    assert_eq!(&*unfinished, [expected], "only the unfinished call reports");
+    assert_eq!(
+        host_bytes.load(Ordering::SeqCst),
+        0,
+        "cleanup releases every retained byte"
+    );
+
+    let mut settled = ScopeTable::new(Arc::clone(&host_bytes), no_price());
+    let scope = open(&mut settled, 1);
+    let only = queued(&mut settled, scope);
+    settled
+        .complete(only, ok_outcome(&settled, only), 100)
+        .expect("complete");
+    let (complete, unfinished) = settled.cleanup();
+    assert!(complete, "every task settled");
+    assert!(unfinished.is_empty());
+    assert_eq!(host_bytes.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn session_tasks_stop_cancels_tracked_work() {
     let tasks = SessionTasks::new();

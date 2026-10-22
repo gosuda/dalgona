@@ -43,7 +43,7 @@ use std::{
 };
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -2037,6 +2037,7 @@ async fn connect_socket(
 ) -> Result<Socket, AttemptFailure> {
     let url = socket_url(turn, connection, project_id, selected, definition)
         .map_err(AttemptFailure::Provider)?;
+    let tls = url.starts_with("wss://");
     let mut request = url.into_client_request().map_err(|_| {
         AttemptFailure::Provider(ProviderError::Transport {
             family: Family::GitLab,
@@ -2061,12 +2062,22 @@ async fn connect_socket(
     let config = WebSocketConfig::default()
         .max_message_size(Some(http::WS_MESSAGE_LIMIT))
         .max_frame_size(Some(http::WS_MESSAGE_LIMIT));
+    let connector = if tls {
+        Some(http::websocket_connector().map_err(|error| {
+            AttemptFailure::Provider(ProviderError::Transport {
+                family: Family::GitLab,
+                reason: error.to_string(),
+            })
+        })?)
+    } else {
+        None
+    };
     let connected = tokio::select! {
         biased;
         () = turn.cancel.cancelled() => return Err(cancelled()),
         connected = timeout(
             http::RESPONSE_HEADER_TIMEOUT,
-            connect_async_with_config(request, Some(config), false),
+            connect_async_tls_with_config(request, Some(config), false, connector),
         ) => connected,
     };
     let Ok(Ok((socket, response))) = connected else {

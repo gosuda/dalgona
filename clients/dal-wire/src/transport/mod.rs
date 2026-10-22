@@ -111,6 +111,18 @@ impl Transport {
     }
 
     /// Closes the transport and makes later operations fail closed.
+    ///
+    /// A writer that is idle shuts its sink down even while other writer
+    /// handles are alive. Local-socket and duplex peers then see the end of
+    /// the stream. Named-pipe and standard-stream writers only flush; the
+    /// descriptor closes when the last handle drops, so close alone sends no
+    /// end of stream to those peers. A WebSocket close sends a Close frame
+    /// when idle; when a write is in flight the connection ends without one.
+    ///
+    /// Close never waits for a write in flight. A write that completes after
+    /// close was requested shuts the sink down before it returns. A write
+    /// that fails or is abandoned leaves the sink untouched; the sink then
+    /// closes when the last writer handle drops.
     pub async fn close(&mut self) {
         match self {
             Self::Stdio(transport) => transport.0.close().await,
@@ -133,6 +145,8 @@ pub struct FrameWriter(Arc<WriterInner>);
 struct WriterInner {
     writer: Mutex<BoxWrite>,
     closed: Arc<AtomicBool>,
+    close_requested: AtomicBool,
+    write_failed: AtomicBool,
     /// Frames queued by producers; the serving task drains them.
     outbox_tx: mpsc::UnboundedSender<String>,
     outbox_rx: Mutex<mpsc::UnboundedReceiver<String>>,
@@ -144,6 +158,8 @@ impl FrameWriter {
         Self(Arc::new(WriterInner {
             writer: Mutex::new(writer),
             closed,
+            close_requested: AtomicBool::new(false),
+            write_failed: AtomicBool::new(false),
             outbox_tx,
             outbox_rx: Mutex::new(outbox_rx),
         }))
@@ -200,46 +216,44 @@ impl FrameWriter {
             return Err(closed_error());
         }
         let mut cancellation = IncompleteWrite {
-            closed: Arc::clone(&self.0.closed),
+            closed: &self.0.closed,
+            write_failed: &self.0.write_failed,
             active: true,
         };
         let mut line = String::with_capacity(frame.len() + 1);
         line.push_str(frame);
         line.push('\n');
         if let Err(error) = writer.write_all(line.as_bytes()).await {
+            self.0.write_failed.store(true, Ordering::Release);
             self.0.closed.store(true, Ordering::Release);
             cancellation.active = false;
             return Err(io_error(&error));
         }
         if let Err(error) = writer.flush().await {
+            self.0.write_failed.store(true, Ordering::Release);
             self.0.closed.store(true, Ordering::Release);
             cancellation.active = false;
             return Err(io_error(&error));
         }
         cancellation.active = false;
+        if self.0.close_requested.load(Ordering::Acquire)
+            && let Err(error) = writer.shutdown().await
+        {
+            tracing::debug!(%error, "transport shutdown failed");
+        }
         Ok(())
     }
 
     async fn close(&self) {
-        if self.0.closed.swap(true, Ordering::AcqRel) {
+        self.0.closed.store(true, Ordering::Release);
+        if self.0.close_requested.swap(true, Ordering::AcqRel) {
             return;
         }
-        if let Err(error) = self.0.writer.lock().await.shutdown().await {
-            tracing::debug!(%error, "transport shutdown failed");
-        }
-    }
-
-    /// Marks the writer closed and shuts the write half down, unless a write
-    /// holds it.
-    ///
-    /// A write in flight owns the half until its peer takes the frame, so
-    /// waiting for it would let a stalled peer hold the close. That half ends
-    /// with the last handle instead. Later writes fail either way.
-    async fn close_unless_writing(&self) {
-        if self.0.closed.swap(true, Ordering::AcqRel) {
+        if self.0.write_failed.load(Ordering::Acquire) {
             return;
         }
         let Ok(mut writer) = self.0.writer.try_lock() else {
+            tracing::debug!("transport shutdown deferred until the write in flight finishes");
             return;
         };
         if let Err(error) = writer.shutdown().await {
@@ -248,14 +262,16 @@ impl FrameWriter {
     }
 }
 
-struct IncompleteWrite {
-    closed: Arc<AtomicBool>,
+struct IncompleteWrite<'a> {
+    closed: &'a AtomicBool,
+    write_failed: &'a AtomicBool,
     active: bool,
 }
 
-impl Drop for IncompleteWrite {
+impl Drop for IncompleteWrite<'_> {
     fn drop(&mut self) {
         if self.active {
+            self.write_failed.store(true, Ordering::Release);
             self.closed.store(true, Ordering::Release);
         }
     }
@@ -367,10 +383,8 @@ impl LineTransport {
         self.writer.clone()
     }
 
-    /// Closes the transport. Reads fail closed through the flag the reader
-    /// shares with the writer.
     async fn close(&mut self) {
-        self.writer.close_unless_writing().await;
+        self.writer.close().await;
     }
 }
 

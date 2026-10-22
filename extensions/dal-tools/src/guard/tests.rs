@@ -113,7 +113,13 @@ fn bands(
 #[test]
 fn placeholder_reject() {
     let rejection = checks::placeholder("...\n}").expect("placeholder rejects");
-    assert_eq!(rejection.0, report::PLACEHOLDER_REJECT);
+    assert!(rejection.0.starts_with("PATCH REJECTED."), "{rejection:?}");
+    assert!(
+        rejection
+            .0
+            .contains("Write the complete replacement text; nothing changed."),
+        "{rejection:?}"
+    );
 }
 
 #[test]
@@ -121,6 +127,129 @@ fn placeholder_non_reject() {
     assert!(checks::placeholder("fn f(x: &[i32]) -> &[i32] { &x[1..] }").is_none());
     assert!(checks::placeholder("const ys = [...xs];").is_none());
     assert!(checks::placeholder("").is_none());
+}
+
+/// Builds a placeholder fixture from a template: `~` stands for the
+/// three-dot ellipsis and `^` for the single-character ellipsis.
+fn ellipsis(template: &str) -> String {
+    template
+        .replace('~', "\u{2e}\u{2e}\u{2e}")
+        .replace('^', "\u{2026}")
+}
+
+const NINETEEN: &str = "abcdefghijklmnopqrs";
+const TWENTY: &str = "abcdefghijklmnopqrst";
+
+#[test]
+fn placeholder_rejects_every_ellipsis_only_form() {
+    for template in [
+        "~",
+        "^",
+        "// ~",
+        "// ^",
+        "# ~",
+        "-- ~",
+        "/* ~ */",
+        "(* ~ *)",
+        "//~",
+        "#^",
+        "/*~*/",
+        "    ~",
+        "\t^  ",
+        "~\r\n}",
+        "{\n    ~\n}",
+        "~\n~\n~",
+    ] {
+        let added = ellipsis(template);
+        let Some(rejection) = checks::placeholder(&added) else {
+            panic!("{added:?} must be rejected");
+        };
+        assert!(
+            rejection.0.starts_with("PATCH REJECTED."),
+            "{added:?}: {rejection:?}"
+        );
+    }
+}
+
+#[test]
+fn placeholder_ignores_ellipsis_that_is_code_or_prose() {
+    for template in [
+        "~xs",
+        "[~xs]",
+        "const ys = [~xs];",
+        "{ ~rest }",
+        "f(~args)",
+        "let s = \"~\";",
+        "x = ~",
+        "def f(): ~",
+        "1~5",
+        "a ~ b",
+        "wait^",
+        "/* ~",
+        "(* ~",
+        "..",
+        "&x[1..]",
+    ] {
+        let added = ellipsis(template);
+        assert!(
+            checks::placeholder(&added).is_none(),
+            "{added:?} is code or prose, not a placeholder"
+        );
+    }
+}
+
+#[test]
+fn placeholder_flips_at_twenty_non_whitespace_characters_beside_the_ellipsis() {
+    assert_eq!(NINETEEN.chars().count(), 19);
+    assert_eq!(TWENTY.chars().count(), 20);
+    let spaced = |body: &str| {
+        body.chars()
+            .map(String::from)
+            .collect::<Vec<_>>()
+            .join(" \t")
+    };
+    for marker in ["~", "^", "// ~", "# ^", "/* ~ */", "(* ~ *)"] {
+        let marker = ellipsis(marker);
+        for (body, rejected) in [
+            (NINETEEN.to_owned(), true),
+            (TWENTY.to_owned(), false),
+            (spaced(NINETEEN), true),
+            (spaced(TWENTY), false),
+        ] {
+            for added in [
+                format!("{marker}\n{body}"),
+                format!("{body}\n{marker}"),
+                format!("{marker}\n{marker}\n{body}\n{marker}"),
+            ] {
+                assert_eq!(checks::placeholder(&added).is_some(), rejected, "{added:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn placeholder_phrases_reject_and_stay_out_of_the_character_count() {
+    for phrase in [
+        "rest of methods",
+        "implementation omitted",
+        "// ~ rest of the code",
+        "# ~ rest of implementation",
+        "-- ~ rest of implementation",
+        "(* ~ rest of implementation *)",
+    ] {
+        let phrase = ellipsis(phrase);
+        assert!(checks::placeholder(&phrase).is_some(), "{phrase:?} alone");
+        for (body, rejected) in [(NINETEEN, true), (TWENTY, false)] {
+            for added in [
+                format!("{body}\n{phrase}"),
+                format!("{body} {phrase}"),
+                format!("{phrase}\n{body}"),
+                format!("{body} {phrase} {phrase}"),
+            ] {
+                assert_eq!(checks::placeholder(&added).is_some(), rejected, "{added:?}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -148,6 +277,132 @@ fn json_strict_gate() {
         None,
     );
     assert!(matches!(outcome, checks::GateOutcome::Pass(_)));
+}
+
+#[tokio::test]
+async fn parse_gate_pins_the_one_based_position_of_a_missing_token() {
+    // The position is where the grammar inserted the missing token, counted
+    // from one on both axes.
+    for (path, src, token, line, column) in [
+        ("a.rs", "fn main() {\n    let x = 1\n}\n", ";", 2, 14),
+        ("a.rs", "fn main() {\n    foo(1, 2;\n}\n", ")", 2, 13),
+        ("a.rs", "struct S {\n    a: u32,\n    b: u32\n", "}", 3, 11),
+        ("a.js", "const a = [1, 2;\n", "]", 1, 16),
+        ("a.c", "int main(void) {\n  return 0\n}\n", ";", 2, 11),
+    ] {
+        let post = parsed(&format!("/ws/{path}"), src).await;
+        let outcome = checks::parse_gate(
+            path,
+            Path::new(&format!("/ws/{path}")),
+            None,
+            src.as_bytes(),
+            None,
+            Some(&post),
+        );
+        let checks::GateOutcome::Reject(rejection) = outcome else {
+            panic!("{path} {src:?} must be rejected, got {outcome:?}");
+        };
+        assert!(rejection.0.starts_with("EDIT REJECTED."), "{rejection:?}");
+        let cause = format!(
+            "Cause: missing {token} at line {line}, column {column}. Re-read {path}:{line},"
+        );
+        assert!(rejection.0.contains(&cause), "{cause} in {rejection:?}");
+    }
+}
+
+#[tokio::test]
+async fn parse_gate_pins_the_one_based_position_of_a_syntax_error() {
+    for (path, src, line, column) in [("a.rs", "fn main() {\n    let x = ;\n}\n", 2, 11)] {
+        let post = parsed(&format!("/ws/{path}"), src).await;
+        let outcome = checks::parse_gate(
+            path,
+            Path::new(&format!("/ws/{path}")),
+            None,
+            src.as_bytes(),
+            None,
+            Some(&post),
+        );
+        let checks::GateOutcome::Reject(rejection) = outcome else {
+            panic!("{path} {src:?} must be rejected, got {outcome:?}");
+        };
+        let cause =
+            format!("Cause: syntax error at line {line}, column {column}. Re-read {path}:{line},");
+        assert!(rejection.0.contains(&cause), "{cause} in {rejection:?}");
+    }
+}
+
+#[test]
+fn parse_gate_reports_the_json_error_line_not_line_one() {
+    for (body, line) in [
+        ("{\n  \"a\": 1,\n  \"b\": [1, 2\n}\n", 4),
+        ("{\"a\":1}\n{\"b\":2}", 2),
+        ("{\"a\": 1,}", 1),
+    ] {
+        let outcome = checks::parse_gate(
+            "x.json",
+            Path::new("/ws/x.json"),
+            None,
+            body.as_bytes(),
+            None,
+            None,
+        );
+        let checks::GateOutcome::Reject(rejection) = outcome else {
+            panic!("{body:?} must be rejected, got {outcome:?}");
+        };
+        assert!(
+            rejection.0.contains(&format!(" at line {line} column ")),
+            "{body:?}: {rejection:?}"
+        );
+        assert!(
+            rejection.0.contains(&format!("Re-read x.json:{line},")),
+            "{body:?}: {rejection:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn parse_gate_skips_what_it_cannot_judge_instead_of_rejecting() {
+    let broken_rs = parsed("/ws/a.rs", "fn bad( {\n").await;
+    // An unguarded file type is never judged, whatever it holds.
+    let outcome = checks::parse_gate(
+        "notes.txt",
+        Path::new("/ws/notes.txt"),
+        None,
+        b"fn bad( {\n",
+        None,
+        Some(&broken_rs),
+    );
+    assert!(
+        matches!(outcome, checks::GateOutcome::Skipped),
+        "{outcome:?}"
+    );
+    // Bytes that are not UTF-8 are skipped even when a tree exists.
+    let outcome = checks::parse_gate(
+        "a.rs",
+        Path::new("/ws/a.rs"),
+        None,
+        b"fn bad( {\xff\n",
+        None,
+        Some(&broken_rs),
+    );
+    assert!(
+        matches!(outcome, checks::GateOutcome::Skipped),
+        "{outcome:?}"
+    );
+    // A tree built with another grammar proves nothing about this path.
+    let python = parsed("/ws/a.py", "x = (\n").await;
+    let outcome = checks::parse_gate(
+        "a.rs",
+        Path::new("/ws/a.rs"),
+        None,
+        b"x = (\n",
+        None,
+        Some(&python),
+    );
+    assert!(
+        matches!(outcome, checks::GateOutcome::Skipped),
+        "{outcome:?}"
+    );
 }
 
 #[tokio::test]
@@ -943,9 +1198,42 @@ fn strike_and_report_text_contracts() {
     for field in ["patch abc123", "none", "a.rs"] {
         assert!(exhausted.contains(field), "{exhausted}");
     }
-    assert_ne!(report::TURN_DENIED, "");
-    assert_ne!(report::FS_READ_DENIED, "");
-    assert_ne!(report::TURN_DENIED, report::FS_READ_DENIED);
+}
+
+#[test]
+fn denied_notices_name_the_one_grant_that_lifts_them() {
+    // The rig tests compare notices against these constants, so only a
+    // literal pin notices a reworded or swapped notice.
+    assert!(
+        report::TURN_DENIED.starts_with("guard: "),
+        "{}",
+        report::TURN_DENIED
+    );
+    assert!(
+        report::TURN_DENIED.contains("Grant the guard extension the turn service"),
+        "{}",
+        report::TURN_DENIED
+    );
+    assert!(
+        !report::TURN_DENIED.contains("fs.read"),
+        "{}",
+        report::TURN_DENIED
+    );
+    assert!(
+        report::FS_READ_DENIED.starts_with("guard: "),
+        "{}",
+        report::FS_READ_DENIED
+    );
+    assert!(
+        report::FS_READ_DENIED.contains("Grant the guard extension fs.read"),
+        "{}",
+        report::FS_READ_DENIED
+    );
+    assert!(
+        !report::FS_READ_DENIED.contains("turn service"),
+        "{}",
+        report::FS_READ_DENIED
+    );
 }
 
 #[test]

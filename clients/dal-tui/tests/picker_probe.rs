@@ -362,6 +362,7 @@ fn idle_view() -> Result<View, TuiError> {
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(std::num::NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {
@@ -441,6 +442,7 @@ fn probe_models() -> Vec<ModelOption> {
             model: ModelRoute::Synthetic { id: id.into() },
             save: dal_core::command::Save::SessionAndDefault,
         },
+        scoped_id: None,
     })
     .collect()
 }

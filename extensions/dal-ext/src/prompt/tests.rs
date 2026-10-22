@@ -197,27 +197,6 @@ const PLUGINS_SECTION: &str = "PLUGINS-SECTION";
 const ENVIRONMENT_SECTION: &str = "ENVIRONMENT-SECTION";
 const FALLBACK_SECTION: &str = "FALLBACK-SECTION";
 
-/// What `build` emits for the parts the `prompt` extension owns, given the
-/// host's tool lines and no docs line.
-fn composed(tool_lines: &[Box<str>]) -> String {
-    let no_pairs: [(Box<str>, Box<str>); 0] = [];
-    let no_text: [Box<str>; 0] = [];
-    build(&PromptInput {
-        product_name: "dal",
-        product_version: env!("CARGO_PKG_VERSION"),
-        tool_lines,
-        skills: None,
-        rules: None,
-        rulebook: None,
-        plugin_sections: &no_pairs,
-        environment: &no_pairs,
-        instructions: None,
-        system_md: None,
-        letter_fallback: &no_text,
-        docs_line: Some(""),
-    })
-}
-
 /// One extension whose only prompt section is fixed text at `order`.
 fn fixed(name: &str, order: PromptOrder, text: &str) -> Extension {
     ExtensionBuilder::new(name, "0.1.0", ServiceSet::EMPTY)
@@ -494,15 +473,24 @@ fn catalog_prompt_first() -> Vec<Extension> {
     catalog
 }
 
+/// The identity paragraph and `D2` line the prompt extension owns, pinned as
+/// literal bytes: deriving these from `build()` would compare the assembler
+/// against itself and let head drift pass silently.
+fn literal_head() -> String {
+    format!(
+        "You are dal {}, a coding agent. Work in the current directory. Read files before you edit them. Keep responses short and factual. Finish the whole task before you report.\nD2 is preferred for diagrams.\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// The `<tools>` block for one probe tool, pinned as literal bytes.
+const LITERAL_TOOLS: &str = "<tools>\n- probe_tool: Probe tool.\n</tools>\n";
+
 #[tokio::test]
 async fn assembled_prompt_orders_owned_sections_around_other_owners() {
     let system = assembled(catalog_prompt_last()).await;
-    let head = composed(&[]);
-    let tool_line: Box<str> = Box::from("probe_tool: Probe tool.");
-    let with_tools = composed(&[tool_line]);
-    let tools = with_tools
-        .strip_prefix(head.as_str())
-        .expect("the tools block follows the identity paragraph");
+    let head = literal_head();
+    let tools = LITERAL_TOOLS;
     let docs = format!("{DEFAULT_DOCS_LINE}\n");
 
     let opening = [head.as_str(), D2_SECTION, tools, "# Skills"].join(SECTION_SEPARATOR);
@@ -545,7 +533,7 @@ async fn absent_tools_and_instructions_leave_no_section_or_separator() {
         extension().expect("prompt extension builds"),
     ])
     .await;
-    let head = composed(&[]);
+    let head = literal_head();
     let docs = format!("{DEFAULT_DOCS_LINE}\n");
     let expected = [head.as_str(), PLUGINS_SECTION, docs.as_str()].join(SECTION_SEPARATOR);
     assert_eq!(system, expected);
@@ -663,12 +651,8 @@ async fn prompt_extension_sections_render_deterministically_when_registered_in_r
         "reverse registration of prompt session sections produces byte-identical assembled prompt"
     );
 
-    let head = composed(&[]);
-    let tool_line: Box<str> = Box::from("probe_tool: Probe tool.");
-    let with_tools = composed(&[tool_line]);
-    let tools = with_tools
-        .strip_prefix(head.as_str())
-        .expect("tools follows head");
+    let head = literal_head();
+    let tools = LITERAL_TOOLS;
     let docs = format!("{DEFAULT_DOCS_LINE}\n");
     let expected = [head.as_str(), tools, docs.as_str()].join(SECTION_SEPARATOR);
 

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dal_core::{SessionId, SessionInfo, Update, View};
+use dal_core::{ModelRoute, SessionId, SessionInfo, Update, View};
 
 pub use agent::{RemoteAgent, RemoteSubscription};
 pub use host::{RemoteHost, RemoteHostSubscription};
@@ -98,6 +98,14 @@ pub struct RemoteModel {
     pub name: String,
     /// The context window, when known.
     pub context_window: Option<u32>,
+    /// The typed route that selects exactly this row, including its
+    /// configured provider. `None` when the server predates the member: the
+    /// row then names only a family label, which cannot select one provider.
+    pub route: Option<ModelRoute>,
+    /// The canonical `provider/model` name of an API row with a known
+    /// provider, or the route id of a synthetic or harness row. `None` when
+    /// the server predates the member or the provider is unknown.
+    pub reference: Option<String>,
 }
 
 /// One `auth/status` provider row.

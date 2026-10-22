@@ -1,3 +1,0 @@
-  × The provided announcement tag (dalgon-v9.9.9) claims we're releasing dalgon 9.9.9, but that package is version
-  │ 0.1.0
-

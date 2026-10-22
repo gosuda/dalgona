@@ -159,7 +159,20 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .settings
         .model
         .as_ref()
-        .map(|model| escape(model.id()))
+        .map(|model| match model {
+            dal_core::ModelRoute::Api {
+                provider: Some(provider),
+                model: native,
+                ..
+            } => {
+                let label = format!("{provider}/{native}");
+                match dal_core::terminal::escape(&label) {
+                    std::borrow::Cow::Borrowed(_) => label,
+                    std::borrow::Cow::Owned(escaped) => escaped,
+                }
+            }
+            other => escape(other.id()),
+        })
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
     let floor = (height < crate::copy::ids::MIN_ROWS)
@@ -180,13 +193,14 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     let assistant_len = assistant.len();
     let activity = activity_rows(&input, assistant);
     let notices = input.live.notices();
+    let armed_delete = armed_delete_line(input.picker);
     let overlay = overlay_height(&input, w, mode);
     let laid = composer_layout(&input, w, mode);
     let budget = RegionBudget::allocate(
         width,
         height,
         RegionRequest {
-            notices: notices.len(),
+            notices: notices.len() + usize::from(armed_delete.is_some()),
             activity: usize::MAX,
             composer: laid.rows.len(),
             hint: true,
@@ -201,7 +215,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         overlay.is_some(),
     );
     let mut bottom = Vec::with_capacity(budget.cap);
-    let notice_rows = notice_rows(notices, budget.notices, w, mode);
+    let notice_rows = notice_rows(notices, armed_delete.as_deref(), budget.notices, w, mode);
     if input.screen == Screen::Inline {
         // The inline live block opens with its notices.
         bottom.extend(notice_rows.iter().cloned());
@@ -337,21 +351,37 @@ fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<u
     }
 }
 
+fn armed_delete_line(picker: Option<&PickerUi>) -> Option<String> {
+    let id = picker?.armed_delete()?;
+    Some(crate::copy::render(
+        crate::copy::ids::RESUME_ARMED,
+        &[("id", &id.to_string())],
+        1,
+    ))
+}
+
 /// The newest `count` notices as clipped rows, each in the role its
 /// severity chose at push time so error notices keep their error role.
 fn notice_rows(
     notices: &[crate::live::NoticeRow],
+    armed_delete: Option<&str>,
     count: usize,
     w: usize,
     mode: WidthMode,
 ) -> Vec<RenderRow> {
-    notices
+    let armed = armed_delete.map(|text| RenderRow::new(escape(text), Role::Error));
+    let recorded = notices
         .iter()
         .rev()
+        .map(|notice| RenderRow::new(escape(&notice.text), notice.role));
+    let mut rows: Vec<RenderRow> = armed
+        .into_iter()
+        .chain(recorded)
         .take(count)
-        .rev()
-        .map(|notice| RenderRow::new(escape(&notice.text), notice.role).clipped(w, mode))
-        .collect()
+        .map(|row| row.clipped(w, mode))
+        .collect();
+    rows.reverse();
+    rows
 }
 
 /// Wraps the draft inside the 2-cell prompt gutter and finds the caret.
@@ -469,6 +499,10 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
     let hint = RenderRow::new(
         if picker.is_settings() {
             crate::copy::ids::SETTINGS_HINT
+        } else if picker.is_resume_picker() {
+            // The resume picker is the only one with a delete key, so it is
+            // the only one whose hint names it.
+            crate::copy::ids::RESUME_HINT
         } else {
             crate::copy::ids::PICKER_HINT
         },
@@ -505,15 +539,13 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
             // Multi-select rows carry the check marker the request dialogs
             // use ([x]/[ ]); single-select rows keep the plain gutter.
             let check = if picker.is_multi() {
-                {
-                    if picker.is_checked(index) {
-                        "[x] "
-                    } else {
-                        "[ ] "
-                    }
+                if picker.is_checked(index) {
+                    "[x] "
+                } else {
+                    "[ ] "
                 }
             } else {
-                Default::default()
+                ""
             };
             middle.push(option_row(
                 format!(
@@ -565,9 +597,10 @@ fn overlay_rows(
         // DESIGN.md dialog boundary: one blank row above and below the
         // dialog. The blanks come out of the overlay budget — rows outside
         // it would overflow the region — so they only paint once the budget
-        // still leaves the dialog a title row and its action row; below
-        // that the content rows win over the chrome.
-        let bordered = budget.overlay >= 4;
+        // still leaves the dialog three content rows: its title, the row
+        // Enter answers, and its actions. Below that the content rows win
+        // over the chrome.
+        let bordered = budget.overlay >= 5;
         let mut rows = input.dialog.rendered_rows(
             w,
             if bordered {
@@ -1076,10 +1109,7 @@ fn status_line(
         &input.view.session.workspace.as_path().display().to_string(),
         input.opts.env.home.as_deref(),
     ));
-    let path = match input.branch {
-        Some(branch) => format!("{home} ({})", escape(branch)),
-        None => home,
-    };
+    let branch = input.branch.map(escape);
     let usage = &input.view.usage.usage;
     let tokens = (usage.input_tokens > 0 || usage.output_tokens > 0).then(|| {
         crate::copy::render(
@@ -1142,7 +1172,8 @@ fn status_line(
             state,
             spinner,
             model,
-            path: Some(&path),
+            path: Some(&home),
+            branch: branch.as_deref(),
             tokens: tokens.as_deref(),
             context: context.as_ref().map(|(text, _)| text.as_str()),
             context_role: context.as_ref().and_then(|(_, role)| *role),
@@ -2292,7 +2323,8 @@ mod tests {
         );
     }
 
-    /// A `FrameInput` over `live` with one committed `entry` in the view.
+    /// A `FrameInput` over `live` with one committed `entry` in the view,
+    /// optionally carrying `picker` (the transcript overlay picker).
     fn expanded_frame<'a>(
         view: &'a dal_core::View,
         live: &'a crate::live::Live,
@@ -2302,6 +2334,7 @@ mod tests {
         theme: &'a crate::theme::ResolvedTheme,
         dialog: &'a crate::dialog::DialogUi,
         cache: &'a RenderCache,
+        picker: Option<&'a crate::picker::PickerUi>,
     ) -> super::FrameInput<'a> {
         super::FrameInput {
             view,
@@ -2313,7 +2346,7 @@ mod tests {
             popup: &[],
             live,
             dialog,
-            picker: None,
+            picker,
             help: None,
             signin: None,
             transcript,
@@ -2394,6 +2427,7 @@ mod tests {
                 created_at: Some(Timestamp::UNIX_EPOCH),
                 archived: Some(false),
                 last_seq: Some(Seq::new(NonZeroU64::MIN)),
+                message_count: None,
             },
             turn: dal_core::TurnState::Idle,
             entries: dal_core::Page {
@@ -2496,6 +2530,7 @@ mod tests {
                     &theme,
                     &dialog,
                     &cache,
+                    None,
                 ),
                 80,
                 24,
@@ -2546,6 +2581,40 @@ mod tests {
         live.close_expand();
     }
 
+    fn picker_over_scroll_path_rows(picker: &crate::picker::PickerUi) -> Vec<super::RenderRow> {
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        super::frame_rows(
+            expanded_frame(
+                &view,
+                &live,
+                &transcript,
+                &viewport,
+                &opts,
+                &theme,
+                &dialog,
+                &cache,
+                Some(picker),
+            ),
+            80,
+            10,
+        )
+    }
+
     /// Twenty `provider/model-nn` rows for the shrunk-overlay tests.
     fn twenty_model_picker() -> crate::picker::PickerUi {
         use crate::picker::{PickerAction, PickerOption};
@@ -2565,7 +2634,20 @@ mod tests {
 
     #[test]
     fn picker_overlay_rows_stay_within_region_budget_at_shrunk_sizes() {
-        let picker = twenty_model_picker();
+        use crate::frame::{RegionBudget, RegionRequest};
+        use crate::picker::{PickerAction, PickerOption, PickerUi};
+
+        let options: Vec<PickerOption> = (0..20)
+            .map(|n| PickerOption {
+                label: format!("model-{n:02}"),
+                action: PickerAction::Command(dal_core::Command::Run {
+                    name: "model".into(),
+                    args: format!("provider/model-{n:02}").into(),
+                    expected: None,
+                }),
+            })
+            .collect();
+        let picker = PickerUi::new("Pick a model", "", options);
         assert_eq!(picker.visible_len(), 20);
 
         let full = super::picker_overlay_rows(&picker, 15);
@@ -2605,6 +2687,30 @@ mod tests {
                 .iter()
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>()
+        );
+
+        let budget = RegionBudget::allocate(
+            80,
+            10,
+            RegionRequest {
+                overlay: Some(picker.visible_len().max(1) + 2),
+                ..RegionRequest::default()
+            },
+        );
+        assert_eq!(budget.overlay, 5);
+        assert_eq!(budget.cap, 6);
+
+        let rows = picker_over_scroll_path_rows(&picker);
+        assert!(
+            rows.len() <= budget.cap,
+            "shrunk live block must not exceed its cap: {} > {}",
+            rows.len(),
+            budget.cap
+        );
+        assert!(
+            rows.iter().any(|row| row.text.contains("model-")),
+            "the picker stays painted at shrunk sizes: {:?}",
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -2767,6 +2873,43 @@ mod tests {
         assert_eq!(merged.spans.len(), 1, "same-role cells share one span");
     }
 
+    /// The resume picker is the one picker with a delete key, so its hint row
+    /// names it; every other picker keeps the common hint.
+    #[test]
+    fn the_resume_picker_shows_the_delete_hint() {
+        use crate::picker::{PickerAction, PickerOption, PickerUi, ResumeTarget, SessionRow};
+
+        let workspace = dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let resume = crate::picker::resume_picker(
+            vec![SessionRow {
+                target: ResumeTarget {
+                    id: dal_core::SessionId::new_v7(),
+                    workspace,
+                },
+                label: "fix · today · 3 messages · /w".to_owned(),
+            }],
+            "",
+        );
+        let hint = |picker: &PickerUi| {
+            super::picker_overlay_rows(picker, 12)
+                .last()
+                .map(|row| row.text.clone())
+                .expect("a picker paints at least its hint row")
+        };
+        assert_eq!(hint(&resume), crate::copy::ids::RESUME_HINT);
+        assert!(hint(&resume).contains("d delete"));
+
+        let plain = PickerUi::new(
+            "Pick",
+            "",
+            vec![PickerOption {
+                label: "opt".to_owned(),
+                action: PickerAction::Noop,
+            }],
+        );
+        assert_eq!(hint(&plain), crate::copy::ids::PICKER_HINT);
+    }
+
     #[test]
     fn a_multi_picker_paints_check_markers_and_the_same_focus() {
         use crate::picker::{PickerAction, PickerOption, PickerUi};
@@ -2797,7 +2940,8 @@ mod tests {
             rows.iter()
                 .filter(|row| !row.selected.is_empty())
                 .all(|row| {
-                    matches!(row.selected.as_slice(), [range] if *range == (0..row.text.len()))
+                    matches!(row.selected.as_slice(), [range]
+                        if range.start == 0 && range.end == row.text.len())
                 }),
             "reverse video still covers the whole focused row"
         );
@@ -2813,10 +2957,8 @@ mod tests {
                 })
                 .collect(),
         );
-        let texts: Vec<String> = super::picker_overlay_rows(&single, 12)
-            .iter()
-            .map(|row| row.text.clone())
-            .collect();
+        let single_rows = super::picker_overlay_rows(&single, 12);
+        let texts: Vec<&str> = single_rows.iter().map(|row| row.text.as_str()).collect();
         assert!(
             !texts
                 .iter()
@@ -2856,6 +2998,7 @@ mod tests {
                 &theme,
                 &dialog,
                 &cache,
+                None,
             );
             input.exit_draft = Some(choice);
             let rows = super::frame_rows(input, 80, 24);
@@ -2883,6 +3026,7 @@ mod tests {
             &theme,
             &dialog,
             &cache,
+            None,
         );
         input.exit_draft = Some(crate::dialog::DraftChoice::Discard);
         let narrow = super::frame_rows(input, 20, 10);
@@ -2896,6 +3040,106 @@ mod tests {
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// An open select keeps its title, the row Enter answers and its actions
+    /// inside the region at every supported terminal height. The dialog's
+    /// boundary blanks only paint once three content rows remain, so a
+    /// four-row overlay carries four rows of content, not a bordered pair.
+    #[test]
+    fn an_open_select_stays_inside_the_region_at_every_supported_height() {
+        use crate::frame::{RegionBudget, RegionRequest};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{Choice, Owner, Question, Request, RequestId};
+
+        let view = scroll_path_view(scroll_path_tool_entry(), scroll_path_reasoning_entry());
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        let mut dialog = crate::dialog::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "pick".into(),
+                options: (1..=7)
+                    .map(|index| Choice {
+                        label: format!("Option {index}").into(),
+                        description: None,
+                    })
+                    .collect(),
+                multi: false,
+                preview: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Cancel,
+        });
+        let start = std::time::Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + crate::dialog::ARM_DELAY);
+        for focus in 0..=7 {
+            let focused = if focus == 7 {
+                "> ( ) Other".to_owned()
+            } else {
+                format!("> (*) Option {}", focus + 1)
+            };
+            for height in 8..=14 {
+                let cap = RegionBudget::allocate(
+                    80,
+                    height,
+                    RegionRequest {
+                        overlay: Some(8),
+                        ..RegionRequest::default()
+                    },
+                )
+                .cap;
+                let input = expanded_frame(
+                    &view,
+                    &live,
+                    &transcript,
+                    &viewport,
+                    &opts,
+                    &theme,
+                    &dialog,
+                    &cache,
+                    None,
+                );
+                let rows = super::frame_rows(input, 80, height);
+                let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+                let at = format!("focus {focus}, height {height}: {texts:?}");
+                assert!(rows.len() <= cap, "{at}");
+                assert_eq!(
+                    texts.iter().filter(|text| **text == "pick").count(),
+                    1,
+                    "{at}"
+                );
+                assert_eq!(
+                    texts.iter().filter(|text| **text == focused).count(),
+                    1,
+                    "{at}"
+                );
+                assert_eq!(
+                    texts.iter().filter(|text| text.starts_with("> ")).count(),
+                    1,
+                    "{at}"
+                );
+                assert!(
+                    texts.iter().any(|text| text.contains("esc dismiss")),
+                    "{at}"
+                );
+            }
+            dialog.key(crate::keys::Key::new(KeyCode::Down, KeyModifiers::NONE));
+        }
     }
 
     #[test]

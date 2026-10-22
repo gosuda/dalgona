@@ -133,30 +133,42 @@ async fn serve_script(script: Vec<(u16, &'static str)>) -> (Url, Arc<Mutex<Vec<V
         reason = "test edge: loopback script server runs concurrently with test"
     )]
     let _server = tokio::spawn(async move {
-        for (status, body) in script {
-            loop {
-                let (mut stream, _) = listener
-                    .accept()
-                    .await
-                    .expect("fixture listener accepts the next connection");
-                let request = match read_request(&mut stream).await {
-                    Ok(Some(request)) => request,
-                    Ok(None) => continue,
-                    Err(reason) => panic!("fixture request unreadable: {reason}"),
-                };
-                captured.lock().expect("requests lock").push(request);
-                let head = format!(
-                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                    body.len()
-                );
-                if stream.write_all(head.as_bytes()).await.is_err() {
-                    return;
-                }
-                if stream.write_all(body.as_bytes()).await.is_err() {
-                    return;
-                }
-                break;
+        let mut script = script.into_iter();
+        let Some((mut status, mut body)) = script.next() else {
+            return;
+        };
+        loop {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("fixture listener accepts the next connection");
+            let request = match read_request(&mut stream).await {
+                Ok(Some(request)) => request,
+                Ok(None) => continue,
+                Err(reason) => panic!("fixture request unreadable: {reason}"),
+            };
+            if !request.starts_with(b"POST ") {
+                // Stray loopback probes are not device requests: refuse them
+                // without consuming a scripted response or recording them.
+                let refused = "HTTP/1.1 404 Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(refused.as_bytes()).await;
+                continue;
             }
+            captured.lock().expect("requests lock").push(request);
+            let head = format!(
+                "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            if stream.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            if stream.write_all(body.as_bytes()).await.is_err() {
+                return;
+            }
+            let Some(next) = script.next() else {
+                return;
+            };
+            (status, body) = next;
         }
     });
     (base, requests)
@@ -311,9 +323,11 @@ async fn workos_slow_down_backs_off_then_completes() {
         Err(err) => panic!("slow_down must retry, not fail after {elapsed:?}: {err:?}"),
     }
     assert_eq!(requests.lock().expect("requests lock").len(), 3);
+    // The start answer sets a one second interval; the `slow_down` answer adds
+    // five seconds (RFC 8628 section 3.5), so the next poll waits six.
     assert!(
-        elapsed >= Duration::from_secs(5),
-        "slow_down must add five seconds, took {elapsed:?}"
+        elapsed >= Duration::from_secs(6),
+        "slow_down must add five seconds to the one second interval, took {elapsed:?}"
     );
 }
 
@@ -383,6 +397,78 @@ async fn workos_device_expiry_times_out() {
     .await;
 
     assert!(matches!(outcome, Err(ProviderError::LoginTimeout)));
+}
+
+/// A device start answer whose code lives two seconds.
+const START_LIVES_2S: &str = r#"{"device_code":"ws-device-pending","user_code":"PEND-0000","verification_uri":"https://example.test/device","interval":1,"expires_in":2}"#;
+/// A device start answer whose code lives five minutes.
+const START_LIVES_5M: &str = r#"{"device_code":"ws-device-pending","user_code":"PEND-0000","verification_uri":"https://example.test/device","interval":1,"expires_in":300}"#;
+
+/// Runs a `WorkOS` device flow whose poll answers stay pending, returning the
+/// outcome, how long it ran, and how many requests the server saw.
+async fn pending_flow(
+    start: &'static str,
+    flow_deadline: Duration,
+) -> (Result<DeviceOutcome, ProviderError>, Duration, usize) {
+    // Enough pending answers that the server outlasts every bound under test:
+    // a flow that polls past its bound meets a closed listener and fails as a
+    // transport error instead of a timeout.
+    let mut script = vec![(200, start)];
+    script.extend((0..4).map(|_| (400, r#"{"error":"authorization_pending"}"#)));
+    let (base, requests) = serve_script(script).await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+    let started = std::time::Instant::now();
+    let outcome = run(
+        &http,
+        Family::Droid,
+        Hook::WorkOsDevice,
+        CLIENT_ID,
+        &urls,
+        Instant::now() + flow_deadline,
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let seen = requests.lock().expect("requests lock").len();
+    (outcome, elapsed, seen)
+}
+
+#[tokio::test]
+async fn workos_polling_stops_at_the_earlier_of_the_device_lifetime_and_the_flow_deadline() {
+    // The device code lives two seconds, the flow allows thirty.
+    let lifetime = pending_flow(START_LIVES_2S, Duration::from_secs(30));
+    // The device code lives five minutes, the flow allows two seconds.
+    let deadline = pending_flow(START_LIVES_5M, Duration::from_secs(2));
+    let ((by_lifetime, lifetime_took, lifetime_seen), (by_deadline, deadline_took, deadline_seen)) =
+        tokio::join!(lifetime, deadline);
+
+    assert!(
+        matches!(by_lifetime, Err(ProviderError::LoginTimeout)),
+        "the device lifetime ends the flow: {:?}",
+        by_lifetime.err()
+    );
+    assert!(
+        matches!(by_deadline, Err(ProviderError::LoginTimeout)),
+        "the flow deadline ends the flow: {:?}",
+        by_deadline.err()
+    );
+    for (took, seen) in [
+        (lifetime_took, lifetime_seen),
+        (deadline_took, deadline_seen),
+    ] {
+        assert!(
+            took >= Duration::from_millis(1_500),
+            "the flow polled until its bound, ran {took:?}"
+        );
+        assert!(seen >= 2, "the start request and at least one poll: {seen}");
+    }
 }
 
 #[tokio::test]
@@ -822,6 +908,71 @@ async fn codex_poll_failure_redacts_the_device_auth_id_and_user_code() {
     };
     assert_eq!(status, 500);
     assert_eq!(message, "boom for <redacted> / <redacted>");
+}
+
+const CODEX_START: &str =
+    r#"{"device_auth_id":"codex-auth-id-1","user_code":"CODE-1111","interval":1}"#;
+const CODEX_GRANT: &str = r#"{"authorization_code":"auth-code-1","code_verifier":"verifier-1"}"#;
+
+/// One Codex device flow whose first poll answers `status`; a second poll
+/// would deliver the grant. Returns the outcome and the request count.
+async fn codex_poll(status: u16) -> (Result<DeviceOutcome, ProviderError>, usize) {
+    let (base, requests) = serve_script(vec![
+        (200, CODEX_START),
+        (status, r#"{"error":"not_yet"}"#),
+        (200, CODEX_GRANT),
+    ])
+    .await;
+    let urls = device_urls(&base);
+    let client = Client::new();
+    let http = OAuthHttp {
+        client: &client,
+        user_agent: "dalgon/test",
+    };
+    let (_, progress) = progress_sink();
+    let outcome = run(
+        &http,
+        Family::Codex,
+        Hook::CodexAccount,
+        "app_test",
+        &urls,
+        Instant::now() + Duration::from_secs(30),
+        &progress,
+        &CancellationToken::new(),
+    )
+    .await;
+    let seen = requests.lock().expect("requests lock").len();
+    (outcome, seen)
+}
+
+#[tokio::test]
+async fn a_codex_poll_waits_only_on_403_and_404_and_fails_on_the_client_errors_around_them() {
+    // Only the 403 and 404 answers are documented as pending. Rate-limit and
+    // server-error answers (429, 5xx) are deliberately left unpinned: the code
+    // fails the login on them, and whether it should is not specified.
+    let runs = [403_u16, 404, 400, 401, 402, 405, 410]
+        .into_iter()
+        .map(|status| async move { (status, codex_poll(status).await) });
+    for (status, (outcome, requests)) in futures::future::join_all(runs).await {
+        if matches!(status, 403 | 404) {
+            let Ok(DeviceOutcome::Grant(grant)) = outcome else {
+                panic!("{status} means approval is pending, so the next poll must be sent");
+            };
+            assert_eq!(grant.authorization_code, "auth-code-1", "{status}");
+            assert_eq!(grant.code_verifier, "verifier-1", "{status}");
+            assert_eq!(requests, 3, "{status}: start, pending poll, grant poll");
+        } else {
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(ProviderError::DeviceCode { status: got, .. }) if *got == status
+                ),
+                "{status} is a failure, not a pending poll: {:?}",
+                outcome.err()
+            );
+            assert_eq!(requests, 2, "{status}: start and one poll, no more");
+        }
+    }
 }
 
 #[tokio::test]

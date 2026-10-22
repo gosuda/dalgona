@@ -196,10 +196,25 @@ fn unknown_set_is_rejected_with_the_set_list() -> Result<(), Box<dyn Error>> {
     let error = ttsr_rules::validate_enabled(&enabled)
         .err()
         .ok_or_else(|| io::Error::other("an unknown rule set was accepted"))?;
+    let message = error.to_string();
     assert!(matches!(
         error,
         ttsr_rules::RuleSetsError::UnknownSet(name) if name == "nope"
     ));
+    let (first, hint) = message
+        .split_once('\n')
+        .ok_or_else(|| io::Error::other("the unknown-set error is not two lines"))?;
+    assert_eq!(
+        first,
+        "dalgona: dal.toml: rule_sets.enabled [\"nope\"] is invalid"
+    );
+    let listed: Vec<&str> = hint
+        .strip_prefix("Use a set name from ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .ok_or_else(|| io::Error::other(format!("unexpected hint: {hint:?}")))?
+        .split(", ")
+        .collect();
+    assert_eq!(listed, SETS, "the hint names every shipped set, in order");
     Ok(())
 }
 
@@ -214,6 +229,59 @@ fn default_empty_and_duplicate_lists_validate() -> Result<(), Box<dyn Error>> {
     defaults.push("steer".to_owned());
     ttsr_rules::validate_enabled(&defaults)?;
     assert_eq!(ttsr_rules::ttsr_rules(&defaults)?.rules().len(), 19);
+    Ok(())
+}
+
+#[test]
+fn docs_contract_markers_attack_their_distance_and_version_bounds() -> Result<(), Box<dyn Error>> {
+    let rules = rules_of(&["docs"])?;
+    let record = rules
+        .iter()
+        .find(|record| record.name.as_str() == "docs-contract-markers")
+        .ok_or_else(|| io::Error::other("the docs pack has no docs-contract-markers rule"))?;
+    let fires = |text: &str| record_matches(record, text);
+    let filler = |count: usize| "x".repeat(count);
+
+    for keyword in ["version 1.2.3", "deprecated", "breaking change"] {
+        assert!(
+            fires(&format!("+{} {keyword}", filler(199)))?,
+            "199 + blank"
+        );
+        assert!(
+            !fires(&format!("+{} {keyword}", filler(200)))?,
+            "{keyword}: 200 + blank is one past the 200-character window"
+        );
+        assert!(
+            fires(&format!("+{} {keyword}", filler(198)))?,
+            "{keyword}: 198 + blank"
+        );
+        assert!(
+            !fires(&format!("+{}\n{keyword}", filler(10)))?,
+            "{keyword}: a newline ends the window"
+        );
+    }
+
+    for (text, expected) in [
+        ("+ version 1.2.3", true),
+        ("+ VERSION 1.2.3", true),
+        ("+ version 1234.123.123", true),
+        ("+ version 12345.1.1", false),
+        ("+ version 1.1234.1", false),
+        ("+ version 1.1.1234", false),
+        ("+ version 1.2", false),
+        ("+ version 1.2.", false),
+        ("+ version v1.2.3", false),
+        ("version 1.2.3", false),
+        ("- version 1.2.3", false),
+        ("+deprecated", true),
+        ("+ undeprecated", false),
+        ("+ deprecatedly", false),
+        ("+ a + deprecated", true),
+        ("+ Breaking Change", true),
+        ("+ breaking-change", false),
+    ] {
+        assert_eq!(fires(text)?, expected, "{text:?}");
+    }
     Ok(())
 }
 

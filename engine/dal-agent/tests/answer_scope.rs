@@ -348,11 +348,12 @@ async fn an_ask_only_scope_answers_asks_and_denies_approvals() {
     );
 
     let answer = Answer::Value(RawJson::parse("\"ada\"").expect("answer json"));
-    let (opened, _) = session.turn(Some(answer)).await;
+    let (opened, _) = session.turn(Some(answer.clone())).await;
     assert_eq!(opened.len(), 1, "the ask waited for its answerer");
     let outcome = session.ask_outcome();
-    assert!(
-        matches!(outcome, Some(Ok(Some(Answer::Value(_))))),
-        "the ask was answered: {outcome:?}"
+    assert_eq!(
+        outcome,
+        Some(Ok(Some(answer))),
+        "the ask received exactly the answer the scoped client sent"
     );
 }

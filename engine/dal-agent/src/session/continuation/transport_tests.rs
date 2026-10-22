@@ -659,6 +659,7 @@ fn cursor_provider(set: &ProviderSet) -> dal_provider::Provider {
         route: ModelRoute::Api {
             family: Family::Cursor,
             model: MODEL.into(),
+            provider: None,
         },
         entry,
     };
@@ -672,6 +673,7 @@ fn cursor_request(tools: &[&str]) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Cursor,
             model: MODEL.into(),
+            provider: None,
         },
         system: "You are a test assistant.".into(),
         tools: tools

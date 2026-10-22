@@ -42,6 +42,7 @@ fn route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
+        provider: None,
     }
 }
 
@@ -1959,6 +1960,7 @@ fn context_measurement_tracks_selected_model_and_family() {
                     model: ModelRoute::Api {
                         family,
                         model: model.into(),
+                        provider: None,
                     },
                     save: crate::Save::SessionOnly,
                 },
@@ -4376,34 +4378,45 @@ fn replay_rejects_out_of_order_turn_ids() {
 }
 
 #[test]
-fn tokens_since_compaction_estimate_uses_the_shared_character_rate() {
-    let text = "a".repeat(35);
-    let mut session = session();
-    let mut journal = Vec::new();
-    let prompted = send(
-        &mut session,
-        Event::Command {
-            cmd: Command::Prompt {
-                expect: Expect::Idle,
-                content: vec![Part::Text {
-                    text: text.clone().into(),
-                }],
+fn tokens_since_compaction_estimate_rounds_up_at_three_and_a_half_characters_per_token() {
+    // One token per 3.5 characters, rounded up: ceil(2n / 7). The expected
+    // counts are the literal rate, never the estimator under test; each pair
+    // of neighbours straddles a rounding boundary.
+    for (characters, tokens) in [
+        (1_usize, 1_u64),
+        (7, 2),
+        (8, 3),
+        (34, 10),
+        (35, 10),
+        (36, 11),
+        (70, 20),
+        (71, 21),
+    ] {
+        let mut session = session();
+        send(
+            &mut session,
+            Event::Command {
+                cmd: Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text {
+                        text: "a".repeat(characters).into(),
+                    }],
+                },
+                by: client(),
             },
-            by: client(),
-        },
-    )
-    .unwrap();
-    append_emitted(&prompted, &mut journal);
-    let turn = match session.phase() {
-        Phase::Opening { turn, .. } => *turn,
-        phase => panic!("prompt did not open a turn: {phase:?}"),
-    };
-    append_emitted(&send(&mut session, guard(turn)).unwrap(), &mut journal);
-    // The branch estimate and the shared estimator agree on the same text.
-    assert_eq!(
-        session.tokens_since_last_compaction(),
-        crate::tokens::estimate_text_tokens(&text),
-    );
+        )
+        .unwrap();
+        let turn = match session.phase() {
+            Phase::Opening { turn, .. } => *turn,
+            phase => panic!("prompt did not open a turn: {phase:?}"),
+        };
+        send(&mut session, guard(turn)).unwrap();
+        assert_eq!(
+            session.tokens_since_last_compaction(),
+            tokens,
+            "{characters} characters"
+        );
+    }
 }
 
 #[test]
@@ -4714,6 +4727,7 @@ fn restore_uses_newest_provenance_among_colliding_spellings() {
     let api = ModelRoute::Api {
         family: Family::Chat,
         model: spelling.into(),
+        provider: None,
     };
     let synthetic = ModelRoute::Synthetic {
         id: spelling.into(),
@@ -4790,10 +4804,12 @@ fn restored_route_family_is_independent_of_wire_family() {
     let chat = ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
+        provider: None,
     };
     let anthropic = ModelRoute::Api {
         family: Family::Anthropic,
         model: "test-model".into(),
+        provider: None,
     };
     let mut live = Session::replay_declared(records.iter().cloned()).unwrap();
     select_model(&mut live, &chat);
@@ -4832,6 +4848,7 @@ fn newer_assistant_without_provenance_invalidates_older_usage() {
         &ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         },
     );
     assert_eq!(live.measured_context_tokens(), None);
@@ -4957,6 +4974,7 @@ fn completed_routes_survive_reopen_across_all_kinds() {
             ModelRoute::Api {
                 family: Family::Chat,
                 model: "api-model".into(),
+                provider: None,
             },
             AssistantRoute::Api(Family::Chat),
             6_000_u64,
@@ -5043,6 +5061,7 @@ fn last_response_model_follows_the_leaf_chain() {
         Some(ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         }),
         "a complete user-to-assistant chain returns that assistant route"
     );
@@ -5203,6 +5222,7 @@ mod threshold_estimate_fallback {
             &ModelRoute::Api {
                 family: Family::Anthropic,
                 model: "other-model".into(),
+                provider: None,
             },
         );
         // Grow the projected branch stream-free in sub-threshold steps
@@ -6391,4 +6411,174 @@ mod capture_policy {
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(early));
         assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
     }
+}
+
+fn provider_scoped_route(provider: &str) -> ModelRoute {
+    ModelRoute::Api {
+        family: Family::Chat,
+        model: "test-model".into(),
+        provider: Some(provider.into()),
+    }
+}
+
+fn measured_fixture() -> Vec<Record> {
+    vec![
+        user_question(1, None),
+        route_assistant(
+            2,
+            Some(entry(1)),
+            Some(AssistantRoute::Api(Family::Chat)),
+            Family::Chat,
+            "test-model",
+            5_500,
+        ),
+    ]
+}
+
+fn select_model_recorded(session: &mut Session, journal: &mut Vec<Record>, route: ModelRoute) {
+    let out = send(
+        session,
+        Event::Command {
+            cmd: Command::SetModel {
+                model: route,
+                save: crate::Save::SessionOnly,
+            },
+            by: client(),
+        },
+    )
+    .expect("selecting a model stays idle");
+    append_emitted(&out, journal);
+}
+
+#[test]
+fn context_measurement_accepts_a_gained_provider_not_a_changed_one() {
+    let bare = ModelRoute::Api {
+        family: Family::Chat,
+        model: "test-model".into(),
+        provider: None,
+    };
+    let renamed = ModelRoute::Api {
+        family: Family::Chat,
+        model: "other-model".into(),
+        provider: Some("acme".into()),
+    };
+    let other_family = ModelRoute::Api {
+        family: Family::Responses,
+        model: "test-model".into(),
+        provider: None,
+    };
+    // Usage journaled before providers travelled on routes names no provider,
+    // so it has nothing to disagree with: every same family+model route
+    // measures, whatever provider it names. Only a different model id or a
+    // different family (or kind) breaks continuity here.
+    let fixture = measured_fixture();
+    for (route, expected) in [
+        (bare.clone(), Some(5_500)),
+        (provider_scoped_route("acme"), Some(5_500)),
+        (provider_scoped_route("other"), Some(5_500)),
+        (renamed.clone(), None),
+        (other_family.clone(), None),
+    ] {
+        let mut live = Session::replay_declared(fixture.iter().cloned()).expect("fixture replays");
+        let mut journal = decode_journal(&fixture);
+        select_model_recorded(&mut live, &mut journal, route.clone());
+        let journal = decode_journal(&journal);
+        let replayed = Session::replay_declared(journal.iter().cloned()).expect("journal replays");
+        assert_eq!(live.measured_context_tokens(), expected, "{route:?}");
+        assert_eq!(replayed.measured_context_tokens(), expected, "{route:?}");
+        if let Some(tokens) = expected {
+            assert_eq!(live.tokens_since_last_compaction(), tokens, "{route:?}");
+            assert_eq!(replayed.tokens_since_last_compaction(), tokens, "{route:?}");
+        } else {
+            assert_eq!(
+                live.tokens_since_last_compaction(),
+                replayed.tokens_since_last_compaction(),
+                "{route:?} must estimate identically live and replayed",
+            );
+        }
+    }
+    // A turn answered by a provider-scoped route records that provider on its
+    // usage, so selecting another provider for the same family+model rejects
+    // the measurement while the bare and same-provider routes still accept.
+    // Replay rebuilds usage identity from provenance, which carries no
+    // provider, so only the live side can tell two providers apart; the
+    // replayed side is asserted solely where both sides must agree.
+    let mut live = session();
+    let mut journal = Vec::new();
+    let turn = open_turn(&mut live, &mut journal);
+    let scoped = provider_scoped_route("acme");
+    let streamed = send(
+        &mut live,
+        Event::StreamEnded {
+            turn,
+            model: scoped.clone(),
+            family: Family::Chat,
+            result: Ok(inference(Stop::EndTurn, &[], 5_500)),
+            partial: None,
+        },
+    )
+    .expect("the scoped response streams");
+    append_emitted(&streamed, &mut journal);
+    let ended = send(&mut live, Event::Boundary { turn }).expect("the turn ends");
+    append_emitted(&ended, &mut journal);
+    assert!(matches!(live.phase(), Phase::Idle));
+    assert_eq!(live.measured_context_tokens(), Some(5_500));
+    for (route, expected) in [
+        (bare, Some(5_500)),
+        (scoped, Some(5_500)),
+        (provider_scoped_route("other"), None),
+        (renamed, None),
+        (other_family, None),
+    ] {
+        let mut branched = live.clone();
+        let mut branch_journal = decode_journal(&journal);
+        select_model_recorded(&mut branched, &mut branch_journal, route.clone());
+        assert_eq!(branched.measured_context_tokens(), expected, "{route:?}");
+        if let Some(tokens) = expected {
+            assert_eq!(branched.tokens_since_last_compaction(), tokens, "{route:?}");
+            let branch_journal = decode_journal(&branch_journal);
+            let replayed =
+                Session::replay_declared(branch_journal.iter().cloned()).expect("journal replays");
+            assert_eq!(replayed.measured_context_tokens(), expected, "{route:?}");
+            assert_eq!(replayed.tokens_since_last_compaction(), tokens, "{route:?}");
+        }
+    }
+}
+
+#[test]
+fn leaf_switch_keeps_the_full_provider_route() {
+    let scoped = provider_scoped_route("acme");
+    let mut live = Session::replay_declared(measured_fixture()).expect("fixture replays");
+    let mut journal = decode_journal(&measured_fixture());
+    select_model_recorded(&mut live, &mut journal, scoped.clone());
+    let model_entry = journal
+        .iter()
+        .find_map(|record| match record {
+            Record::Model(entry) => Some(entry.id),
+            _ => None,
+        })
+        .expect("SetModel journals a model record");
+    assert_eq!(live.requested_model(), Some(&scoped));
+    // `Fork` never runs inside the fold (the driver owns the copy), so the
+    // in-fold leaf switch is `MoveLeaf`: the requested route is a setting,
+    // not branch state, and must survive moving off the branch that set it.
+    for leaf in [entry(1), model_entry] {
+        let out = send(
+            &mut live,
+            Event::Command {
+                cmd: Command::MoveLeaf(leaf),
+                by: client(),
+            },
+        )
+        .expect("leaf switch stays idle");
+        append_emitted(&out, &mut journal);
+        assert_eq!(
+            live.requested_model(),
+            Some(&scoped),
+            "leaf {leaf} keeps the route",
+        );
+    }
+    let journal = decode_journal(&journal);
+    let rebuilt = Session::replay_declared(journal.iter().cloned()).expect("journal replays");
+    assert_eq!(rebuilt.requested_model(), Some(&scoped));
 }

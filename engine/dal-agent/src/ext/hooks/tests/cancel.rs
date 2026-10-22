@@ -280,6 +280,7 @@ async fn cancelled_before_request_chain_starts_no_later_hook_and_reports_no_fail
                 id: "acme/test".into(),
             },
             name: "test".into(),
+            provider: "".into(),
             caps: caps.clone(),
         },
         caps,

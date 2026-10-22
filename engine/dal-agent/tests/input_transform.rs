@@ -568,6 +568,73 @@ async fn a_stopping_hook_ends_the_fold_and_its_content_is_admitted() {
     assert_eq!(live.durable_users().await, vec![journaled(&expected)]);
 }
 
+/// An input hook that fails.
+struct FailingInput;
+
+impl Hook<InputEvent, InputVerdict> for FailingInput {
+    fn call(
+        &self,
+        _input: InputEvent,
+        _cx: HookCx,
+    ) -> BoxFuture<'static, Result<InputVerdict, HookError>> {
+        Box::pin(async {
+            Err(HookError::Failed {
+                message: "the hook broke".into(),
+            })
+        })
+    }
+}
+
+/// A failing hook between two transforming hooks keeps the running content:
+/// the later hook still runs on the earlier hook's output, the turn admits
+/// the final content, and exactly one notice names the failed hook.
+#[tokio::test]
+async fn a_failing_hook_keeps_the_running_content_and_raises_one_notice() {
+    let (first, first_inputs) =
+        probe(|content| InputVerdict::Transform(rewrite_text(content, |text| format!("{text}-a"))));
+    let (last, last_inputs) =
+        probe(|content| InputVerdict::Transform(rewrite_text(content, |text| format!("{text}-c"))));
+    let chain = extension("chain", Origin::Builtin)
+        .on_input(first)
+        .on_input(FailingInput)
+        .on_input(last)
+        .build()
+        .expect("chain extension");
+    let mut live = Harness::synthetic(None, vec![chain]).await;
+    let turn = live.prompt(vec![text("original")]).await;
+    let mut notices = Vec::new();
+    let stop = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let delivery = live.subscription.next().await.expect("stream open");
+            let Delivery::Update(update) = delivery else {
+                continue;
+            };
+            match &update.kind {
+                UpdateKind::Notice(notice) => notices.push(notice.text.to_string()),
+                UpdateKind::TurnEnded { turn: seen, stop } if *seen == turn => return *stop,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the turn ends in time");
+    assert_eq!(stop, Stop::EndTurn);
+    assert_eq!(recorded(&first_inputs), vec![vec![text("original")]]);
+    assert_eq!(
+        recorded(&last_inputs),
+        vec![vec![text("original-a")]],
+        "the hook after the failure still runs on the earlier transform"
+    );
+    let expected = vec![text("original-a-c")];
+    assert_eq!(live.requests()[0].users, vec![expected.clone()]);
+    assert_eq!(live.durable_users().await, vec![journaled(&expected)]);
+    assert_eq!(
+        notices,
+        vec![r#"plugin "chain" hook input failed; input continued unchanged"#.to_owned()],
+        "one notice names the failed hook"
+    );
+}
+
 /// A cancel that lands while a later hook is held ends the opening. The
 /// transform an earlier hook already returned is not admitted: the turn
 /// journals the content as submitted, and no request or record carries the

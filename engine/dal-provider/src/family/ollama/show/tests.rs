@@ -245,3 +245,37 @@ fn a_thinking_object_without_usable_values_reports_nothing() {
         .expect("values report");
     assert_eq!(empty.ladder(), (Vec::new(), false));
 }
+
+#[test]
+fn a_context_window_is_accepted_from_one_up_to_u32_max() {
+    // Both ends of the accepted range, and the values a signed 32-bit
+    // reading would wrongly refuse.
+    for (tokens, expected) in [
+        ("1", 1_u32),
+        ("2147483647", 2_147_483_647),
+        ("2147483648", 2_147_483_648),
+        ("4294967295", u32::MAX),
+    ] {
+        let body = format!(r#"{{"model_info":{{"a.context_length":{tokens}}}}}"#);
+        assert_eq!(show(&body).context_window, Some(expected), "{tokens}");
+    }
+}
+
+#[test]
+fn named_levels_outrank_the_boolean_spellings_in_the_ladder() {
+    let ladder = |values: &str| {
+        show(&format!(r#"{{"thinking":{{"values":{values}}}}}"#))
+            .thinking
+            .expect("the reply reports think values")
+            .ladder()
+    };
+    // `true` only matters when no named level is offered.
+    assert_eq!(ladder(r#"["low",true]"#), (vec![Low], false));
+    assert_eq!(ladder(r#"[true,"high",false]"#), (vec![High], true));
+    assert_eq!(ladder("[true]"), (vec![BOOLEAN_ON], false));
+    assert_eq!(ladder("[false]"), (Vec::new(), true));
+    assert_eq!(
+        ladder(r#"["xhigh","max"]"#),
+        (vec![ThinkingLevel::Xhigh, Max], false)
+    );
+}

@@ -393,8 +393,10 @@ async fn login_oauth(
     let cancel = CancellationToken::new();
     let (paste, paste_receiver) = oneshot::channel();
     let (io, events) = LoginIo::channel(Some(paste_receiver), cancel.clone());
+    let mut signals = edge::ShutdownSignals::register();
     let outcome = super::drive(
         &cancel,
+        &mut signals,
         run_with_paste(&host, def.id, method, io, events, paste),
     )
     .await;
@@ -474,8 +476,20 @@ async fn read_piped_key() -> std::io::Result<Option<String>> {
     use tokio::io::AsyncReadExt as _;
     let mut key = String::new();
     tokio::io::stdin().read_to_string(&mut key).await?;
-    let key = key.trim_end_matches(['\r', '\n']).to_owned();
-    Ok((!key.is_empty()).then_some(key))
+    let key = key.trim_end_matches(['\r', '\n']);
+    // A tab is a legal header character; any other control character, a line
+    // break included, makes a key that no request can carry, and saving it would
+    // report success until the first request fails.
+    if key
+        .chars()
+        .any(|character| character.is_control() && character != '\t')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the key holds a line break or control character",
+        ));
+    }
+    Ok((!key.is_empty()).then(|| key.to_owned()))
 }
 
 async fn prompt_for_key(provider: &str) -> io::Result<String> {

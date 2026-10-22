@@ -84,6 +84,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         dal_tui::copy::ids::DIALOG_ACTIONS_SHORT,
         Duration::from_secs(15),
     )?;
+
     terminal.write(b"y")?;
     wait_for_path(&marker, Duration::from_secs(10), "by the remote turn")?;
     terminal.wait_for(
@@ -117,7 +118,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
             .is_running()
             .expect("serve process status is observable")
     );
-    let _first_output_byte = terminal.output().first().unwrap();
+    assert_eq!(terminal.terminal_restore_problem()?, None);
     Ok(())
 }
 

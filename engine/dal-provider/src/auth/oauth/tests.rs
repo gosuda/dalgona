@@ -243,6 +243,103 @@ fn pasted_redirect_and_query_are_accepted() {
 }
 
 #[test]
+fn a_pasted_result_needs_a_matching_state_and_a_code_in_every_form() {
+    let parse = |input: &str| parse_pasted_code(input, "right-state", Family::Anthropic);
+    for (input, code) in [
+        ("code123#right-state", "code123"),
+        (
+            "http://localhost/callback?code=code123&state=right-state",
+            "code123",
+        ),
+        ("?code=code123&state=right-state", "code123"),
+    ] {
+        assert_eq!(parse(input).ok().as_deref(), Some(code), "{input}");
+    }
+    // A wrong or absent state is refused whichever form carried it: the state
+    // is the only proof that the pasted result answers this login.
+    for input in [
+        "code123#wrong-state",
+        "code123#",
+        "http://localhost/callback?code=code123&state=wrong-state",
+        "http://localhost/callback?code=code123",
+        "?code=code123&state=wrong-state",
+        "code=code123&state=wrong-state",
+    ] {
+        let result = parse(input);
+        assert!(
+            matches!(result, Err(ProviderError::StateMismatch)),
+            "{input}: {result:?}"
+        );
+    }
+    // A matching state without a code, or a blank paste, is no login either.
+    for input in [
+        "#right-state",
+        "http://localhost/callback?state=right-state",
+        "http://localhost/callback?code=&state=right-state",
+        "   ",
+    ] {
+        let result = parse(input);
+        assert!(
+            matches!(result, Err(ProviderError::Transport { .. })),
+            "{input}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn an_endpoint_override_must_name_exactly_a_loopback_host() {
+    let env = EnvSnapshot::default();
+    for base in [
+        "http://127.0.0.1:8123",
+        "http://localhost:8123",
+        "http://[::1]:8123",
+        "HTTP://LOCALHOST:8123",
+    ] {
+        assert!(
+            LoginEndpoints::loopback(base, &env).is_ok(),
+            "{base} is a loopback host"
+        );
+    }
+    // Host confusion: the override receives authorization codes and tokens,
+    // so a name that only starts or ends like a loopback host must be refused.
+    // A plain-HTTP base is stopped by the transport rule first.
+    for base in [
+        "http://localhost.evil.test:8123",
+        "http://127.0.0.1.evil.test:8123",
+        "http://notlocalhost:8123",
+        "http://localhost@evil.test:8123",
+        "http://127.0.0.1@evil.test:8123",
+        "http://0.0.0.0:8123",
+    ] {
+        let result = LoginEndpoints::loopback(base, &env);
+        assert!(
+            matches!(
+                result,
+                Err(ProviderError::PlainHttp { .. } | ProviderError::Transport { .. })
+            ),
+            "{base} is not a loopback host: {:?}",
+            result.err()
+        );
+    }
+    // An https base passes the transport rule, so only the loopback test
+    // itself stands between a look-alike host and the override.
+    for base in [
+        "https://example.test",
+        "https://localhost.evil.test:8123",
+        "https://127.0.0.1.evil.test:8123",
+        "https://notlocalhost:8123",
+        "https://0.0.0.0:8123",
+    ] {
+        let result = LoginEndpoints::loopback(base, &env);
+        assert!(
+            matches!(result, Err(ProviderError::Transport { .. })),
+            "{base} is not a loopback host: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
 fn endpoint_override_rejects_non_loopback_origins() {
     let env = EnvSnapshot::default();
     assert!(LoginEndpoints::loopback("http://127.0.0.1:8123", &env).is_ok());
@@ -256,6 +353,27 @@ async fn held_loopback_port() -> (TcpListener, u16) {
         .expect("loopback bind succeeds");
     let port = holder.local_addr().expect("bound address").port();
     (holder, port)
+}
+
+/// Binds `address`, retrying briefly while a stray loopback connection still
+/// holds the port. The invariant is that the owner released it; the wait only
+/// covers the release-to-close window a connecting peer can hold open after
+/// the listener drops.
+async fn bind_soon(address: (&str, u16)) -> std::io::Result<TcpListener> {
+    let mut delay = Duration::from_millis(10);
+    for _ in 0..20 {
+        match TcpListener::bind(address).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_millis(160));
+                if delay >= Duration::from_secs(2) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    TcpListener::bind(address).await
 }
 
 #[tokio::test]
@@ -325,7 +443,7 @@ async fn occupied_claude_callback_advertises_a_bound_port() {
         "the authorize URL must advertise the port actually bound, not the occupied one"
     );
     if let Some(advertised) = advertised {
-        let rebound = TcpListener::bind(("127.0.0.1", advertised)).await;
+        let rebound = bind_soon(("127.0.0.1", advertised)).await;
         assert!(
             rebound.is_ok(),
             "advertised port {advertised} was not bound"
@@ -445,8 +563,8 @@ async fn cancellation_and_timeout_release_callback_listener() {
         let port = observed_port.lock().ok().and_then(|observed| *observed);
         assert!(port.is_some());
         if let Some(port) = port {
-            let rebound = TcpListener::bind(("127.0.0.1", port)).await;
-            assert!(rebound.is_ok());
+            let rebound = bind_soon(("127.0.0.1", port)).await;
+            assert!(rebound.is_ok(), "released callback port was not bound");
         }
         assert!(!dir.auth_path().exists());
     }

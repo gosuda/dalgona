@@ -130,6 +130,7 @@ fn resolved(family: Family, provider: &str, model: &str) -> ResolvedModel {
         route: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         entry: entry(provider, model),
     }
@@ -161,6 +162,7 @@ fn request(family: Family, model: &str, context: Vec<ContextItem>) -> ModelReque
         model: ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([read_tool()]),

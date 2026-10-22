@@ -324,7 +324,7 @@ impl Host {
                     message: error.to_string().into(),
                 }
             })?;
-        if !route_matches(&route, &resolved.route) {
+        if !route.same_model(&resolved.route) {
             return Err(HostError::Config {
                 message: format!("request route does not match {route:?}.").into(),
             });
@@ -544,6 +544,7 @@ fn builtin_models(
         models.push(crate::session::context::model_info_for(
             &resolved.entry,
             &resolved.route,
+            &resolved.provider,
             shared.config.thinking(),
         ));
     }
@@ -554,23 +555,6 @@ pub(crate) fn request_reference(route: &ModelRoute) -> String {
     match route {
         ModelRoute::Api { model, .. } => model.to_string(),
         ModelRoute::Synthetic { id } | ModelRoute::Harness { id } => id.to_string(),
-    }
-}
-
-/// Whether two routes name the same model.
-fn route_matches(wanted: &ModelRoute, resolved: &ModelRoute) -> bool {
-    match (wanted, resolved) {
-        (
-            ModelRoute::Api {
-                family: a,
-                model: m,
-            },
-            ModelRoute::Api {
-                family: b,
-                model: n,
-            },
-        ) => a == b && m == n,
-        _ => wanted == resolved,
     }
 }
 

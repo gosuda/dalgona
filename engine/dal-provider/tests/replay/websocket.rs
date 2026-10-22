@@ -104,6 +104,7 @@ fn codex_request(model: &str, session: SessionId) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Codex,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([]),
@@ -126,6 +127,7 @@ fn resolved(model: &str) -> ResolvedModel {
         route: ModelRoute::Api {
             family: Family::Codex,
             model: model.into(),
+            provider: None,
         },
         entry: entry(model),
     }

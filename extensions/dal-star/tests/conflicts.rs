@@ -25,9 +25,9 @@ fn tool_plugin(name: &str, tool: &str) -> String {
     )
 }
 
-fn model_plugin(name: &str) -> String {
+fn model_plugin(name: &str, id: &str) -> String {
     format!(
-        "load(\"@dal/v1\", \"dal\")\ndef infer(ctx, request):\n    return None\nm = dal.model(id = \"dalgona/shared\", caps = {{\"context_window\": 8, \"thinking\": [\"off\"], \"tool_use\": False, \"image_input\": False}}, run = infer)\nplugin = dal.plugin(name = \"{name}\", version = \"0.1.0\", models = {{\"m\": m}})\n"
+        "load(\"@dal/v1\", \"dal\")\ndef infer(ctx, request):\n    return None\nm = dal.model(id = \"{id}\", caps = {{\"context_window\": 8, \"thinking\": [\"off\"], \"tool_use\": False, \"image_input\": False}}, run = infer)\nplugin = dal.plugin(name = \"{name}\", version = \"0.1.0\", models = {{\"m\": m}})\n"
     )
 }
 
@@ -115,24 +115,39 @@ async fn wire_names_that_collide_through_underscores_are_refused() {
     ]);
     let extensions =
         converted.expect("each plugin converts on its own; the host owns cross-plugin conflicts");
-    let refused = refusal(&data, extensions).await;
-    assert!(
-        refused.is_some(),
-        "two tools with one wire name must not both register"
+    let refused = refusal(&data, extensions)
+        .await
+        .expect("two tools with one wire name must not both register");
+    assert_eq!(
+        refused,
+        "tool \"a__b__c\" is already registered by plugin \"a\"; plugin \"a__b\" cannot register it"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_plugins_declaring_one_public_model_id_are_refused() {
+async fn two_plugins_declaring_one_public_model_id_are_refused_naming_both_owners() {
+    // The control differs only in the second plugin's model id.
     let (data, converted) = convert(&[
-        ("alpha", model_plugin("alpha")),
-        ("beta", model_plugin("beta")),
+        ("alpha", model_plugin("alpha", "dalgona/first")),
+        ("beta", model_plugin("beta", "dalgona/second")),
+    ]);
+    let extensions = converted.expect("distinct model ids convert");
+    assert_eq!(refusal(&data, extensions).await, None);
+
+    let (data, converted) = convert(&[
+        ("alpha", model_plugin("alpha", "dalgona/shared")),
+        ("beta", model_plugin("beta", "dalgona/shared")),
     ]);
     let extensions =
         converted.expect("each plugin converts on its own; the host owns cross-plugin conflicts");
-    let refused = refusal(&data, extensions).await;
+    let refused = refusal(&data, extensions)
+        .await
+        .expect("one public model id cannot route to two handlers");
     assert!(
-        refused.is_some(),
-        "one public model id cannot route to two handlers"
+        refused.starts_with("model ")
+            && refused.ends_with(
+                " is already registered by plugin \"alpha\"; plugin \"beta\" cannot register it"
+            ),
+        "{refused}"
     );
 }

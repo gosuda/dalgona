@@ -140,6 +140,7 @@ fn loopback() -> (ProviderRun, Server) {
 
 /// A waker that counts wakes, so tests pin exactly when the run wakes its
 /// keeper.
+#[derive(Default)]
 struct WakeCount(AtomicUsize);
 
 impl ArcWake for WakeCount {
@@ -966,4 +967,168 @@ fn a_step_stream_runs_on_another_thread_while_the_run_stays_here() {
     assert_eq!(run.state(), awaiting(&["a"]));
     run.respond(vec![answer("a")]).unwrap();
     assert_eq!(server.sent(), vec![vec![answer("a")]]);
+}
+
+/// What the source's upkeep did: how many times the run polled it, and the
+/// failure the next poll reports.
+#[derive(Default)]
+struct Upkeep {
+    polls: AtomicUsize,
+    fail: Mutex<Option<ProviderError>>,
+}
+
+/// A channel-backed source whose upkeep is observable and can fail.
+struct MaintainedEvents {
+    inner: mpsc::Receiver<Item>,
+    upkeep: Arc<Upkeep>,
+}
+
+impl Stream for MaintainedEvents {
+    type Item = Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl RunEvents for MaintainedEvents {
+    fn poll_maintain(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), ProviderError>> {
+        self.upkeep.polls.fetch_add(1, Ordering::SeqCst);
+        match self.upkeep.fail.lock().unwrap().take() {
+            Some(error) => Poll::Ready(Err(error)),
+            None => Poll::Pending,
+        }
+    }
+}
+
+fn upkeep_loopback() -> (ProviderRun, Server, Arc<Upkeep>) {
+    let (events, inbox) = mpsc::channel(SCRIPT_ROOM);
+    let wire = Arc::new(Wire::default());
+    let upkeep = Arc::new(Upkeep::default());
+    let source = MaintainedEvents {
+        inner: inbox,
+        upkeep: Arc::clone(&upkeep),
+    };
+    let run = ProviderRun::new(Family::Chat, source, Loopback(Arc::clone(&wire)));
+    (run, Server { events, wire }, upkeep)
+}
+
+#[test]
+fn keepalive_does_upkeep_only_while_awaiting_and_is_woken_on_each_phase_change() {
+    let (mut run, mut server, upkeep) = upkeep_loopback();
+    let counter = Arc::new(WakeCount::default());
+    let waker = futures::task::waker(Arc::clone(&counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut keeper = Box::pin(run.keepalive());
+    let polls = || upkeep.polls.load(Ordering::SeqCst);
+    let woken = || counter.0.load(Ordering::SeqCst);
+
+    // While a step is in flight, taken or not, its stream owns the source:
+    // the keeper parks and never polls the source for upkeep.
+    assert!(keeper.as_mut().poll(&mut cx).is_pending());
+    let mut step = run.next_step().unwrap();
+    assert!(keeper.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(polls(), 0);
+
+    // The step ends in tool use. The parked keeper is woken, and the next
+    // poll runs exactly one round of upkeep.
+    server.push(tool_step(&["a"]));
+    read_step(&mut step);
+    assert_eq!(woken(), 1);
+    assert!(keeper.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(polls(), 1);
+
+    // The answer puts a step back in flight, and upkeep stops again.
+    run.respond(vec![answer("a")]).unwrap();
+    assert!(keeper.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(polls(), 1);
+
+    // Ending the run wakes the keeper once more, and it then resolves
+    // without touching the dropped source.
+    let before = woken();
+    drop(run);
+    assert_eq!(woken(), before + 1);
+    assert_eq!(keeper.as_mut().poll(&mut cx), Poll::Ready(()));
+    assert_eq!(polls(), 1);
+}
+
+#[test]
+fn an_upkeep_failure_while_awaiting_loses_the_run_through_the_usual_mapping() {
+    let transport = || ProviderError::Transport {
+        family: Family::Chat,
+        reason: String::from("heartbeat write failed"),
+    };
+    let cases = [
+        (
+            transport(),
+            RunLostReason::Transport(transport().to_string()),
+        ),
+        (ProviderError::StreamCut, RunLostReason::ServerClosed),
+        (
+            ProviderError::Protocol {
+                family: Family::Chat,
+                detail: String::from("bad heartbeat"),
+            },
+            RunLostReason::Protocol(String::from("bad heartbeat")),
+        ),
+        (
+            ProviderError::RunLost {
+                family: Family::Chat,
+                reason: RunLostReason::Authority("web_fetch".into()),
+            },
+            RunLostReason::Authority("web_fetch".into()),
+        ),
+    ];
+    for (failure, expected) in cases {
+        let (mut run, mut server, upkeep) = upkeep_loopback();
+        server.push(tool_step(&["a"]));
+        read_step(&mut run.next_step().unwrap());
+        assert_eq!(run.state(), awaiting(&["a"]));
+        *upkeep.fail.lock().unwrap() = Some(failure);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut keeper = Box::pin(run.keepalive());
+        // The keeper resolves because the run ended, not because it is idle.
+        assert_eq!(keeper.as_mut().poll(&mut cx), Poll::Ready(()), "{expected}");
+        assert_eq!(run.state(), RunState::Lost(expected.clone()));
+        assert_eq!(
+            (server.aborts(), server.connected()),
+            (1, false),
+            "{expected}"
+        );
+        assert!(is_lost(&run.respond(vec![answer("a")])), "{expected}");
+        assert!(is_lost(&run.next_step()), "{expected}");
+        assert!(server.sent().is_empty(), "{expected}");
+    }
+}
+
+#[test]
+fn awaiting_names_the_pending_calls_in_response_order_and_only_then() {
+    let ids = || vec![CallId::new("b"), CallId::new("a"), CallId::new("c")];
+    let (mut run, mut server) = loopback();
+    assert_eq!(run.awaiting(), None);
+
+    server.push(tool_step(&["b", "a", "c"]));
+    let mut step = run.next_step().unwrap();
+    assert_eq!(run.awaiting(), None, "a step in flight awaits nothing");
+    read_step(&mut step);
+    // The order of the response, not sorted and not the caller's.
+    assert_eq!(run.awaiting(), Some(ids()));
+    assert_eq!(run.state(), RunState::Awaiting(ids()));
+
+    run.respond(vec![answer("c"), answer("b"), answer("a")])
+        .unwrap();
+    assert_eq!(run.awaiting(), None, "answered calls are no longer pending");
+
+    server.push(final_step(StopReason::EndTurn));
+    read_step(&mut run.next_step().unwrap());
+    assert_eq!(run.state(), RunState::Closed);
+    assert_eq!(run.awaiting(), None);
+
+    let (mut lost, mut server) = loopback();
+    server.push(tool_step(&["a"]));
+    read_step(&mut lost.next_step().unwrap());
+    assert!(is_lost(&lost.respond(vec![answer("x")])));
+    assert_eq!(lost.awaiting(), None, "a lost run awaits nothing");
 }

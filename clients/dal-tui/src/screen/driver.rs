@@ -20,6 +20,9 @@ const POSITION_QUERY_BUDGET: Duration = Duration::from_millis(300);
 #[derive(Default)]
 pub(crate) struct Painter {
     previous: Vec<RenderRow>,
+    /// The next main-screen frame is structural whatever the diff says; set
+    /// by `invalidate`, cleared once a main-screen frame lands.
+    repaint: bool,
     size: (u16, u16),
     committed: usize,
     /// Screen row, 1-based, where the live block starts: directly under the
@@ -38,11 +41,7 @@ pub(crate) struct Painter {
     epoch: u64,
     sync: bool,
     initialized: bool,
-    overlay: bool,
-    /// The main-screen frame parked while the transcript overlay owns the
-    /// alternate screen. The main buffer is never touched meanwhile, so
-    /// leaving the overlay diffs against it and repaints only what changed.
-    main: Option<MainFrame>,
+    overlay: OverlayState,
     /// Terminal cell (row, column), 1-based, where the caret was last placed.
     cursor: Option<(usize, usize)>,
     #[expect(
@@ -118,6 +117,13 @@ struct MainFrame {
     epoch: u64,
 }
 
+#[derive(Default)]
+enum OverlayState {
+    #[default]
+    Closed,
+    Open(Option<MainFrame>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ImageKey {
     digest: [u8; 32],
@@ -127,6 +133,16 @@ struct ImageKey {
 }
 
 impl Painter {
+    /// Makes the next main-screen frame structural, so it rewrites the whole
+    /// live block. `Ctrl+L`, the external editor, and a suspend consume this:
+    /// a diff paint with unchanged rows would otherwise emit zero bytes and
+    /// leave mangled rows corrupted. `previous` stays: the structural erase
+    /// needs the stale block's height, which differs from the new block's
+    /// when an editor returns a shorter draft.
+    pub(crate) fn invalidate(&mut self) {
+        self.repaint = true;
+    }
+
     /// Changes the synchronized-update capability after the startup probe.
     pub(crate) fn set_sync(&mut self, sync: bool) {
         self.sync = sync;
@@ -163,7 +179,10 @@ impl Painter {
     /// moves while the transcript overlay owns the alternate screen or before
     /// the first frame.
     pub(crate) fn rest_below_block(&self, io: &dyn TermIo) -> Result<(), TuiError> {
-        if self.overlay || !self.initialized || self.previous.is_empty() {
+        if matches!(self.overlay, OverlayState::Open(_))
+            || !self.initialized
+            || self.previous.is_empty()
+        {
             return Ok(());
         }
         let size = io.size().unwrap_or(self.size);
@@ -187,20 +206,23 @@ impl Painter {
     /// Windows), never by deriving rows from the old height. When no trusted
     /// position exists the frame holds: it writes nothing, keeps every queued
     /// commit and keystroke, and measures again next frame.
+    ///
+    /// Returns whether the frame that landed shows the dialog's request rows
+    /// on screen; the caller arms answer keys off this verdict alone.
     pub(crate) fn paint(
         &mut self,
         io: &dyn TermIo,
         state: &Arc<Mutex<TermState>>,
         input: FrameInput<'_>,
         overlay: bool,
-    ) -> Result<(), TuiError> {
+    ) -> Result<bool, TuiError> {
         let mut size = io.size().unwrap_or((80, 24));
         let mut epoch = io.resize_epoch();
 
         let relocated =
             self.relocate_block(io, input.screen, input.opts.env.width_mode, size, epoch)?;
         let Some((relocated_size, relocated_epoch, relocated_placement)) = relocated else {
-            return Ok(());
+            return Ok(false);
         };
         size = relocated_size;
         epoch = relocated_epoch;
@@ -227,13 +249,14 @@ impl Painter {
         }
         let committed_len = input.transcript.rows().len();
         let mut bytes = Vec::new();
-        if overlay != self.overlay {
+        let surface_is_overlay = matches!(self.overlay, OverlayState::Open(_));
+        if overlay != surface_is_overlay {
             if overlay {
                 (size, epoch, placement) = self.enter_overlay(&mut bytes, size, epoch, placement);
             } else {
                 let left = self.leave_overlay(io, size, epoch, placement)?;
                 let Some((left_size, left_epoch, left_placement)) = left else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 size = left_size;
                 epoch = left_epoch;
@@ -241,6 +264,7 @@ impl Painter {
             }
         }
         let structural = !self.initialized
+            || self.repaint
             || !matches!(placement, Placement::Anchor)
             || self.size != size
             || self.previous.len() != rows.len()
@@ -260,7 +284,11 @@ impl Painter {
         } else {
             self.fullscreen_bytes(&mut bytes, size, &rows, structural, theme);
         }
-        self.emit_frame(
+        // A frame below the usable floor renders only the narrow warning, so
+        // it never shows the dialog's rows; on any landed frame with the
+        // dialog open, the interactive tail carries its request rows.
+        let dialog_shown = input.dialog.is_open() && !crate::render::below_floor(size.0, size.1);
+        let landed = self.emit_frame(
             io,
             state,
             input.screen,
@@ -276,14 +304,15 @@ impl Painter {
                 committed_len,
             },
             theme,
-        )
+        )?;
+        Ok(landed && dialog_shown)
     }
 
     /// Draws frame images, parks the cursor, and writes the frame. Every model
     /// field that mirrors the screen (rows, size, epoch, commits, theme) moves
     /// only when the frame is known to land: an empty frame is already final,
     /// and a frame discarded on an epoch change leaves the model matching the
-    /// untouched screen.
+    /// untouched screen. Returns whether the frame landed.
     fn emit_frame(
         &mut self,
         io: &dyn TermIo,
@@ -291,7 +320,7 @@ impl Painter {
         input_screen: Screen,
         staged: StagedFrame,
         theme: &ResolvedTheme,
-    ) -> Result<(), TuiError> {
+    ) -> Result<bool, TuiError> {
         let StagedFrame {
             screen,
             size,
@@ -317,12 +346,12 @@ impl Painter {
         self.place_cursor(&mut bytes, size, top, &rows, overlay, park);
         if bytes.is_empty() {
             self.finish_frame(committed_len, size, epoch, rows, overlay, theme);
-            return Ok(());
+            return Ok(true);
         }
         // A resize signal between measurement and write discards the frame:
         // holding narrows the in-flight race to signal latency.
         if input_screen == Screen::Inline && !overlay && io.resize_epoch() != epoch {
-            return Ok(());
+            return Ok(false);
         }
         if self.sync {
             bytes.splice(..0, b"\x1b[?2026h".iter().copied());
@@ -350,7 +379,7 @@ impl Painter {
             }
             modes.set_transcript_overlay(overlay);
         }
-        result
+        result.map(|()| true)
     }
 
     /// Relocates the stale live block after a resize signal by measuring the
@@ -370,7 +399,7 @@ impl Painter {
         // target (also on an overlay-entry frame, before ?1049h), the block
         // was painted, and something signaled a resize.
         if screen == Screen::Inline
-            && !self.overlay
+            && matches!(self.overlay, OverlayState::Closed)
             && self.initialized
             && (self.size != size || self.epoch != epoch)
         {
@@ -418,15 +447,15 @@ impl Painter {
             bytes.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
         }
         bytes.extend_from_slice(b"\x1b[?1049h\x1b[?25l");
-        self.main = Some(MainFrame {
+        let main = MainFrame {
             previous: std::mem::take(&mut self.previous),
             size: self.size,
             initialized: self.initialized,
             anchor: self.anchor,
             epoch: self.epoch,
-        });
+        };
+        self.overlay = OverlayState::Open(Some(main));
         self.initialized = false;
-        self.overlay = true;
         (size, epoch, placement)
     }
 
@@ -447,7 +476,11 @@ impl Painter {
                 "dalgon: cannot write the interface: {error}\nCheck that the terminal is still connected."
             ))
         })?;
-        if let Some(main) = self.main.take() {
+        let main = match &mut self.overlay {
+            OverlayState::Open(parked) => parked.take(),
+            OverlayState::Closed => None,
+        };
+        if let Some(main) = main {
             self.previous = main.previous;
             self.size = main.size;
             self.initialized = main.initialized;
@@ -465,7 +498,7 @@ impl Painter {
                 placement: Placement::Hold,
                 ..
             } => {
-                self.overlay = false;
+                self.overlay = OverlayState::Closed;
                 if self.size == size && self.epoch == epoch {
                     let top = u16::try_from(self.anchor.max(1)).unwrap_or(u16::MAX);
                     return Ok(Some((size, epoch, Placement::Located(top))));
@@ -490,7 +523,7 @@ impl Painter {
                 ..
             } => {}
         }
-        self.overlay = false;
+        self.overlay = OverlayState::Closed;
         Ok(Some((size, epoch, placement)))
     }
 
@@ -508,6 +541,7 @@ impl Painter {
         if !overlay {
             // Rows settled behind the overlay commit on the main screen once it returns.
             self.committed = committed_len;
+            self.repaint = false;
         }
         self.size = size;
         self.epoch = epoch;
@@ -1243,6 +1277,7 @@ mod tests {
                     created_at: Some(dal_core::Timestamp::UNIX_EPOCH),
                     archived: Some(false),
                     last_seq: Some(dal_core::Seq::new(NonZeroU64::MIN)),
+                    message_count: None,
                 },
                 turn: dal_core::TurnState::Idle,
                 entries: dal_core::Page {
@@ -1975,7 +2010,7 @@ mod tests {
         // Many committed rows so the live block starts near the bottom of the screen.
         let mut committed_texts = Vec::new();
         for i in 1..=14 {
-            committed_texts.push(format!("committed transcript row {i}"));
+            committed_texts.push(format!("committed transcript line {i}"));
         }
         fixture.transcript.commit("entry-0", &committed_texts);
 
@@ -2016,7 +2051,7 @@ mod tests {
         let live_block_top = u16::try_from(painter.anchor).unwrap();
         let targeted = targeted_rows(expand_bytes);
 
-        assert_ne!(targeted, [] as [u16; 0]);
+        assert_ne!(targeted, Vec::<u16>::new());
         for &row in &targeted {
             assert!(
                 row >= live_block_top,
@@ -2097,7 +2132,7 @@ mod tests {
         let live_block_top = u16::try_from(painter.anchor).unwrap();
         let targeted = targeted_rows(collapse_bytes);
 
-        assert_ne!(targeted, [] as [u16; 0]);
+        assert_ne!(targeted, Vec::<u16>::new());
         for &row in &targeted {
             assert!(
                 row >= live_block_top,
@@ -2583,7 +2618,7 @@ mod tests {
 
     fn committed_rows(count: usize) -> Vec<String> {
         (1..=count)
-            .map(|n| format!("committed transcript row {n}"))
+            .map(|n| format!("committed transcript line {n}"))
             .collect()
     }
 
@@ -2751,6 +2786,61 @@ mod tests {
                 dump(&io)
             ))
         }
+    }
+
+    /// An external editor can hand back a shorter draft: the invalidated
+    /// repaint must still erase every row of the taller stale block.
+    #[test]
+    fn invalidate_before_a_shorter_block_erases_the_stale_rows() {
+        let fixture = Fixture::new();
+        let io = SimIo::new((80, 24), true);
+        let mut painter = Painter::default();
+        let tall = "first line\nsecond line\nthird line\nfourth line";
+        paint_with_composer(&io, &fixture, &mut painter, tall, 3);
+        let tall_height = painter.previous.len();
+        assert!(
+            io.visible().iter().any(|line| line.contains("fourth line")),
+            "the tall draft must paint, or the test proves nothing\n{}",
+            dump(&io)
+        );
+        painter.invalidate();
+        paint_with_composer(&io, &fixture, &mut painter, "first line", 3);
+        let stale: Vec<String> = io
+            .visible()
+            .into_iter()
+            .filter(|line| {
+                ["second line", "third line", "fourth line"]
+                    .iter()
+                    .any(|gone| line.contains(gone))
+            })
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "stale rows survived the shorter block: {stale:?}\n{}",
+            dump(&io)
+        );
+        assert!(painter.previous.len() < tall_height);
+        assert_eq!(live_block_faults(&io, &painter, &[]), Vec::<String>::new());
+    }
+
+    /// A row mangled behind the painter's back survives a diff paint that
+    /// finds every row unchanged; an invalidated paint rewrites it.
+    #[test]
+    fn invalidate_rewrites_a_row_damaged_behind_the_painter() {
+        let fixture = Fixture::new();
+        let io = SimIo::new((80, 24), true);
+        let mut painter = Painter::default();
+        paint_with_composer(&io, &fixture, &mut painter, "kept draft", 4);
+        let row = painter.anchor;
+        let intact = io.visible()[row - 1].clone();
+        io.write(format!("\x1b[{row};1H\x1b[2Kgarbage left by a child process").as_bytes())
+            .unwrap();
+        assert_ne!(io.visible()[row - 1], intact);
+        painter.invalidate();
+        paint_with_composer(&io, &fixture, &mut painter, "kept draft", 4);
+        assert_eq!(io.visible()[row - 1], intact, "{}", dump(&io));
+        assert!(!painter.repaint, "a landed main frame consumes the flag");
+        assert_eq!(live_block_faults(&io, &painter, &[]), Vec::<String>::new());
     }
 
     #[test]

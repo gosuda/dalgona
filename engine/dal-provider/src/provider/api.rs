@@ -88,7 +88,7 @@ impl Provider {
         client: &reqwest::Client,
         owner: &ProviderSet,
     ) -> Result<Self, ProviderError> {
-        let ModelRoute::Api { family, model } = &resolved.route else {
+        let ModelRoute::Api { family, model, .. } = &resolved.route else {
             return Err(ProviderError::InvalidRequest {
                 message: String::from("an HTTP provider needs a concrete API route"),
             });

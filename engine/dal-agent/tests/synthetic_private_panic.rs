@@ -98,6 +98,7 @@ impl dal_agent::ext::ModelHandler for ExplodeModel {
             request.model = ModelRoute::Api {
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
+                provider: None,
             };
             let private = [PrivateTool(Arc::new(Explode::new()))];
             cx.forward(request, &private).await

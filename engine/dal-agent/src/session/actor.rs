@@ -337,6 +337,11 @@ pub(crate) struct Actor {
     host: Arc<crate::host::HostState>,
     pending_commands: VecDeque<ReplyTx>,
     settling: Option<TurnId>,
+    /// One-shot replies parked by [`ActorRequest::Settle`], drained when a
+    /// folded driver confirmation clears [`Self::settling`]. A waiter whose
+    /// receiver is gone (its close timed out) removes itself on the next
+    /// drain.
+    settle_waiters: Vec<oneshot::Sender<()>>,
     /// Broker resolutions held until their journal emit has been observed.
     pending_releases: Vec<Resolved>,
     /// The approval mode the session started under, before any journaled
@@ -589,6 +594,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         host: deps.host,
         pending_commands: VecDeque::new(),
         settling: None,
+        settle_waiters: Vec::new(),
         pending_releases: Vec::new(),
         broken: None,
         services: None,
@@ -1047,6 +1053,13 @@ impl Actor {
                 self.on_shutdown().await;
                 let _ = reply.send(());
             }
+            ActorRequest::Settle { reply } => {
+                if self.settling.is_none() {
+                    let _ = reply.send(());
+                } else {
+                    self.settle_waiters.push(reply);
+                }
+            }
             ActorRequest::Work { work } => {
                 self.on_work(work).await;
             }
@@ -1438,6 +1451,14 @@ impl Actor {
             TurnWork::Cancelled { turn, stop } => {
                 if self.settling == Some(turn) {
                     self.settling = None;
+                    // The last ended turn is confirmed: its turn-end hooks
+                    // have finished their journal writes, so a teardown that
+                    // parked on the settle barrier may run session-end hooks.
+                    // Waiters whose close timed out hold dead receivers and
+                    // drop out here.
+                    for waiter in std::mem::take(&mut self.settle_waiters) {
+                        let _ = waiter.send(());
+                    }
                 }
                 // Cancelled turns defer their `TurnEnded` to this driver
                 // confirmation — the kill ladder of an in-flight call has

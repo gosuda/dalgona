@@ -35,6 +35,11 @@ pub struct ModelOption {
     pub label: String,
     /// Typed host command submitted when the row is selected.
     pub command: Command,
+    /// Provider-qualified scope id (`{provider}/{route.id()}`) for `Api`
+    /// rows with a known provider; `None` for synthetic, harness, or
+    /// legacy rows the scope gate cannot match. Never derived from display
+    /// labels or family tables.
+    pub scoped_id: Option<Box<str>>,
 }
 
 /// Converts host model rows into typed route selections.
@@ -44,12 +49,20 @@ pub fn model_options(models: Vec<ModelInfo>) -> Vec<ModelOption> {
         .into_iter()
         .map(|model| {
             let label = format!("{} · {}", model.name, route_label(&model.route));
+            let scoped_id = match &model.route {
+                ModelRoute::Api { .. } if !model.provider.is_empty() => {
+                    Some(format!("{}/{}", model.provider, model.route.id()).into_boxed_str())
+                }
+                _ => None,
+            };
+            let command = Command::SetModel {
+                model: model.route,
+                save: dal_core::command::Save::SessionAndDefault,
+            };
             ModelOption {
                 label,
-                command: Command::SetModel {
-                    model: model.route,
-                    save: dal_core::command::Save::SessionAndDefault,
-                },
+                command,
+                scoped_id,
             }
         })
         .collect()
@@ -57,7 +70,7 @@ pub fn model_options(models: Vec<ModelInfo>) -> Vec<ModelOption> {
 
 pub(crate) fn route_label(route: &ModelRoute) -> String {
     match route {
-        ModelRoute::Api { family, model } => {
+        ModelRoute::Api { family, model, .. } => {
             let provider = match family {
                 Family::Chat => "openai-chat",
                 Family::Responses => "openai-responses",
@@ -118,9 +131,23 @@ pub(crate) enum PickerAction {
     ScopeModel(Box<str>),
     /// Load the row's stored text into the composer as the draft.
     SetDraft(Box<str>),
+    /// Resume the stored session. Handled by the runtime's resume-target path
+    /// through public host ownership, never by guessing.
+    ResumeSession(ResumeTarget),
     /// Activate nothing: the failed model picker keeps its instruction row
     /// selectable without running a command or dismissing the failure state.
     Noop,
+}
+
+/// A stored session the terminal can reopen: its identity and the workspace
+/// the host's listing reported for it, so the reopen resolves the session
+/// where it lives, not in the workspace of the session being left.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResumeTarget {
+    /// The session to reopen.
+    pub(crate) id: dal_core::SessionId,
+    /// The workspace the listing named for it.
+    pub(crate) workspace: dal_core::Workspace,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +174,11 @@ pub(crate) struct PickerUi {
     /// query never loses a check.
     multi: bool,
     checked: std::collections::BTreeSet<usize>,
+    /// The resume row whose delete the user armed with a first `d`. It lives
+    /// and dies with this picker: closing the picker, opening a new one, or
+    /// any move or filter edit drops it, so a delete is only ever confirmed
+    /// by a second `d` on the same row in the same, unchanged opening.
+    armed_delete: Option<dal_core::SessionId>,
 }
 
 impl PickerUi {
@@ -162,9 +194,37 @@ impl PickerUi {
             load_failed: false,
             multi: false,
             checked: std::collections::BTreeSet::new(),
+            armed_delete: None,
         };
         picker.refilter();
         picker
+    }
+
+    /// The resume row whose delete is armed, if any.
+    pub(crate) fn armed_delete(&self) -> Option<dal_core::SessionId> {
+        self.armed_delete
+    }
+
+    /// Arms the delete of one resume row; the next `d` on that same row
+    /// confirms it.
+    pub(crate) fn arm_delete(&mut self, id: dal_core::SessionId) {
+        self.armed_delete = Some(id);
+    }
+
+    /// Drops an armed delete: the confirmation is spent or abandoned.
+    pub(crate) fn disarm_delete(&mut self) {
+        self.armed_delete = None;
+    }
+
+    /// Removes the resume row of one session and drops any armed delete. Used
+    /// after a delete whose fresh listing could not be read, so the removed
+    /// session is never offered again while the rest of the picker stays.
+    pub(crate) fn remove_resume_row(&mut self, id: dal_core::SessionId) {
+        self.options.retain(|option| {
+            !matches!(&option.action, PickerAction::ResumeSession(target) if target.id == id)
+        });
+        self.armed_delete = None;
+        self.refilter();
     }
 
     /// Marks the picker multi-select: space toggles the focused row, Enter
@@ -213,6 +273,7 @@ impl PickerUi {
     }
 
     pub(crate) fn move_selection(&mut self, down: bool) {
+        self.armed_delete = None;
         let count = self.visible_len();
         if count == 0 {
             return;
@@ -225,11 +286,13 @@ impl PickerUi {
     }
 
     pub(crate) fn add_filter_char(&mut self, character: char) {
+        self.armed_delete = None;
         self.filter.push(character);
         self.refilter();
     }
 
     pub(crate) fn remove_filter_char(&mut self) {
+        self.armed_delete = None;
         crate::composer::pop_grapheme(&mut self.filter);
         self.refilter();
     }
@@ -239,6 +302,7 @@ impl PickerUi {
     /// sign-in input), refiltering once, and never activates a row or
     /// submits.
     pub(crate) fn paste(&mut self, text: &str) {
+        self.armed_delete = None;
         self.filter.extend(text.chars().filter(|c| !c.is_control()));
         self.refilter();
     }
@@ -252,9 +316,13 @@ impl PickerUi {
             }));
         }
         if self.multi {
-            // The checked set is the answer: Enter submits every checked
-            // row's scope id, and an empty set clears the scope.
-            let ids = self
+            // The checked rows are the whole answer. A committed id the model
+            // list no longer names is a row of its own (see
+            // `scoped_models_picker`), so unchecking it removes it and an
+            // untouched one is submitted unchanged. Nothing checked clears.
+            let mut seen = std::collections::BTreeSet::new();
+            let mut ids: Vec<Box<str>> = Vec::new();
+            for id in self
                 .checked
                 .iter()
                 .filter_map(|index| self.options.get(*index))
@@ -262,7 +330,12 @@ impl PickerUi {
                     PickerAction::ScopeModel(id) => Some(id.clone()),
                     _ => None,
                 })
-                .collect();
+            {
+                if seen.insert(id.to_string()) {
+                    ids.push(id);
+                }
+            }
+            ids.sort();
             return Some(PickerAction::Command(Command::SetScopedModels(ids)));
         }
         let index = *self.visible.get(self.selected)?;
@@ -328,6 +401,18 @@ impl PickerUi {
 
     pub(crate) fn is_selected(&self, index: usize) -> bool {
         self.selected == index
+    }
+
+    /// Focused visible position, for resume-picker delete needs.
+    pub(crate) fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    /// Whether this picker holds resume rows (delete armed only here).
+    pub(crate) fn is_resume_picker(&self) -> bool {
+        self.options
+            .iter()
+            .any(|option| matches!(option.action, PickerAction::ResumeSession(_)))
     }
 
     pub(crate) fn visible_len(&self) -> usize {
@@ -480,8 +565,11 @@ pub(crate) struct ScopedModelRow {
 }
 
 /// The `/scoped-models` picker: a multi-select over the model catalog
-/// whose checked rows submit as `SetScopedModels`. Rows in `active`
-/// arrive checked, so the picker opens on the current scope.
+/// whose checked rows submit as `SetScopedModels`. Every committed id in
+/// `active` arrives checked. One the catalog has no row for stays on screen
+/// as a selectable row of its own, after the catalog rows, labelled as not in
+/// the current model list: it keeps its scope until the user unchecks it, and
+/// unchecking every row submits the empty list that clears the scope.
 #[cfg_attr(
     not(test),
     expect(
@@ -496,7 +584,7 @@ pub(crate) fn scoped_models_picker(
     filter: &str,
 ) -> PickerUi {
     let mut checked = Vec::new();
-    let options = rows
+    let mut options = rows
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
@@ -508,10 +596,61 @@ pub(crate) fn scoped_models_picker(
                 action: PickerAction::ScopeModel(row.id),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let mut unavailable: Vec<&str> = Vec::new();
+    for id in active {
+        let id: &str = id;
+        let listed = options.iter().any(|option| match &option.action {
+            PickerAction::ScopeModel(row) => &**row == id,
+            _ => false,
+        });
+        if !listed && !unavailable.contains(&id) {
+            unavailable.push(id);
+        }
+    }
+    for id in unavailable {
+        checked.push(options.len());
+        options.push(PickerOption {
+            label: crate::copy::render(ids::SCOPED_UNAVAILABLE_ROW, &[("id", id)], 1),
+            action: PickerAction::ScopeModel(id.into()),
+        });
+    }
     let mut picker = PickerUi::new(ids::SCOPED_MODELS_TITLE, filter, options);
     picker.with_multi(checked);
     picker
+}
+
+/// One resume row: `target` resumes through public host ownership,
+/// `label` is the rendered `RESUME_ROW` text.
+pub(crate) struct SessionRow {
+    /// The session to resume and the workspace it lives in.
+    pub(crate) target: ResumeTarget,
+    /// Rendered row label.
+    pub(crate) label: String,
+}
+
+/// The `/resume` picker: every session is a row whose activation resumes
+/// that session through the runtime resume-target path. Filter narrows by
+/// label; `d` on this picker deletes with explicit confirmation.
+pub(crate) fn resume_picker(rows: Vec<SessionRow>, filter: &str) -> PickerUi {
+    let options = rows
+        .into_iter()
+        .map(|row| PickerOption {
+            label: row.label,
+            action: PickerAction::ResumeSession(row.target),
+        })
+        .collect();
+    PickerUi::new(ids::RESUME_TITLE, filter, options)
+}
+
+/// Returns the focused resume-picker session, when the picker holds a
+/// resume row under the cursor.
+pub(crate) fn focused_resume_session(picker: &PickerUi) -> Option<dal_core::SessionId> {
+    let option = picker.visible_option(picker.selected_index())?;
+    match &option.action {
+        PickerAction::ResumeSession(target) => Some(target.id),
+        _ => None,
+    }
 }
 
 /// The prompt-history picker: every past user message is a row whose
@@ -538,8 +677,7 @@ pub(crate) fn history_picker(entries: &[EntryView], filter: &str) -> PickerUi {
             }
             let preview = text.lines().next().unwrap_or("");
             Some(PickerOption {
-                label: crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow)
-                    .clone(),
+                label: crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow),
                 action: PickerAction::SetDraft(text.into()),
             })
         })
@@ -564,9 +702,18 @@ pub(crate) fn model_picker_failed(filter: &str) -> PickerUi {
     picker
 }
 
-/// Renders one resume row.
+/// Renders one resume row. `messages` is the count the host's listing
+/// reported; `None` means the host could not read the journal, which the row
+/// says outright instead of showing a count nobody measured.
 #[must_use]
-pub fn resume_row(name: &str, when: &str, messages: u64, dir: &str) -> String {
+pub fn resume_row(name: &str, when: &str, messages: Option<u64>, dir: &str) -> String {
+    let Some(messages) = messages else {
+        return crate::copy::render(
+            ids::RESUME_ROW_UNREADABLE,
+            &[("name", name), ("when", when), ("dir", dir)],
+            1,
+        );
+    };
     crate::copy::render(
         ids::RESUME_ROW,
         &[
@@ -619,7 +766,75 @@ mod tests {
         );
         assert_eq!(offer.notice(Some("luna_reserve")), None);
         assert_eq!(offer.notice(None), None);
-        assert!(resume_row("fix", "today", 1, "/w").contains("/w"));
+        assert!(resume_row("fix", "today", Some(1), "/w").contains("/w"));
+    }
+
+    /// A resume row prints the count the host's listing measured, and a row
+    /// whose journal could not be read says so instead of showing a zero.
+    #[test]
+    fn resume_rows_show_the_listed_count_or_say_it_is_unreadable() {
+        assert_eq!(
+            resume_row("fix", "today", Some(3), "/w"),
+            "fix · today · 3 messages · /w"
+        );
+        assert_eq!(
+            resume_row("fix", "today", Some(1), "/w"),
+            "fix · today · 1 message · /w"
+        );
+        assert_eq!(
+            resume_row("fix", "today", Some(0), "/w"),
+            "fix · today · 0 messages · /w",
+            "a measured zero is a real zero"
+        );
+        let unreadable = resume_row("fix", "today", None, "/w");
+        assert_eq!(unreadable, "fix · today · messages unreadable · /w");
+        assert!(!unreadable.contains("0 message"));
+    }
+
+    /// A committed scope id the model list does not name stays selected as a
+    /// visible row once, survives an untouched submit, and can be unchecked:
+    /// unchecking every row submits the empty list that clears the scope.
+    #[test]
+    fn a_committed_scope_id_missing_from_the_catalog_is_a_removable_row() {
+        use dal_core::Command;
+
+        use super::PickerAction;
+
+        let rows = vec![super::ScopedModelRow {
+            id: "openai/gpt-6".into(),
+            label: "GPT 6".into(),
+        }];
+        let active: Vec<Box<str>> = vec![
+            "openai/gpt-6".into(),
+            "anthropic/vanished".into(),
+            "anthropic/vanished".into(),
+        ];
+        let mut picker = super::scoped_models_picker(rows, &active, "");
+        assert_eq!(picker.visible_len(), 2, "the missing id is one row, once");
+        assert!(picker.is_checked(0) && picker.is_checked(1));
+        assert!(picker.visible_option(1).is_some_and(|option| {
+            option.label.contains("not in the current model list")
+                && option.label.contains("anthropic/vanished")
+        }));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(AsRef::as_ref).eq(["anthropic/vanished", "openai/gpt-6"])
+        ));
+        // Uncheck the listed row only: the missing id is still committed.
+        assert_eq!(picker.toggle_selected(), Some(false));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids)))
+                if ids.iter().map(AsRef::as_ref).eq(["anthropic/vanished"])
+        ));
+        // Uncheck the missing row too: the scope clears.
+        picker.move_selection(true);
+        assert_eq!(picker.toggle_selected(), Some(false));
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::SetScopedModels(ids))) if ids.is_empty()
+        ));
     }
 
     #[test]
@@ -727,11 +942,12 @@ mod picker_tests {
     }
 
     #[test]
-    fn host_model_choices_preserve_the_exact_api_family() {
-        let options = super::model_options(vec![dal_core::ModelInfo {
+    fn host_model_choices_preserve_the_exact_api_family_and_provider() {
+        let row = |provider: &str| dal_core::ModelInfo {
             route: dal_core::ModelRoute::Api {
                 family: dal_core::Family::Chat,
                 model: "gpt-4.1".into(),
+                provider: Some(provider.into()),
             },
             name: "GPT 4.1".into(),
             caps: dal_core::Caps {
@@ -741,18 +957,27 @@ mod picker_tests {
                 image_input: false,
                 custom_grammar: false,
             },
-        }]);
+            provider: provider.into(),
+        };
+        let options = super::model_options(vec![row("openai"), row("acme-proxy")]);
         assert!(options[0].label.contains("openai-chat/gpt-4.1"));
-        assert!(matches!(
-            &options[0].command,
-            Command::SetModel {
-                model: dal_core::ModelRoute::Api {
-                    family: dal_core::Family::Chat,
-                    ..
-                },
-                save: dal_core::command::Save::SessionAndDefault,
-            }
-        ));
+        assert_eq!(options[0].scoped_id.as_deref(), Some("openai/gpt-4.1"));
+        assert_eq!(options[1].scoped_id.as_deref(), Some("acme-proxy/gpt-4.1"));
+        // Two same-family providers list one native id: each row submits the
+        // route that names its own provider, never one shared route.
+        for (option, expected) in options.iter().zip(["openai", "acme-proxy"]) {
+            assert!(matches!(
+                &option.command,
+                Command::SetModel {
+                    model: dal_core::ModelRoute::Api {
+                        family: dal_core::Family::Chat,
+                        provider: Some(provider),
+                        ..
+                    },
+                    save: dal_core::command::Save::SessionAndDefault,
+                } if provider.as_ref() == expected
+            ));
+        }
     }
 
     #[test]
@@ -894,7 +1119,7 @@ mod picker_tests {
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(std::convert::AsRef::as_ref).eq(["openai/gpt-6"])
+                if ids.iter().map(AsRef::as_ref).eq(["openai/gpt-6"])
         ));
         // Checking nothing submits the empty scope, which clears it.
         picker.toggle_selected();
@@ -925,7 +1150,7 @@ mod picker_tests {
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids.iter().map(std::convert::AsRef::as_ref).eq(["openai/gpt-6"])
+                if ids.iter().map(AsRef::as_ref).eq(["openai/gpt-6"])
         ));
     }
 

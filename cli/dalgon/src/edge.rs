@@ -233,6 +233,10 @@ pub(crate) struct ShutdownSignals {
     interrupt: Option<tokio::signal::unix::Signal>,
     terminate: Option<tokio::signal::unix::Signal>,
     hangup: Option<tokio::signal::unix::Signal>,
+    /// Test-only queued statuses drained ahead of the OS subscriptions, so
+    /// signal delivery is deterministic without sending real signals.
+    #[cfg(test)]
+    queued: std::collections::VecDeque<u8>,
 }
 
 #[cfg(unix)]
@@ -243,12 +247,30 @@ impl ShutdownSignals {
             interrupt: register_signal(SignalKind::interrupt(), "SIGINT"),
             terminate: register_signal(SignalKind::terminate(), "SIGTERM"),
             hangup: register_signal(SignalKind::hangup(), "SIGHUP"),
+            #[cfg(test)]
+            queued: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Queues one shutdown status for tests: the next [`Self::next`] returns
+    /// it before any OS signal, reproducing a signal that arrived earlier.
+    /// The queue holds two pending statuses, one per recorded signal: a
+    /// further push replaces the oldest.
+    #[cfg(test)]
+    pub(crate) fn enqueue(&mut self, status: u8) {
+        if self.queued.len() >= 2 {
+            self.queued.pop_front();
+        }
+        self.queued.push_back(status);
     }
 
     /// Waits for the next shutdown signal and returns its `128 + signo`
     /// exit status.
     pub(crate) async fn next(&mut self) -> u8 {
+        #[cfg(test)]
+        if let Some(status) = self.queued.pop_front() {
+            return status;
+        }
         tokio::select! {
             biased;
             () = wait_for_signal(&mut self.interrupt) => 130,
@@ -266,6 +288,10 @@ impl ShutdownSignals {
 pub(crate) struct ShutdownSignals {
     interrupt: Option<tokio::signal::windows::CtrlC>,
     close: Option<tokio::signal::windows::CtrlClose>,
+    /// Test-only queued statuses drained ahead of the OS subscriptions, so
+    /// event delivery is deterministic without real console events.
+    #[cfg(test)]
+    queued: std::collections::VecDeque<u8>,
 }
 
 #[cfg(windows)]
@@ -274,12 +300,30 @@ impl ShutdownSignals {
         Self {
             interrupt: registered(tokio::signal::windows::ctrl_c(), "CTRL_C_EVENT"),
             close: registered(tokio::signal::windows::ctrl_close(), "CTRL_CLOSE_EVENT"),
+            #[cfg(test)]
+            queued: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Queues one shutdown status for tests: the next [`Self::next`] returns
+    /// it before any console event, reproducing an event that arrived
+    /// earlier. The queue holds two pending statuses, one per recorded
+    /// event: a further push replaces the oldest.
+    #[cfg(test)]
+    pub(crate) fn enqueue(&mut self, status: u8) {
+        if self.queued.len() >= 2 {
+            self.queued.pop_front();
+        }
+        self.queued.push_back(status);
     }
 
     /// Waits for the next shutdown event and returns its `128 + signo`
     /// exit status.
     pub(crate) async fn next(&mut self) -> u8 {
+        #[cfg(test)]
+        if let Some(status) = self.queued.pop_front() {
+            return status;
+        }
         tokio::select! {
             biased;
             () = wait_for_ctrl_c(&mut self.interrupt) => 130,

@@ -32,7 +32,7 @@ pub fn exec_reads_only(command: &str, _cwd: Option<&str>) -> bool {
         "fd" => guards::fd_ok(&mut tokens),
         "rg" => guards::rg_ok(&mut tokens),
         "tree" => guards::tree_ok(&mut tokens),
-        "file" => guards::file_ok(&mut tokens),
+        "file" => guards::no_writer_flag(&mut tokens, 'C', Some("compile")),
         _ => tokens.finish(),
     }
 }
@@ -513,6 +513,41 @@ mod guards {
         }
     }
 
+    /// `tree -o FILE` and `file -C` write files. Reject the writer's short
+    /// letter anywhere in a short-option cluster, any abbreviation of its long
+    /// name, an option whose leading dash is quoted, and expansions that could
+    /// produce an option.
+    pub(super) fn no_writer_flag(
+        tokens: &mut super::Tokens<'_>,
+        letter: char,
+        long: Option<&str>,
+    ) -> bool {
+        loop {
+            let argument = match tokens.next() {
+                Ok(Some(argument)) => argument,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            if super::has_shell_expansion_or_glob(argument) {
+                return false;
+            }
+            if !super::shell_word_starts_with(argument, "-") {
+                continue;
+            }
+            if !argument.starts_with('-') {
+                return false;
+            }
+            if let Some(name) = argument.strip_prefix("--") {
+                let name = name.split('=').next().unwrap_or_default();
+                if long.is_some_and(|long| !name.is_empty() && long.starts_with(name)) {
+                    return false;
+                }
+            } else if argument[1..].contains(letter) {
+                return false;
+            }
+        }
+    }
+
     /// Accepts `tree` argument lists that cannot write: rejects
     /// glob/expansion plus `-o`/`--output`, which names an output file
     /// (including clustered shorts such as `-Jo`). Other flags render to
@@ -528,27 +563,6 @@ mod guards {
                 || super::shell_word_starts_with(argument, "-o")
                 || super::shell_word_starts_with(argument, "--output")
                 || has_clustered_short(argument, b"o")
-            {
-                return false;
-            }
-        }
-    }
-
-    /// Accepts `file` argument lists that cannot write: rejects
-    /// glob/expansion plus `-C`/`--compile`, which writes the magic database
-    /// (including clustered shorts such as `-zC`). `-m` only selects a
-    /// database to read.
-    pub(super) fn file_ok(tokens: &mut super::Tokens<'_>) -> bool {
-        loop {
-            let argument = match tokens.next() {
-                Ok(Some(argument)) => argument,
-                Ok(None) => return true,
-                Err(_) => return false,
-            };
-            if super::has_shell_expansion_or_glob(argument)
-                || super::shell_word_eq(argument, "-C")
-                || super::shell_word_starts_with(argument, "--compile")
-                || has_clustered_short(argument, b"C")
             {
                 return false;
             }

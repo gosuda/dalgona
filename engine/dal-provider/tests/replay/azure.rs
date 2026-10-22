@@ -91,6 +91,7 @@ fn resolved(family: Family) -> ResolvedModel {
         route: ModelRoute::Api {
             family,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         entry: entry(),
     }
@@ -112,6 +113,7 @@ fn text_request(family: Family) -> ModelRequest {
         model: ModelRoute::Api {
             family,
             model: "gpt-6-astra".into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([read_tool()]),

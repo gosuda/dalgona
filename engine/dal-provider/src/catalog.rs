@@ -226,6 +226,15 @@ impl Catalog {
         &self.entries
     }
 
+    /// Returns the configured providers in catalog order.
+    ///
+    /// Each entry names its provider id and the API family it serves. A row
+    /// in [`Catalog::entries`] whose provider is absent here (a built-in row
+    /// for a provider the configuration does not list) cannot be resolved.
+    pub fn providers(&self) -> impl Iterator<Item = &ProviderEntry> + '_ {
+        self.providers.iter().map(|(provider, _)| provider)
+    }
+
     fn source_for(&self, provider: &str) -> CatalogSource {
         self.providers
             .iter()

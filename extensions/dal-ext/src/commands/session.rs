@@ -201,21 +201,17 @@ pub(super) async fn name(cx: &CommandCx<'_>, raw: &str) -> Result<Reply, ErrorTr
     let saved = match cx.submit_wait(Command::Rename(word.into())).await {
         Ok(()) => None,
         Err(SaveError::Rejected { message }) => {
-            let known = cx.view().settings.name.as_deref();
-            let line = match known {
-                Some(name) => {
-                    format!("Session name: {name}. Not changed to {word}: {message}.")
-                }
+            let view = cx.view();
+            let line = match view.settings.name.as_deref() {
+                Some(name) => format!("Session name: {name}. Not changed to {word}: {message}."),
                 None => format!("Session name not changed to {word}: {message}."),
             };
             return Ok(Reply::Done(Output::Text(line.into())));
         }
         Err(SaveError::SessionClosed { id }) => {
-            let known = cx.view().settings.name.as_deref();
-            let line = match known {
-                Some(name) => {
-                    format!("Session name: {name}. Not changed: session {id} is closed.")
-                }
+            let view = cx.view();
+            let line = match view.settings.name.as_deref() {
+                Some(name) => format!("Session name: {name}. Not changed: session {id} is closed."),
                 None => format!("Session name not changed: session {id} is closed."),
             };
             return Ok(Reply::Done(Output::Text(line.into())));
@@ -223,6 +219,8 @@ pub(super) async fn name(cx: &CommandCx<'_>, raw: &str) -> Result<Reply, ErrorTr
         Err(SaveError::Failed { message }) => Some(message.to_string()),
         Err(_) => Some("the save failed".to_owned()),
     };
+    // The resume hint names the session by a name that only a persisted
+    // rename makes resolvable, so a failed save reports the reason instead.
     let line = match saved {
         None => format!("Session name: {word}. Resume it with dalgon -r {token}."),
         Some(reason) => format!("Session name: {word}. It did not persist: {reason}."),

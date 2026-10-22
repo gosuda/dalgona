@@ -352,7 +352,7 @@ pub(crate) fn request_body(
 ) -> Result<Vec<u8>, BedrockBodyError> {
     let ModelRoute::Api {
         family: Family::Bedrock,
-        model: _,
+        ..
     } = &request.model
     else {
         return Err(BedrockBodyError::NotBedrock {

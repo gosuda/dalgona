@@ -537,6 +537,22 @@ async fn the_prompt_policy_survives_a_reopen() {
 }
 
 #[tokio::test]
+async fn the_role_policy_survives_a_reopen() {
+    let mut rig = rig_with_extension_section().await;
+    rig.run("spawn_role").await;
+    let child = rig.child();
+    rig.settled(child, 1).await;
+    rig.restart(child).await;
+    rig.prompt_child(child).await;
+    rig.settled(child, 2).await;
+    assert_eq!(
+        rig.probe.requests()[1].system,
+        format!("{EXTENSION_SECTION}\n\n{ROLE_TEXT}"),
+        "the replayed child policy restores the role preset after a reopen"
+    );
+}
+
+#[tokio::test]
 async fn a_start_cannot_combine_role_and_system() {
     let rig = rig().await;
     let error = tokio::time::timeout(

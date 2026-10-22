@@ -303,6 +303,7 @@ impl ModelHandler for GateModel {
             request.model = ModelRoute::Api {
                 family: Family::Cursor,
                 model: MODEL.into(),
+                provider: None,
             };
             let effect = Arc::clone(&self.effect);
             let private = [PrivateTool(effect)];

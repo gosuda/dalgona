@@ -170,6 +170,63 @@ fn more_than_sixty_four_files_are_refused() {
 }
 
 #[test]
+fn case_repeats_accept_one_through_ten_and_refuse_either_side() {
+    let case = |fields: &str| {
+        format!(
+            "def c(r, w):\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c{fields})])\n"
+        )
+    };
+    for repeats in [1, 2, 9, 10] {
+        assert_eq!(
+            error_text(&case(&format!(", repeats = {repeats}"))),
+            "loaded",
+            "repeats = {repeats}"
+        );
+    }
+    for repeats in ["-1", "0", "11", "100"] {
+        assert_eq!(
+            error_text(&case(&format!(", repeats = {repeats}"))),
+            "case \"a\": repeats must be an integer from 1 to 10.",
+            "repeats = {repeats}"
+        );
+    }
+}
+
+#[test]
+fn a_case_holds_64_files_and_refuses_65() {
+    let case = |count: usize| {
+        format!(
+            "def c(r, w):\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c, files = {{str(i): \"x\" for i in range({count})}})])\n"
+        )
+    };
+    for count in [1, 63, 64] {
+        assert_eq!(error_text(&case(count)), "loaded", "{count} files");
+    }
+    assert_eq!(
+        error_text(&case(65)),
+        "case \"a\": files has more than 64 entries."
+    );
+}
+
+#[test]
+fn a_case_file_holds_65536_bytes_and_refuses_65537() {
+    let case = |fields: &str| {
+        format!(
+            "def c(r, w):\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c{fields})])\n"
+        )
+    };
+    assert_eq!(
+        error_text(&case(", files = {\"f\": \"x\" * 65536}")),
+        "loaded",
+        "a file of exactly 65536 bytes"
+    );
+    assert_eq!(
+        error_text(&case(", files = {\"f\": \"x\" * 65537}")),
+        "case \"a\": file \"f\" is larger than 65536 bytes."
+    );
+}
+
+#[test]
 fn a_duplicate_case_id_is_a_load_error() {
     let source = "def c(r, w):\n    return True\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c), evalpack.case(id = \"a\", prompt = \"y\", check = c)])\n";
     assert_eq!(error_text(source), "case \"a\": duplicate id.");

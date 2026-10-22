@@ -414,6 +414,7 @@ async fn bearer_env_short_circuits_the_chain() {
     match auth {
         BedrockAuth::Bearer(token) => assert_eq!(token.expose(), "CANARY-bearer-token-0004"),
         BedrockAuth::SigV4(_) => panic!("bearer must bypass SigV4"),
+        BedrockAuth::None => panic!("a bearer source must never resolve unsigned"),
     }
 }
 
@@ -462,6 +463,37 @@ async fn empty_bearer_env_counts_as_unset() {
         .await
         .expect_err("no source");
     assert!(matches!(error, ProviderError::NoCredentials { .. }));
+}
+
+#[tokio::test]
+async fn auth_none_entry_resolves_no_credential_source() {
+    let dir = TestDir::new("auth-none");
+    let env = snapshot(
+        &dir,
+        &[("AWS_BEARER_TOKEN_BEDROCK", "CANARY-env-bearer-0007")],
+    );
+    let resolver_instance = resolver(env, dir.path());
+    let auth_path = dir.path().join("auth.json");
+    crate::store_api_key(auth_path, "openai", String::from("CANARY-stored-key-0008"))
+        .await
+        .expect("store");
+    let store = AuthStore::load(dir.path().join("auth.json")).expect("load");
+    let mut none_entry = entry("openai");
+    none_entry.auth = AuthStyle::None;
+    let auth = resolver_instance
+        .resolve_bedrock_auth(
+            &none_entry,
+            &store,
+            &options(None, "us-east-1"),
+            &cancel(),
+            deadline(),
+        )
+        .await
+        .expect("auth none resolves unsigned without reading any source");
+    assert!(
+        matches!(auth, BedrockAuth::None),
+        "auth=none must short-circuit before bearer and chain: {auth:?}"
+    );
 }
 
 // ---------- chain precedence and profiles ----------
@@ -1526,6 +1558,75 @@ fn endpoint_admission_cases() {
     assert!(metadata::ecs_full_endpoint("ftp://example.com/v1").is_err());
     let endpoint = metadata::ecs_relative_endpoint("/v2/credentials/abc").expect("base");
     assert_eq!(endpoint.host_str(), Some("169.254.170.2"));
+}
+
+#[test]
+fn container_full_uri_refuses_dns_names_that_only_start_like_a_local_address() {
+    // Four dot-separated labels whose first two are digits are a DNS name,
+    // not an IPv4 literal, when the last two are words. A remote attacker
+    // controls such a name, so plain HTTP to it would carry the container
+    // authorization token off the machine.
+    for url in [
+        "http://127.0.evil.example/creds",
+        "http://10.0.evil.example/creds",
+        "http://169.254.evil.example/creds",
+        "http://192.168.evil.example/creds",
+        "http://172.16.evil.example/creds",
+        "http://0.0.evil.example/creds",
+        // Single-label names that merely spell an IPv6 prefix.
+        "http://fe80/creds",
+        "http://fd12/creds",
+    ] {
+        let error = metadata::ecs_full_endpoint(url).expect_err(url);
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{url}: {error:?}"
+        );
+    }
+    for host in ["10.0.evil.example", "169.254.evil.example", "fe80", "fd12"] {
+        assert!(!metadata::is_local_or_metadata_host(host), "{host}");
+    }
+}
+
+#[test]
+fn container_full_uri_admits_plain_http_by_resolved_host_not_by_text() {
+    // Every URL below names a local address somewhere in its text, yet the
+    // host the URL parser resolves is remote or outside the local ranges, so
+    // the container authorization token must never be sent there.
+    for url in [
+        "http://127.0.0.1.evil.example/creds",
+        "http://localhost.evil.example/creds",
+        "http://127.0.0.1@evil.example/creds",
+        "http://localhost:80@evil.example/creds",
+        "http://evil.example/?127.0.0.1",
+        "http://evil.example/#localhost",
+        "http://evil.example\\@127.0.0.1/creds",
+        "http://169.254.170.2.evil.example/creds",
+        "http://evil.example:80/127.0.0.1",
+        "http://[2001:db8::1]/creds",
+        "http://[fb00::1]/creds",
+        "http://[fec0::1]/creds",
+    ] {
+        let error = metadata::ecs_full_endpoint(url).expect_err(url);
+        assert!(
+            matches!(error, ProviderError::InvalidRequest { .. }),
+            "{url}: {error:?}"
+        );
+    }
+    // The admitted side of the same boundary, including both edges of the
+    // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) ranges.
+    for (url, host) in [
+        ("http://[fc00::1]/c", "[fc00::1]"),
+        ("http://[fdff::1]/c", "[fdff::1]"),
+        ("http://[fe80::1]/c", "[fe80::1]"),
+        ("http://[febf::1]/c", "[febf::1]"),
+        ("http://[::1]:9/c", "[::1]"),
+        ("http://LOCALHOST/c", "localhost"),
+        ("http://169.254.170.23/c", "169.254.170.23"),
+    ] {
+        let endpoint = metadata::ecs_full_endpoint(url).expect(url);
+        assert_eq!(endpoint.host_str(), Some(host), "{url}");
+    }
 }
 
 #[tokio::test]

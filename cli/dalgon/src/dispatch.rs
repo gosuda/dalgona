@@ -54,13 +54,17 @@ pub(crate) use models::run as models;
 /// second signal arrives while draining. Dropping the future closes the
 /// listener without waiting out the grace period. `future` must not own the
 /// host close: that step runs after this returns, inside the ladder, and is
-/// never abandoned.
-pub(crate) async fn drive<Fut>(stop: &CancellationToken, future: Fut) -> Result<Fut::Output, u8>
+/// never abandoned. The caller keeps the subscription alive across the close
+/// phase, so a second signal during it is still observed.
+pub(crate) async fn drive<Fut>(
+    stop: &CancellationToken,
+    signals: &mut edge::ShutdownSignals,
+    future: Fut,
+) -> Result<Fut::Output, u8>
 where
     Fut: Future,
 {
     tokio::pin!(future);
-    let mut signals = edge::ShutdownSignals::register();
     let mut signalled = false;
     loop {
         tokio::select! {
@@ -177,38 +181,29 @@ pub(crate) async fn serve(
         Err(error) => return host_exit(&error, &data_root),
     };
     let stop = CancellationToken::new();
+    let mut signals = edge::ShutdownSignals::register();
     let snapshot = edge::terminal_snapshot();
     let closing = host.clone();
     // The stream locks live only as long as the server: the host close that
     // follows must not hold up other threads that write diagnostics.
-    let outcome = {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        drive(
-            &stop,
-            serve::run(
-                serve::ServeRun {
-                    host,
-                    args: serve_args,
-                    config: serve_config,
-                    data_root,
-                    stop: stop.clone(),
-                },
-                &mut out,
-                &mut err,
-                snapshot.stderr_tty,
-                snapshot.stdout_tty,
-            ),
-        )
-        .await
+    let run = serve::ServeRun {
+        host,
+        args: serve_args,
+        config: serve_config,
+        data_root,
+        stop: stop.clone(),
+    };
+    let ladder = exit::Ladder::begin();
+    let outcome = run_server(&stop, &mut signals, run, &snapshot).await;
+    let closed = if outcome.is_err() {
+        ladder.close_host_after_quiet_wait(closing).await
+    } else {
+        ladder.close_host(closing, &mut signals).await
     };
     let result = match outcome {
         Ok(result) => result,
         Err(code) => return ExitCode::from(code),
     };
-    let closed = exit::Ladder::begin().close_host(closing).await;
     if let Some(code) = closed.skipped_by {
         return ExitCode::from(code);
     }
@@ -216,6 +211,32 @@ pub(crate) async fn serve(
         Ok(code) => code,
         Err(error) => serve_error(error),
     }
+}
+/// Runs the server under [`drive`]. The stream locks live only as long as the
+/// server: the host close that follows must not hold up other threads that
+/// write diagnostics.
+async fn run_server(
+    stop: &CancellationToken,
+    signals: &mut edge::ShutdownSignals,
+    run: serve::ServeRun,
+    snapshot: &edge::TerminalSnapshot,
+) -> Result<Result<ExitCode, serve::ServeCommandError>, u8> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let stderr = std::io::stderr();
+    let mut err = stderr.lock();
+    drive(
+        stop,
+        signals,
+        serve::run(
+            run,
+            &mut out,
+            &mut err,
+            snapshot.stderr_tty,
+            snapshot.stdout_tty,
+        ),
+    )
+    .await
 }
 
 /// Writes the unconfigured-plugin diagnostic for `name`.

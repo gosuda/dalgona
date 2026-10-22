@@ -850,6 +850,7 @@ fn modelinfo(image_input: bool) -> ModelInfo {
             id: "p/model".into(),
         },
         name: "p/model".into(),
+        provider: "".into(),
         caps: Caps {
             context_window: None,
             thinking: Box::new([ThinkingLevel::Off]),

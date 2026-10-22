@@ -201,8 +201,10 @@ fn model_info_context_window_roundtrips_unknown_zero_and_known() -> TestResult {
         route: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         name: "GPT-5".into(),
+        provider: "".into(),
         caps: Caps {
             context_window,
             thinking: Vec::new().into_boxed_slice(),
@@ -257,6 +259,7 @@ fn routes_validate_id_grammars_and_wire_names() -> TestResult {
     let api = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-5".into(),
+        provider: None,
     };
     assert_eq!(api.id(), "gpt-5");
     assert_eq!(
@@ -267,6 +270,22 @@ fn routes_validate_id_grammars_and_wire_names() -> TestResult {
         sonic_rs::from_str::<ModelRoute>(&sonic_rs::to_string(&api)?)?,
         api
     );
+    let scoped = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("acme-proxy".into()),
+    };
+    assert_eq!(scoped.provider(), Some("acme-proxy"));
+    assert_eq!(api.provider(), None);
+    assert_eq!(
+        sonic_rs::to_string(&scoped)?,
+        r#"{"kind":"api","family":"openai_chat","model":"gpt-5","provider":"acme-proxy"}"#
+    );
+    assert_eq!(
+        sonic_rs::from_str::<ModelRoute>(&sonic_rs::to_string(&scoped)?)?,
+        scoped
+    );
+    assert_ne!(api, scoped);
     Ok(())
 }
 
@@ -617,5 +636,91 @@ fn message_replay_keeps_its_nested_status_discriminant() -> TestResult {
             "accepted {text}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn same_model_treats_a_missing_provider_as_no_disagreement() -> TestResult {
+    let bare = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: None,
+    };
+    let scoped = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("acme".into()),
+    };
+    let other = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-5".into(),
+        provider: Some("other".into()),
+    };
+    assert!(bare.same_model(&scoped));
+    assert!(scoped.same_model(&bare));
+    assert!(scoped.same_model(&scoped.clone()));
+    assert!(!scoped.same_model(&other));
+    assert!(!other.same_model(&scoped));
+    assert!(
+        !bare.same_model(&ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-5".into(),
+            provider: None,
+        }),
+        "a different family names a different model"
+    );
+    assert!(
+        !bare.same_model(&ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-6".into(),
+            provider: None,
+        }),
+        "a different native id names a different model"
+    );
+    let synthetic = ModelRoute::synthetic("a/b")?;
+    assert!(synthetic.same_model(&ModelRoute::synthetic("a/b")?));
+    assert!(!synthetic.same_model(&ModelRoute::synthetic("a/c")?));
+    let harness = ModelRoute::harness("dalgon/normal")?;
+    assert!(harness.same_model(&ModelRoute::harness("dalgon/normal")?));
+    assert!(!harness.same_model(&ModelRoute::harness("dalgon/eval-only")?));
+    assert!(!synthetic.same_model(&harness));
+    assert!(!bare.same_model(&synthetic));
+    Ok(())
+}
+
+#[test]
+fn api_route_json_rejects_an_empty_provider() -> TestResult {
+    let bare: ModelRoute =
+        sonic_rs::from_str(r#"{"kind":"api","family":"openai_chat","model":"m"}"#)?;
+    assert_eq!(bare.provider(), None);
+    let error = sonic_rs::from_str::<ModelRoute>(
+        r#"{"kind":"api","family":"openai_chat","model":"m","provider":""}"#,
+    )
+    .expect_err("an empty provider must not decode");
+    assert!(
+        error
+            .to_string()
+            .contains("model route `provider` must not be empty"),
+        "wrong error: {error}"
+    );
+    assert!(
+        sonic_rs::from_str::<ModelRoute>(
+            r#"{"kind":"api","family":"openai_chat","model":"m","provider":7}"#
+        )
+        .is_err(),
+        "a non-string provider must not decode"
+    );
+    assert!(
+        sonic_rs::from_str::<ModelRoute>(
+            r#"{"kind":"api","family":"openai_chat","model":"m","provider":null}"#
+        )
+        .is_err(),
+        "null is malformed, not an absent provider"
+    );
+    let scoped: ModelRoute = sonic_rs::from_str(
+        r#"{"kind":"api","family":"openai_chat","model":"m","provider":"acme"}"#,
+    )?;
+    assert_eq!(scoped.provider(), Some("acme"));
+    assert_ne!(bare, scoped);
     Ok(())
 }

@@ -371,8 +371,10 @@ async fn run_headless(
     };
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
+    let mut signals = edge::ShutdownSignals::register();
     let outcome = match dispatch::drive(
         &stop,
+        &mut signals,
         print::run_print(agent, options, &mut stdout, &mut stderr),
     )
     .await
@@ -388,7 +390,7 @@ async fn run_headless(
     let closed = if quiet_waited {
         ladder.close_host_after_quiet_wait(host).await
     } else {
-        ladder.close_host(host).await
+        ladder.close_host(host, &mut signals).await
     };
     if let Some(code) = closed.skipped_by {
         return ExitCode::from(code);
@@ -1037,12 +1039,15 @@ mod config_exit_tests {
     use dal_core::{ConfigError, ConfigProduct};
     use std::path::Path;
 
+    /// Loads a one-key user config that must fail.
+    fn load_error(user_toml: &str) -> ConfigError {
+        dal_core::Config::load(ConfigProduct::Dalgon, Path::new("/t"), "", Some(user_toml))
+            .unwrap_err()
+    }
+
     /// Loads a one-key user config and renders its failure lines.
     fn lines_for(user_toml: &str) -> [String; 2] {
-        let error =
-            dal_core::Config::load(ConfigProduct::Dalgon, Path::new("/t"), "", Some(user_toml))
-                .unwrap_err();
-        config_error_lines(&error, "dalgon")
+        config_error_lines(&load_error(user_toml), "dalgon")
     }
 
     #[test]
@@ -1162,6 +1167,30 @@ mod config_exit_tests {
             "{}",
             lines[1]
         );
+    }
+
+    /// An invalid `[rules]` value renders as exactly two lines: the key and
+    /// the value in TOML form, then the fix. A string keeps its quotes, so a
+    /// quoted number is not reported as if the number itself were out of
+    /// range, and a number stays bare. It never falls back to the generic
+    /// text and hint.
+    #[test]
+    fn rules_values_keep_their_rules_lines() {
+        for (body, first, second) in [
+            (
+                "max_retries = \"3\"",
+                "dalgon: dal.toml: rules.max_retries \"3\" is invalid",
+                "Use a whole number from 0 to 20.",
+            ),
+            (
+                "max_retries = 50",
+                "dalgon: dal.toml: rules.max_retries 50 is invalid",
+                "Use a whole number from 0 to 20.",
+            ),
+        ] {
+            let lines = lines_for(&format!("[rules]\n{body}\n"));
+            assert_eq!(lines, [first.to_owned(), second.to_owned()], "{body}");
+        }
     }
 
     #[test]

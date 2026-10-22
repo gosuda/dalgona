@@ -845,13 +845,14 @@ impl Services for SessionServices {
         let client = self.mcp_client.clone();
         Box::pin(async move {
             Self::check_inject(&who, Service::Mcp)?;
+            let cancel = self.call_cancel(&who)?;
             self.gated(&who, Service::Mcp).await?;
             let Some(client) = client else {
                 return Err(ServiceError::Denied(DenyReason::Unavailable {
                     what: "MCP client".into(),
                 }));
             };
-            client.call(&who, req).await
+            client.call(&who, req, cancel).await
         })
     }
 

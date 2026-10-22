@@ -26,6 +26,11 @@ struct PasteBuffer {
 pub struct KeyDecoder {
     bytes: Vec<u8>,
     paste: Option<PasteBuffer>,
+    /// When the incomplete escape prefix at the head of `bytes` first
+    /// arrived. It is `Some` only while such a prefix is waiting: every
+    /// escape-path consumption of head bytes goes through `consume`, which
+    /// drops it, and an empty buffer never arms it, so a consumed marker or
+    /// an idle decoder cannot leave a clock running for the next Esc.
     escape_started: Option<Instant>,
 }
 
@@ -54,8 +59,11 @@ impl KeyDecoder {
             if self.paste.is_some() {
                 break;
             }
+            if self.bytes.is_empty() {
+                break;
+            }
             if self.bytes.starts_with(b"\x1b[200~") {
-                self.bytes.drain(..6);
+                self.consume(6);
                 self.paste = Some(PasteBuffer {
                     bytes: Vec::new(),
                     started: now,
@@ -69,16 +77,13 @@ impl KeyDecoder {
                 }
             }
             if self.bytes.starts_with(b"\x1b[201~") {
-                self.bytes.drain(..6);
+                self.consume(6);
                 continue;
             }
             if self.bytes.first() == Some(&0x1b) {
                 if self.decode_escape(now, &mut events) {
                     continue;
                 }
-                break;
-            }
-            if self.bytes.is_empty() {
                 break;
             }
             if self.decode_utf8(&mut events) {
@@ -115,18 +120,25 @@ impl KeyDecoder {
         false
     }
 
+    /// Drops `count` bytes from the head of the buffer. The escape window
+    /// belongs to the incomplete prefix being waited on, so consuming the
+    /// head ends it; whatever follows starts its own window when it is next
+    /// seen.
+    fn consume(&mut self, count: usize) {
+        self.bytes.drain(..count);
+        self.escape_started = None;
+    }
+
     fn decode_escape(&mut self, now: Instant, events: &mut Vec<InputEvent>) -> bool {
         let started = *self.escape_started.get_or_insert(now);
         match parse_escape(&self.bytes) {
             EscapeParse::Key(key, consumed) => {
-                self.bytes.drain(..consumed);
-                self.escape_started = None;
+                self.consume(consumed);
                 events.push(InputEvent::Key(key));
                 true
             }
             EscapeParse::Consumed(consumed) => {
-                self.bytes.drain(..consumed);
-                self.escape_started = None;
+                self.consume(consumed);
                 true
             }
             EscapeParse::Partial
@@ -136,8 +148,7 @@ impl KeyDecoder {
                 // the remaining bytes re-parse on their own (this also
                 // splits a fragmented `\x1b\x1b` meta prefix into two Esc
                 // presses once the tail never completes the sequence).
-                self.bytes.remove(0);
-                self.escape_started = None;
+                self.consume(1);
                 events.push(InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE)));
                 true
             }
@@ -504,16 +515,118 @@ mod tests {
                 KeyModifiers::ALT.union(KeyModifiers::CONTROL)
             )
         );
+        // A pair of Esc bytes cannot be told from a meta prefix until the
+        // next byte or the timeout, so the decoder holds it instead of
+        // emitting an Esc early: fed to a fresh decoder, a chord split at
+        // any read boundary still decodes whole.
+        for wire in [&b"\x1b\x1b[D"[..], b"\x1b\x1bOA", b"\x1b\x1b[98;5u"] {
+            let whole = decoded(wire);
+            for split in 1..wire.len() {
+                let mut decoder = KeyDecoder::default();
+                let mut events = decoder.feed(&wire[..split], start);
+                events.extend(decoder.feed(&wire[split..], start));
+                assert_eq!(
+                    events,
+                    [InputEvent::Key(whole)],
+                    "{wire:?} split at {split}"
+                );
+            }
+        }
+        // With nothing behind it the pair is two real Esc presses, resolved
+        // only once the ambiguity window closes.
+        let esc = || InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE));
         let mut double = KeyDecoder::default();
         assert_eq!(double.feed(b"\x1b\x1b", start), []);
         assert_eq!(
-            double.tick(start + Duration::from_millis(50)),
-            [InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE))]
+            double.tick(start + Duration::from_millis(49)),
+            [],
+            "the pair stays ambiguous inside the fifty millisecond window"
         );
+        let mut settled = double.tick(start + Duration::from_millis(50));
+        settled.extend(double.tick(start + Duration::from_millis(100)));
+        assert_eq!(settled, [esc(), esc()]);
+        assert_eq!(double.tick(start + Duration::from_millis(150)), []);
+    }
+
+    #[test]
+    fn escape_window_opens_when_the_esc_arrives_not_when_the_decoder_idles() {
+        let start = Instant::now();
+        let key = |code, modifiers| InputEvent::Key(Key::new(code, modifiers));
+        let mut decoder = KeyDecoder::default();
+        // The runtime ticks on every idle read, and a decoded key leaves an
+        // empty buffer behind; neither may start the clock of an Esc that
+        // has not arrived yet.
+        assert_eq!(decoder.tick(start), []);
         assert_eq!(
-            double.tick(start + Duration::from_millis(100)),
-            [InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE))]
+            decoder.feed(b"a", start),
+            [key(KeyCode::Char('a'), KeyModifiers::NONE)]
         );
+        let press = start + Duration::from_secs(1);
+        assert_eq!(decoder.feed(b"\x1b", press), []);
+        assert_eq!(
+            decoder.feed(b"[D", press + Duration::from_millis(10)),
+            [key(KeyCode::Left, KeyModifiers::NONE)]
+        );
+        // A meta prefix split across reads after more idle time still joins.
+        assert_eq!(decoder.tick(press + Duration::from_secs(1)), []);
+        let chord = press + Duration::from_secs(2);
+        assert_eq!(decoder.feed(b"\x1b\x1b", chord), []);
+        assert_eq!(
+            decoder.feed(b"[D", chord + Duration::from_millis(10)),
+            [key(KeyCode::Left, KeyModifiers::ALT)]
+        );
+        // After the idle gap a lone Esc still resolves exactly when its own
+        // fifty millisecond window closes.
+        let lone = chord + Duration::from_secs(1);
+        assert_eq!(decoder.tick(lone), []);
+        assert_eq!(decoder.feed(b"\x1b", lone), []);
+        assert_eq!(decoder.tick(lone + Duration::from_millis(49)), []);
+        assert_eq!(
+            decoder.tick(lone + Duration::from_millis(50)),
+            [key(KeyCode::Esc, KeyModifiers::NONE)]
+        );
+    }
+
+    #[test]
+    fn consumed_paste_markers_leave_no_escape_window_behind() {
+        let start = Instant::now();
+        let key = |code| InputEvent::Key(Key::new(code, KeyModifiers::NONE));
+        // A paste marker split across reads arms the window while it is
+        // incomplete. Once the rest arrives and the marker is consumed, an
+        // Esc behind it is a new fragment with a window of its own.
+        let armed_then_consumed = |tail: &[u8]| {
+            let mut decoder = KeyDecoder::default();
+            assert_eq!(decoder.feed(b"\x1b[20", start), []);
+            let events = decoder.feed(tail, start + Duration::from_millis(40));
+            (decoder, events)
+        };
+        let paste = vec![InputEvent::Paste(b"hi".to_vec())];
+        let cases = [
+            // The start marker is consumed, the paste closes, an Esc trails.
+            (&b"0~hi\x1b[201~\x1b"[..], paste),
+            // The marker turns out to be a stray paste end.
+            (&b"1~\x1b"[..], vec![]),
+        ];
+        for (tail, expected) in cases {
+            let (mut decoder, events) = armed_then_consumed(tail);
+            assert_eq!(events, expected, "{tail:?}");
+            assert_eq!(
+                decoder.tick(start + Duration::from_millis(60)),
+                [],
+                "the trailing Esc is twenty milliseconds old: {tail:?}"
+            );
+            assert_eq!(
+                decoder.tick(start + Duration::from_millis(90)),
+                [key(KeyCode::Esc)],
+                "its own window closes fifty milliseconds after it arrived: {tail:?}"
+            );
+            let (mut decoder, _) = armed_then_consumed(tail);
+            assert_eq!(
+                decoder.feed(b"[D", start + Duration::from_millis(70)),
+                [key(KeyCode::Left)],
+                "{tail:?}"
+            );
+        }
     }
 
     #[test]

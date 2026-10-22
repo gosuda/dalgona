@@ -170,6 +170,7 @@ pub(crate) async fn stream_attempt(
         context.request.model = ModelRoute::Api {
             family: Family::Chat,
             model: context.model.clone(),
+            provider: context.request.model.provider().map(Box::from),
         };
     }
     if is_copilot_entry(&slot.entry) {
@@ -376,17 +377,30 @@ async fn bedrock_try(
     )))
 }
 
-/// Builds the Converse `RequestBuilder` for one resolved auth: a bearer token
-/// rides `Authorization: Bearer` with no signing, and `SigV4` signs through
-/// the family's narrow signer seam. The second member is the redaction list
-/// of the credential material the request carries; every response and stream
-/// error of the attempt passes through it.
+/// Builds the Converse `RequestBuilder` for one resolved auth: an
+/// `auth = "none"` entry sends no auth header and no signature, a bearer
+/// token rides `Authorization: Bearer` with no signing, and `SigV4` signs
+/// through the family's narrow signer seam. The second member is the
+/// redaction list of the credential material the request carries; every
+/// response and stream error of the attempt passes through it.
 fn bedrock_request(
     context: &StreamContext,
     auth: &BedrockAuth,
     region: &str,
 ) -> Result<(reqwest::RequestBuilder, Vec<Box<str>>), ProviderError> {
     match auth {
+        BedrockAuth::None => {
+            let path = bedrock::request_path(&context.model);
+            let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
+            let body = bedrock::request_body(&context.request, &context.thinking)
+                .map_err(bedrock_body_error)?;
+            let builder = context
+                .client
+                .post(url)
+                .header("content-type", "application/json")
+                .header("accept", BEDROCK_EVENTSTREAM_ACCEPT);
+            Ok((builder.body(body), Vec::new()))
+        }
         BedrockAuth::Bearer(token) => {
             let path = bedrock::request_path(&context.model);
             let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
@@ -2443,12 +2457,20 @@ pub(crate) fn compact_stream_context(context: &CompactContext) -> StreamContext 
 }
 
 pub(crate) fn ensure_request(http: &Http, request: &ModelRequest) -> Result<(), ProviderError> {
-    let ModelRoute::Api { family, model } = &request.model else {
+    let ModelRoute::Api {
+        family,
+        model,
+        provider,
+    } = &request.model
+    else {
         return Err(ProviderError::InvalidRequest {
             message: String::from("an HTTP provider needs a concrete API model route"),
         });
     };
-    if *family != http.entry.family || model.as_ref() != http.model() {
+    let other_provider = provider
+        .as_deref()
+        .is_some_and(|named| named != http.entry.id.as_ref());
+    if *family != http.entry.family || model.as_ref() != http.model() || other_provider {
         return Err(ProviderError::InvalidRequest {
             message: String::from("request model does not match the bound provider route"),
         });
@@ -2651,8 +2673,10 @@ pub(crate) fn model_info(
         route: ModelRoute::Api {
             family,
             model: entry.id.clone(),
+            provider: (!entry.provider.is_empty()).then(|| entry.provider.clone()),
         },
         name: format!("{} · {}/{}", entry.display, entry.provider, entry.id).into_boxed_str(),
+        provider: entry.provider.clone(),
         caps: Caps {
             context_window: entry.context_window,
             thinking: thinking::levels_for(&entry.thinking),

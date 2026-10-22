@@ -122,6 +122,12 @@ async fn spawn_approved(
 // rely on Unix process-group semantics (stop-ladder signals, grandchild
 // sweeps). The Windows job-object launcher is covered by the
 // `windows_*` tests at the end of this module.
+
+/// Every byte the lifetime test's child writes, in order: three lines, then
+/// the four variables the launcher forces on each child.
+#[cfg(unix)]
+const LIFETIME_OUTPUT: &[u8] = b"a\nb\nc\nNO_COLOR=1 TERM=dumb PAGER=cat DAL_NESTED=1";
+
 #[cfg(unix)]
 #[tokio::test]
 async fn proc_spawns_captures_output_and_reports_bounded_env() {
@@ -144,7 +150,12 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
         "the durable log lives in the jobs directory: {:?}",
         result.log_path
     );
-    assert!(result.log_path.exists());
+    assert_eq!(
+        std::fs::read(&result.log_path).expect("durable log bytes"),
+        LIFETIME_OUTPUT,
+        "the durable log holds every byte the child wrote, in order"
+    );
+    assert_eq!(result.preview.as_ref(), LIFETIME_OUTPUT);
     let preview = String::from_utf8_lossy(&result.preview);
     assert!(
         preview.contains("NO_COLOR=1"),
@@ -166,7 +177,11 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     assert!(result.completion_tail.len() <= COMPLETION_TAIL_BYTES);
     assert!(!result.denial_seen);
     let tail = proc.tail(64);
-    assert!(!tail.is_empty());
+    assert_eq!(
+        tail.as_ref(),
+        LIFETIME_OUTPUT,
+        "a window wider than the output returns all of it"
+    );
     let preview_from_file = tail_preview(&result.log_path, PREVIEW_BYTES).expect("tail preview");
     assert_eq!(preview_from_file.as_ref(), result.preview.as_ref());
 }
@@ -187,6 +202,13 @@ async fn proc_timeout_uses_stop_ladder_and_reports_timed_out() {
     let cancel = CancellationToken::new();
     let result = proc.wait(&cancel).await.expect("wait with timeout");
     assert_eq!(result.status, ProcStatus::TimedOut);
+    assert_eq!(
+        result.outcome,
+        dal_core::JobOutcome::Failed {
+            message: "Command timed out".into()
+        },
+        "a timeout settles as a failed job, never as an exit"
+    );
 }
 
 #[cfg(unix)]
@@ -204,6 +226,7 @@ async fn proc_cancellation_kills_tree_and_settles_once() {
     .expect("spawn sleep tree");
     let result = proc.stop(StopReason::Cancelled).await.expect("stop tree");
     assert_eq!(result.status, ProcStatus::Cancelled);
+    assert_eq!(result.outcome, dal_core::JobOutcome::Cancelled);
     // A second terminal call returns the same cached outcome without reaping again.
     let again = proc.stop(StopReason::Cancelled).await.expect("repeat stop");
     assert_eq!(again.status, result.status);
@@ -309,6 +332,225 @@ async fn proc_capture_fault_after_reap_disarms_drop_sweep() {
     assert!(
         proc.leader_pid.is_none(),
         "reap plus sweep consumes the owned pid even when capture fails"
+    );
+}
+
+/// Polls the live tail until it holds `marker`, so a signal sent next finds
+/// the child's handlers already installed.
+#[cfg(unix)]
+async fn wait_for_output(proc: &super::Proc, marker: &[u8]) {
+    for _ in 0..250 {
+        if proc
+            .tail(4_096)
+            .windows(marker.len())
+            .any(|window| window == marker)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the child never printed {marker:?}");
+}
+
+/// `Proc::tail` serves the newest bytes of the retained output and never an
+/// older window, at every width around the output length.
+#[cfg(unix)]
+#[tokio::test]
+async fn tail_serves_exactly_the_newest_requested_bytes() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-tail-window",
+        &shell_argv("printf '0123456789abcdef'"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn printf");
+    proc.wait(&CancellationToken::new())
+        .await
+        .expect("wait printf");
+    let output: &[u8] = b"0123456789abcdef";
+    assert_eq!(proc.tail(0).as_ref(), b"", "a zero window is empty");
+    assert_eq!(proc.tail(1).as_ref(), b"f", "one byte is the newest byte");
+    assert_eq!(proc.tail(6).as_ref(), b"abcdef");
+    assert_eq!(
+        proc.tail(15).as_ref(),
+        &output[1..],
+        "one under the length drops only the oldest byte"
+    );
+    assert_eq!(
+        proc.tail(16).as_ref(),
+        output,
+        "the exact length is the whole output"
+    );
+    assert_eq!(
+        proc.tail(17).as_ref(),
+        output,
+        "one over the length invents no bytes"
+    );
+    assert_eq!(proc.tail(usize::MAX).as_ref(), output);
+}
+
+/// The launcher forces the four bounded variables last, so no snapshot or
+/// override can switch them off, and the child sees nothing else from the
+/// host: its environment is exactly snapshot, then overrides, then forced.
+#[cfg(unix)]
+#[tokio::test]
+async fn child_environment_is_exactly_snapshot_then_overrides_then_the_bounded_variables() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let call = CallId::new("test-env-exact");
+    let digest = Some([4_u8; 32]);
+    let approved = approved_for(&call, digest, vec![temp.path().to_path_buf()]);
+    let pair = |key: &str, value: &str| (OsString::from(key), OsString::from(value));
+    let snapshot = [
+        pair("KEEP", "snapshot"),
+        pair("ONLY_SNAPSHOT", "s"),
+        pair("NO_COLOR", "0"),
+        pair("TERM", "xterm-256color"),
+    ];
+    let opts = SpawnOpts {
+        cwd: temp.path().to_path_buf(),
+        timeout: None,
+        env: vec![
+            pair("KEEP", "override"),
+            pair("PAGER", "less"),
+            pair("DAL_NESTED", "0"),
+        ],
+        stdout_prefix_limit: 0,
+    };
+    let mut proc = spawn_process(
+        &[OsString::from("/usr/bin/env")],
+        call,
+        opts,
+        &approved,
+        digest,
+        &temp.path().join("jobs"),
+        &snapshot,
+        &Launcher::Direct,
+        test_permit().await,
+        None,
+    )
+    .expect("spawn env");
+    let result = proc
+        .wait(&CancellationToken::new())
+        .await
+        .expect("wait env");
+    assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+    let mut lines: Vec<String> = String::from_utf8_lossy(&result.preview)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            "DAL_NESTED=1",
+            "KEEP=override",
+            "NO_COLOR=1",
+            "ONLY_SNAPSHOT=s",
+            "PAGER=cat",
+            "TERM=dumb",
+        ]
+    );
+}
+
+/// A non-zero exit and a signal death are different terminal states with
+/// their own durable outcomes; neither may collapse into a clean exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn non_zero_exits_and_signal_deaths_settle_with_their_own_status_and_outcome() {
+    use dal_core::JobOutcome;
+
+    let temp = tempfile::tempdir().expect("temp workspace");
+    for (index, (script, status, outcome)) in [
+        (
+            "exit 7",
+            ProcStatus::Exited { code: 7 },
+            JobOutcome::Exited { code: 7 },
+        ),
+        (
+            "kill -9 $$",
+            ProcStatus::Signaled { signal: 9 },
+            JobOutcome::Failed {
+                message: "Command was killed by signal 9".into(),
+            },
+        ),
+        (
+            "kill -TERM $$",
+            ProcStatus::Signaled { signal: 15 },
+            JobOutcome::Failed {
+                message: "Command was killed by signal 15".into(),
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = run_with_call_id(&temp, &CallId::new(format!("test-status-{index}")), script)
+            .await
+            .unwrap_or_else(|error| panic!("{script} settles: {error}"));
+        assert_eq!(result.status, status, "status of {script}");
+        assert_eq!(result.outcome, outcome, "outcome of {script}");
+    }
+}
+
+/// The stop ladder sends the soft signal first: a handler gets to run and
+/// write before the hard kill could ever land.
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_sends_the_soft_signal_first_and_lets_a_handler_finish() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-soft-first",
+        &shell_argv("trap 'printf graceful; exit 0' TERM; printf ready; sleep 30 & wait"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn trapping shell");
+    wait_for_output(&proc, b"ready").await;
+    let result = proc.stop(StopReason::Cancelled).await.expect("stop");
+    assert_eq!(result.status, ProcStatus::Cancelled);
+    assert_eq!(
+        result.preview.as_ref(),
+        b"readygraceful",
+        "the TERM handler ran before the group died"
+    );
+}
+
+/// A child that ignores the soft signal still dies: the ladder waits out
+/// the grace window, then kills the whole group.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_child_that_ignores_the_soft_signal_is_killed_after_the_grace_window() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-hard-kill",
+        &shell_argv("trap '' TERM; printf ready; sleep 30 & wait"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn TERM-ignoring shell");
+    wait_for_output(&proc, b"ready").await;
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(20), proc.stop(StopReason::Timeout))
+        .await
+        .expect("the hard kill reaps a child that ignored the soft signal")
+        .expect("stop");
+    assert_eq!(result.status, ProcStatus::TimedOut);
+    assert!(
+        started.elapsed() + Duration::from_millis(100) >= super::KILL_GRACE,
+        "the soft signal gets the whole grace window first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        result.preview.as_ref(),
+        b"ready",
+        "the ignored soft signal produced no output"
     );
 }
 

@@ -268,8 +268,12 @@ pub mod ids {
     pub const RESUME_TITLE: &str = "Resume a session · type to filter";
     /// Resume picker row.
     pub const RESUME_ROW: &str = "{name} · {when} · {n} message|s · {dir}";
+    /// Resume picker row whose journal could not be read, so it has no count.
+    pub const RESUME_ROW_UNREADABLE: &str = "{name} · {when} · messages unreadable · {dir}";
     /// Resume picker hint.
     pub const RESUME_HINT: &str = "enter resume · esc cancel · d delete";
+    /// Line shown while a resume row's delete is armed, until its second `d`.
+    pub const RESUME_ARMED: &str = "note: press d again to delete session {id}; esc cancels";
     /// Session tree title.
     pub const TREE_TITLE: &str =
         "Session tree · enter moves the leaf · the model rewinds to that point";
@@ -284,6 +288,8 @@ pub mod ids {
     /// Scoped-model picker title.
     pub const SCOPED_MODELS_TITLE: &str =
         "Pick the models /model lists · space checks · enter applies";
+    /// Scoped-model row for a committed id the current model list does not name.
+    pub const SCOPED_UNAVAILABLE_ROW: &str = "{id} · not in the current model list";
     /// Prompt-history picker title.
     pub const HISTORY_PICKER_TITLE: &str = "Pick a past prompt · enter loads it as the draft";
     /// Empty picker notice.
@@ -535,12 +541,18 @@ pub const DECK: &[(&str, &str)] = &[
     ("retry.cancel", ids::RETRY_CANCEL),
     ("resume.title", ids::RESUME_TITLE),
     ("resume.row", ids::RESUME_ROW),
+    ("resume.rowUnreadable", ids::RESUME_ROW_UNREADABLE),
     ("resume.hint", ids::RESUME_HINT),
+    ("resume.armed", ids::RESUME_ARMED),
     ("tree.title", ids::TREE_TITLE),
     ("tree.leaf", ids::TREE_LEAF),
     ("picker.fork.title", ids::FORK_PICKER_TITLE),
     ("picker.hint", ids::PICKER_HINT),
     ("picker.scopedModels.title", ids::SCOPED_MODELS_TITLE),
+    (
+        "picker.scopedModels.unavailableRow",
+        ids::SCOPED_UNAVAILABLE_ROW,
+    ),
     ("picker.history.title", ids::HISTORY_PICKER_TITLE),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),

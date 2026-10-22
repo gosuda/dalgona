@@ -70,5 +70,5 @@ only.
 Every capability degrades along a named ladder rather than failing silently: truecolor
 to 256 to 16-color to `NO_COLOR`; motion to `DAL_NO_MOTION`; kitty keys to legacy
 modifiers; inline images to placeholder cards; kitty/sixel images to text. A state that
-cannot render as designed renders as words and markers — meaning never depends on a
+cannot render as designed renders as words and markers. Meaning never depends on a
 channel the terminal did not confirm.

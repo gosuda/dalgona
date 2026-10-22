@@ -101,24 +101,19 @@ async fn failed_write_rolls_back_cleanly() {
         write_after_bytes: Some(10),
         ..Default::default()
     };
-    let failure = sink
-        .append_partial(&path, &batch)
-        .expect_err("partial write fails");
-    assert_eq!(
-        failure.to_string(),
-        "injected fault: write",
-        "the write failpoint fires"
-    );
-    assert_eq!(
-        fs::metadata(&path).expect("journal stat").len(),
-        size_before + 10,
-        "only the partial bytes follow the prior file"
-    );
+    sink.append_partial(&path, &batch)
+        .expect_err("the sink stages a torn batch then fails");
     let (mut reopened, report) = store.open_session(id).await.expect("open repairs");
+    let torn = report.torn.as_ref().expect("torn tail reported");
     assert_eq!(
-        report.torn.as_ref().expect("torn tail reported").offset,
-        size_before,
+        torn.offset, size_before,
         "the tail starts where the prefix ended"
+    );
+    assert_eq!(torn.bytes, 10, "exactly the bytes that landed are the tail");
+    assert_eq!(
+        fs::read(torn.kept_at.as_path()).expect("read side file"),
+        batch[..10],
+        "the quarantined tail is the head of the failed batch"
     );
     let repaired = fs::read(&path).expect("read repaired journal");
     let prefix_len = usize::try_from(size_before).expect("journal size fits memory");
@@ -504,10 +499,18 @@ async fn oversized_record_before_the_first_user_entry_is_refused_at_append() {
             source: "test".into(),
         },
     });
-    let refused = journal.append(vec![huge]).await;
+    let refused = journal
+        .append(vec![huge])
+        .await
+        .expect_err("an over-limit record is refused when appended, not buffered");
     assert!(
-        refused.is_err(),
-        "an over-limit record is refused when appended, not buffered: {refused:?}"
+        matches!(&refused, dal_store::StoreError::Invalid { reason }
+            if reason.contains("exceeds the 67108864-byte limit")),
+        "the refusal names the record limit, got {refused:?}"
+    );
+    assert!(
+        journal.is_lazy(),
+        "the refusal leaves the session lazy, with nothing materialized"
     );
     journal
         .append(vec![user(2, "still usable")])

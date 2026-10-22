@@ -9,6 +9,8 @@
 //! picker Ctrl+P/N/B/F chords, Undo on Ctrl+-, `AcceptCycleCompletion` on
 //! Shift+Tab/BackTab, and `DialogFocusRight` on Tab.
 
+#![cfg(test)]
+
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -386,4 +388,173 @@ fn dialog_focus_right_tab_resolves_in_both_modes() {
         Key::new(KeyCode::Tab, KeyModifiers::NONE)
     );
     expect_action(b"\t", &[Owner::Dialog], Action::DialogFocusRight);
+}
+
+fn expect_no_action(bytes: &[u8], owners: &[Owner]) {
+    let key = decode_key(bytes);
+    for kitty in [false, true] {
+        assert_eq!(
+            resolve_in(key, kitty, owners),
+            None,
+            "{bytes:?} kitty={kitty} owners={owners:?} must not resolve"
+        );
+    }
+}
+
+fn expect_all(owners: &[Owner], cases: &[(&[u8], Action)]) {
+    for (bytes, action) in cases {
+        expect_action(bytes, owners, *action);
+    }
+}
+
+/// The composer chords are pinned to their documented actions by literal wire
+/// bytes, not by reading the table back. A table-derived check stays green when
+/// two rows trade keys (Ctrl+K for Ctrl+U, Up for Down), so every user's editing
+/// keys would silently trade places.
+#[test]
+fn composer_chords_resolve_to_their_documented_actions() {
+    expect_all(
+        &[Owner::Composer],
+        &[
+            (b"\x01", Action::LineStart),
+            (b"\x05", Action::LineEnd),
+            (b"\x0b", Action::KillLineEnd),
+            (b"\x15", Action::KillLineStart),
+            (b"\x17", Action::DeleteWordBack),
+            (b"\x19", Action::Yank),
+            (b"\x1b\x7f", Action::DeleteWordBack),
+            (b"\x1bd", Action::DeleteWordForward),
+            (b"\x1bb", Action::WordLeft),
+            (b"\x1bf", Action::WordRight),
+            (b"\x02", Action::CharLeft),
+            (b"\x06", Action::CharRight),
+            (b"\x1b[D", Action::CharLeft),
+            (b"\x1b[C", Action::CharRight),
+            (b"\x1b[H", Action::LineStart),
+            (b"\x1b[F", Action::LineEnd),
+            (b"\x1b[A", Action::HistoryPrev),
+            (b"\x1b[B", Action::HistoryNext),
+            (b"\x10", Action::HistoryPrev),
+            (b"\x0e", Action::HistoryNext),
+            (b"\r", Action::Submit),
+        ],
+    );
+}
+
+/// Dialog answers and transcript selection are pinned the same way: a swapped
+/// pair here approves what the user meant to deny, or selects the wrong way.
+#[test]
+fn dialog_and_transcript_chords_resolve_to_their_documented_actions() {
+    expect_all(
+        &[Owner::Dialog],
+        &[
+            (b"y", Action::ApprovalAllowOnce),
+            (b"a", Action::ApprovalAllowSession),
+            (b"n", Action::ApprovalDeny),
+            (b"v", Action::ApprovalView),
+            (b"r", Action::RetryNow),
+            (b"c", Action::RetryCancel),
+            (b" ", Action::AskToggle),
+            (b"\x1b[A", Action::AskMoveUp),
+            (b"\x1b[B", Action::AskMoveDown),
+            (b"\x1b[D", Action::DialogFocusLeft),
+            (b"\x1b[C", Action::DialogFocusRight),
+            (b"\x1b[5~", Action::DialogScrollUp),
+            (b"\x1b[6~", Action::DialogScrollDown),
+        ],
+    );
+    expect_all(
+        &[Owner::Transcript],
+        &[
+            (b"\x1b[1;2A", Action::SelectionUp),
+            (b"\x1b[1;2B", Action::SelectionDown),
+            (b"\x1b[1;2D", Action::SelectionLeft),
+            (b"\x1b[1;2C", Action::SelectionRight),
+            (b"\x1b[F", Action::TranscriptJumpLatest),
+        ],
+    );
+}
+
+/// One chord means different things to different owners, and the first listed
+/// owner wins. Resolving by table order instead would hand Ctrl+P to the
+/// picker while the composer has focus.
+#[test]
+fn a_chord_belongs_to_its_owner_and_the_first_listed_owner_wins() {
+    let letter_y = decode_key(b"y");
+    let ctrl_y = decode_key(b"\x19");
+    let ctrl_p = decode_key(b"\x10");
+    for kitty in [false, true] {
+        assert_eq!(
+            resolve_in(letter_y, kitty, &[Owner::Dialog]),
+            Some(Action::ApprovalAllowOnce)
+        );
+        // A text owner must not claim the letter the dialog answers with.
+        assert_eq!(
+            resolve_in(
+                letter_y,
+                kitty,
+                &[
+                    Owner::Composer,
+                    Owner::Editor,
+                    Owner::App,
+                    Owner::Transcript
+                ]
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_in(ctrl_y, kitty, &[Owner::Dialog, Owner::Picker]),
+            None
+        );
+        assert_eq!(
+            resolve_in(ctrl_y, kitty, &[Owner::Composer]),
+            Some(Action::Yank)
+        );
+        assert_eq!(
+            resolve_in(ctrl_p, kitty, &[Owner::Picker, Owner::Composer]),
+            Some(Action::PickerMoveUp)
+        );
+        assert_eq!(
+            resolve_in(ctrl_p, kitty, &[Owner::Composer, Owner::Picker]),
+            Some(Action::HistoryPrev)
+        );
+        // An owner that does not bind the key defers to the next one listed.
+        assert_eq!(
+            resolve_in(letter_y, kitty, &[Owner::Composer, Owner::Dialog]),
+            Some(Action::ApprovalAllowOnce)
+        );
+        assert_eq!(resolve_in(letter_y, kitty, &[]), None);
+    }
+}
+
+/// No printable key may resolve in an owner that shares the keyboard with the
+/// text field, legacy spellings included: `validate` checks each row's default
+/// key only, so a printable legacy key would otherwise swallow typed text. A
+/// chord is also exactly its modifiers: Ctrl+Alt+K is not Ctrl+K.
+#[test]
+fn text_owners_never_claim_a_printable_key_and_modifiers_match_exactly() {
+    let text_owners = [
+        Owner::Composer,
+        Owner::Editor,
+        Owner::App,
+        Owner::Transcript,
+    ];
+    for scalar in 0x20_u8..=0x7e {
+        let character = char::from(scalar);
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let key = Key::new(KeyCode::Char(character), modifiers);
+            for kitty in [false, true] {
+                assert_eq!(
+                    resolve_in(key, kitty, &text_owners),
+                    None,
+                    "printable {character:?} with {modifiers:?} must reach the text field"
+                );
+            }
+        }
+    }
+    let composer = [Owner::Composer];
+    expect_action(b"\x0b", &composer, Action::KillLineEnd);
+    expect_no_action(b"\x1b[107;7u", &composer);
+    expect_no_action(b"\x1b[107;6u", &composer);
+    expect_no_action(b"\x1b[107;3u", &composer);
 }

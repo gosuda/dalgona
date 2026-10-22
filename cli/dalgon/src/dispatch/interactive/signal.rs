@@ -16,6 +16,7 @@ pub(super) struct Signals {
     /// the screen even when the size flag reads the same twice.
     epoch: Arc<AtomicU64>,
     tasks: Vec<JoinHandle<()>>,
+    shutdown: Option<crate::edge::ShutdownSignals>,
 }
 
 impl Signals {
@@ -25,12 +26,14 @@ impl Signals {
         let stop = Arc::new(AtomicU8::new(0));
         let resize = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));
-        let tasks = start_tasks(Arc::clone(&stop), Arc::clone(&resize), Arc::clone(&epoch));
+        let shutdown = crate::edge::ShutdownSignals::register();
+        let tasks = start_tasks(Arc::clone(&resize), Arc::clone(&epoch));
         Self {
             stop,
             resize,
             epoch,
             tasks,
+            shutdown: Some(shutdown),
         }
     }
 
@@ -49,6 +52,25 @@ impl Signals {
         let status = self.stop.load(Ordering::SeqCst);
         (status != 0).then_some(status)
     }
+
+    pub(super) async fn await_shutdown(&mut self) -> u8 {
+        let code = match self.shutdown.as_mut() {
+            Some(watcher) => watcher.next().await,
+            None => unreachable!("into_shutdown consumed this Signals"),
+        };
+        self.stop.store(code, Ordering::SeqCst);
+        code
+    }
+
+    pub(super) fn into_shutdown(mut self) -> crate::edge::ShutdownSignals {
+        for task in &self.tasks {
+            task.abort();
+        }
+        match self.shutdown.take() {
+            Some(watcher) => watcher,
+            None => unreachable!("into_shutdown consumes self exactly once"),
+        }
+    }
 }
 
 impl Drop for Signals {
@@ -60,23 +82,10 @@ impl Drop for Signals {
 }
 
 #[cfg(unix)]
-fn start_tasks(
-    stop: Arc<AtomicU8>,
-    resize: Arc<AtomicBool>,
-    epoch: Arc<AtomicU64>,
-) -> Vec<JoinHandle<()>> {
+fn start_tasks(resize: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Vec<JoinHandle<()>> {
     use tokio::signal::unix::SignalKind;
 
-    let mut shutdown = crate::edge::ShutdownSignals::register();
     let window_change = crate::edge::register_signal(SignalKind::window_change(), "SIGWINCH");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "process edge: the process edge owns its signal watchers"
-    )]
-    let stop_task = tokio::spawn(async move {
-        let code = shutdown.next().await;
-        stop.store(code, Ordering::SeqCst);
-    });
     #[expect(
         clippy::disallowed_methods,
         reason = "process edge: the process edge owns its signal watchers"
@@ -90,26 +99,14 @@ fn start_tasks(
             resize.store(true, Ordering::SeqCst);
         }
     });
-    vec![stop_task, resize_task]
+    vec![resize_task]
 }
 
 /// Watches the console Ctrl+C event (130) and the console close event (129,
 /// the terminal-hangup status). Resize arrives as a terminal input event.
 #[cfg(windows)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "process edge: the process edge owns its signal watchers"
-)]
-fn start_tasks(
-    stop: Arc<AtomicU8>,
-    _resize: Arc<AtomicBool>,
-    _epoch: Arc<AtomicU64>,
-) -> Vec<JoinHandle<()>> {
-    let mut shutdown = crate::edge::ShutdownSignals::register();
-    vec![tokio::spawn(async move {
-        let code = shutdown.next().await;
-        stop.store(code, Ordering::SeqCst);
-    })]
+fn start_tasks(_resize: Arc<AtomicBool>, _epoch: Arc<AtomicU64>) -> Vec<JoinHandle<()>> {
+    Vec::new()
 }
 
 /// Terminal adapter whose signal state is captured by the process edge.

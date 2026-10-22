@@ -14,8 +14,8 @@ use dal_agent::ext::{
 use dal_agent::{Env, Host, Product, SessionRef};
 use dal_core::{
     AgentStart, Budget, CallId, Caps, ClientId, Command, Config, ConfigProduct, ContextItem,
-    Expect, Family, ModelId, ModelRequest, ModelRoute, OnError, Part, Purpose, RequestParams,
-    ScopeSpec, ServiceSet, ThinkingLevel, Workspace,
+    Expect, Family, InferFailure, ModelId, ModelRequest, ModelRoute, OnError, Part, Purpose,
+    RequestParams, ScopeSpec, ServiceSet, ThinkingLevel, Workspace,
 };
 use dal_provider::{ProviderError, StreamEvent as ProviderEvent};
 
@@ -42,6 +42,8 @@ enum Mode {
     Fifo,
     Usd,
     Agent,
+    /// Infers the named model through a scope of its own and logs how it ended.
+    Nested(&'static str),
     ScopedInfer,
 }
 
@@ -55,6 +57,7 @@ fn api_route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-6-luna".into(),
+        provider: None,
     }
 }
 
@@ -192,6 +195,29 @@ impl Handler {
         self.log.push(format!("usd {:?}", refused.err()));
     }
 
+    async fn nested(&self, cx: &ModelCx<'_>, target: &str) {
+        let ran = format!("ran {}", self.id);
+        if self.log.lines().iter().filter(|line| **line == ran).count() > 3 {
+            // Bounds the recursion if the id stack is ever lost.
+            return;
+        }
+        let spec = ScopeSpec {
+            limit: 1,
+            on_error: OnError::Settle,
+            budget: Budget::default(),
+        };
+        let scope = cx.scope(spec).expect("scope opens");
+        let child = scope
+            .infer(request(route_of(target)))
+            .expect("child admitted");
+        let result = child.result().await;
+        self.log.push(format!(
+            "nested {} -> {target}: {:?}",
+            self.id,
+            result.err()
+        ));
+    }
+
     async fn agent(&self, cx: &ModelCx<'_>) {
         let spec = ScopeSpec {
             limit: 1,
@@ -296,6 +322,10 @@ impl ModelHandler for Handler {
                     self.agent(&cx).await;
                     Ok(done_stream())
                 }
+                Mode::Nested(target) => {
+                    self.nested(&cx, target).await;
+                    Ok(done_stream())
+                }
                 Mode::ScopedInfer => {
                     self.scoped_infer(&cx).await;
                     Ok(done_stream())
@@ -335,7 +365,7 @@ struct Rig {
     _tmp: tempfile::TempDir,
 }
 
-const MODELS: [(&str, Mode); 16] = [
+const MODELS: [(&str, Mode); 19] = [
     ("acme/echo", Mode::Forward("api")),
     ("acme/double", Mode::DoubleForward),
     ("acme/loop", Mode::Forward("acme/loop")),
@@ -352,6 +382,9 @@ const MODELS: [(&str, Mode); 16] = [
     ("acme/d3", Mode::Forward("acme/d4")),
     ("acme/d4", Mode::Forward("acme/d5")),
     ("acme/d5", Mode::Forward("api")),
+    ("acme/sself", Mode::Nested("acme/sself")),
+    ("acme/sd3", Mode::Nested("acme/d3")),
+    ("acme/sd2", Mode::Nested("acme/d2")),
 ];
 
 async fn rig(steps: &[String], model: &str) -> Rig {
@@ -586,6 +619,72 @@ async fn nesting_four_synthetic_models_runs_and_five_is_typed_depth() {
             .iter()
             .any(|line| line.contains("SyntheticDepth"))
     );
+    let lines = shallow_rig.log.lines();
+    assert!(
+        lines.contains(&"ran acme/d4".to_owned()),
+        "the fourth handler is within the limit and runs: {lines:?}"
+    );
+    assert!(
+        !lines.contains(&"ran acme/d5".to_owned()),
+        "the fifth handler is refused before it runs: {lines:?}"
+    );
+}
+
+/// A handler's scope belongs to its run: a child it infers inherits the id
+/// stack, so a handler that infers its own id is a typed cycle and not a
+/// second run of itself.
+#[tokio::test]
+async fn a_scope_child_inherits_the_id_stack_and_cannot_re_run_its_parent() {
+    let rig = rig(&[], "acme/echo").await;
+    let _ = relay(&rig, "acme/sself").await;
+    let cycle = ScopeError::Infer(InferFailure::SyntheticCycle {
+        chain: vec![route_of("acme/sself"), route_of("acme/sself")],
+    });
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/sself".to_owned(),
+            format!("nested acme/sself -> acme/sself: {:?}", Some(cycle)),
+        ]
+    );
+}
+
+/// The depth limit counts a scope child's run on top of its parent's: the
+/// expansion that ends at four ids runs, and one more id reached through a
+/// scope is refused as depth five before its handler runs.
+#[tokio::test]
+async fn the_depth_limit_counts_scope_children_on_top_of_their_parent() {
+    let at_limit = rig(&[text_step("deep", 3, 1)], "acme/echo").await;
+    let _ = relay(&at_limit, "acme/sd3").await;
+    assert_eq!(
+        at_limit.log.lines(),
+        vec![
+            "ran acme/sd3".to_owned(),
+            "ran acme/d3".to_owned(),
+            "ran acme/d4".to_owned(),
+            "ran acme/d5".to_owned(),
+            "nested acme/sd3 -> acme/d3: None".to_owned(),
+        ],
+        "four ids deep, the scope child completes"
+    );
+
+    let past_limit = rig(&[], "acme/echo").await;
+    let _ = relay(&past_limit, "acme/sd2").await;
+    let chain: Vec<ModelRoute> = ["sd2", "d2", "d3", "d4", "d5"]
+        .iter()
+        .map(|name| route_of(&format!("acme/{name}")))
+        .collect();
+    let depth = ScopeError::Infer(InferFailure::SyntheticDepth { chain });
+    let lines = past_limit.log.lines();
+    assert_eq!(
+        lines.last(),
+        Some(&format!("nested acme/sd2 -> acme/d2: {:?}", Some(depth))),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.contains(&"ran acme/d5".to_owned()),
+        "the fifth id is refused before its handler runs: {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -603,15 +702,31 @@ async fn budget_limit_refuses_the_next_handle_once_reached() {
     );
 }
 
+/// The failure of the policy handlers' `acme/loop` child: it forwards to
+/// itself on top of the handler `outer` that opened the scope.
+fn loop_cycle(outer: &str) -> ScopeError {
+    ScopeError::Infer(InferFailure::SyntheticCycle {
+        chain: vec![
+            route_of(outer),
+            route_of("acme/loop"),
+            route_of("acme/loop"),
+        ],
+    })
+}
+
 #[tokio::test]
 async fn cancel_policy_cancels_siblings_of_the_first_failure() {
     let rig = rig(&[], "acme/echo").await;
     let _ = relay(&rig, "acme/cancel").await;
     let lines = rig.log.lines();
     let outcome = lines.last().expect("policy line");
-    assert!(
-        outcome.starts_with("bad Failed good Cancelled count 2"),
-        "{outcome}"
+    assert_eq!(
+        outcome,
+        &format!(
+            "bad Failed good Cancelled count 2 error {:?}",
+            Some(loop_cycle("acme/cancel"))
+        ),
+        "the failed sibling carries the typed cycle, not an anonymous failure"
     );
 }
 
@@ -621,9 +736,13 @@ async fn settle_policy_keeps_every_result_after_a_failure() {
     let _ = relay(&rig, "acme/settle").await;
     let lines = rig.log.lines();
     let outcome = lines.last().expect("policy line");
-    assert!(
-        outcome.starts_with("bad Failed good Done count 2"),
-        "{outcome}"
+    assert_eq!(
+        outcome,
+        &format!(
+            "bad Failed good Done count 2 error {:?}",
+            Some(loop_cycle("acme/settle"))
+        ),
+        "the failed sibling carries the typed cycle, not an anonymous failure"
     );
 }
 

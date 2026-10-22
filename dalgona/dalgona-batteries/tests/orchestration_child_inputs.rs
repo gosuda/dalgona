@@ -104,6 +104,7 @@ impl ModelHandler for Probe {
                 });
             let mut forwarded = request;
             forwarded.model = ModelRoute::Api {
+                provider: None,
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
             };

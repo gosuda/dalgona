@@ -235,6 +235,11 @@ pub(crate) fn check_idle(view: &dal_core::View) -> Result<(), ErrorObject> {
 
 /// Rejects a prompt with no model or no provider credentials; a session with
 /// no model of its own uses the host's configured default route.
+///
+/// Readiness follows the same source-aware contract
+/// [`dal_provider::ProviderSet::credential_source_available`] applies at
+/// request time, so a Bedrock route with ambient AWS-chain material or a
+/// Vertex route with an environment bearer passes before its prompt.
 pub(crate) async fn check_model(host: &Host, view: &dal_core::View) -> Result<(), ErrorObject> {
     let route = match view.settings.model.clone() {
         Some(route) => Some(route),
@@ -249,16 +254,59 @@ pub(crate) async fn check_model(host: &Host, view: &dal_core::View) -> Result<()
             })),
         });
     };
-    if let Some(provider) = crate::rpc::missing_credential(host, &route) {
-        return Err(ErrorObject {
-            code: -32000,
-            message: format!("{provider} has no credentials: auth.json has no entry for it"),
-            data: Some(sonic_rs::json!({
-                "hint": format!("Run dalgon login {provider} or set {}.", crate::rpc::env_name(&provider)),
-            })),
-        });
-    }
-    Ok(())
+    let provider = unready_provider(host, &route)
+        .await
+        .map_err(crate::rpc::host_error)?;
+    let Some(provider) = provider else {
+        return Ok(());
+    };
+    Err(ErrorObject {
+        code: -32000,
+        message: format!("{provider} has no credentials: auth.json has no entry for it"),
+        data: Some(sonic_rs::json!({
+            "hint": format!("Run dalgon login {provider} or set {}.", crate::rpc::env_name(&provider)),
+        })),
+    })
+}
+
+/// Returns the provider label when the host reports no credential source for
+/// the provider a prompt resolves to, or the readiness failure itself.
+/// Harness and synthetic routes carry no provider credential.
+pub(crate) async fn unready_provider(
+    host: &Host,
+    route: &dal_core::ModelRoute,
+) -> Result<Option<String>, dal_agent::HostError> {
+    let dal_core::ModelRoute::Api {
+        family,
+        provider: named,
+        ..
+    } = route
+    else {
+        return Ok(None);
+    };
+    let label = crate::rpc::provider_label(route);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let rows = host.provider_readiness(&cancel).await?;
+    let bound = if let Some(id) = named {
+        rows.into_iter()
+            .find(|row| row.provider.as_ref() == id.as_ref())
+    } else {
+        let in_family: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.family == *family)
+            .collect();
+        match in_family.as_slice() {
+            [one] => Some(one.clone()),
+            many => many
+                .iter()
+                .find(|row| row.provider.as_ref() == label.as_str())
+                .cloned(),
+        }
+    };
+    let Some(ready) = bound else {
+        return Ok(Some(label));
+    };
+    Ok((!ready.ready).then_some(label))
 }
 
 /// Submits one prompt (or slash command) and returns the accepted turn.

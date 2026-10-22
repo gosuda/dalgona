@@ -120,6 +120,7 @@ pub(crate) fn route_model(request: &ModelRequest, family: Family) -> Result<&str
         ModelRoute::Api {
             family: route_family,
             model,
+            ..
         } if *route_family == family => Ok(model.as_ref()),
         _ => Err(GoogleBodyError::NotGoogle {
             want: family_label(family),

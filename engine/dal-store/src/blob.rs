@@ -284,7 +284,7 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// Reads a blob. `Gone` when the session directory is absent, `NotFound` when only the digest is.
 ///
 /// # Errors
-/// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
+/// Returns [`BlobError::Gone`], [`BlobError::NotFound`], [`BlobError::TooLarge`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let blobs = session_dir.join("blobs");
     let file = crate::private::open_private_file(&blobs.join(id.to_string()))
@@ -950,6 +950,25 @@ mod tests {
         ));
         fs::remove_dir_all(&session).expect("delete session");
         assert!(matches!(read(&session, &id), Err(BlobError::Gone)));
+    }
+
+    #[test]
+    fn read_refuses_a_file_past_the_blob_cap_without_reading_it() {
+        let temp = TestDir::new();
+        let session = temp.0.join("session");
+        let blobs = session.join("blobs");
+        fs::create_dir_all(&blobs).expect("create session blobs");
+        let id = BlobId::from_bytes(b"planted");
+        let planted = File::create(blobs.join(id.to_string())).expect("create planted blob");
+        planted
+            .set_len(MAX_BLOB + 1)
+            .expect("extend planted blob past the cap");
+        drop(planted);
+
+        assert!(matches!(
+            read(&session, &id),
+            Err(BlobError::TooLarge { bytes }) if bytes == MAX_BLOB + 1
+        ));
     }
 
     #[test]

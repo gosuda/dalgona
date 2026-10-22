@@ -120,6 +120,11 @@ pub(crate) fn is_local_or_metadata_host(host: &str) -> bool {
     if ip == "::1" || ip == "::" {
         return true;
     }
+    // Only an IPv6 literal carries a colon; a name that spells an IPv6 prefix
+    // (`fe80`, `fd12`) is a DNS name.
+    if !ip.contains(':') {
+        return false;
+    }
     let bytes: Vec<&str> = ip.split(':').collect();
     if let Some(first) = bytes.first() {
         let group = first.to_lowercase();
@@ -138,19 +143,22 @@ pub(crate) fn is_local_or_metadata_host(host: &str) -> bool {
 
 /// The first two octets of a dotted-quad IPv4 literal, or `None` when `ip`
 /// is not one. Single-digit groups are not required: one to three digits
-/// each, exactly four groups.
+/// each, exactly four groups, every group a value up to 255. A DNS name whose
+/// first two labels are digits (`10.0.evil.example`) is not a literal.
 fn ipv4_first_two(ip: &str) -> Option<(u16, u16)> {
-    let mut groups = ip.split('.');
-    let first = groups.next()?;
-    let second = groups.next()?;
-    if groups.count() != 2 {
-        return None;
-    }
     let parse = |group: &str| {
         (!group.is_empty() && group.len() <= 3 && group.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| group.parse::<u16>().ok())?
+            .then(|| group.parse::<u16>().ok().filter(|octet| *octet <= 255))?
     };
-    Some((parse(first)?, parse(second)?))
+    let mut groups = ip.split('.');
+    let first = parse(groups.next()?)?;
+    let second = parse(groups.next()?)?;
+    parse(groups.next()?)?;
+    parse(groups.next()?)?;
+    if groups.next().is_some() {
+        return None;
+    }
+    Some((first, second))
 }
 
 /// Tier 4: ECS / container credentials. Returns `None` when neither URI

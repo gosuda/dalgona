@@ -2265,6 +2265,36 @@ mod tests {
     }
 
     #[test]
+    fn rollback_marker_at_the_journal_end_is_valid_and_one_past_it_is_refused() {
+        let directory = TestDirectory::new();
+        let (path, _) = journal_with_uncommitted_line(&directory);
+        let original = fs::read(&path).expect("read journal");
+        let end = u64::try_from(original.len()).expect("journal length fits");
+
+        let past = format!("{}\n", end + 1);
+        fs::write(rollback_marker(&path), &past).expect("write marker one past the end");
+        assert!(matches!(
+            Journal::open(&path, &Faults::default()),
+            Err(OpenFailure::Damaged { offset, reason })
+                if offset == end + 1 && reason.contains("past the end")
+        ));
+        assert_eq!(fs::read(&path).expect("read journal"), original);
+        assert_eq!(
+            fs::read(rollback_marker(&path)).expect("read marker"),
+            past.as_bytes(),
+            "a refused marker stays as evidence"
+        );
+
+        fs::write(rollback_marker(&path), format!("{end}\n")).expect("write marker at the end");
+        let opened = Journal::open(&path, &Faults::default())
+            .expect("a marker at the end of the file bounds nothing away");
+        assert_eq!(opened.records.len(), 4, "every complete line replays");
+        assert!(opened.report.torn.is_none(), "no tail is quarantined");
+        assert!(!rollback_marker(&path).exists(), "the marker is consumed");
+        assert_eq!(fs::read(&path).expect("read journal"), original);
+    }
+
+    #[test]
     fn staged_sync_rollback_preserves_prefix_and_followup_append() {
         let directory = TestDirectory::new();
         let committed_a = [session_record(), boot_record(1), user_record(1, None)];
@@ -2736,9 +2766,11 @@ mod tests {
             };
             let mut line = encode_records(std::slice::from_ref(&record));
             line.extend_from_slice(garbage.as_bytes());
+            let failure = decode_line(&line, 7).expect_err("trailing garbage must not decode");
             assert!(
-                decode_line(&line, 0).is_err(),
-                "valid record followed by `{garbage}` must not decode"
+                matches!(&failure, OpenFailure::Damaged { offset: 7, reason }
+                    if reason.starts_with("invalid JSON")),
+                "valid record followed by `{garbage}` is damage at the line start, got {failure:?}"
             );
         }
     }

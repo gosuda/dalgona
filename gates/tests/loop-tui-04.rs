@@ -23,15 +23,19 @@ mod support;
 
 use std::{error::Error, time::Duration};
 
+use pty::vt::VtRecorder;
 use pty::{PtyProcess, dalgon_command};
 use support::TestDir;
+
+const COLUMNS: u16 = 100;
+const ROWS: u16 = 30;
 
 #[test]
 fn tui_commands_route_through_host_command_table() -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;
     let mut command = dalgon_command(dir.path(), &[])?;
     command.args(["--screen", "inline"]);
-    let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
+    let mut terminal = PtyProcess::spawn(&mut command, COLUMNS, ROWS)?;
     terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
         Duration::from_secs(10),
@@ -63,10 +67,34 @@ fn tui_commands_route_through_host_command_table() -> Result<(), Box<dyn Error +
     }
 
     terminal.write(b"\x1b")?;
-    terminal.collect_for(Duration::from_millis(60))?;
+    let composer = format!("> {}", dal_tui::copy::ids::COMPOSER_PLACEHOLDER);
+    let mut screen = VtRecorder::new(COLUMNS, ROWS);
+    let mut consumed = 0;
+    let closed = terminal.wait_until(
+        "the composer after Esc closed the model picker",
+        Duration::from_secs(10),
+        |output| {
+            screen.feed(&output[consumed..]);
+            consumed = output.len();
+            let rows = screen.screen_rows();
+            !screen.sync_is_open()
+                && rows.iter().any(|row| row.trim_end() == composer)
+                && !rows.iter().any(|row| row.contains("Pick a model"))
+        },
+    );
+    if let Err(error) = closed {
+        let rows = screen
+            .screen_rows()
+            .iter()
+            .map(|row| row.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("{error}\nscreen:\n{rows}").into());
+    }
     terminal.write(b"\x04")?;
     let status = terminal.wait_for_exit(Duration::from_secs(5))?;
     assert!(status.success(), "dalgon exited with {status}");
+    assert_eq!(terminal.terminal_restore_problem()?, None);
     let first_byte = terminal.output().first().unwrap();
     assert_ne!(*first_byte, 0);
     let _output =

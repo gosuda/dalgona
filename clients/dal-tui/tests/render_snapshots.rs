@@ -14,7 +14,8 @@ fn idle() -> StatusData<'static> {
         state: None,
         spinner: None,
         model: Some("acme/opus"),
-        path: Some("~/work/shop (main)"),
+        path: Some("~/work/shop"),
+        branch: Some("main"),
         tokens: Some("in 14k out 4k"),
         context: Some("ctx 47%"),
         context_role: None,
@@ -37,6 +38,7 @@ fn empty_view() -> Result<View, Box<dyn std::error::Error>> {
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
             last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            message_count: None,
         },
         turn: TurnState::Idle,
         entries: Page {

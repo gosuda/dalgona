@@ -63,6 +63,122 @@ fn collapse_run_fires_once_and_latches() {
     assert!(state.feed("!!!").is_none());
 }
 
+fn collapse_fire(text: &str) -> Option<(&'static str, u64)> {
+    CollapseState::new(CollapseSource::Prose)
+        .feed(text)
+        .map(|fire| (fire.reason, fire.anomaly_start_offset))
+}
+
+fn assert_run_threshold(units: &[&str], threshold: usize) {
+    for unit in units {
+        assert_eq!(
+            collapse_fire(&unit.repeat(threshold - 1)),
+            None,
+            "{unit:?} x {}",
+            threshold - 1
+        );
+        assert_eq!(
+            collapse_fire(&unit.repeat(threshold)),
+            Some(("dominant_run", 0)),
+            "{unit:?} x {threshold}"
+        );
+        assert_eq!(
+            collapse_fire(&unit.repeat(threshold + 1)),
+            Some(("dominant_run", 0)),
+            "{unit:?} x {}",
+            threshold + 1
+        );
+    }
+}
+
+#[test]
+fn a_punctuation_run_fires_at_exactly_256_repeats() {
+    assert_run_threshold(&["!", "?", "$", "%", "&", "@"], 256);
+}
+
+#[test]
+fn a_cjk_run_fires_at_exactly_224_repeats() {
+    assert_run_threshold(&["\u{4f60}", "\u{ac00}"], 224);
+}
+
+#[test]
+fn a_dominant_run_resumes_across_gaps_only_while_gap_times_eight_fits_the_count() {
+    let with_gap = |count: usize, gap: usize| {
+        collapse_fire(&format!(
+            "{}{}{}",
+            "!".repeat(count),
+            " ".repeat(gap),
+            "!".repeat(300 - count)
+        ))
+    };
+    for (count, widest_gap) in [(224_usize, 28_usize), (160, 20), (96, 12)] {
+        assert_eq!(
+            with_gap(count, widest_gap),
+            Some(("dominant_run", 0)),
+            "{widest_gap} blanks after {count}"
+        );
+        assert_eq!(
+            with_gap(count, widest_gap + 1),
+            None,
+            "{} blanks after {count} end the run",
+            widest_gap + 1
+        );
+    }
+}
+
+const LEAK_TOKEN: &str = "<|endoftext|>";
+
+/// Whether a leak detector that read `stream` and then `trailing` more bytes of
+/// prose corroborates the collapse the same `stream` causes.
+fn leak_corroborates(stream: &str, trailing: usize) -> Result<bool, Box<dyn Error>> {
+    let mut leak = LeakState::new();
+    let _ = leak.feed(stream);
+    let _ = leak.feed(&"x".repeat(trailing));
+    let fire = CollapseState::new(CollapseSource::Prose)
+        .feed(stream)
+        .ok_or_else(|| std::io::Error::other("the stream should collapse"))?;
+    Ok(leak.corroborates(&fire))
+}
+
+#[test]
+fn a_leak_corroborates_the_collapse_that_starts_at_its_first_payload() -> TestResult {
+    let adjacent = format!("{LEAK_TOKEN}{}", "!".repeat(300));
+    assert!(
+        leak_corroborates(&adjacent, 0)?,
+        "the payload follows the token"
+    );
+    let unrelated = format!("{LEAK_TOKEN}xxxxx{}", "!".repeat(300));
+    assert!(
+        !leak_corroborates(&unrelated, 0)?,
+        "a collapse that starts after other payload is not this token's"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_leak_stops_corroborating_after_more_than_32_blanks_before_the_payload() -> TestResult {
+    for (blanks, expected) in [(31_usize, true), (32, true), (33, false)] {
+        let stream = format!("{LEAK_TOKEN}{}{}", " ".repeat(blanks), "!".repeat(300));
+        assert_eq!(leak_corroborates(&stream, 0)?, expected, "{blanks} blanks");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_leak_stops_corroborating_one_byte_past_its_2048_byte_window() -> TestResult {
+    let adjacent = format!("{LEAK_TOKEN}{}", "!".repeat(300));
+    let window_edge = LEAK_TOKEN.len() + 2048 - adjacent.len();
+    assert!(
+        leak_corroborates(&adjacent, window_edge)?,
+        "last offset inside the window"
+    );
+    assert!(
+        !leak_corroborates(&adjacent, window_edge + 1)?,
+        "one byte past the window"
+    );
+    Ok(())
+}
+
 #[test]
 fn control_token_run_fires_only_outside_a_fence() {
     let mut plain = LeakState::new();

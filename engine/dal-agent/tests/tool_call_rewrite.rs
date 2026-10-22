@@ -129,6 +129,45 @@ impl ObserveHook<ToolResultEvent> for Results {
     }
 }
 
+/// Answers `Allow`, or blocks with `block`, and records the arguments every
+/// call hands it.
+struct Spy {
+    seen: Arc<Mutex<Vec<String>>>,
+    block: Option<&'static str>,
+}
+
+impl Hook<ToolCallEvent, ToolCallVerdict> for Spy {
+    fn call(
+        &self,
+        input: ToolCallEvent,
+        _cx: HookCx,
+    ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(input.args.as_str().to_owned());
+        let verdict = self
+            .block
+            .map_or(ToolCallVerdict::Allow, |reason| ToolCallVerdict::Block {
+                reason: reason.into(),
+            });
+        Box::pin(async { Ok(verdict) })
+    }
+}
+
+/// An extension whose only part is a `tool_call` hook that records its input.
+fn spy_extension(
+    name: &str,
+    seen: Arc<Mutex<Vec<String>>>,
+    block: Option<&'static str>,
+) -> Extension {
+    ExtensionBuilder::new(name, "0.1.0", ServiceSet::EMPTY)
+        .expect("spy builder")
+        .on_tool_call(Spy { seen, block })
+        .build()
+        .expect("spy extension")
+}
+
 fn extension(step: Step, ran: Arc<Mutex<Vec<String>>>, seen: Settled) -> Extension {
     let name = Name::parse("fixture__stat").expect("tool name");
     let stat = Arc::new(Stat {
@@ -166,6 +205,16 @@ fn extension(step: Step, ran: Arc<Mutex<Vec<String>>>, seen: Settled) -> Extensi
 /// Runs one scripted call whose `tool_call` hook answers `step`, then returns
 /// the settled result and the arguments the tool actually ran with.
 async fn run_with_hook(step: Step) -> ((bool, Box<str>), Vec<String>) {
+    run_with_extras(step, Vec::new(), Vec::new()).await
+}
+
+/// [`run_with_hook`] with `before` registered ahead of the `fixture`
+/// extension and `after` registered behind it.
+async fn run_with_extras(
+    step: Step,
+    before: Vec<Extension>,
+    after: Vec<Extension>,
+) -> ((bool, Box<str>), Vec<String>) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("workspace");
@@ -181,11 +230,14 @@ async fn run_with_hook(step: Step) -> ((bool, Box<str>), Vec<String>) {
         Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text.as_str())).expect("config");
     let ran = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = before;
+    extensions.push(extension(step, Arc::clone(&ran), Arc::clone(&seen)));
+    extensions.extend(after);
     let product = Product {
         name: "dal",
         data_root: data.clone(),
         defaults: "",
-        extensions: vec![extension(step, Arc::clone(&ran), Arc::clone(&seen))],
+        extensions,
         bundled: Vec::new(),
     };
     let env = Env {
@@ -263,6 +315,48 @@ async fn rewrite_to_a_valid_path_still_runs_with_the_rewritten_arguments() {
     let ((ok, preview), ran) = run_with_hook(Step::Rewrite(r#"{"path":"other.txt"}"#)).await;
     assert!(ok, "the valid rewrite must run: {preview}");
     assert_eq!(ran, vec![r#"{"path":"other.txt"}"#.to_owned()]);
+}
+
+/// Rewrites thread through the extensions in registration order: one ahead
+/// of the rewriting extension is handed the model's arguments, one behind it
+/// is handed the rewritten ones, and its block names that later extension
+/// and keeps the tool from running.
+#[tokio::test]
+async fn a_later_extension_is_handed_the_rewrite_and_can_block_it() {
+    let early = Arc::new(Mutex::new(Vec::new()));
+    let late = Arc::new(Mutex::new(Vec::new()));
+    let ((ok, preview), ran) = run_with_extras(
+        Step::Rewrite(r#"{"path":"other.txt"}"#),
+        vec![spy_extension("early", Arc::clone(&early), None)],
+        vec![spy_extension(
+            "late",
+            Arc::clone(&late),
+            Some("rewritten path refused"),
+        )],
+    )
+    .await;
+    assert!(!ok, "the later block must fail the call: {preview}");
+    assert_eq!(
+        preview.as_ref(),
+        "blocked by late: rewritten path refused",
+        "the block names the later extension, not the rewriting one"
+    );
+    assert!(ran.is_empty(), "the tool must not run: {ran:?}");
+    let handed = |log: &Arc<Mutex<Vec<String>>>| {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    };
+    assert_eq!(
+        handed(&early),
+        vec![r#"{"path":"inside.txt"}"#.to_owned()],
+        "an extension ahead of the rewrite sees the model's arguments"
+    );
+    assert_eq!(
+        handed(&late),
+        vec![r#"{"path":"other.txt"}"#.to_owned()],
+        "an extension after the rewrite sees the rewritten arguments"
+    );
 }
 
 #[tokio::test]
@@ -353,9 +447,14 @@ impl ObserveHook<ToolResultEvent> for CallResults {
     }
 }
 
-/// Builds the classification fixture extension that rewrites `read-b` to a
-/// mutating `write` while recording settled `(call, ok, preview)` triples.
-fn class_rewrite_extension(ran: Arc<Mutex<Vec<String>>>, seen: SettledCalls) -> Extension {
+/// Builds the classification fixture extension that rewrites the `second`
+/// call's arguments to `to` while recording settled `(call, ok, preview)`
+/// triples.
+fn class_rewrite_extension(
+    ran: Arc<Mutex<Vec<String>>>,
+    seen: SettledCalls,
+    to: &'static str,
+) -> Extension {
     let name = Name::parse("fixture__class").expect("tool name");
     let tool = Arc::new(ClassTool {
         name: name.clone(),
@@ -370,8 +469,8 @@ fn class_rewrite_extension(ran: Arc<Mutex<Vec<String>>>, seen: SettledCalls) -> 
     ExtensionBuilder::new("fixture", "0.1.0", ServiceSet::EMPTY)
         .expect("extension builder")
         .on_tool_call(SelectiveRewrite {
-            target: "read-b",
-            to: r#"{"op":"write"}"#,
+            target: "second",
+            to,
         })
         .on_tool_result(CallResults { seen })
         .script_tool(
@@ -392,13 +491,21 @@ fn class_rewrite_extension(ran: Arc<Mutex<Vec<String>>>, seen: SettledCalls) -> 
         .expect("extension")
 }
 
-async fn run_two_reads_with_rewrite() -> (Vec<(String, bool, Box<str>)>, Vec<String>) {
+/// Runs a `first` call with `op` read and a `second` call with `second_op`;
+/// the hook rewrites the `second` call's arguments to `rewrite_to`. Returns
+/// the settled triples and the arguments the tool actually ran with.
+async fn run_two_calls(
+    second_op: &str,
+    rewrite_to: &'static str,
+) -> (Vec<(String, bool, Box<str>)>, Vec<String>) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("workspace");
     std::fs::create_dir_all(&data).expect("data directory");
     std::fs::create_dir_all(&workspace_dir).expect("workspace directory");
-    let step_call = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"read-a\",\"name\":\"fixture__class\"},{\"type\":\"tool_call_started\",\"id\":\"read-b\",\"name\":\"fixture__class\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"read-a\",\"name\":\"fixture__class\",\"args\":{\"kind\":\"parsed\",\"value\":{\"op\":\"read\"}}},{\"id\":\"read-b\",\"name\":\"fixture__class\",\"args\":{\"kind\":\"parsed\",\"value\":{\"op\":\"read\"}}}]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}]}\n";
+    let step_call = format!(
+        "{{\"kind\":\"events\",\"events\":[{{\"type\":\"tool_call_started\",\"id\":\"first\",\"name\":\"fixture__class\"}},{{\"type\":\"tool_call_started\",\"id\":\"second\",\"name\":\"fixture__class\"}},{{\"type\":\"tool_calls_done\",\"calls\":[{{\"id\":\"first\",\"name\":\"fixture__class\",\"args\":{{\"kind\":\"parsed\",\"value\":{{\"op\":\"read\"}}}}}},{{\"id\":\"second\",\"name\":\"fixture__class\",\"args\":{{\"kind\":\"parsed\",\"value\":{{\"op\":\"{second_op}\"}}}}}}]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"tool_use\"}}]}}\n"
+    );
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, format!("{step_call}{STEP_END}")).expect("script fixture");
     let config_text = format!(
@@ -409,7 +516,7 @@ async fn run_two_reads_with_rewrite() -> (Vec<(String, bool, Box<str>)>, Vec<Str
         Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text.as_str())).expect("config");
     let ran = Arc::new(Mutex::new(Vec::new()));
     let seen: SettledCalls = Arc::new(Mutex::new(Vec::new()));
-    let extension = class_rewrite_extension(Arc::clone(&ran), Arc::clone(&seen));
+    let extension = class_rewrite_extension(Arc::clone(&ran), Arc::clone(&seen), rewrite_to);
     let product = Product {
         name: "dal",
         data_root: data.clone(),
@@ -480,15 +587,15 @@ async fn run_two_reads_with_rewrite() -> (Vec<(String, bool, Box<str>)>, Vec<Str
 
 #[tokio::test]
 async fn hook_rewrite_from_read_to_mutating_class_is_refused_without_running() {
-    let (seen, ran) = run_two_reads_with_rewrite().await;
+    let (seen, ran) = run_two_calls("read", r#"{"op":"write"}"#).await;
     let by_call = |id: &str| {
         seen.iter()
             .find(|(call, _, _)| call == id)
             .unwrap_or_else(|| panic!("missing result for {id}: {seen:?}"))
             .clone()
     };
-    let (_, a_ok, _) = by_call("read-a");
-    let (_, b_ok, b_preview) = by_call("read-b");
+    let (_, a_ok, _) = by_call("first");
+    let (_, b_ok, b_preview) = by_call("second");
     assert!(a_ok, "the untouched read must still run: {seen:?}");
     assert!(!b_ok, "the class-changing rewrite must fail: {seen:?}");
     assert!(
@@ -502,5 +609,24 @@ async fn hook_rewrite_from_read_to_mutating_class_is_refused_without_running() {
         ran,
         vec![r#"{"op":"read"}"#.to_owned()],
         "the mutating rewrite must never run beside the read: {ran:?}"
+    );
+}
+
+/// The re-classification guards only a read-only call: a mutating call that a
+/// hook rewrites into a read keeps running, with the rewritten arguments,
+/// beside the untouched read.
+#[tokio::test]
+async fn hook_rewrite_from_a_mutating_class_to_read_still_runs() {
+    let (seen, mut ran) = run_two_calls("write", r#"{"op":"read"}"#).await;
+    assert_eq!(seen.len(), 2, "both calls settle: {seen:?}");
+    assert!(
+        seen.iter().all(|(_, ok, _)| *ok),
+        "neither call may be refused: {seen:?}"
+    );
+    ran.sort();
+    assert_eq!(
+        ran,
+        vec![r#"{"op":"read"}"#.to_owned(), r#"{"op":"read"}"#.to_owned()],
+        "the rewritten call ran with its rewritten arguments: {ran:?}"
     );
 }

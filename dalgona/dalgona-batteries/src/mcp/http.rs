@@ -117,6 +117,23 @@ pub(crate) struct CallCx<'a> {
     pub services: &'a dyn dal_agent::ext::Services,
     pub who: &'a dal_agent::ext::Caller,
     pub cancel: &'a CancellationToken,
+    pub call_cancel: Option<&'a CancellationToken>,
+}
+
+fn is_cancelled(cancel: &CancellationToken, call_cancel: Option<&CancellationToken>) -> bool {
+    cancel.is_cancelled() || call_cancel.is_some_and(CancellationToken::is_cancelled)
+}
+
+async fn either_cancelled(cancel: &CancellationToken, call_cancel: Option<&CancellationToken>) {
+    match call_cancel {
+        Some(token) => {
+            tokio::select! {
+                () = cancel.cancelled() => {},
+                () = token.cancelled() => {},
+            }
+        }
+        None => cancel.cancelled().await,
+    }
 }
 
 /// One request loop's retry and authentication ledger.
@@ -165,6 +182,7 @@ struct SendCx<'a> {
     version: &'a str,
     token: Option<String>,
     cancel: &'a CancellationToken,
+    call_cancel: Option<&'a CancellationToken>,
     deadline: &'a CallDeadline,
 }
 
@@ -175,6 +193,7 @@ struct StreamCx<'a> {
     version: &'a str,
     token: Option<String>,
     cancel: &'a CancellationToken,
+    call_cancel: Option<&'a CancellationToken>,
     deadline: &'a mut CallDeadline,
 }
 
@@ -267,7 +286,7 @@ impl HttpTransport {
         let mut deadline = CallDeadline::new(self.call_timeout, self.call_max);
         let mut ledger = AuthLedger::new(id);
         loop {
-            if call.cancel.is_cancelled() {
+            if is_cancelled(call.cancel, call.call_cancel) {
                 return Err(TransportError::Cancelled);
             }
             let body = request_body(
@@ -279,6 +298,7 @@ impl HttpTransport {
             )
             .map_err(TransportError::Mcp)?;
             let send = self.send_frame(&mut ledger, call, &deadline).await;
+            let token = send.token.clone();
             let response = self
                 .send_once(
                     body.as_str(),
@@ -290,8 +310,17 @@ impl HttpTransport {
                 .await?;
             self.capture_session(&response).await?;
             let status = response.status();
-            if status == StatusCode::UNAUTHORIZED {
-                match self.unauthorized(&response, &mut ledger, call, ids).await? {
+            let auth_step = match status {
+                StatusCode::UNAUTHORIZED => {
+                    Some(self.unauthorized(&response, &mut ledger, call, ids).await?)
+                }
+                StatusCode::FORBIDDEN => {
+                    Some(self.forbidden(&response, &mut ledger, call, ids).await?)
+                }
+                _ => None,
+            };
+            if let Some(step) = auth_step {
+                match step {
                     AuthStep::Retry { reset_deadline } => {
                         if reset_deadline {
                             deadline = CallDeadline::new(self.call_timeout, self.call_max);
@@ -301,61 +330,80 @@ impl HttpTransport {
                     AuthStep::Fail(error) => return Err(error),
                 }
             }
-            if status == StatusCode::FORBIDDEN {
-                match self.forbidden(&response, &mut ledger, call, ids).await? {
-                    AuthStep::Retry { reset_deadline } => {
-                        if reset_deadline {
-                            deadline = CallDeadline::new(self.call_timeout, self.call_max);
-                        }
-                        continue;
-                    }
-                    AuthStep::Fail(error) => return Err(error),
-                }
-            }
-            if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
-                return Err(TransportError::Mcp(protocol_error(
-                    "MCP request completed without a response".to_owned(),
-                )));
-            }
-            if !status.is_success() {
-                let body = self
-                    .read_body(response, ERROR_BODY_MAX, call.cancel, &deadline)
-                    .await?;
-                let text = String::from_utf8_lossy(&body).into_owned();
-                return error_status(
-                    status,
-                    call.version,
-                    ledger.request_id,
-                    id,
-                    &text,
-                    ledger.attempts,
-                );
-            }
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if content_type.starts_with("text/event-stream") {
-                let mut stream = StreamCx {
-                    request_id: ledger.request_id,
-                    original_id: id,
-                    version: call.version,
-                    token: send.token.clone(),
-                    cancel: call.cancel,
-                    deadline: &mut deadline,
-                };
-                return self.read_event_stream(response, &mut stream).await;
-            }
-            let body = self
-                .read_body(response, RESPONSE_MAX, call.cancel, &deadline)
-                .await?;
-            let text = std::str::from_utf8(&body).map_err(|_| {
-                TransportError::Mcp(protocol_error("invalid MCP response encoding".to_owned()))
-            })?;
-            return response_for_id(text, ledger.request_id, id).map_err(TransportError::Mcp);
+            return self
+                .exchange_response(response, token, &ledger, id, call, &mut deadline)
+                .await;
         }
+    }
+
+    /// Answers a completed response: error status text, the event stream,
+    /// or the JSON body for the attempt id.
+    async fn exchange_response(
+        &self,
+        response: Response,
+        token: Option<String>,
+        ledger: &AuthLedger,
+        original_id: u64,
+        call: &CallCx<'_>,
+        deadline: &mut CallDeadline,
+    ) -> Result<RawJson, TransportError> {
+        let status = response.status();
+        if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
+            return Err(TransportError::Mcp(protocol_error(
+                "MCP request completed without a response".to_owned(),
+            )));
+        }
+        if !status.is_success() {
+            let body = self
+                .read_body(
+                    response,
+                    ERROR_BODY_MAX,
+                    call.cancel,
+                    call.call_cancel,
+                    deadline,
+                )
+                .await?;
+            let text = String::from_utf8_lossy(&body).into_owned();
+            return error_status(
+                status,
+                call.version,
+                ledger.request_id,
+                original_id,
+                &text,
+                ledger.attempts,
+            );
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if content_type.starts_with("text/event-stream") {
+            let mut stream = StreamCx {
+                request_id: ledger.request_id,
+                original_id,
+                version: call.version,
+                token,
+                cancel: call.cancel,
+                call_cancel: call.call_cancel,
+                deadline,
+            };
+            return self.read_event_stream(response, &mut stream).await;
+        }
+        let body = self
+            .read_body(
+                response,
+                RESPONSE_MAX,
+                call.cancel,
+                call.call_cancel,
+                deadline,
+            )
+            .await?;
+        let text = std::str::from_utf8(&body).map_err(|_| {
+            TransportError::Mcp(protocol_error("invalid MCP response encoding".to_owned()))
+        })?;
+        response_for_id(text, ledger.request_id, original_id).map_err(TransportError::Mcp)
     }
 
     /// Refreshes the bearer token and assembles this attempt's send context.
@@ -371,6 +419,7 @@ impl HttpTransport {
             version: call.version,
             token: ledger.used_token.clone(),
             cancel: call.cancel,
+            call_cancel: call.call_cancel,
             deadline,
         }
     }
@@ -569,7 +618,7 @@ impl HttpTransport {
         let mut deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
         let mut ledger = AuthLedger::new(0);
         loop {
-            if call.cancel.is_cancelled() {
+            if is_cancelled(call.cancel, call.call_cancel) {
                 return Err(TransportError::Cancelled);
             }
             let token = self.bearer().await;
@@ -578,6 +627,7 @@ impl HttpTransport {
                 version: call.version,
                 token,
                 cancel: call.cancel,
+                call_cancel: call.call_cancel,
                 deadline: &deadline,
             };
             let response = self
@@ -669,7 +719,7 @@ impl HttpTransport {
         extra: &[(HeaderName, HeaderValue)],
         send: &SendCx<'_>,
     ) -> Result<Response, TransportError> {
-        if send.cancel.is_cancelled() {
+        if is_cancelled(send.cancel, send.call_cancel) {
             return Err(TransportError::Cancelled);
         }
         let session = self.session_id.lock().await.clone();
@@ -684,7 +734,8 @@ impl HttpTransport {
             request = request.bearer_auth(token);
         }
         tokio::select! {
-            () = send.cancel.cancelled() => Err(TransportError::Cancelled),
+            biased;
+            () = either_cancelled(send.cancel, send.call_cancel) => Err(TransportError::Cancelled),
             response = tokio::time::timeout_at(send.deadline.expires, request.send()) => match response {
                 Ok(Ok(response)) => Ok(response),
                 Ok(Err(_)) => Err(TransportError::Mcp(protocol_error(format!(
@@ -701,12 +752,13 @@ impl HttpTransport {
         mut response: Response,
         maximum: usize,
         cancel: &CancellationToken,
+        call_cancel: Option<&CancellationToken>,
         deadline: &CallDeadline,
     ) -> Result<Vec<u8>, TransportError> {
         let mut body = Vec::new();
         loop {
             let chunk = tokio::select! {
-                () = cancel.cancelled() => return Err(TransportError::Cancelled),
+                () = either_cancelled(cancel, call_cancel) => return Err(TransportError::Cancelled),
                 chunk = tokio::time::timeout_at(deadline.expires, response.chunk()) => match chunk {
                     Ok(Ok(chunk)) => chunk,
                     Ok(Err(_)) => return Err(TransportError::Mcp(protocol_error("HTTP response read failed".to_owned()))),
@@ -733,7 +785,7 @@ impl HttpTransport {
         let mut parser = SseParser::default();
         loop {
             let chunk = tokio::select! {
-                () = stream.cancel.cancelled() => return Err(TransportError::Cancelled),
+                () = either_cancelled(stream.cancel, stream.call_cancel) => return Err(TransportError::Cancelled),
                 chunk = tokio::time::timeout_at(stream.deadline.expires, response.chunk()) => match chunk {
                     Ok(Ok(chunk)) => chunk,
                     Ok(Err(_)) => return Err(TransportError::Mcp(protocol_error("HTTP event stream read failed".to_owned()))),
@@ -834,7 +886,7 @@ impl HttpTransport {
         // budget: a server that holds this POST open must not hold the call
         // past its deadline.
         let _ = tokio::select! {
-            () = stream.cancel.cancelled() => None,
+            () = either_cancelled(stream.cancel, stream.call_cancel) => None,
             response = tokio::time::timeout_at(stream.deadline.expires, request.send()) => {
                 response.ok().and_then(Result::ok)
             }

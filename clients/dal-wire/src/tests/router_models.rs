@@ -23,8 +23,11 @@ fn options(aliases: &[(&str, &str)]) -> RouterOptions {
     }
 }
 
+/// One catalog row as `Host::models` produces it: an API route names the
+/// provider that listed it, and `provider` repeats that identity.
 fn info(route: ModelRoute) -> ModelInfo {
     ModelInfo {
+        provider: route.provider().unwrap_or_default().into(),
         route,
         name: "model".into(),
         caps: Caps {
@@ -37,27 +40,28 @@ fn info(route: ModelRoute) -> ModelInfo {
     }
 }
 
-fn api(family: Family, model: &str) -> ModelRoute {
+fn api(family: Family, model: &str, provider: &str) -> ModelRoute {
     ModelRoute::Api {
         family,
         model: model.into(),
+        provider: Some(provider.into()),
     }
 }
 
 fn catalog() -> Vec<ModelInfo> {
     vec![
-        info(api(Family::Chat, "gpt-4o")),
-        info(api(Family::Responses, "o3")),
-        info(api(Family::Codex, "gpt-5-codex")),
-        info(api(Family::Anthropic, "claude-sonnet-4")),
-        info(api(Family::Chat, "org/nested-model")),
+        info(api(Family::Chat, "gpt-4o", "acme-proxy")),
+        info(api(Family::Responses, "o3", "openai")),
+        info(api(Family::Codex, "gpt-5-codex", "openai-codex")),
+        info(api(Family::Anthropic, "claude-sonnet-4", "anthropic")),
+        info(api(Family::Chat, "org/nested-model", "acme-proxy")),
         info(ModelRoute::Synthetic {
             id: "team/fast".into(),
         }),
         info(ModelRoute::Harness {
             id: "dalgon/normal".into(),
         }),
-        info(api(Family::Chat, "gpt-4o")),
+        info(api(Family::Chat, "gpt-4o", "openai")),
     ]
 }
 
@@ -108,9 +112,14 @@ fn every_listed_id_resolves_to_its_own_identity() {
             let ResolvedModel::Route(route) = resolved else {
                 panic!("catalog id {id} resolved away from its route: {resolved:?}");
             };
+            assert!(
+                route.same_model(&entry.route),
+                "catalog id {id} resolved to the wrong route {route:?}"
+            );
             assert_eq!(
-                &route, &entry.route,
-                "catalog id {id} resolved to the wrong route"
+                route.provider(),
+                None,
+                "the router id namespace names no provider"
             );
         }
     }
@@ -126,9 +135,78 @@ fn catalog_ids_round_trip_to_their_routes() {
             (ResolvedModel::Harness(mode), ModelRoute::Harness { id }) => {
                 assert_eq!(mode.id(), id.as_ref());
             }
-            (ResolvedModel::Route(route), expected) => assert_eq!(&route, expected),
+            (ResolvedModel::Route(route), expected) => {
+                assert!(
+                    route.same_model(expected),
+                    "{expected:?} resolved to {route:?}"
+                );
+                assert_eq!(route.provider(), None, "{expected:?} gained a provider");
+            }
             (other, expected) => panic!("{expected:?} resolved to {other:?}"),
         }
+    }
+}
+
+#[test]
+fn providers_sharing_a_family_and_model_list_one_router_id_naming_no_provider() {
+    let options = options(&[]);
+    let catalog = [
+        info(api(Family::Chat, "gpt-4o", "openai")),
+        info(api(Family::Chat, "gpt-4o", "acme-proxy")),
+    ];
+    let ids = listed_ids(&BTreeMap::new(), &catalog);
+    assert_eq!(
+        ids.iter().filter(|id| *id == "openai-chat/gpt-4o").count(),
+        1,
+        "both providers list the one id: {ids:?}"
+    );
+    let resolved = resolve_model(&options, "openai-chat/gpt-4o").expect("the listed id resolves");
+    let ResolvedModel::Route(route) = resolved else {
+        panic!("an API id resolved to {resolved:?}");
+    };
+    assert_eq!(route, api_without_provider(Family::Chat, "gpt-4o"));
+    // A route that names no provider is a different selection by `==` but
+    // the same model for both providers' catalog rows.
+    for entry in &catalog {
+        assert_ne!(route, entry.route);
+        assert!(route.same_model(&entry.route));
+    }
+}
+
+#[test]
+fn new_family_catalog_rows_list_api_ids_and_requests_resolve_them() {
+    let catalog = [
+        info(api(Family::Ollama, "llama3", "ollama-local")),
+        info(api(Family::Mistral, "mistral-small", "mistral")),
+    ];
+    let ids = listed_ids(&BTreeMap::new(), &catalog);
+    assert!(ids.contains(&"ollama/llama3".to_owned()), "{ids:?}");
+    assert!(ids.contains(&"mistral/mistral-small".to_owned()), "{ids:?}");
+    let options = options(&[]);
+    for (id, family, native, row) in [
+        ("ollama/llama3", Family::Ollama, "llama3", &catalog[0]),
+        (
+            "mistral/mistral-small",
+            Family::Mistral,
+            "mistral-small",
+            &catalog[1],
+        ),
+    ] {
+        let ResolvedModel::Route(route) =
+            resolve_model(&options, id).unwrap_or_else(|error| panic!("{id}: {error:?}"))
+        else {
+            panic!("{id} did not resolve to a route");
+        };
+        assert_eq!(route, api_without_provider(family, native), "{id}");
+        assert!(route.same_model(&row.route), "{id} left its catalog row");
+    }
+}
+
+fn api_without_provider(family: Family, model: &str) -> ModelRoute {
+    ModelRoute::Api {
+        family,
+        model: model.into(),
+        provider: None,
     }
 }
 
@@ -153,6 +231,41 @@ fn unlisted_spellings_are_model_not_found() {
         assert_eq!(fail.status, 400);
         assert_eq!(fail.code, "model_not_found");
         assert_eq!(fail.message, format!(r#"model "{id}" was not found"#));
+    }
+}
+
+#[test]
+fn every_family_prefix_round_trips_through_the_wire_id() {
+    const FAMILIES: [Family; 16] = [
+        Family::Chat,
+        Family::Responses,
+        Family::Codex,
+        Family::Anthropic,
+        Family::Bedrock,
+        Family::Cursor,
+        Family::Devin,
+        Family::Droid,
+        Family::GitLab,
+        Family::GoogleGenerativeAi,
+        Family::GoogleVertex,
+        Family::GoogleGeminiCli,
+        Family::GoogleAntigravity,
+        Family::Mistral,
+        Family::Ollama,
+        Family::PiMessages,
+    ];
+    let options = options(&[]);
+    for route in FAMILIES {
+        let native = "native/model";
+        let expected = api_without_provider(route, native);
+        let id = route_id(&expected);
+        let ResolvedModel::Route(parsed) =
+            resolve_model(&options, &id).unwrap_or_else(|error| panic!("{id}: {error:?}"))
+        else {
+            panic!("{id} did not resolve to a route");
+        };
+        assert_eq!(parsed, expected, "{id} parsed to a different route");
+        assert_eq!(route_id(&parsed), id, "{id} does not re-render");
     }
 }
 

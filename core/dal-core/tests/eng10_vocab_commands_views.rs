@@ -547,6 +547,7 @@ fn session_info_rejects_relative_workspace_at_decode() -> TestResult {
         created_at: None,
         archived: None,
         last_seq: None,
+        message_count: None,
     };
     let encoded = sonic_rs::to_string(&session)?;
     assert_eq!(sonic_rs::from_str::<SessionInfo>(&encoded)?, session);

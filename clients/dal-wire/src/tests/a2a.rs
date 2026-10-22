@@ -184,6 +184,43 @@ fn version_needs_one_point_zero() {
     assert!(!version_ok(None, "A2A-Version=0.3"));
 }
 
+/// The version is matched exactly: a near spelling of `1.0` is another version,
+/// and a header that is present decides alone, so a good query cannot rescue a
+/// bad header (nor an empty one).
+#[test]
+fn version_match_is_exact_and_a_present_header_overrides_the_query() {
+    // Only surrounding blanks are forgiven in a header.
+    assert!(version_ok(Some("1.0"), ""));
+    assert!(version_ok(Some(" 1.0\t"), ""));
+    for near in [
+        "1.0.0", "1.00", "1.", "1", "1.0x", "x1.0", "01.0", "1,0", "1.0 1.0", "",
+    ] {
+        assert!(!version_ok(Some(near), ""), "header {near:?}");
+        assert!(
+            !version_ok(Some(near), "A2A-Version=1.0"),
+            "header {near:?} must not be rescued by a good query"
+        );
+    }
+    // In the query the member name ignores case, but the value is exact.
+    assert!(version_ok(None, "a2a-version=1.0"));
+    assert!(version_ok(None, "A2A-VERSION=1.0"));
+    assert!(version_ok(None, "a=b&A2A-Version=1.0&c=d"));
+    for near in [
+        "A2A-Version=1.0x",
+        "A2A-Version=1.00",
+        "A2A-Version=1",
+        "A2A-Version=",
+        "A2A-Version",
+        "xA2A-Version=1.0",
+        "A2A-Versions=1.0",
+        "A2A-Version =1.0",
+        "A2A-Version=%201.0",
+        "",
+    ] {
+        assert!(!version_ok(None, near), "query {near:?}");
+    }
+}
+
 #[test]
 fn card_base_prefers_host_header() {
     let bind = "127.0.0.1".parse().expect("ip");

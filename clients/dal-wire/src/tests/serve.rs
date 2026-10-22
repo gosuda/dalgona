@@ -738,6 +738,67 @@ mod heartbeat {
         );
     }
 
+    /// A transport whose frame reader never ran: the peer sent one text frame
+    /// and then `ending`, so the one-slot queue holds the text and the driver
+    /// holds the end of the connection. Returns once the peer has seen the
+    /// server's close frame, which proves the driver took both.
+    async fn blocked_handoff(ending: Message) -> (WebSocketTransport, Client) {
+        let (server, mut client) = pair().await;
+        client
+            .send(Message::Text("queued".into()))
+            .await
+            .expect("the text sends");
+        client.send(ending).await.expect("the ending sends");
+        while !matches!(next_frame(&mut client, WAIT).await, Message::Close(_)) {}
+        (server, client)
+    }
+
+    /// Closes a transport in the state [`blocked_handoff`] builds and returns
+    /// the virtual time the close took.
+    async fn close_with_blocked_handoff(ending: Message) -> Duration {
+        let (mut server, _client) = blocked_handoff(ending).await;
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(120), server.close())
+            .await
+            .expect("close returns");
+        let elapsed = start.elapsed();
+        assert_eq!(server.read_frame().await, Err(ReadFrameError::Closed));
+        elapsed
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_close_does_not_wait_for_a_blocked_peer_close_handoff() {
+        let elapsed = close_with_blocked_handoff(Message::Close(None)).await;
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close took {elapsed:?} with the peer's close held for the reader"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_close_does_not_wait_for_a_blocked_binary_end_handoff() {
+        let elapsed = close_with_blocked_handoff(Message::Binary(Bytes::from_static(b"\0"))).await;
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close took {elapsed:?} with the binary end held for the reader"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_write_fails_without_waiting_for_a_blocked_handoff() {
+        let (mut server, _client) = blocked_handoff(Message::Close(None)).await;
+        let start = tokio::time::Instant::now();
+        let written = tokio::time::timeout(Duration::from_secs(120), server.write_frame("late"))
+            .await
+            .expect("the write ends");
+        assert!(written.is_err(), "a write after the peer closed succeeded");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the write took {elapsed:?} with the peer's close held for the reader"
+        );
+    }
+
     #[tokio::test]
     async fn heartbeat_close_leaves_the_session_turn_running() {
         let rig = rig(&[gate_step("c1"), text_step(&["after"], 1, 1)]).await;

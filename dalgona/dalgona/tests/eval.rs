@@ -383,6 +383,39 @@ evalpack.pack(name = "pair", cases = [evalpack.case(id = "c", prompt = "p", chec
 }
 
 #[test]
+fn an_against_file_reaches_the_against_arm_and_never_the_defaults_arm() {
+    let rig = Rig::new(&[text_step("hello")], "");
+    let other = rig.root.join("other.jsonl");
+    fs::write(&other, text_step("goodbye") + "\n").expect("other script");
+    rig.pack(
+        "layer",
+        r#"def ok(result, workspace):
+    return result["text"] == "hello"
+
+evalpack.pack(name = "layer", cases = [evalpack.case(id = "c", prompt = "p", check = ok, repeats = 1)])
+"#,
+    );
+    let layered = rig.root.join("against.toml");
+    fs::write(
+        &layered,
+        format!(
+            "[providers.scripted]\nfixture = {:?}\n",
+            other.to_string_lossy()
+        ),
+    )
+    .expect("against file");
+    let run = rig.run(&["layer", "--against", &layered.to_string_lossy()]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    let lines = rig.lines("layer");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    contains(
+        &lines[0],
+        r#""arm":"defaults","repeat":1,"status":"passed""#,
+    );
+    contains(&lines[1], r#""arm":"against","repeat":1,"status":"failed""#);
+}
+
+#[test]
 fn a_missing_against_file_fails_the_against_arm_and_not_the_report() {
     let rig = Rig::new(&[text_step("hello")], "");
     rig.pack(

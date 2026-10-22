@@ -344,9 +344,12 @@ async fn corrupted_blob_bytes_are_refused_not_returned() {
     );
 
     fs::write(&path, b"").expect("truncate the blob to zero bytes");
+    let emptied = store
+        .read_blob(id, digest)
+        .expect_err("a zero-length blob is not the blob");
     assert!(
-        store.read_blob(id, digest).is_err(),
-        "a zero-length blob is not the blob"
+        matches!(&emptied, BlobError::Io { source } if source.kind() == std::io::ErrorKind::InvalidData),
+        "a truncated blob is corrupt, not missing, got {emptied:?}"
     );
     journal.close().await.expect("session closes");
 }

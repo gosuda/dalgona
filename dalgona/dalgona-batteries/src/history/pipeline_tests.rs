@@ -1588,6 +1588,7 @@ async fn compactor_reuses_matching_images_without_fetching_unrelated_pngs() {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "test".into(),
+            provider: None,
         },
         session: SessionId::new_v7(),
         instructions: "",
@@ -1631,6 +1632,7 @@ async fn compactor_without_an_image_profile_refuses_with_the_exact_notice() {
         model: ModelRoute::Api {
             family: Family::Chat,
             model: "test".into(),
+            provider: None,
         },
         session: SessionId::new_v7(),
         instructions: "",

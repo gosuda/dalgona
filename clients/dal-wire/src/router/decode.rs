@@ -456,38 +456,10 @@ pub(crate) fn resolve_model(
         })
 }
 
-/// Renders one route as its wire model id: one `<namespace>/<model>` per API
-/// family (`openai-chat`, `openai-responses`, `openai-codex`, `anthropic`,
-/// and one namespace for every newer family), or the synthetic or harness
-/// id itself.
+/// Renders one route as its wire model id: the family-qualified reference
+/// such as `openai-chat/<model>`, or the synthetic or harness id itself.
 pub(crate) fn route_id(route: &ModelRoute) -> String {
-    match route {
-        ModelRoute::Api { family, model } => {
-            let prefix = match family {
-                Family::Chat => "openai-chat",
-                Family::Responses => "openai-responses",
-                Family::Codex => "openai-codex",
-                Family::Anthropic => "anthropic",
-                // No provider adapter exists for these families yet
-                // (Provider::from_family refuses them); each leaves this
-                // arm for its display name when its adapter lands.
-                Family::Bedrock => "bedrock",
-                Family::Cursor => "cursor",
-                Family::Devin => "devin",
-                Family::Droid => "droid",
-                Family::GitLab => "gitlab",
-                Family::GoogleGenerativeAi => "google-generative-ai",
-                Family::GoogleVertex => "google-vertex",
-                Family::GoogleGeminiCli => "google-gemini-cli",
-                Family::GoogleAntigravity => "google-antigravity",
-                Family::Mistral => "mistral",
-                Family::Ollama => "ollama",
-                Family::PiMessages => "radius",
-            };
-            format!("{prefix}/{model}")
-        }
-        ModelRoute::Synthetic { id } | ModelRoute::Harness { id } => id.to_string(),
-    }
+    route.family_qualified_reference()
 }
 
 /// Parses one wire model id in the [`route_id`] rendering.
@@ -498,29 +470,17 @@ pub(crate) fn parse_route_id(id: &str) -> Option<ModelRoute> {
         });
     }
     let (prefix, name) = id.split_once('/')?;
-    let family = match prefix {
-        "dalgon" => return None,
-        "openai-chat" => Family::Chat,
-        "openai-responses" => Family::Responses,
-        "openai-codex" => Family::Codex,
-        "anthropic" => Family::Anthropic,
-        "bedrock" => Family::Bedrock,
-        "cursor" => Family::Cursor,
-        "devin" => Family::Devin,
-        "droid" => Family::Droid,
-        "gitlab" => Family::GitLab,
-        "google-generative-ai" => Family::GoogleGenerativeAi,
-        "google-vertex" => Family::GoogleVertex,
-        "google-gemini-cli" => Family::GoogleGeminiCli,
-        "google-antigravity" => Family::GoogleAntigravity,
-        "mistral" => Family::Mistral,
-        "ollama" => Family::Ollama,
-        "radius" => Family::PiMessages,
-        _ => return ModelRoute::synthetic(id).ok(),
+    if prefix == "dalgon" {
+        return None;
+    }
+    let Some(family) = Family::from_route_prefix(prefix) else {
+        return ModelRoute::synthetic(id).ok();
     };
+
     (!name.is_empty()).then(|| ModelRoute::Api {
         family,
         model: name.into(),
+        provider: None,
     })
 }
 
@@ -543,7 +503,10 @@ pub(crate) fn listed_ids(
     ids.extend(aliases.keys().map(ToString::to_string));
     let mut routes: Vec<String> = catalog
         .iter()
-        .filter(|info| parse_route_id(&route_id(&info.route)).as_ref() == Some(&info.route))
+        .filter(|info| {
+            parse_route_id(&route_id(&info.route))
+                .is_some_and(|parsed| parsed.same_model(&info.route))
+        })
         .map(|info| route_id(&info.route))
         .filter(|id| !ids.contains(id))
         .collect();

@@ -325,6 +325,7 @@ impl StdioTransport {
         };
 
         let write_result = tokio::select! {
+            biased;
             () = cancel.cancelled() => Err(TransportError::Cancelled),
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
             result = self.pipe.write_line(body.as_str()) => Ok(result),
@@ -342,9 +343,17 @@ impl StdioTransport {
         };
         if let Err(error) = write_result {
             inflight.settle().await;
+            if cancel.is_cancelled() || self.cancel.is_cancelled() {
+                return Err(TransportError::Cancelled);
+            }
             return Err(error);
         }
         Ok(inflight)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
     }
 
     /// Returns the bounded stderr excerpt retained for crash diagnostics.
@@ -420,6 +429,7 @@ impl StdioTransport {
             }
         };
         tokio::select! {
+            biased;
             () = cancel.cancelled() => Err(TransportError::Cancelled),
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
             result = write => result,

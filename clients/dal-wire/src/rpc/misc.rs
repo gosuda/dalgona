@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use dal_agent::Host;
-use dal_core::{Family, ModelRoute};
+use dal_core::ModelRoute;
 use serde::Serialize;
 use sonic_rs::Value;
 use tokio::sync::Mutex;
@@ -81,6 +81,13 @@ pub(crate) fn commands_list(host: &Host, params: &Value) -> Value {
 }
 
 /// One `models/list` row.
+///
+/// `id`, `provider`, `name`, and `contextWindow` keep their original shape
+/// and meaning: `provider` is the family label, not a configured provider id.
+/// `route` and `reference` are additive. `route` is the typed route that
+/// selects exactly this row, including the configured provider when the
+/// producer reported one; `reference` is the canonical `provider/model` name
+/// of an API row with a known provider, and the route id of any other row.
 #[derive(Serialize)]
 struct ModelRow {
     id: String,
@@ -89,6 +96,9 @@ struct ModelRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "contextWindow")]
     context_window: Option<u32>,
+    route: ModelRoute,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
 }
 
 /// Handles `models/list`: lists display rows without a network round trip
@@ -100,17 +110,48 @@ pub(crate) async fn models_list(host: &Host, params: &Value) -> Result<Value, Er
         .into_iter()
         .map(|info| {
             let (id, provider) = route_identity(&info.route);
+            let route = row_route(info.route, &info.provider);
+            let reference = row_reference(&route);
             ModelRow {
                 id,
                 provider,
                 name: info.name.into_string(),
                 context_window: info.caps.context_window,
+                route,
+                reference,
             }
         })
         .collect();
     rows.sort_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
     let models = to_value(&rows)?;
     Ok(sonic_rs::json!({"models": models}))
+}
+
+/// The route a row selects. An API route that does not name its provider
+/// takes the provider its producer reported on `ModelInfo.provider`; that
+/// field is the producer's own identity, never derived from a label. Every
+/// other route is returned as produced.
+fn row_route(route: ModelRoute, reported: &str) -> ModelRoute {
+    match route {
+        ModelRoute::Api { provider: None, .. } if !reported.is_empty() => {
+            route.with_provider(reported)
+        }
+        route => route,
+    }
+}
+
+/// The canonical name of a row: `provider/model` for an API route that names
+/// its provider, the route id for a synthetic or harness route, and nothing
+/// for an API route whose provider is unknown.
+fn row_reference(route: &ModelRoute) -> Option<String> {
+    match route {
+        ModelRoute::Api {
+            model, provider, ..
+        } => provider
+            .as_deref()
+            .map(|provider| format!("{provider}/{model}")),
+        ModelRoute::Synthetic { id } | ModelRoute::Harness { id } => Some(id.to_string()),
+    }
 }
 
 /// Splits one route into its wire id and provider label.
@@ -120,29 +161,8 @@ pub(super) fn route_identity(route: &ModelRoute) -> (String, String) {
             let provider = id.split('/').next().unwrap_or("").to_owned();
             (id.to_string(), provider)
         }
-        ModelRoute::Api { family, model } => {
-            let provider = match family {
-                Family::Chat | Family::Responses => "openai",
-                Family::Codex => "openai-codex",
-                Family::Anthropic => "anthropic",
-                // These families bind through the general HTTP adapter (the
-                // subprocess variant for Gemini CLI); each arm names its
-                // display provider id.
-                Family::Bedrock => "bedrock",
-                Family::Cursor => "cursor",
-                Family::Devin => "devin",
-                Family::Droid => "droid",
-                Family::GitLab => "gitlab",
-                Family::GoogleGenerativeAi => "google-generative-ai",
-                Family::GoogleVertex => "google-vertex",
-                Family::GoogleGeminiCli => "google-gemini-cli",
-                Family::GoogleAntigravity => "google-antigravity",
-                Family::Mistral => "mistral",
-                Family::Ollama => "ollama",
-                Family::PiMessages => "radius",
-            }
-            .to_owned();
-            (model.to_string(), provider)
+        ModelRoute::Api { family, model, .. } => {
+            (model.to_string(), super::family_label(*family).to_owned())
         }
         ModelRoute::Harness { id } => (id.to_string(), "dalgon".to_owned()),
     }

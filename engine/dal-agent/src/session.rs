@@ -284,6 +284,11 @@ pub(crate) enum ActorRequest {
         /// The busy or texted statuses after the poll.
         reply: oneshot::Sender<Vec<dal_core::ExtStatus>>,
     },
+    /// Wait until the last ended turn's driver confirmation has been folded.
+    Settle {
+        /// Sent once the actor has folded the pending turn confirmation.
+        reply: oneshot::Sender<()>,
+    },
     /// Flush the journal, close subscriber queues, and stop the actor.
     Shutdown {
         /// Shutdown acknowledgement.
@@ -645,6 +650,15 @@ impl SessionHandle {
             reply,
         })
         .await
+    }
+
+    /// Resolves once the actor has folded the driver confirmation for the
+    /// last ended turn, so turn-end observer records are durable before
+    /// session-end observers sweep per-turn state. A closed session
+    /// resolves as [`AgentError::SessionClosed`].
+    pub(crate) async fn settled(&self) -> Result<(), AgentError> {
+        self.roundtrip_via(self.safe_sender(), |reply| ActorRequest::Settle { reply })
+            .await
     }
 
     /// Classifies every open request of the opening and running turn for

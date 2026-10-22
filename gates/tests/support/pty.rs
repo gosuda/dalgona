@@ -266,6 +266,40 @@ impl PtyProcess {
         }
     }
 
+    /// Captures output until `ready` accepts the whole capture or the deadline
+    /// expires; `what` names the awaited state in the error.
+    pub fn wait_until(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        mut ready: impl FnMut(&[u8]) -> bool,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if ready(&self.output) {
+                return Ok(());
+            }
+            if let Some(status) = self.child.try_wait()? {
+                self.read_available()?;
+                if ready(&self.output) {
+                    return Ok(());
+                }
+                return Err(io::Error::other(format!(
+                    "PTY child exited with {status} before the terminal showed {what}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("the terminal never showed {what}"),
+                ));
+            }
+            if self.read_available()? == 0 {
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
     /// Resizes the slave side of the terminal and signals the child.
     pub fn resize(&mut self, columns: u16, rows: u16) -> io::Result<()> {
         tcsetwinsize(
@@ -293,6 +327,43 @@ impl PtyProcess {
     #[must_use]
     pub fn output(&self) -> &[u8] {
         &self.output
+    }
+
+    /// The exit status when the child has already ended; never waits.
+    pub fn exited(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    /// Names what the child left unrestored after it ended, or `None` when
+    /// the terminal is usable again: raw mode off (line mode and echo back),
+    /// bracketed paste disabled after its last enable, and the cursor shown
+    /// after its last hide.
+    pub fn terminal_restore_problem(&self) -> io::Result<Option<String>> {
+        use rustix::termios::LocalModes;
+
+        let termios = self.termios()?;
+        if !termios
+            .local_modes
+            .contains(LocalModes::ICANON | LocalModes::ECHO)
+        {
+            return Ok(Some(format!(
+                "the terminal is still in raw mode: {:?}",
+                termios.local_modes
+            )));
+        }
+        for (what, on, off) in [
+            ("bracketed paste", &b"\x1b[?2004h"[..], &b"\x1b[?2004l"[..]),
+            ("the cursor hide", &b"\x1b[?25l"[..], &b"\x1b[?25h"[..]),
+        ] {
+            let last_on = last_position(&self.output, on);
+            let last_off = last_position(&self.output, off);
+            if let Some(on_at) = last_on
+                && last_off.is_none_or(|off_at| off_at < on_at)
+            {
+                return Ok(Some(format!("{what} was never undone before exit")));
+            }
+        }
+        Ok(None)
     }
 
     /// Waits for child termination while continuing to drain PTY output.
@@ -409,6 +480,15 @@ pub(crate) fn wait_for_path(path: &Path, timeout: Duration, context: &str) -> io
         thread::sleep(Duration::from_millis(5));
     }
     Ok(())
+}
+
+fn last_position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

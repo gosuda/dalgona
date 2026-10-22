@@ -95,6 +95,81 @@ fn dangling_journal(workspace: Workspace) -> Vec<Record> {
     ]
 }
 
+/// One assistant entry with four calls: `ask`, `task` and `Ask` never settle
+/// (`Ask` never even started), while `read` already journaled its result.
+fn mixed_journal(workspace: Workspace) -> Vec<Record> {
+    let session = SessionId::parse("01890f47-36b0-7cc4-8000-000000000002").expect("session id");
+    let at = Timestamp::now();
+    let call = |id: &str, name: &str| Block::ToolCall {
+        id: CallId::new(id),
+        name: name.into(),
+        input: RawJson::parse("{}").expect("args"),
+        replay: None,
+    };
+    let assistant = Entry {
+        id: entry(1),
+        parent: None,
+        at,
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test".into(),
+            route: None,
+            content: vec![
+                call("ask-call", "ask"),
+                call("task-call", "task"),
+                call("shout-call", "Ask"),
+                call("read-call", "read"),
+            ],
+            usage: usage(),
+            stop: AssistantStop::ToolUse,
+            replay: None,
+        },
+    };
+    let settled = Entry {
+        id: entry(2),
+        parent: Some(entry(1)),
+        at,
+        kind: EntryKind::ToolResult {
+            call: CallId::new("read-call"),
+            name: "read".into(),
+            error: false,
+            parts: vec![JournalPart::Text {
+                text: "file text".into(),
+            }],
+            changes: Vec::new(),
+            elapsed_ms: None,
+        },
+    };
+    vec![
+        Record::Session(Header {
+            id: session,
+            at,
+            workspace,
+            product: Product::Dal,
+            from: None,
+        }),
+        Record::TurnReserved { at, turn: turn(1) },
+        Record::TurnStart { at, turn: turn(1) },
+        Record::Assistant(assistant),
+        Record::ToolStart {
+            at,
+            turn: turn(1),
+            call: CallId::new("ask-call"),
+        },
+        Record::ToolStart {
+            at,
+            turn: turn(1),
+            call: CallId::new("task-call"),
+        },
+        Record::ToolStart {
+            at,
+            turn: turn(1),
+            call: CallId::new("read-call"),
+        },
+        Record::ToolResult(settled),
+    ]
+}
+
 fn synthesized_text(entry: &Entry) -> (&str, bool, &str) {
     let EntryKind::ToolResult {
         name, error, parts, ..
@@ -106,6 +181,66 @@ fn synthesized_text(entry: &Entry) -> (&str, bool, &str) {
         panic!("one text part per synthesized result");
     };
     (name.as_ref(), *error, text.as_ref())
+}
+
+/// Repair touches only calls with no journaled result, and only the exact
+/// tool name `ask` earns the question text: `task` and `Ask` share the
+/// generic crash text, and the settled `read` is never answered twice.
+#[test]
+fn a_restart_repairs_only_open_calls_and_only_the_exact_ask_name_gets_the_ask_text() -> TestResult {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workspace = Workspace::new(tmp.path().to_path_buf()).expect("workspace");
+    let (session, effects) = dal_core::Session::replay(mixed_journal(workspace), Timestamp::now())?;
+    assert!(matches!(session.phase(), Phase::Idle));
+    let [Effect::Emit(emit)] = effects.as_slice() else {
+        panic!("replay must append one repair emit");
+    };
+    let mut repaired = Vec::new();
+    for record in &emit.records {
+        if let Record::ToolResult(entry) = record {
+            let (name, error, text) = synthesized_text(entry);
+            repaired.push((
+                name.to_owned(),
+                error,
+                text.to_owned(),
+                entry.id,
+                entry.parent,
+            ));
+        }
+    }
+    let expected = |name: &str, text: &str, id: u64, parent: u64| {
+        (
+            name.to_owned(),
+            true,
+            text.to_owned(),
+            entry(id),
+            Some(entry(parent)),
+        )
+    };
+    assert_eq!(
+        repaired,
+        vec![
+            expected("ask", RESTART_TEXT, 3, 2),
+            expected("task", CRASH_TEXT, 4, 3),
+            expected("Ask", CRASH_TEXT, 5, 4),
+        ],
+        "only the three open calls are repaired, in call order, chained after the settled result"
+    );
+    let aborts = emit
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::TurnEnd {
+                    stop: TurnEndStop::Aborted,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(aborts, 1, "the turn aborts exactly once after repair");
+    Ok(())
 }
 
 #[test]

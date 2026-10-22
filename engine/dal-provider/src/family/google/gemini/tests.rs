@@ -13,6 +13,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GoogleGenerativeAi,
             model: "gemini-3-pro".into(),
+            provider: None,
         },
         system: "".into(),
         tools: Vec::new().into(),
@@ -61,7 +62,7 @@ fn build_sends_the_key_header_and_model_path() {
     assert!(wire.fallback.is_none());
     assert_eq!(
         wire.headers,
-        vec![(API_KEY_HEADER, String::from("secret-key"))]
+        vec![("x-goog-api-key", String::from("secret-key"))]
     );
     let body = String::from_utf8(wire.body).unwrap();
     assert!(body.contains("\"contents\""), "{body}");
@@ -96,6 +97,7 @@ fn model_ids_that_leave_the_path_are_refused() {
         request.model = ModelRoute::Api {
             family: Family::GoogleGenerativeAi,
             model: model.into(),
+            provider: None,
         };
         let error = build(&GeminiRequest {
             request: &request,
@@ -117,6 +119,7 @@ fn wrong_family_route_is_refused() {
     request.model = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-6".into(),
+        provider: None,
     };
     let thinking = plan();
     let error = build(&GeminiRequest {

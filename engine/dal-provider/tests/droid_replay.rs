@@ -131,6 +131,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Droid,
             model: "kimi-k3".into(),
+            provider: None,
         },
         system: Arc::from("You are terse."),
         tools: Arc::from([]),
@@ -172,6 +173,7 @@ async fn droid_completions_text_turn() {
         route: ModelRoute::Api {
             family: Family::Droid,
             model: "kimi-k3".into(),
+            provider: None,
         },
         entry: entry(),
     };

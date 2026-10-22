@@ -109,6 +109,7 @@ fn minimal_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([]),
@@ -126,6 +127,7 @@ fn turn_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([read_tool()]),
@@ -143,6 +145,7 @@ fn snapshot_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([read_tool()]),
@@ -198,6 +201,7 @@ fn cross_model_request(model: &str) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: model.into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([]),
@@ -237,6 +241,7 @@ fn compact_request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         system: Arc::from("Summarize."),
         tools: Arc::from([]),
@@ -365,6 +370,7 @@ async fn responses_turn_canonical_order() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -434,6 +440,7 @@ async fn responses_replay_backfill_from_completed() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -478,6 +485,7 @@ async fn responses_argument_precedence_final_over_deltas() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -526,6 +534,7 @@ async fn responses_incomplete_max_output_truncates_open_call() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -567,6 +576,7 @@ async fn responses_done_line_before_completion_is_ignored() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -604,6 +614,7 @@ async fn responses_failed_after_text_is_status_without_retry() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -647,6 +658,7 @@ async fn responses_sequence_number_backwards_is_protocol_error() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -687,6 +699,7 @@ async fn responses_request_snapshot_with_replay_item() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })
@@ -725,6 +738,7 @@ async fn responses_replay_bound_to_model_not_cross_model() {
                 route: ModelRoute::Api {
                     family: Family::Responses,
                     model: model.into(),
+                    provider: None,
                 },
                 entry: entry(model),
             })
@@ -764,6 +778,7 @@ async fn responses_remote_compact_round_trip() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: compact_entry("gpt-5"),
         })
@@ -802,6 +817,7 @@ async fn responses_cancel_before_open_sends_nothing() {
             route: ModelRoute::Api {
                 family: Family::Responses,
                 model: "gpt-5".into(),
+                provider: None,
             },
             entry: entry("gpt-5"),
         })

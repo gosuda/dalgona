@@ -189,13 +189,14 @@ async fn connect_remote(
             .map_err(|error| TuiError::Backend(Box::new(error)))?;
         Ok(remote_model_options(models))
     };
-    run_blocking(
+    let (code, _shutdown) = run_blocking(
         remote::RemoteBackend(host),
         opts,
         model_source,
         save_diagrams,
     )
-    .await
+    .await;
+    code
 }
 /// Starts the interactive client after the process edge has resolved all inputs.
 pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
@@ -267,9 +268,11 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
     }
-    let code = run_blocking(host, opts, model_source, save_diagrams).await;
+    let (code, mut signals) = run_blocking(host, opts, model_source, save_diagrams).await;
     // The terminal is already restored here; the ladder closes the host.
-    let closed = exit::Ladder::begin().close_host(shutdown).await;
+    let closed = exit::Ladder::begin()
+        .close_host(shutdown, &mut signals)
+        .await;
     closed.skipped_by.map_or(code, ExitCode::from)
 }
 
@@ -278,34 +281,43 @@ async fn run_blocking<H, M, S>(
     opts: TuiOptions,
     model_source: M,
     save_diagrams: S,
-) -> ExitCode
+) -> (ExitCode, edge::ShutdownSignals)
 where
     H: dal_tui::backend::TuiHost,
     M: FnMut() -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> + Send + 'static,
     S: FnMut(bool) -> Result<(), TuiError> + Send + 'static,
 {
-    let signals = signal::Signals::start();
+    let mut signals = signal::Signals::start();
     #[expect(
         clippy::disallowed_methods,
         reason = "process edge: the process edge owns standard input"
     )]
     let io = signals.terminal(std::io::stdin());
-    let result = tokio::task::spawn_blocking(move || {
+    let mut task = tokio::task::spawn_blocking(move || {
         dal_tui::run_backend_with_settings_save(&host, &opts, &io, model_source, save_diagrams)
-    })
-    .await;
+    });
+    let polled = tokio::select! {
+        biased;
+        _ = signals.await_shutdown() => None,
+        result = &mut task => Some(result),
+    };
+    let result = match polled {
+        Some(result) => result,
+        None => (&mut task).await,
+    };
     let signal = signals.exit_status();
-    drop(signals);
+    let shutdown = signals.into_shutdown();
     if let Some(code) = signal {
-        return ExitCode::from(code);
+        return (ExitCode::from(code), shutdown);
     }
-    match result {
+    let code = match result {
         Ok(Ok(_)) => exit::code(exit::ExitKind::Success),
         Ok(Err(error)) => tui_error(error),
         Err(error) => tui_error(TuiError::Terminal(format!(
             "dalgon: interactive terminal stopped: {error}\nRestart dalgon in a terminal."
         ))),
-    }
+    };
+    (code, shutdown)
 }
 
 fn tui_error(error: TuiError) -> ExitCode {
@@ -325,27 +337,82 @@ fn tui_error(error: TuiError) -> ExitCode {
     }
 }
 
+/// Maps the rows of a remote `models/list` to picker options.
+///
+/// A row whose server publishes a typed route selects by that route and
+/// nothing else: the picker submits `SetModel` of the route exactly as the
+/// local picker does, and the route's configured provider is the scope
+/// identity. A row from a server that predates typed routes keeps its
+/// original `/model <reference>` selection and has no scope identity: its
+/// `provider` is only a family label, which cannot name a configured
+/// provider. Rows that spell one label (an API model and a synthetic model
+/// both named `openrouter/free`) stay separate rows and are told apart by
+/// their route kind.
 fn remote_model_options(
     models: Vec<dal_wire::remote::RemoteModel>,
 ) -> Vec<dal_tui::picker::ModelOption> {
-    models
-        .into_iter()
-        .map(|model| {
-            let reference = if dal_provider::find(&model.provider).is_some() {
-                format!("{}/{}", model.provider, model.id)
-            } else {
-                model.id
-            };
-            dal_tui::picker::ModelOption {
-                label: format!("{} · {reference}", model.name),
-                command: dal_core::Command::Run {
-                    name: "model".into(),
-                    args: reference.into(),
-                    expected: None,
-                },
-            }
-        })
-        .collect()
+    let (mut options, kinds): (Vec<_>, Vec<_>) =
+        models.into_iter().map(remote_model_option).unzip();
+    let mut spelled: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for option in &options {
+        *spelled.entry(option.label.clone()).or_default() += 1;
+    }
+    for (option, kind) in options.iter_mut().zip(kinds) {
+        if let Some(kind) = kind
+            && spelled.get(&option.label).is_some_and(|count| *count > 1)
+        {
+            option.label = format!("{} ({kind})", option.label);
+        }
+    }
+    options
+}
+
+/// One picker option, and the route kind that tells it apart from a row with
+/// the same label; `None` for a row that carries no typed route.
+fn remote_model_option(
+    model: dal_wire::remote::RemoteModel,
+) -> (dal_tui::picker::ModelOption, Option<&'static str>) {
+    let Some(route) = model.route else {
+        let reference = if dal_provider::find(&model.provider).is_some() {
+            format!("{}/{}", model.provider, model.id)
+        } else {
+            model.id
+        };
+        let option = dal_tui::picker::ModelOption {
+            label: format!("{} · {reference}", model.name),
+            command: dal_core::Command::Run {
+                name: "model".into(),
+                args: reference.into(),
+                expected: None,
+            },
+            scoped_id: None,
+        };
+        return (option, None);
+    };
+    let shown = model.reference.unwrap_or_else(|| route.id().to_owned());
+    let (kind, scoped_id) = match &route {
+        dal_core::ModelRoute::Api {
+            provider: Some(provider),
+            model: native,
+            ..
+        } if !provider.is_empty() => ("api", Some(format!("{provider}/{native}").into())),
+        dal_core::ModelRoute::Api { .. } => ("api", None),
+        dal_core::ModelRoute::Synthetic { .. } => ("synthetic", None),
+        dal_core::ModelRoute::Harness { .. } => ("harness", None),
+    };
+    let option = dal_tui::picker::ModelOption {
+        label: format!("{} · {shown}", model.name),
+        command: dal_core::Command::SetModel {
+            model: route,
+            // A remote host never writes its own defaults (`serve` and wire
+            // hosts refuse the save), so a remote selection is session-only:
+            // `SessionAndDefault` would change the model and still report an
+            // error.
+            save: dal_core::command::Save::SessionOnly,
+        },
+        scoped_id,
+    };
+    (option, Some(kind))
 }
 
 fn endpoint(addr: &str) -> Result<RemoteEndpoint, TuiError> {
@@ -480,5 +547,155 @@ mod tests {
                 .is_err_and(|error| error.to_string().contains("cannot read"))
         );
         assert!(connect_token(dir.path(), dir.path()).is_err());
+    }
+
+    /// The remote model picker: each row of a server's `models/list` becomes
+    /// one option that selects by the row's typed route and nothing else.
+    mod remote_picker {
+        use dal_core::command::Save;
+        use dal_core::{Command, Family, ModelRoute};
+        use dal_tui::picker::ModelOption;
+        use dal_wire::remote::RemoteModel;
+
+        use super::super::remote_model_options;
+
+        fn old_row(id: &str, provider: &str, name: &str) -> RemoteModel {
+            RemoteModel {
+                id: id.into(),
+                provider: provider.into(),
+                name: name.into(),
+                context_window: None,
+                route: None,
+                reference: None,
+            }
+        }
+
+        fn typed_row(name: &str, route: ModelRoute, reference: Option<&str>) -> RemoteModel {
+            RemoteModel {
+                id: route.id().into(),
+                provider: "openai".into(),
+                name: name.into(),
+                context_window: None,
+                route: Some(route),
+                reference: reference.map(str::to_owned),
+            }
+        }
+
+        fn select(route: ModelRoute) -> Command {
+            Command::SetModel {
+                model: route,
+                save: Save::SessionOnly,
+            }
+        }
+
+        #[test]
+        fn rows_from_a_server_without_typed_routes_keep_the_model_command_and_no_scope() {
+            let route = ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-4o".into(),
+                provider: Some("acme-proxy".into()),
+            };
+            let options = remote_model_options(vec![
+                old_row("gpt-4o", "openai", "GPT-4o"),
+                old_row("acme/fast", "acme", "acme/fast"),
+                typed_row(
+                    "GPT-4o via acme-proxy",
+                    route.clone(),
+                    Some("acme-proxy/gpt-4o"),
+                ),
+                old_row("gpt-4o", "openai", "GPT-4o"),
+            ]);
+            // One old server row names a configured provider (`openai` is a
+            // provider id as well as a family label), the other a synthetic
+            // namespace; a row without a route never gets a scope identity,
+            // and the list is not refused for lacking the members. Two
+            // routeless rows with one label stay as they are: only typed rows
+            // are told apart by kind.
+            let run = |reference: &str| Command::Run {
+                name: "model".into(),
+                args: reference.into(),
+                expected: None,
+            };
+            assert_eq!(
+                options,
+                vec![
+                    ModelOption {
+                        label: "GPT-4o · openai/gpt-4o".into(),
+                        command: run("openai/gpt-4o"),
+                        scoped_id: None,
+                    },
+                    ModelOption {
+                        label: "acme/fast · acme/fast".into(),
+                        command: run("acme/fast"),
+                        scoped_id: None,
+                    },
+                    ModelOption {
+                        label: "GPT-4o via acme-proxy · acme-proxy/gpt-4o".into(),
+                        command: select(route),
+                        scoped_id: Some("acme-proxy/gpt-4o".into()),
+                    },
+                    ModelOption {
+                        label: "GPT-4o · openai/gpt-4o".into(),
+                        command: run("openai/gpt-4o"),
+                        scoped_id: None,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn rows_that_spell_one_label_are_told_apart_by_their_route_kind() {
+            let api = ModelRoute::Api {
+                family: Family::Responses,
+                model: "free".into(),
+                provider: Some("openrouter".into()),
+            };
+            let synthetic = ModelRoute::Synthetic {
+                id: "openrouter/free".into(),
+            };
+            let harness = ModelRoute::Harness {
+                id: "dalgon/normal".into(),
+            };
+            let unnamed = ModelRoute::Api {
+                family: Family::Chat,
+                model: "gpt-4o".into(),
+                provider: None,
+            };
+            let options = remote_model_options(vec![
+                typed_row("Free", api.clone(), Some("openrouter/free")),
+                typed_row("Free", synthetic.clone(), Some("openrouter/free")),
+                typed_row("Normal", harness.clone(), Some("dalgon/normal")),
+                typed_row("Bare", unnamed.clone(), None),
+            ]);
+            let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                [
+                    "Free · openrouter/free (api)",
+                    "Free · openrouter/free (synthetic)",
+                    "Normal · dalgon/normal",
+                    "Bare · gpt-4o",
+                ]
+            );
+            let commands: Vec<Command> = options
+                .iter()
+                .map(|option| option.command.clone())
+                .collect();
+            assert_eq!(
+                commands,
+                [
+                    select(api),
+                    select(synthetic),
+                    select(harness),
+                    select(unnamed)
+                ]
+            );
+            // Only an API row whose provider the server named has a scope id.
+            let scoped: Vec<Option<&str>> = options
+                .iter()
+                .map(|option| option.scoped_id.as_deref())
+                .collect();
+            assert_eq!(scoped, [Some("openrouter/free"), None, None, None]);
+        }
     }
 }

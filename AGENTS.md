@@ -218,18 +218,13 @@ directory rule may narrow a shared rule. It must not weaken it.
 - Run these commands from the repository root before you merge a pull request or
   publish a release:
 
-  ```text
+  ```bash
   cargo fmt --check
   cargo clippy --all-targets --all-features --locked -- -D warnings
   cargo test --locked
   cargo deny --locked check
   ```
-
-- A checkpoint commit on a feature branch, and a draft pull request built from it, may
-  carry failing or unrun gates. Record each failing target and each unrun gate in the
-  pull request body. Do not mark the pull request ready for review until every gate
-  passes. A checkpoint still excludes secrets, private artifacts, and private references.
-
+  
 - Run every specialized suite named by the applicable directory instructions. Do not relax
   a lint, remove a target, accept a snapshot blindly, or skip a native target to make a
   gate pass.
@@ -243,13 +238,6 @@ directory rule may narrow a shared rule. It must not weaken it.
   work to force the expected base.
 - Stage explicit paths only. Do not use `git add -A` from the public root. The nested
   private checkout and unrelated work must never enter a public commit.
-- Keep one concern per commit. Leave the workspace buildable at each commit on the
-  default branch. A feature-branch checkpoint may build only together with its
-  neighbors.
-  Split generated data, lint-only sweeps, and independent mechanisms when they have
-  separate review and rollback paths.
-- Run the available local gate before you push a checkpoint, and record its result.
-  Never force-push or rewrite published history to repair a failed gate.
 - Keep generated files reproducible from checked-in inputs and a named command. Verify a
   clean regeneration in its owning gate. Do not edit generated output by hand.
 - Regenerate the package-local dal manual from the repository root with

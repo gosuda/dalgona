@@ -185,3 +185,48 @@ proptest! {
         prop_assert!((contrast_ratio(white, color) - ratio).abs() < 1e-9);
     }
 }
+
+/// Each luminance coefficient is pinned by a pure channel: swapping the red
+/// and blue weights (0.2126/0.0722) trades the 5.25 and 2.44 below, and any
+/// change to the green weight moves 15.30. The WCAG 4.5 floor is pinned from
+/// both sides by two greys one step apart, so a moved floor or a broken
+/// threshold comparison flips one of the two assertions.
+#[test]
+fn contrast_ratio_pins_each_channel_weight_and_the_4_5_edge() {
+    let black = opaline::OpalineColor::new(0, 0, 0);
+    let white = opaline::OpalineColor::new(255, 255, 255);
+    let close = |actual: f64, expected: f64| (actual - expected).abs() < 0.01;
+    assert!(
+        close(
+            contrast_ratio(opaline::OpalineColor::new(255, 0, 0), black),
+            5.25
+        ),
+        "red weight moved"
+    );
+    assert!(
+        close(
+            contrast_ratio(opaline::OpalineColor::new(0, 255, 0), black),
+            15.30
+        ),
+        "green weight moved"
+    );
+    assert!(
+        close(
+            contrast_ratio(opaline::OpalineColor::new(0, 0, 255), black),
+            2.44
+        ),
+        "blue weight moved"
+    );
+    let just_below = contrast_ratio(opaline::OpalineColor::new(119, 119, 119), white);
+    let just_above = contrast_ratio(opaline::OpalineColor::new(118, 118, 118), white);
+    assert!(
+        (just_below - 4.48).abs() < 0.02,
+        "grey #777 no longer measures 4.48: {just_below}"
+    );
+    assert!(
+        (just_above - 4.54).abs() < 0.02,
+        "grey #767676 no longer measures 4.54: {just_above}"
+    );
+    assert!(just_below < 4.5, "#777 must sit below the floor");
+    assert!(just_above > 4.5, "#767676 must sit above the floor");
+}

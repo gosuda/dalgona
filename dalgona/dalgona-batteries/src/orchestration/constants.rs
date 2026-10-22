@@ -390,3 +390,6 @@ pub(crate) fn constants_table() -> String {
     }
     text
 }
+
+#[cfg(test)]
+mod tests;

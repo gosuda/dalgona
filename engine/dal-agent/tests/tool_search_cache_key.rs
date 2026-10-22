@@ -80,6 +80,7 @@ impl ModelHandler for Probe {
             forwarded.model = ModelRoute::Api {
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
+                provider: None,
             };
             cx.forward(forwarded, &[]).await
         })

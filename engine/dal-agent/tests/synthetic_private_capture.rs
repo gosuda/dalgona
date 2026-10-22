@@ -117,6 +117,7 @@ impl dal_agent::ext::ModelHandler for RelayModel {
             request.model = ModelRoute::Api {
                 family: Family::Chat,
                 model: "gpt-6-luna".into(),
+                provider: None,
             };
             let private = [PrivateTool(Arc::new(Probe::new()))];
             let mut relay = cx.forward(request, &private).await?;

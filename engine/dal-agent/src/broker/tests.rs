@@ -416,6 +416,80 @@ fn a_fold_minted_request_is_reported_from_the_start() {
 }
 
 #[test]
+fn a_value_answer_to_a_question_that_takes_none_is_refused_and_leaves_it_open() {
+    let broker = Broker::new();
+    let value = || Answer::Value(dal_core::RawJson::parse("\"free text\"").unwrap());
+    let confirm = Question::Confirm { text: "go?".into() };
+    for question in [grant(), confirm] {
+        let (id, _waiter) = open_in(&broker, question, turn());
+        let refused = broker
+            .answer(id, value(), client("acp"))
+            .expect_err("a value cannot answer this question");
+        assert!(matches!(refused, AgentError::Invalid(_)), "{refused:?}");
+        let won = broker
+            .answer(id, Answer::Decline, client("tui"))
+            .expect("the refused answer left the request open");
+        assert_eq!(won.by, client("tui"), "the refused client won nothing");
+    }
+    let (id, _waiter) = open_text(&broker);
+    let accepted = broker
+        .answer(id, value(), client("tui"))
+        .expect("a text question takes a value");
+    assert_eq!(accepted.answer, value());
+
+    let unknown = broker
+        .answer(RequestId::new_v7(), Answer::Approve, client("tui"))
+        .expect_err("an unknown request cannot be answered");
+    assert!(matches!(unknown, AgentError::Invalid(_)), "{unknown:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_question_falls_back_to_its_kinds_fail_closed_default() {
+    let broker = Broker::new();
+    let approval = Question::Approval {
+        tool: "bash".into(),
+        preview: dal_core::Preview {
+            title: "run".into(),
+            body: "rm -rf /".into(),
+            digest: None,
+        },
+        grant: None,
+        call: None,
+    };
+    let select = Question::Select {
+        prompt: "pick".into(),
+        options: Vec::new(),
+        multi: false,
+        preview: None,
+    };
+    let confirm = Question::Confirm { text: "go?".into() };
+    let mut expected = Vec::new();
+    for (question, default) in [
+        (approval, Answer::Decline),
+        (select, Answer::Cancel),
+        (confirm, Answer::Cancel),
+    ] {
+        let (id, _waiter) = open_in(&broker, question, turn());
+        expected.push((id, default));
+    }
+    tokio::time::advance(LIMIT).await;
+    let resolved = broker.expire(Instant::now(), with_answerer);
+    assert_eq!(resolved.len(), 3);
+    for (id, default) in expected {
+        let item = resolved
+            .iter()
+            .find(|item| item.request.id == id)
+            .expect("the request expired");
+        assert_eq!(
+            item.answer, default,
+            "default for {:?}",
+            item.request.question
+        );
+        assert!(item.was_default);
+    }
+}
+
+#[test]
 fn an_answer_before_a_cancel_wins_and_the_cancel_claims_nothing() {
     let broker = Broker::new();
     let (id, _waiter) = open_reported(&broker);

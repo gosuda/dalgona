@@ -23,6 +23,7 @@ pub struct Session {
     pub(super) last_turn: u64,
     pub(super) tree: Tree,
     pub(super) settings: Settings,
+    pub(super) model_selected: bool,
     pub(super) request_params: RequestParams,
     pub(super) allow_always: BTreeSet<Name>,
     pub(super) promoted: BTreeSet<Name>,
@@ -68,6 +69,7 @@ fn response_model(route: Option<AssistantRoute>, model: &str) -> Option<ModelRou
         AssistantRoute::Api(family) => ModelRoute::Api {
             family,
             model: model.into(),
+            provider: None,
         },
         AssistantRoute::Synthetic => ModelRoute::Synthetic { id: model.into() },
         AssistantRoute::Harness => ModelRoute::Harness { id: model.into() },

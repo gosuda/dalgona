@@ -28,6 +28,13 @@ pub struct ModelInfo {
     pub route: ModelRoute,
     /// Human-readable model name.
     pub name: Box<str>,
+    /// The catalog provider id that resolved this row, as its producer
+    /// reports it; empty when the producer has no provider identity. An
+    /// empty value means the row is ineligible for provider-qualified
+    /// scoping: the scope gate matches `{provider}/{model}` and cannot match
+    /// it. Absent in older payloads, which decode as empty.
+    #[serde(default)]
+    pub provider: Box<str>,
     /// Supported operations and limits.
     pub caps: Caps,
 }

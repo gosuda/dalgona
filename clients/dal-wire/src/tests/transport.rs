@@ -1,7 +1,7 @@
+use futures::{FutureExt, StreamExt, stream};
 use std::future::Future;
 use std::time::Duration;
 
-use futures::{StreamExt, stream};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::transport::{MAX_FRAME_BYTES, ReadFrameError, StdioTransport, Transport};
@@ -128,6 +128,81 @@ async fn oversized_frame_closes_the_transport() {
         transport.read_frame().await,
         Err(ReadFrameError::Closed)
     ));
+}
+
+#[tokio::test]
+async fn frame_cap_counts_bytes_kept_across_abandoned_reads() {
+    let (mut input, reader) = tokio::io::duplex(9 * 1024 * 1024);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, tokio::io::sink()));
+    let chunk = vec![b'x'; MAX_FRAME_BYTES / 8];
+    for _ in 0..4 {
+        input.write_all(&chunk).await.expect("send one chunk");
+        assert!(
+            transport.read_frame().now_or_never().is_none(),
+            "no complete frame arrives yet"
+        );
+    }
+    let rest = vec![b'x'; MAX_FRAME_BYTES / 2 + 1];
+    let writer = async {
+        input.write_all(&rest).await.expect("send second half");
+    };
+    let reader = async {
+        let first = transport.read_frame().await;
+        let second = transport.read_frame().await;
+        (first, second)
+    };
+    let ((), (first, second)) = tokio::join!(writer, reader);
+    assert_eq!(first, Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES)));
+    assert_eq!(second, Err(ReadFrameError::Closed));
+}
+
+#[tokio::test]
+async fn close_after_oversize_read_still_ends_the_peer_stream() {
+    let bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
+    let reader = std::io::Cursor::new(bytes);
+    let (writer_side, mut peer) = tokio::io::duplex(64);
+    let mut transport = Transport::Stdio(StdioTransport::new(reader, writer_side));
+
+    assert_eq!(
+        transport.read_frame().await,
+        Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES))
+    );
+    transport.close().await;
+    assert!(
+        transport.write_frame("late").await.is_err(),
+        "a closed transport takes no more frames"
+    );
+
+    let mut seen = Vec::new();
+    let end = peer.read_to_end(&mut seen).now_or_never();
+    assert!(
+        matches!(end, Some(Ok(0))),
+        "the peer sees the end of the stream after close"
+    );
+    assert_eq!(seen, [] as [u8; 0]);
+}
+
+#[tokio::test]
+async fn close_during_a_write_ends_the_peer_stream_once_the_write_finishes() {
+    let (writer_side, mut peer) = tokio::io::duplex(16);
+    let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
+    let writer = transport.writer();
+    let frame = "x".repeat(1024);
+    let mut write = std::pin::pin!(writer.write_frame(&frame));
+    assert!(
+        write.as_mut().now_or_never().is_none(),
+        "the write parks while nothing reads"
+    );
+    assert!(
+        transport.close().now_or_never().is_some(),
+        "close returns without waiting for the write"
+    );
+
+    let mut seen = Vec::new();
+    let (result, end) = tokio::join!(write, peer.read_to_end(&mut seen));
+    result.expect("the parked write finishes once the peer reads");
+    end.expect("the peer reads to the end of the stream");
+    assert_eq!(seen, format!("{frame}\n").into_bytes());
 }
 
 #[tokio::test]

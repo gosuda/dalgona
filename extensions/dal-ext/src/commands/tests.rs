@@ -362,15 +362,28 @@ fn assert_resolved_routes(pairs: &[(&str, &str)]) {
                 ModelRoute::Api {
                     family: Family::Responses,
                     model: "gpt-x".into(),
+                    provider: Some("openai".into()),
                 }
             );
         }
         other => panic!("qualified row must resolve, got {other:?}"),
     }
     match resolve_model(pairs, "claude") {
-        ModelResolution::Route { provider, id, .. } => {
+        ModelResolution::Route {
+            provider,
+            id,
+            route,
+        } => {
             assert_eq!(&*provider, "anthropic");
             assert_eq!(&*id, "claude");
+            assert_eq!(
+                route,
+                ModelRoute::Api {
+                    family: Family::Anthropic,
+                    model: "claude".into(),
+                    provider: Some("anthropic".into()),
+                }
+            );
         }
         other => panic!("bare unique id must resolve, got {other:?}"),
     }
@@ -380,6 +393,22 @@ fn assert_resolved_routes(pairs: &[(&str, &str)]) {
             assert_eq!(&*second, "other");
         }
         other => panic!("shared bare id must be ambiguous, got {other:?}"),
+    }
+    match resolve_model(pairs, "other/gpt-x") {
+        ModelResolution::Route {
+            provider, route, ..
+        } => {
+            assert_eq!(&*provider, "other");
+            assert_eq!(
+                route,
+                ModelRoute::Api {
+                    family: Family::Chat,
+                    model: "gpt-x".into(),
+                    provider: Some("other".into()),
+                }
+            );
+        }
+        other => panic!("typed fallback-provider row must resolve, got {other:?}"),
     }
     assert!(matches!(
         resolve_model(pairs, "dalgon/eval-first"),
@@ -471,6 +500,132 @@ fn model_resolution_matrix() {
             "Unknown mode \"\"",
             "the modes are normal, eval-first, eval-only",
             "Type /mode normal, /mode eval-first, or /mode eval-only.",
+        )
+    );
+}
+
+#[test]
+fn model_typed_and_unique_bare_ids_carry_the_matched_provider() {
+    use dal_core::{Family, ModelRoute};
+
+    use super::model::ModelResolution;
+
+    let pairs = [("openrouter", "gpt-4o")];
+    match resolve_model(&pairs, "openrouter/gpt-4o") {
+        ModelResolution::Route {
+            provider,
+            id,
+            route,
+        } => {
+            assert_eq!(&*provider, "openrouter");
+            assert_eq!(&*id, "gpt-4o");
+            assert_eq!(
+                route,
+                ModelRoute::Api {
+                    family: Family::Responses,
+                    model: "gpt-4o".into(),
+                    provider: Some("openrouter".into()),
+                }
+            );
+        }
+        other => panic!("typed provider id must resolve, got {other:?}"),
+    }
+    match resolve_model(&pairs, "gpt-4o") {
+        ModelResolution::Route {
+            provider,
+            id,
+            route,
+        } => {
+            assert_eq!(&*provider, "openrouter");
+            assert_eq!(&*id, "gpt-4o");
+            assert_eq!(
+                route,
+                ModelRoute::Api {
+                    family: Family::Responses,
+                    model: "gpt-4o".into(),
+                    provider: Some("openrouter".into()),
+                }
+            );
+        }
+        other => panic!("unique bare id must resolve, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_shared_native_id_resolves_per_provider_and_stays_ambiguous_bare() {
+    use dal_core::{Family, ModelRoute};
+
+    use super::model::ModelResolution;
+
+    let pairs = [("openrouter", "gpt-4o"), ("openai", "gpt-4o")];
+    let openrouter = match resolve_model(&pairs, "openrouter/gpt-4o") {
+        ModelResolution::Route { route, .. } => route,
+        other => panic!("openrouter row must resolve, got {other:?}"),
+    };
+    let openai = match resolve_model(&pairs, "openai/gpt-4o") {
+        ModelResolution::Route { route, .. } => route,
+        other => panic!("openai row must resolve, got {other:?}"),
+    };
+    assert_eq!(
+        openrouter,
+        ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: Some("openrouter".into()),
+        }
+    );
+    assert_eq!(
+        openai,
+        ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: Some("openai".into()),
+        }
+    );
+    assert_ne!(openrouter, openai);
+    assert!(
+        !openrouter.same_model(&openai),
+        "one native id under two providers is not the same model",
+    );
+    let legacy = ModelRoute::Api {
+        family: Family::Responses,
+        model: "gpt-4o".into(),
+        provider: None,
+    };
+    assert!(
+        legacy.same_model(&openrouter) && legacy.same_model(&openai),
+        "a provider-less route carries no provider to disagree with",
+    );
+    match resolve_model(&pairs, "gpt-4o") {
+        ModelResolution::Ambiguous { first, second } => {
+            assert_eq!(&*first, "openrouter");
+            assert_eq!(&*second, "openai");
+        }
+        other => panic!("shared bare id must be ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
+fn model_credential_refusal_names_the_matched_provider() {
+    use super::model::ModelResolution;
+
+    // Pins the exact refusal the credential gate returns for the matched
+    // catalog provider, never the family label: a typed openrouter row
+    // reports openrouter credentials. The gate branch itself
+    // (`apply_route`, which needs a host-minted `CommandCx`) cannot run
+    // from this crate's unit tests.
+    let pairs = [("openrouter", "gpt-4o")];
+    let provider = match resolve_model(&pairs, "openrouter/gpt-4o") {
+        ModelResolution::Route { provider, .. } => provider,
+        other => panic!("typed provider id must resolve, got {other:?}"),
+    };
+    assert_eq!(&*provider, "openrouter");
+    assert_eq!(
+        no_credentials(&provider),
+        triple(
+            "openrouter has no credentials",
+            "auth.json has no entry for it",
+            "Type /login openrouter, or set OPENROUTER_API_KEY.",
         )
     );
 }
@@ -795,4 +950,106 @@ fn export_format_pairs() {
             "Type /export PATH.md or /export PATH.jsonl.",
         )
     );
+}
+
+fn view_with(providers: &[(&str, dal_core::Family)]) -> dal_agent::ext::command::CatalogView {
+    dal_agent::ext::command::CatalogView {
+        entries: Vec::new(),
+        providers: providers
+            .iter()
+            .map(|(id, family)| ((*id).into(), *family))
+            .collect(),
+    }
+}
+
+#[test]
+fn a_custom_responses_provider_keeps_its_family_through_the_catalog() {
+    use dal_core::{Family, ModelRoute};
+
+    use super::model::{ModelResolution, exact_route};
+
+    let ModelResolution::Route {
+        provider,
+        id,
+        route,
+    } = resolve_model(&[("acme", "gpt-4o")], "acme/gpt-4o")
+    else {
+        unreachable!("a cached row resolves");
+    };
+    // Resolution alone cannot know a custom provider's family: it guesses Chat.
+    assert!(matches!(
+        &route,
+        ModelRoute::Api {
+            family: Family::Chat,
+            ..
+        }
+    ));
+    let view = view_with(&[("acme", Family::Responses)]);
+    assert_eq!(
+        exact_route(Some(&view), &provider, &id, route).expect("the provider is configured"),
+        ModelRoute::Api {
+            family: Family::Responses,
+            model: "gpt-4o".into(),
+            provider: Some("acme".into()),
+        }
+    );
+}
+
+#[test]
+fn the_catalog_family_wins_over_the_built_in_table_for_a_rebound_provider() {
+    use dal_core::{Family, ModelRoute};
+
+    use super::model::{ModelResolution, exact_route};
+
+    // The built-in table says `openai` serves Responses; this configuration
+    // rebinds it to Chat, and the catalog is the one that knows.
+    let ModelResolution::Route {
+        provider,
+        id,
+        route,
+    } = resolve_model(&[("openai", "gpt-4o")], "openai/gpt-4o")
+    else {
+        unreachable!("a cached row resolves");
+    };
+    let view = view_with(&[("openai", Family::Chat)]);
+    let exact = exact_route(Some(&view), &provider, &id, route).expect("openai is configured");
+    assert!(matches!(
+        exact,
+        ModelRoute::Api {
+            family: Family::Chat,
+            provider: Some(ref named),
+            ..
+        } if &**named == "openai"
+    ));
+}
+
+#[test]
+fn a_provider_the_catalog_does_not_list_refuses_the_selection() {
+    use dal_core::Family;
+
+    use super::model::{ModelResolution, exact_route};
+
+    let resolve = || {
+        let ModelResolution::Route {
+            provider,
+            id,
+            route,
+        } = resolve_model(&[("ghost", "gpt-4o")], "ghost/gpt-4o")
+        else {
+            unreachable!("a cached row resolves");
+        };
+        (provider, id, route)
+    };
+    // A built-in row can sit in the cache for a provider the configuration
+    // does not list; a request through it would fail on every turn.
+    let view = view_with(&[("acme", Family::Responses)]);
+    let (provider, id, route) = resolve();
+    let refused = exact_route(Some(&view), &provider, &id, route).expect_err("unlisted provider");
+    assert!(
+        refused.what.contains("\"ghost\" is not configured"),
+        "{refused:?}"
+    );
+    let (provider, id, route) = resolve();
+    let refused = exact_route(None, &provider, &id, route).expect_err("no catalog view");
+    assert!(refused.what.contains("is not configured"), "{refused:?}");
 }

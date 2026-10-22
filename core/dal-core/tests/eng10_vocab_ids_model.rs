@@ -431,6 +431,7 @@ fn model_route_grammars_enforced_at_construction_and_decode() {
     let api = ModelRoute::Api {
         family: Family::Chat,
         model: "gpt-5".into(),
+        provider: None,
     };
     assert_eq!(api.id(), "gpt-5");
     let encoded = sonic_rs::to_string(&api).expect("encode");
@@ -443,28 +444,32 @@ fn model_route_grammars_enforced_at_construction_and_decode() {
         ModelRoute::from_id("openai-chat/gpt-5"),
         ModelRoute::Api {
             family: Family::Chat,
-            model: "gpt-5".into()
+            model: "gpt-5".into(),
+            provider: None
         }
     );
     assert_eq!(
         ModelRoute::from_id("openai-responses/gpt-5"),
         ModelRoute::Api {
             family: Family::Responses,
-            model: "gpt-5".into()
+            model: "gpt-5".into(),
+            provider: None
         }
     );
     assert_eq!(
         ModelRoute::from_id("openai-codex/codex-1"),
         ModelRoute::Api {
             family: Family::Codex,
-            model: "codex-1".into()
+            model: "codex-1".into(),
+            provider: None
         }
     );
     assert_eq!(
         ModelRoute::from_id("anthropic/claude-opus-5"),
         ModelRoute::Api {
             family: Family::Anthropic,
-            model: "claude-opus-5".into()
+            model: "claude-opus-5".into(),
+            provider: None
         }
     );
     assert_eq!(
@@ -483,7 +488,8 @@ fn model_route_grammars_enforced_at_construction_and_decode() {
         ModelRoute::from_id("gpt-5"),
         ModelRoute::Api {
             family: Family::Chat,
-            model: "gpt-5".into()
+            model: "gpt-5".into(),
+            provider: None
         }
     );
     // `dalgon/other` is a valid synthetic spelling, so it resolves synthetic.
@@ -497,7 +503,8 @@ fn model_route_grammars_enforced_at_construction_and_decode() {
         ModelRoute::from_id("ACME/fast"),
         ModelRoute::Api {
             family: Family::Chat,
-            model: "ACME/fast".into()
+            model: "ACME/fast".into(),
+            provider: None
         }
     );
 }
@@ -519,7 +526,8 @@ fn api_route_empty_model_decodes_with_journal_holding_nonempty_rule() {
         ModelRoute::from_id(""),
         ModelRoute::Api {
             family: Family::Chat,
-            model: "".into()
+            model: "".into(),
+            provider: None
         }
     );
 }
@@ -531,6 +539,7 @@ fn synthetic_chain_reports_depth_before_cycle_and_ignores_plain_repeats() {
     let api = |model: &str| ModelRoute::Api {
         family: Family::Chat,
         model: model.into(),
+        provider: None,
     };
     let four = vec![
         synth("a/one"),

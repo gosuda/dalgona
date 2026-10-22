@@ -285,22 +285,24 @@ async fn opening_hooks_can_round_trip_through_the_real_session_actor() {
         .await
         .expect("submit");
     assert!(matches!(reply, dal_core::Reply::Accepted { .. }));
-    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+    // This whole test takes about 3 s on a loaded machine, so the bound only
+    // has to outlast that; the count below pins that both hooks completed.
+    let stop = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let delivery = subscription.next().await.expect("stream open");
-            if matches!(
-                delivery,
-                dal_agent::Delivery::Update(update)
-                    if matches!(update.kind, dal_core::UpdateKind::TurnEnded { .. })
-            ) {
-                break;
+            if let dal_agent::Delivery::Update(update) = delivery
+                && let dal_core::UpdateKind::TurnEnded { stop, .. } = update.kind
+            {
+                break stop;
             }
         }
     })
-    .await;
-    assert!(
-        ended.is_ok(),
-        "opening round trips must not hit hook timeout"
+    .await
+    .expect("the turn ends after both opening hooks");
+    assert_eq!(
+        stop,
+        dal_core::Stop::EndTurn,
+        "the turn ends normally, not on a hook failure"
     );
     assert_eq!(
         calls.load(Ordering::Relaxed),
@@ -497,6 +499,40 @@ async fn scripted_turn_ends_on_a_family_qualified_unlisted_model() {
     .await
     .expect("turn ends");
     assert_eq!(stop, dal_core::Stop::EndTurn);
+    let view = agent.view(dal_core::PageReq::default()).expect("view");
+    let replied = view
+        .entries
+        .items
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            dal_core::EntryKind::Assistant {
+                api,
+                model,
+                content,
+                stop,
+                ..
+            } => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        dal_core::Block::Text { text, .. } => Some(text.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((*api, model.to_string(), text, stop.clone()))
+            }
+            _ => None,
+        });
+    assert_eq!(
+        replied,
+        Some((
+            dal_core::Family::Responses,
+            "gpt-6".to_owned(),
+            "Hello".to_owned(),
+            dal_core::AssistantStop::Done,
+        )),
+        "the journaled reply keeps the route's family and drops its prefix"
+    );
 }
 
 /// The router relay resolves a route by the same rule as a session turn: a
@@ -507,6 +543,7 @@ async fn relay_opens_a_family_route_for_an_unlisted_model() {
     let route = dal_core::ModelRoute::Api {
         family: dal_core::Family::Responses,
         model: "gpt-6".into(),
+        provider: None,
     };
     let request = dal_core::ModelRequest {
         purpose: dal_core::Purpose::Turn,

@@ -694,6 +694,7 @@ fn route(family: Family) -> ModelRoute {
     ModelRoute::Api {
         family,
         model: "anthropic.claude-sonnet-4:0".into(),
+        provider: None,
     }
 }
 

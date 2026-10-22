@@ -81,6 +81,23 @@ pub trait TuiHost: Clone + Send + Sync + 'static {
 
     /// Opens a session for the terminal client.
     async fn open(&self, session: SessionRef, client: ClientId) -> Result<Self::Agent, TuiError>;
+    /// Opens the session that takes over from `leaving`, which the terminal
+    /// closes once the opened session is attached; the contract of
+    /// [`Host::open_replacing`]. The host refuses a target the close of
+    /// `leaving` would end, before the terminal cancels or closes anything.
+    /// The default denies like `sessions`: a host that cannot say whether
+    /// the target survives that close never resumes into a session it may
+    /// take down with the one on screen.
+    async fn open_replacing(
+        &self,
+        _leaving: SessionId,
+        _session: SessionRef,
+        _client: ClientId,
+    ) -> Result<Self::Agent, TuiError> {
+        Err(TuiError::Terminal(
+            "dal-tui: this host cannot open a session in place of another".to_owned(),
+        ))
+    }
     /// Returns the registered slash commands.
     async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError>;
     /// Releases the opened session after the terminal has been restored.
@@ -98,6 +115,34 @@ pub trait TuiHost: Clone + Send + Sync + 'static {
     async fn logout(&self, provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError>;
     /// Lists the stored credentials without their secrets.
     async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError>;
+    /// Lists sessions for the resume picker. The default denies so remote
+    /// or test hosts without a listing channel report the gap instead of
+    /// guessing; the in-process host serves the real workspace listing.
+    async fn sessions(
+        &self,
+        _query: dal_core::ListQuery,
+    ) -> Result<dal_core::Page<dal_core::SessionInfo, Box<str>>, TuiError> {
+        Err(TuiError::Terminal(
+            "dal-tui: this host cannot list sessions".to_owned(),
+        ))
+    }
+    /// Resolves one session reference (a full id, an exact name, or an id
+    /// prefix) to its listing row with no listing cap; the row names the
+    /// workspace the session lives in. The default denies like `sessions`,
+    /// so a host without the seam never has a workspace guessed for it.
+    async fn find_session(&self, _reference: &str) -> Result<dal_core::SessionInfo, TuiError> {
+        Err(TuiError::Terminal(
+            "dal-tui: this host cannot look up a session".to_owned(),
+        ))
+    }
+    /// Deletes one session tree through existing store ownership. Refuses
+    /// live/owned sessions without touching the tree; the store lock is the
+    /// second refusal. The default denies like `sessions`.
+    async fn delete_session(&self, _id: SessionId) -> Result<(), TuiError> {
+        Err(TuiError::Terminal(
+            "dal-tui: this host cannot delete sessions".to_owned(),
+        ))
+    }
 }
 
 impl TuiHost for Host {
@@ -105,6 +150,15 @@ impl TuiHost for Host {
 
     async fn open(&self, session: SessionRef, client: ClientId) -> Result<Agent, TuiError> {
         Ok(self.open(session, client).await?)
+    }
+
+    async fn open_replacing(
+        &self,
+        leaving: SessionId,
+        session: SessionRef,
+        client: ClientId,
+    ) -> Result<Agent, TuiError> {
+        Ok(Host::open_replacing(self, leaving, session, client).await?)
     }
 
     async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError> {
@@ -130,6 +184,21 @@ impl TuiHost for Host {
 
     async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError> {
         Ok(self.stored_credentials().await?)
+    }
+
+    async fn sessions(
+        &self,
+        query: dal_core::ListQuery,
+    ) -> Result<dal_core::Page<dal_core::SessionInfo, Box<str>>, TuiError> {
+        async { Ok(Host::sessions(self, query)?) }.await
+    }
+
+    async fn find_session(&self, reference: &str) -> Result<dal_core::SessionInfo, TuiError> {
+        async { Ok(Host::find_session(self, reference)?) }.await
+    }
+
+    async fn delete_session(&self, id: SessionId) -> Result<(), TuiError> {
+        async { Ok(Host::delete_session(self, id)?) }.await
     }
 }
 

@@ -191,6 +191,12 @@ impl Projection {
         self.auto_compaction = auto;
     }
 
+    /// The effective settings for publication: the projection's current
+    /// settings, returned unchanged.
+    pub(crate) fn effective_settings(&self) -> SettingsView {
+        self.settings.clone()
+    }
+
     /// Builds the client-facing snapshot with leaf paging applied.
     pub(crate) fn snapshot(&self, args: SnapshotArgs) -> View {
         let (entries, next_before) = self.page(&args);
@@ -207,6 +213,7 @@ impl Projection {
                 created_at: args.created_at,
                 archived: args.archived,
                 last_seq: self.last_seq,
+                message_count: None,
             },
             turn: self.turn,
             entries: Page {
@@ -252,6 +259,7 @@ impl Projection {
             added,
             leaf: fold.leaf_entry(),
         }));
+        self.apply(&UpdateKind::Settings(fold.settings_view()));
         self.usage.context_tokens = fold.tokens_since_last_compaction();
     }
 
@@ -339,7 +347,9 @@ fn entry_bytes(entry: &EntryView) -> usize {
         }
         EntryKind::Reminder { source, text } => source.len() + text.len(),
         EntryKind::Model { route } => match route {
-            dal_core::ModelRoute::Api { model, .. } => model.len() + 16,
+            dal_core::ModelRoute::Api {
+                model, provider, ..
+            } => model.len() + provider.as_deref().map_or(0, str::len) + 16,
             dal_core::ModelRoute::Synthetic { id } | dal_core::ModelRoute::Harness { id } => {
                 id.len()
             }
@@ -393,9 +403,9 @@ mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
 
     use dal_core::{
-        ApprovalMode, AssistantStop, Block, EntryId, EntryKind, EntryView, Family, Gen,
-        JournalPart, Mode, PageReq, RawJson, SessionId, ThinkingLevel, Timestamp, TreeDelta,
-        UpdateKind, Usage, Workspace,
+        ApprovalMode, AssistantStop, Block, Entry, EntryId, EntryKind, EntryView, Family, Gen,
+        JournalPart, Mode, ModelRoute, PageReq, RawJson, Record, Session, SessionId, Settings,
+        ThinkingLevel, Timestamp, TreeDelta, UpdateKind, Usage, Workspace,
     };
 
     use super::{Projection, SnapshotArgs};
@@ -557,5 +567,95 @@ mod tests {
             [entry_id(1), entry_id(2), entry_id(3)].map(|entry| entry.to_string())
         );
         Ok(())
+    }
+
+    fn journal_entry(id: u64, kind: EntryKind) -> Entry {
+        Entry {
+            id: entry_id(id),
+            parent: (id > 1).then(|| entry_id(id - 1)),
+            at: Timestamp::UNIX_EPOCH,
+            kind,
+        }
+    }
+
+    fn user_record() -> Record {
+        Record::User(journal_entry(
+            1,
+            EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "hello".into(),
+                }],
+            },
+        ))
+    }
+
+    #[test]
+    fn restore_fold_reports_journaled_settings_and_no_inherited_model() {
+        let default = ModelRoute::Api {
+            family: Family::Chat,
+            model: "default-model".into(),
+            provider: Some("acme".into()),
+        };
+        let seed = Settings {
+            model: Some(default.clone()),
+            thinking: ThinkingLevel::Medium,
+            approval: ApprovalMode::Ask,
+            name: None,
+            mode: Mode::Normal,
+        };
+        let restored = |records: Vec<Record>| {
+            let (fold, _) = Session::replay_with(seed.clone(), records, Timestamp::now())
+                .expect("fixture journal replays");
+            let mut projection =
+                Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+            projection.restore_fold(&fold);
+            projection.effective_settings()
+        };
+
+        let inheriting = restored(vec![
+            user_record(),
+            Record::Thinking(journal_entry(
+                2,
+                EntryKind::Thinking {
+                    level: ThinkingLevel::Low,
+                },
+            )),
+        ]);
+        assert_eq!(
+            inheriting.model, None,
+            "an inherited default is not a selection"
+        );
+        assert_eq!(inheriting.thinking, ThinkingLevel::Low);
+
+        let selecting = restored(vec![
+            user_record(),
+            Record::Model(journal_entry(
+                2,
+                EntryKind::Model {
+                    route: default.clone(),
+                },
+            )),
+            Record::Approval(journal_entry(
+                3,
+                EntryKind::Approval {
+                    mode: ApprovalMode::All,
+                },
+            )),
+            Record::Mode(journal_entry(
+                4,
+                EntryKind::Mode {
+                    mode: Mode::EvalOnly,
+                },
+            )),
+            Record::Name {
+                at: Timestamp::UNIX_EPOCH,
+                name: Some("kept".into()),
+            },
+        ]);
+        assert_eq!(selecting.model, Some(default));
+        assert_eq!(selecting.thinking, ThinkingLevel::Medium);
+        assert_eq!(selecting.approval, ApprovalMode::All);
+        assert_eq!(selecting.mode, Mode::EvalOnly);
+        assert_eq!(selecting.name.as_deref(), Some("kept"));
     }
 }

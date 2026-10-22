@@ -643,6 +643,7 @@ fn model_request(context: Vec<ContextItem>) -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Cursor,
             model: "cursor-test-model".into(),
+            provider: None,
         },
         system: "You are a test assistant.".into(),
         tools: vec![ModelToolSpec {

@@ -293,6 +293,7 @@ pub(crate) fn request_body(
     let ModelRoute::Api {
         family: Family::Ollama,
         model,
+        ..
     } = &request.model
     else {
         return Err(OllamaBodyError::NotOllama {

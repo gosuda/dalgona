@@ -731,7 +731,7 @@ fn anthropic_parts(input: &CopilotRequest<'_>) -> Result<Parts, ProviderError> {
 /// [`ProviderError::InvalidRequest`] for a route outside the three surfaces, a
 /// thinking plan of the wrong family, or a body the codec rejects.
 pub(crate) fn build(input: &CopilotRequest<'_>) -> Result<CopilotWire, ProviderError> {
-    let ModelRoute::Api { family, model } = &input.request.model else {
+    let ModelRoute::Api { family, model, .. } = &input.request.model else {
         return Err(invalid("a Copilot request needs an API model route"));
     };
     let Some(surface) = Surface::of_family(*family) else {
@@ -1925,6 +1925,7 @@ mod tests {
             model: ModelRoute::Api {
                 family,
                 model: model.into(),
+                provider: None,
             },
             system: "sys".into(),
             tools: Vec::<ModelToolSpec>::new().into(),

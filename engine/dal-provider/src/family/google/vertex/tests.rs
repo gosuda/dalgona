@@ -13,6 +13,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::GoogleVertex,
             model: "gemini-3-pro".into(),
+            provider: None,
         },
         system: "".into(),
         tools: Vec::new().into(),
@@ -175,6 +176,7 @@ fn hostile_ids_are_refused_before_the_wire() {
     tuned.model = ModelRoute::Api {
         family: Family::GoogleVertex,
         model: "tunedModels/x".into(),
+        provider: None,
     };
     let error = build(&VertexRequest {
         request: &tuned,
@@ -199,4 +201,80 @@ fn compat_never_sends_ids_or_sentinels() {
     assert!(!policy.part_ids);
     assert_eq!(policy.skip, SignaturePolicy::Never);
     assert!(policy.nested_tool_images);
+}
+
+#[test]
+fn location_and_project_delimiters_never_reach_the_host_or_path() {
+    let request = request();
+    let thinking = plan();
+    let build_with = |auth: VertexAuth<'_>| {
+        build(&VertexRequest {
+            request: &request,
+            thinking: &thinking,
+            auth,
+            image_input: true,
+        })
+    };
+    // Each value would turn the interpolated text into a sibling host, userinfo,
+    // a port, a path escape, a query, a fragment, or a different byte string.
+    for hostile in [
+        "a.b", "a@b", "a:80", "a/b", "a?b", "a#b", "a\\b", "a%2fb", "a_b", "a\nb", "a\u{e9}b",
+    ] {
+        for auth in [
+            VertexAuth::Bearer {
+                access_token: "t",
+                project: "proj-1",
+                location: hostile,
+            },
+            VertexAuth::Bearer {
+                access_token: "t",
+                project: hostile,
+                location: "us-central1",
+            },
+            VertexAuth::Express {
+                api_key: "k",
+                location: Some(hostile),
+                explicit_location: true,
+            },
+            VertexAuth::Express {
+                api_key: "k",
+                location: Some(hostile),
+                explicit_location: false,
+            },
+        ] {
+            let error = build_with(auth).unwrap_err();
+            assert!(
+                matches!(error, ProviderError::InvalidRequest { .. }),
+                "{hostile:?} must be refused, got {error:?}"
+            );
+        }
+    }
+    // The admitted side of the same boundary: letters of either case, digits,
+    // and interior hyphens reach the host and the path unchanged.
+    for (location, host) in [
+        (
+            "us-central1",
+            "https://us-central1-aiplatform.googleapis.com",
+        ),
+        (
+            "US-CENTRAL1",
+            "https://US-CENTRAL1-aiplatform.googleapis.com",
+        ),
+        ("a-b-9", "https://a-b-9-aiplatform.googleapis.com"),
+        ("x", "https://x-aiplatform.googleapis.com"),
+    ] {
+        let wire = build_with(VertexAuth::Bearer {
+            access_token: "t",
+            project: "Proj-9",
+            location,
+        })
+        .unwrap();
+        assert_eq!(wire.base_override.as_deref(), Some(host), "{location}");
+        assert!(
+            wire.path
+                .starts_with(&format!("v1/projects/Proj-9/locations/{location}/")),
+            "{}",
+            wire.path
+        );
+    }
 }

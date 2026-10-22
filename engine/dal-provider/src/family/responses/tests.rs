@@ -374,6 +374,7 @@ fn request() -> Result<ModelRequest, Box<dyn Error>> {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-5".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([ModelToolSpec {
@@ -491,6 +492,7 @@ fn responses_and_codex_bodies_map_mapped_tool_names_for_advertisements_and_histo
         request.model = ModelRoute::Api {
             family,
             model: "gpt-5".into(),
+            provider: None,
         };
         let body = String::from_utf8(request_body(
             &request,
@@ -704,5 +706,81 @@ fn cumulative_websocket_and_sse_arguments_share_the_event_budget() {
     assert_eq!(
         decoder.calls[0].deltas.len(),
         crate::stream_budget::STREAM_EVENTS_LIMIT - 1
+    );
+}
+
+#[test]
+fn reasoning_beyond_the_output_count_leaves_zero_output_and_cache_writes_survive() -> TestResult {
+    // (output, reasoning, expected output): below, at, and above the
+    // boundary where reasoning would consume the whole output count.
+    for (output, reasoning, expected) in [(3_u64, 9_u64, 0_u64), (9, 9, 0), (10, 9, 1)] {
+        let terminal = format!(
+            r#"{{"type":"response.completed","response":{{"output":[],"usage":{{"input_tokens":10,"input_tokens_details":{{"cached_tokens":4,"cache_write_tokens":2}},"output_tokens":{output},"output_tokens_details":{{"reasoning_tokens":{reasoning}}}}}}}}}"#
+        );
+        let events = ok(run(&[terminal.as_str()]))?;
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .ok_or("a completed response carries one usage")?;
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 10,
+                cached_input_tokens: 4,
+                output_tokens: expected,
+                reasoning_tokens: Some(reasoning),
+                cache_write_tokens: 2,
+                premium_requests: None,
+                cost_usd: None,
+            },
+            "output {output}, reasoning {reasoning}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_or_skipping_sequence_numbers_are_accepted() {
+    // Only a decrease is an error: the same number again, the next one, and
+    // a jump are all fine, up to the largest representable value.
+    let numbered = |numbers: &[&str]| -> Vec<String> {
+        numbers
+            .iter()
+            .map(|number| {
+                format!(r#"{{"type":"response.in_progress","sequence_number":{number}}}"#)
+            })
+            .collect()
+    };
+    for numbers in [
+        &["5", "5", "6", "100"][..],
+        &["0", "0"][..],
+        &["18446744073709551615", "18446744073709551615"][..],
+    ] {
+        let events = numbered(numbers);
+        let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+        // No terminal arrives, so the only error is the cut itself.
+        assert!(
+            matches!(run(&refs).as_slice(), [Err(ProviderError::StreamCut)]),
+            "{numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unnumbered_event_does_not_forgive_a_later_decrease() {
+    let results = run(&[
+        r#"{"type":"response.in_progress","sequence_number":5}"#,
+        r#"{"type":"response.in_progress"}"#,
+        r#"{"type":"response.in_progress","sequence_number":4}"#,
+    ]);
+    assert!(
+        matches!(
+            results.as_slice(),
+            [Err(ProviderError::Protocol { detail, .. })] if detail == "sequence_number went backwards"
+        ),
+        "{results:?}"
     );
 }

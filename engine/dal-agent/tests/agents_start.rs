@@ -13,10 +13,11 @@ use dal_agent::ext::{
     BoxFuture, Extension, ExtensionBuilder, RawValue, Tool, ToolCall, ToolCx, ToolOutcome,
     ToolOutput,
 };
-use dal_agent::{Delivery, Env, Host, Product, SessionRef, Subscription};
+use dal_agent::{Delivery, Env, Host, Product, ServiceError, SessionRef, Subscription};
 use dal_core::{
-    AgentStart, AgentsOp, AgentsReply, CallId, ClientId, Command, Config, ConfigProduct, Expect,
-    ModelInfo, Name, Part, RawJson, ServiceSet, ToolClass, ToolSpec, UpdateKind, Workspace,
+    AgentRefusal, AgentStart, AgentsOp, AgentsReply, CallId, ClientId, Command, Config,
+    ConfigProduct, Expect, ModelInfo, Name, Part, RawJson, Service, ServiceSet, SessionId, Stop,
+    ToolClass, ToolSpec, UpdateKind, Workspace,
 };
 
 const USAGE: &str = "{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}";
@@ -55,11 +56,14 @@ fn start_args(name: &str, workspace: Option<&Workspace>) -> AgentStart {
     }
 }
 
+type StartReply = Result<AgentsReply, ServiceError>;
+
 #[derive(Debug)]
 struct Outcome {
-    escaped: Option<String>,
-    id_named: Option<String>,
-    started: Option<String>,
+    escaped: Option<StartReply>,
+    id_named: Option<StartReply>,
+    started: Option<StartReply>,
+    awaited: Option<(SessionId, StartReply)>,
 }
 
 struct Spawner {
@@ -94,6 +98,7 @@ impl Tool for Spawner {
                 escaped: None,
                 id_named: None,
                 started: None,
+                awaited: None,
             };
             // A workspace outside the session root must be denied, not
             // reported as a cancelled start.
@@ -103,35 +108,32 @@ impl Tool for Spawner {
                     AgentsOp::Start(start_args("escape", Some(&self.escape_root))),
                 )
                 .await;
-            seen.escaped = Some(format!("{escaped:?}"));
+            seen.escaped = Some(escaped);
             // A name made only of session-id characters is refused by the
             // store; the refusal must name the rule, not collapse into a
             // cancellation.
             let id_named = services
                 .agents(caller, AgentsOp::Start(start_args("a", None)))
                 .await;
-            seen.id_named = Some(format!("{id_named:?}"));
+            seen.id_named = Some(id_named);
             // A valid start still reports Started, and the child finishes
             // the scripted turn.
             let started = services
                 .agents(caller, AgentsOp::Start(start_args("worker", None)))
                 .await;
-            let record = match started {
-                Ok(AgentsReply::Started { id }) => {
-                    let awaited = services
-                        .agents(
-                            caller,
-                            AgentsOp::Await {
-                                id,
-                                timeout: Some(Duration::from_secs(20)),
-                            },
-                        )
-                        .await;
-                    format!("started {id:?} await {awaited:?}")
-                }
-                other => format!("{other:?}"),
-            };
-            seen.started = Some(record);
+            if let Ok(AgentsReply::Started { id }) = &started {
+                let awaited = services
+                    .agents(
+                        caller,
+                        AgentsOp::Await {
+                            id: *id,
+                            timeout: Some(Duration::from_secs(20)),
+                        },
+                    )
+                    .await;
+                seen.awaited = Some((*id, awaited));
+            }
+            seen.started = Some(started);
             *self
                 .seen
                 .lock()
@@ -181,6 +183,10 @@ async fn turn_ended(subscription: &mut Subscription) {
     .await;
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scripted turn drives every start case and each outcome is checked in place"
+)]
 #[tokio::test]
 async fn a_refused_child_start_is_a_typed_error_not_a_cancellation() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -202,6 +208,7 @@ async fn a_refused_child_start_is_a_typed_error_not_a_cancellation() {
         escaped: None,
         id_named: None,
         started: None,
+        awaited: None,
     }));
     let escape_root = Workspace::new(escape_dir).expect("escape workspace");
     let product = Product {
@@ -247,31 +254,51 @@ async fn a_refused_child_start_is_a_typed_error_not_a_cancellation() {
     let outcome = seen
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let escaped = outcome.escaped.as_deref().expect("the escape case ran");
+    let escaped = outcome.escaped.as_ref().expect("the escape case ran");
     assert!(
-        escaped.starts_with("Ok(Refused") && escaped.contains("WorkspaceOutsideRoot"),
-        "an out-of-scope workspace is refused with its reason: {escaped}"
+        matches!(
+            escaped,
+            Ok(AgentsReply::Refused {
+                reason: AgentRefusal::WorkspaceOutsideRoot
+            })
+        ),
+        "an out-of-scope workspace is refused with its reason: {escaped:?}"
     );
-    let id_named = outcome.id_named.as_deref().expect("the id-name case ran");
-    assert!(
-        id_named.starts_with("Err(Failed"),
-        "an id-shaped name fails with the store rule: {id_named}"
-    );
-    assert!(
-        id_named.contains("1 to 64 characters"),
-        "the refusal keeps the store's reason: {id_named}"
-    );
-    let started = outcome.started.as_deref().expect("the start case ran");
-    assert!(
-        started.starts_with("started "),
-        "a valid child reports Started: {started}"
-    );
-    assert!(
-        started.contains("Await {"),
-        "the await resolves to a completed report, not Pending or Cancelled: {started}"
+    let id_named = outcome.id_named.as_ref().expect("the id-name case ran");
+    let Err(ServiceError::Failed { service, message }) = id_named else {
+        panic!("an id-shaped name fails with the store rule: {id_named:?}");
+    };
+    assert_eq!(
+        *service,
+        Some(Service::Agents),
+        "the failure is attributed to the agents service"
     );
     assert!(
-        started.contains("stop: EndTurn"),
-        "the report carries a terminal stop kind: {started}"
+        message.starts_with("could not start child session: ")
+            && message.contains("1 to 64 characters"),
+        "the refusal keeps the store's reason: {message}"
+    );
+    let started = outcome.started.as_ref().expect("the start case ran");
+    let Ok(AgentsReply::Started { id: started_id }) = started else {
+        panic!("a valid child reports Started: {started:?}");
+    };
+    let (awaited_id, awaited) = outcome.awaited.as_ref().expect("the await case ran");
+    assert_eq!(
+        awaited_id, started_id,
+        "the await targeted the started child"
+    );
+    let Ok(AgentsReply::Await { report }) = awaited else {
+        panic!("the await resolves to a completed report, not Pending or Cancelled: {awaited:?}");
+    };
+    assert_eq!(report.session, *started_id, "the report names the child");
+    assert_eq!(
+        report.stop,
+        Stop::EndTurn,
+        "the report carries its stop kind"
+    );
+    assert_eq!(
+        report.text.as_ref(),
+        "done",
+        "the report carries the child's final text"
     );
 }

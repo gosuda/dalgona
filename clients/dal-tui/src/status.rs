@@ -14,8 +14,10 @@ pub struct StatusData<'a> {
     pub spinner: Option<&'a str>,
     /// Model identifier.
     pub model: Option<&'a str>,
-    /// Workspace path and branch.
+    /// Escaped, home-contracted workspace path, without branch decoration.
     pub path: Option<&'a str>,
+    /// Escaped branch text, without surrounding punctuation.
+    pub branch: Option<&'a str>,
     /// Input and output token labels.
     pub tokens: Option<&'a str>,
     /// Context usage percentage.
@@ -79,14 +81,17 @@ pub fn render_with_roles(
         .context
         .map_or(CONTEXT_SLOT, |text| width(text, mode).max(CONTEXT_SLOT));
     let compact_tokens = data.tokens.map(compact_token_pair);
-    let basename = data.path.map(path_basename);
+    let path = data.path.map(|path| decorate_path(path, data.branch));
+    let basename = data
+        .path
+        .map(|path| decorate_path(path_basename(path), data.branch));
     let slots = slots_for(
         &data,
         state.as_deref(),
         state_width,
         context_width,
         compact_tokens.as_deref(),
-        basename.as_deref(),
+        (path.as_deref(), basename.as_deref()),
         columns,
     );
 
@@ -133,7 +138,7 @@ fn slots_for<'a>(
     state_width: usize,
     context_width: usize,
     compact_tokens: Option<&'a str>,
-    basename: Option<&'a str>,
+    paths: (Option<&'a str>, Option<&'a str>),
     columns: usize,
 ) -> Vec<Slot<'a>> {
     let state = Slot {
@@ -149,7 +154,8 @@ fn slots_for<'a>(
         role: data.context_role,
     };
     let model = Slot::fixed(data.model, 24, Align::Left);
-    let path = Slot::fixed(data.path, 24, Align::Left);
+    let (path, basename) = paths;
+    let path = Slot::fixed(path, 24, Align::Left);
     if columns >= 120 {
         vec![
             state,
@@ -396,15 +402,19 @@ pub(crate) fn style_sgr(
     }
 }
 
-fn path_basename(path: &str) -> String {
-    let (path, branch) = path
-        .split_once(" ( ")
-        .map_or((path, None), |(path, rest)| (path, Some(rest)));
-    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    branch.map_or_else(
-        || basename.to_owned(),
-        |branch| format!("{basename} ({branch}"),
-    )
+fn path_basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return path;
+    }
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+fn decorate_path<'a>(path: &'a str, branch: Option<&str>) -> std::borrow::Cow<'a, str> {
+    match branch {
+        Some(branch) => std::borrow::Cow::Owned(format!("{path} ({branch})")),
+        None => std::borrow::Cow::Borrowed(path),
+    }
 }
 
 #[cfg(test)]
@@ -432,12 +442,77 @@ mod tests {
     }
 
     #[test]
+    fn semantic_paths_preserve_literal_names_and_branch_slashes() {
+        for (path, branch, expected) in [
+            ("/", None, "/"),
+            ("/srv/work/repo", None, "repo"),
+            ("/srv/work/my repo", None, "my repo"),
+            ("/srv/work/repo ( archive)", None, "repo ( archive)"),
+            ("/srv/work/repo (main)", None, "repo (main)"),
+            ("/srv/work/repo (archive)/src", None, "src"),
+            ("/srv/work/repo/", None, "repo"),
+            (
+                "/srv/work/repo",
+                Some("feature/topic"),
+                "repo (feature/topic)",
+            ),
+            (
+                "/srv/work/repo ( archive)",
+                Some("feature/topic"),
+                "repo ( archive) (feature/topic)",
+            ),
+            ("/", Some("main"), "/ (main)"),
+        ] {
+            assert_eq!(
+                super::decorate_path(super::path_basename(path), branch),
+                expected
+            );
+            let data = StatusData {
+                path: Some(path),
+                branch,
+                ..StatusData::default()
+            };
+            for mode in [WidthMode::Narrow, WidthMode::Cjk] {
+                for columns in [40, 41, 59] {
+                    let line = render(data, columns, mode);
+                    let fitted = crate::width::take_cells(expected, 24, mode);
+                    assert!(line.starts_with(&fitted), "{path:?} {branch:?}: {line:?}");
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+                let full = super::decorate_path(path, branch);
+                for columns in [60, 79, 80, 119, 120] {
+                    let line = render(data, columns, mode);
+                    assert!(line.starts_with(&crate::width::take_cells(&full, 24, mode)));
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+                for columns in [19, 20, 39] {
+                    assert_eq!(render(data, columns, mode), String::new());
+                }
+                for columns in [40, 41, 59] {
+                    let line = render(
+                        StatusData {
+                            state: Some("working"),
+                            model: Some("m"),
+                            ..data
+                        },
+                        columns,
+                        mode,
+                    );
+                    assert!(line.starts_with("working"));
+                    assert!(crate::width::width(&line, mode) <= columns);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bands_keep_status_state_and_drop_whole_right_slots() {
         let data = StatusData {
             state: Some("working"),
             spinner: Some("⠋"),
             model: Some("provider/model"),
-            path: Some("~/work/project (main)"),
+            path: Some("~/work/project"),
+            branch: Some("main"),
             tokens: Some("in 14k out 4k"),
             context: Some("ctx 47%"),
             context_role: None,

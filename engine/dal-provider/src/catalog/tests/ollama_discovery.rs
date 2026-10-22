@@ -37,10 +37,9 @@ impl Captured {
     }
 }
 
-/// What the script saw: every request, and the most requests answered at once.
+/// What the script saw: every request it answered.
 struct Seen {
     requests: Vec<Captured>,
-    max_in_flight: usize,
 }
 
 struct Script {
@@ -110,8 +109,6 @@ where
         .port();
     let route = Arc::new(route);
     let log = Arc::new(Mutex::new(Vec::new()));
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    let max_in_flight = Arc::new(AtomicUsize::new(0));
     let handle = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut workers = Vec::new();
@@ -120,15 +117,10 @@ where
                 Ok((mut stream, _)) => {
                     let route = Arc::clone(&route);
                     let log = Arc::clone(&log);
-                    let in_flight = Arc::clone(&in_flight);
-                    let max_in_flight = Arc::clone(&max_in_flight);
                     workers.push(thread::spawn(move || {
                         let request = read_request(&mut stream);
-                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                        max_in_flight.fetch_max(now, Ordering::SeqCst);
                         thread::sleep(hold);
                         let (status, body) = route(&request);
-                        in_flight.fetch_sub(1, Ordering::SeqCst);
                         let reply = format!(
                             "HTTP/1.1 {status} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                             body.len()
@@ -154,10 +146,7 @@ where
             worker.join().expect("answer one scripted request");
         }
         let requests = std::mem::take(&mut *log.lock().expect("lock the request log"));
-        Seen {
-            requests,
-            max_in_flight: max_in_flight.load(Ordering::SeqCst),
-        }
+        Seen { requests }
     });
     Script { port, handle }
 }
@@ -524,30 +513,151 @@ async fn a_server_without_a_show_endpoint_still_lists_its_models() {
 #[tokio::test]
 async fn show_probes_run_in_bounded_parallel() {
     const MODELS: usize = 14;
+    const BOUND: usize = 6;
     let directory = TestDir::new();
-    let script = serve(1 + MODELS, Duration::from_millis(120), |request| {
+    // Each probe waits until `BOUND` probes have arrived. It then holds its
+    // reply until one more probe arrives (which only an over-wide bound lets
+    // happen) or a grace period ends, so the observed peak is the bound itself
+    // and neither side depends on a short timing window. Probes are counted
+    // here, by path, because other processes on a shared host can connect to
+    // this loopback port and must not be mistaken for probes.
+    let current = AtomicUsize::new(0);
+    let arrived = AtomicUsize::new(0);
+    let peak = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&peak);
+    let script = serve(1 + MODELS, Duration::ZERO, move |request| {
         if request.path == "/api/tags" {
             let models: Vec<String> = (0..MODELS)
                 .map(|index| format!(r#"{{"name":"model-{index}"}}"#))
                 .collect();
             return (200, format!(r#"{{"models":[{}]}}"#, models.join(",")));
         }
+        if request.path != "/api/show" {
+            return (404, String::from("{}"));
+        }
+        let inside = current.fetch_add(1, Ordering::SeqCst) + 1;
+        observed.fetch_max(inside, Ordering::SeqCst);
+        arrived.fetch_add(1, Ordering::SeqCst);
+        let give_up = Instant::now() + Duration::from_secs(2);
+        while arrived.load(Ordering::SeqCst) < BOUND && Instant::now() < give_up {
+            thread::sleep(Duration::from_millis(2));
+        }
+        let grace = Instant::now() + Duration::from_millis(400);
+        while arrived.load(Ordering::SeqCst) <= BOUND && Instant::now() < grace {
+            thread::sleep(Duration::from_millis(2));
+        }
+        current.fetch_sub(1, Ordering::SeqCst);
         (200, String::from(r#"{"capabilities":["completion"]}"#))
     });
     let provider = ollama_provider("ollama", script.port, "", AuthStyle::None);
     let fetched = refresh(&provider, &Credential::None, directory.path()).await;
-    let seen = script.finish();
+    script.finish();
     assert_eq!(fetched.entries.len(), MODELS);
-    assert!(
-        seen.max_in_flight > 1,
-        "probes ran one at a time: {}",
-        seen.max_in_flight
+    // Fourteen probes against a bound of six: the bound is reached, and it
+    // is never exceeded.
+    let peak = peak.load(Ordering::SeqCst);
+    assert_eq!(peak, BOUND, "the probe bound is {BOUND}, saw {peak}");
+}
+
+#[tokio::test]
+async fn a_slow_probe_cannot_hand_its_capabilities_to_a_faster_models_row() {
+    let directory = TestDir::new();
+    let script = serve(3, Duration::ZERO, |request| {
+        if request.path == "/api/tags" {
+            return (
+                200,
+                String::from(r#"{"models":[{"name":"slow"},{"name":"fast"}]}"#),
+            );
+        }
+        match request.model().as_deref() {
+            Some("slow") => {
+                thread::sleep(Duration::from_millis(400));
+                (
+                    200,
+                    String::from(
+                        r#"{"capabilities":["completion","vision"],"model_info":{"llama.context_length":1111}}"#,
+                    ),
+                )
+            }
+            _ => (
+                200,
+                String::from(
+                    r#"{"capabilities":["completion"],"model_info":{"llama.context_length":2222}}"#,
+                ),
+            ),
+        }
+    });
+    let provider = ollama_provider("ollama", script.port, "", AuthStyle::None);
+    let fetched = refresh(&provider, &Credential::None, directory.path()).await;
+    script.finish();
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
     );
-    assert!(
-        seen.max_in_flight <= 6,
-        "probes exceeded the bound: {}",
-        seen.max_in_flight
+    let slow = row_of(&fetched, "slow");
+    assert_eq!(slow.context_window, Some(1_111));
+    assert!(slow.image_input);
+    let fast = row_of(&fetched, "fast");
+    assert_eq!(fast.context_window, Some(2_222));
+    assert!(!fast.image_input);
+}
+
+#[tokio::test]
+async fn a_failed_probe_never_adopts_another_providers_cached_row() {
+    let directory = TestDir::new();
+    let cloud = serve(
+        2,
+        Duration::ZERO,
+        ollama_route(
+            r#"{"models":[{"name":"seer"}]}"#,
+            &[(
+                "seer",
+                200,
+                r#"{"capabilities":["completion","vision"],"model_info":{"llama.context_length":4096}}"#,
+            )],
+        ),
     );
+    let cloud_provider = ollama_provider("ollama-cloud", cloud.port, "", AuthStyle::None);
+    let fetched = refresh(&cloud_provider, &Credential::None, directory.path()).await;
+    cloud.finish();
+    assert_eq!(fetched.source, CatalogSource::Live);
+
+    let local = serve(
+        2,
+        Duration::ZERO,
+        ollama_route(
+            r#"{"models":[{"name":"seer"}]}"#,
+            &[("seer", 500, r#"{"error":"busy"}"#)],
+        ),
+    );
+    let local_provider = ollama_provider("ollama", local.port, "", AuthStyle::None);
+    let fetched = refresh(&local_provider, &Credential::None, directory.path()).await;
+    local.finish();
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    let seer = row_of(&fetched, "seer");
+    assert_eq!(seer.provider.as_ref(), "ollama", "never relabelled");
+    assert_eq!(seer.context_window, None);
+    assert!(!seer.image_input);
+
+    let cached = read_cache_async(directory.path().join("models.json"))
+        .await
+        .expect("both providers' rows share the cache");
+    let cached_seer = |provider: &str| {
+        cached
+            .iter()
+            .find(|entry| entry.provider.as_ref() == provider && entry.id.as_ref() == "seer")
+            .unwrap_or_else(|| panic!("no cached seer for {provider}"))
+    };
+    assert_eq!(cached_seer("ollama-cloud").context_window, Some(4_096));
+    assert!(cached_seer("ollama-cloud").image_input);
+    assert_eq!(cached_seer("ollama").context_window, None);
 }
 
 #[tokio::test]

@@ -598,6 +598,7 @@ mod tests {
         ModelRoute::Api {
             family: Family::Chat,
             model: "test-model".into(),
+            provider: None,
         }
     }
 

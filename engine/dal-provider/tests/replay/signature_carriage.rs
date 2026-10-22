@@ -42,6 +42,7 @@ fn request() -> ModelRequest {
         model: ModelRoute::Api {
             family: Family::Responses,
             model: "gpt-6".into(),
+            provider: None,
         },
         system: Arc::from("Be brief."),
         tools: Arc::from([]),

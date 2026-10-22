@@ -100,7 +100,8 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         let _ = writeln!(std::io::stderr().lock(), "{notice}");
     }
     let stop = CancellationToken::new();
-    let outcome = super::drive(&stop, async {
+    let mut signals = edge::ShutdownSignals::register();
+    let outcome = super::drive(&stop, &mut signals, async {
         tokio::select! {
             biased;
             () = stop.cancelled() => Ok(()),
@@ -112,7 +113,7 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         Ok(result) => result,
         Err(code) => return ExitCode::from(code),
     };
-    let closed = exit::Ladder::begin().close_host(host).await;
+    let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
     if let Some(code) = closed.skipped_by {
         return ExitCode::from(code);
     }
@@ -154,7 +155,8 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     };
     let listener_host = host.clone();
     let stop = CancellationToken::new();
-    let outcome = super::drive(&stop, async {
+    let mut signals = edge::ShutdownSignals::register();
+    let outcome = super::drive(&stop, &mut signals, async {
         tokio::select! {
             biased;
             () = stop.cancelled() => Ok(()),
@@ -171,7 +173,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         Ok(result) => result,
         Err(code) => return ExitCode::from(code),
     };
-    let closed = exit::Ladder::begin().close_host(host).await;
+    let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
     if let Some(code) = closed.skipped_by {
         return ExitCode::from(code);
     }
