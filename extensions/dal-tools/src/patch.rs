@@ -94,9 +94,14 @@ pub async fn apply_replacement(
         index: crate::search::index::Index::new(None),
         snapshots: Arc::new(snapshot::SnapshotStore::new(process_boot())),
         cutoff: cx.cutoff(),
+        cancel: cx.cancel().clone(),
     };
     let mut plan = write::plan_replacement(&session, path, before, after, line).await?;
-    plan.findings = write::inspect(&session, &plan, observers).await;
+    #[cfg(feature = "symbols")]
+    let findings = write::inspect(&session, &plan, observers).await;
+    #[cfg(not(feature = "symbols"))]
+    let findings = write::inspect(&session, &plan, observers);
+    plan.findings = findings;
     if let Some(blocked) = plan
         .findings
         .iter()
@@ -260,6 +265,7 @@ impl PatchTool {
             index: Arc::clone(&self.index),
             snapshots: Arc::clone(&self.snapshots),
             cutoff: cx.cutoff(),
+            cancel: cx.cancel().clone(),
         };
         let mut plan = match write::plan(&session, style, &payload).await {
             Ok(plan) => plan,
@@ -268,7 +274,11 @@ impl PatchTool {
             }
         };
         let observers: Vec<Arc<dyn ir::EditObserver>> = self.observer.clone().into_iter().collect();
-        plan.findings = write::inspect(&session, &plan, &observers).await;
+        #[cfg(feature = "symbols")]
+        let findings = write::inspect(&session, &plan, &observers).await;
+        #[cfg(not(feature = "symbols"))]
+        let findings = write::inspect(&session, &plan, &observers);
+        plan.findings = findings;
         if let Some(blocked) = plan
             .findings
             .iter()
@@ -283,13 +293,7 @@ impl PatchTool {
         // Denials fail closed as the model-visible denial text; tests drive
         // plan/commit directly, not this run() path.
         match cx.authorize(preview).await {
-            Ok(_approved) => {
-                let output = write::commit(&session, plan, &observers).await;
-                let text = output.text.clone();
-                // Dirty the search index before returning (best-effort; index
-                // owner supplies the exact dirty handle once its public API lands).
-                ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.as_str())))
-            }
+            Ok(_approved) => settle(write::commit_checked(&session, plan, &observers).await),
             Err(deny) => ToolOutcome::Err(ToolError::Denied(deny)),
         }
     }
@@ -314,6 +318,17 @@ impl PatchTool {
         };
         (style, args_text.to_owned())
     }
+}
+
+/// Settles a finished commit: its text for the model, or an interrupted call
+/// when cancellation stopped it before any file changed.
+fn settle(result: Result<write::commit::Settled, ir::EngineError>) -> ToolOutcome {
+    let text = match result {
+        Ok(write::commit::Settled::Done(output)) => output.text,
+        Ok(write::commit::Settled::Cancelled) => return ToolOutcome::Err(ToolError::Cancelled),
+        Err(error) => error.message,
+    };
+    ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.as_str())))
 }
 
 fn preview_for_plan(plan: &ir::Plan) -> Preview {

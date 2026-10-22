@@ -9,6 +9,8 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 
+use dal_agent::ext::BoxFuture;
+
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Operation, Output, Plan,
     StagedFileOwned,
@@ -119,57 +121,199 @@ async fn prepare_write_set(
         }
     }
     for file in &ordered {
-        if let Some(expected) = file.before.as_deref() {
-            ensure_regular_target(&file.absolute_path, &file.path).await?;
-            let current = tokio::fs::read(&file.absolute_path)
-                .await
-                .unwrap_or_default();
-            if current != expected {
-                drop(guards);
-                return Err(EngineError::new(
-                    ErrorClass::Stale,
-                    format!(
-                        "patch: {} changed while you were approving. Nothing was written. Try again.",
-                        file.path.display()
-                    ),
-                ));
-            }
-        } else if let Ok(metadata) = tokio::fs::metadata(&file.absolute_path).await {
-            if !metadata.is_file() {
-                return Err(non_regular_target(&file.path));
-            }
-            drop(guards);
-            return Err(EngineError::new(
-                ErrorClass::File,
-                format!("patch: {} already exists.", file.path.display()),
-            ));
-        }
+        check_unchanged(file).await?;
     }
     Ok(guards)
 }
 
-pub(crate) async fn apply_files(
+fn changed_while_approving(path: &Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::Stale,
+        format!(
+            "patch: {} changed while you were approving. Nothing was written. Try again.",
+            path.display()
+        ),
+    )
+}
+
+/// Proves one staged file still has the bytes it was staged from, or still
+/// has no occupant when it was staged as new. A file that vanished is
+/// stale, and a read that fails for any other reason is an I/O failure:
+/// neither may pass as an empty file.
+async fn check_unchanged(file: &StagedFileOwned) -> Result<(), EngineError> {
+    let Some(expected) = file.before.as_deref() else {
+        // A symlink that resolves nowhere still occupies the name, and
+        // publishing over it would silently destroy the link.
+        return match tokio::fs::symlink_metadata(&file.absolute_path).await {
+            Ok(metadata) if metadata.is_file() => Err(EngineError::new(
+                ErrorClass::File,
+                format!("patch: {} already exists.", file.path.display()),
+            )),
+            Ok(_) => Err(non_regular_target(&file.path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(cannot_read(&file.path, &error)),
+        };
+    };
+    ensure_regular_target(&file.absolute_path, &file.path).await?;
+    match tokio::fs::read(&file.absolute_path).await {
+        Ok(current) if current == expected => Ok(()),
+        Ok(_) => Err(changed_while_approving(&file.path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(changed_while_approving(&file.path))
+        }
+        Err(error) => Err(cannot_read(&file.path, &error)),
+    }
+}
+
+/// A target whose state cannot be read is never assumed vacant or empty.
+fn cannot_read(path: &Path, error: &io::Error) -> EngineError {
+    EngineError::new(
+        ErrorClass::Io,
+        format!(
+            "patch: cannot read {}: {error}. Nothing was written.",
+            path.display()
+        ),
+    )
+}
+
+/// The text shown for a commit cancelled before any target changed.
+pub(crate) const CANCELLED: &str = "patch: cancelled before any file changed. Nothing was written.";
+
+/// How a commit that was not refused or failed ended.
+#[derive(Debug)]
+pub(crate) enum Settled {
+    /// Every change is published.
+    Done(Output),
+    /// Cancellation stopped the commit before any target changed, so nothing
+    /// was written and no temp remains.
+    Cancelled,
+}
+
+/// Why the write phases stopped before publishing everything.
+enum Stop {
+    Cancelled,
+    Failed(EngineError),
+}
+
+impl From<EngineError> for Stop {
+    fn from(error: EngineError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// The decision points of the commit pipeline. Production runs unpaced;
+/// a test pacer interleaves one concurrent actor at an exact point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Phase {
+    /// Every temp is staged and the index is invalidated; no target has
+    /// changed, and cancellation is still honored.
+    Staged,
+    /// The first target is published; cancellation is ignored from here to
+    /// the end.
+    Published,
+}
+
+trait Pace: Send + Sync {
+    fn at(&self, phase: Phase) -> BoxFuture<'_, ()>;
+}
+
+struct Unpaced;
+
+impl Pace for Unpaced {
+    fn at(&self, _phase: Phase) -> BoxFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// Commits `plan` to completion even when the caller stops polling it.
+///
+/// Dropping the returned future before the first target is published cancels
+/// the commit and removes its temps. From the first publication on, the
+/// commit runs to the end on its own task, so a caller that goes away can
+/// never leave a multi-file plan half-published.
+pub(crate) async fn apply_detached(
+    session: &PatchSession,
+    plan: Plan,
+) -> Result<Settled, EngineError> {
+    detached(session, plan, Arc::new(Unpaced)).await
+}
+
+async fn detached(
+    session: &PatchSession,
+    plan: Plan,
+    pace: Arc<dyn Pace>,
+) -> Result<Settled, EngineError> {
+    let token = session.cancel.child_token();
+    let abandoned = token.clone().drop_guard();
+    let mut owned = session.clone();
+    owned.cancel = token;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a started publication must finish after the caller drops this future; the task is joined below and holds only owned state"
+    )]
+    let task = tokio::spawn(async move { apply_with(&owned, &plan, pace.as_ref()).await });
+    let joined = task.await;
+    drop(abandoned.disarm());
+    joined.unwrap_or_else(|error| {
+        Err(EngineError::new(
+            ErrorClass::Io,
+            format!("patch: the write task ended abnormally: {error}. Inspect the files before retrying."),
+        ))
+    })
+}
+
+async fn apply_with(
     session: &PatchSession,
     plan: &Plan,
-) -> Result<Output, EngineError> {
-    let mut seen_dirs = std::collections::HashSet::new();
+    pace: &dyn Pace,
+) -> Result<Settled, EngineError> {
     let _guards = prepare_write_set(session, plan).await?;
-    let mut temps: Vec<(&StagedFileOwned, PendingTemp)> = Vec::new();
-    for file in &plan.files {
-        match stage_temp(session, file, &mut seen_dirs).await {
-            Ok(Some(temp)) => temps.push((file, temp)),
-            Ok(None) => {}
-            Err(error) => {
-                cleanup_temps(&temps).await;
-                return Err(error);
-            }
-        }
+    // The index hears about the write before the first mutation and again
+    // after the last. A build that starts between the two reads pre-write
+    // bytes under the generation the first call produced, and only the second
+    // call keeps that snapshot from being served as fresh.
+    mark_dirty(session, plan);
+    let written = write_set(session, plan, pace).await;
+    mark_dirty(session, plan);
+    match written {
+        Ok(()) => Ok(Settled::Done(report_output(session, plan))),
+        Err(Stop::Cancelled) => Ok(Settled::Cancelled),
+        Err(Stop::Failed(error)) => Err(error),
     }
+}
+
+fn mark_dirty(session: &PatchSession, plan: &Plan) {
     for file in &plan.files {
         session.index.dirty(&session.workspace, &file.path);
         if let Some(renamed_to) = file.renamed_to.as_ref() {
             session.index.dirty(&session.workspace, &renamed_to.path);
         }
+    }
+}
+
+/// Phases A to C for a plan whose locks are held and whose digests were
+/// re-proved: stage temps, publish in order, and undo everything on failure.
+async fn write_set(session: &PatchSession, plan: &Plan, pace: &dyn Pace) -> Result<(), Stop> {
+    let mut seen_dirs = std::collections::HashSet::new();
+    let mut temps: Vec<(&StagedFileOwned, PendingTemp)> = Vec::new();
+    for file in &plan.files {
+        if session.cancel.is_cancelled() {
+            cleanup_temps(&temps).await;
+            return Err(Stop::Cancelled);
+        }
+        match stage_temp(session, file, &mut seen_dirs).await {
+            Ok(Some(temp)) => temps.push((file, temp)),
+            Ok(None) => {}
+            Err(error) => {
+                cleanup_temps(&temps).await;
+                return Err(error.into());
+            }
+        }
+    }
+    pace.at(Phase::Staged).await;
+    if session.cancel.is_cancelled() {
+        cleanup_temps(&temps).await;
+        return Err(Stop::Cancelled);
     }
     let mut undo = Vec::new();
     for file in &plan.files {
@@ -177,10 +321,10 @@ pub(crate) async fn apply_files(
             trash_source(session, file, &temps, &mut undo).await?;
         }
     }
-    for (file, pending) in &temps {
+    for (position, (file, pending)) in temps.iter().enumerate() {
         let target = pending.target();
         if let Err(error) = pending.publish().await {
-            return Err(rollback_error(target, error, &temps, &undo).await);
+            return Err(rollback_error(target, error, &temps, &undo).await.into());
         }
         undo.push(match (pending, file.before.as_deref()) {
             (PendingTemp::Rename(rename), _) => Undo::RemoveRenamed(rename),
@@ -191,6 +335,9 @@ pub(crate) async fn apply_files(
                 mode: *mode,
             },
         });
+        if position == 0 {
+            pace.at(Phase::Published).await;
+        }
     }
     for file in &plan.files {
         if file.op == super::super::ir::Operation::Rename {
@@ -201,18 +348,28 @@ pub(crate) async fn apply_files(
         pending.sync_rename_dir();
     }
     #[cfg(unix)]
-    for dir in seen_dirs {
-        if let Ok(handle) = std::fs::File::open(&dir) {
-            let _ = handle.sync_all();
-        }
-    }
+    sync_dirs(seen_dirs).await;
     for action in undo {
         if let Undo::RestoreMoved { backup, .. } = action {
             let _ = tokio::fs::remove_file(backup).await;
         }
     }
     cleanup_temps(&temps).await;
-    Ok(report_output(session, plan))
+    Ok(())
+}
+
+/// Syncs every touched directory. An fsync waits for the device, so it runs on
+/// the blocking pool, never on the executor thread.
+#[cfg(unix)]
+async fn sync_dirs(dirs: std::collections::HashSet<PathBuf>) {
+    let _ = tokio::task::spawn_blocking(move || {
+        for dir in dirs {
+            if let Ok(handle) = std::fs::File::open(&dir) {
+                let _ = handle.sync_all();
+            }
+        }
+    })
+    .await;
 }
 
 fn write_target(file: &StagedFileOwned) -> &std::path::Path {
@@ -365,19 +522,29 @@ async fn create_sibling_temp(
     parent: &Path,
     mode: Option<u32>,
 ) -> io::Result<(PathBuf, tokio::fs::File)> {
-    let temp = parent.join(format!(
-        ".dalgon-patch-{}-{:032x}.tmp",
-        std::process::id(),
-        nonce_u128()
-    ));
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(mode.unwrap_or(0o644));
     #[cfg(not(unix))]
     let _ = mode;
-    let handle = options.open(&temp).await?;
-    Ok((temp, handle))
+    // An exclusive-create collision draws a fresh nonce and tries again.
+    for _ in 0..16 {
+        let temp = parent.join(format!(
+            ".dalgon-patch-{}-{:032x}.tmp",
+            std::process::id(),
+            nonce_u128()
+        ));
+        match options.open(&temp).await {
+            Ok(handle) => return Ok((temp, handle)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "unable to allocate a unique temporary file",
+    ))
 }
 
 /// One failure text for every refusal in `stage_temp`: the plan is dead,
@@ -662,20 +829,32 @@ pub(super) fn nonce_u128() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
+    use std::{num::NonZeroU64, path::PathBuf, process::Command, sync::Arc, time::Duration};
 
+    use dal_agent::ext::BoxFuture;
     use dal_core::{CallId, GenerationId, SessionId, TurnId};
+    use tokio_util::sync::CancellationToken;
 
     use crate::{
         patch::{
-            ir::{DialectId, ErrorClass, Operation, Plan, RenameTarget, StagedFileOwned},
+            ir::{
+                DialectId, EngineError, ErrorClass, Operation, Output, Plan, RenameTarget,
+                StagedFileOwned,
+            },
             snapshot::SnapshotStore,
         },
         search::index::Index,
     };
 
     use super::super::PatchSession;
-    use super::apply_files;
+    use super::{Pace, Phase, Settled, Unpaced, apply_with, detached, prepare_write_set};
+
+    async fn apply_files(session: &PatchSession, plan: &Plan) -> Result<Output, EngineError> {
+        match apply_with(session, plan, &Unpaced).await? {
+            Settled::Done(output) => Ok(output),
+            Settled::Cancelled => panic!("the commit was cancelled"),
+        }
+    }
 
     #[tokio::test]
     async fn rejected_rename_parent_cleans_up_earlier_staged_files() {
@@ -707,6 +886,7 @@ mod tests {
             index: Index::new(None),
             snapshots: Arc::new(SnapshotStore::new([7; 16])),
             cutoff: Some(u64::MAX),
+            cancel: CancellationToken::new(),
         };
         let plan = Plan {
             style: DialectId::Replace,
@@ -769,6 +949,7 @@ mod tests {
             index: Index::new(None),
             snapshots: Arc::new(SnapshotStore::new([7; 16])),
             cutoff: Some(64),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -940,6 +1121,86 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "std has no umask API; a child shell scopes the umask to one test process"
+    )]
+    async fn commit_published_modes_respect_umask_and_preserve_updates() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        const CHILD: &str = "DAL_TOOLS_UMASK_CHILD";
+        const TEST: &str = "patch::write::commit::tests::commit_published_modes_respect_umask_and_preserve_updates";
+
+        if std::env::var_os(CHILD).is_none() {
+            // Rust's standard library has no umask API. Run the real test body
+            // in a child shell, whose POSIX umask is scoped to that process.
+            let exe = std::env::current_exe().expect("test executable");
+            let status = Command::new("sh")
+                .args([
+                    "-c",
+                    "umask 027; exec \"$1\" --exact \"$2\" --nocapture",
+                    "dal-tools-umask",
+                    exe.to_str().expect("test executable path"),
+                    TEST,
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("run umask child");
+            assert!(status.success(), "umask child exited with {status}");
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        let new_path = workspace.join("new.txt");
+        let existing_path = workspace.join("existing.txt");
+        tokio::fs::write(&existing_path, b"before\n")
+            .await
+            .expect("seed existing file");
+        tokio::fs::set_permissions(&existing_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("set existing mode");
+
+        let session = failed_rollback_session(&workspace);
+        let plan = Plan {
+            style: DialectId::Replace,
+            files: vec![
+                StagedFileOwned {
+                    path: PathBuf::from("new.txt"),
+                    absolute_path: new_path.clone(),
+                    before: None,
+                    after: Some(b"new\n".to_vec().into_boxed_slice()),
+                    op: Operation::Create,
+                    renamed_to: None,
+                    hunks: Vec::new(),
+                },
+                StagedFileOwned {
+                    path: PathBuf::from("existing.txt"),
+                    absolute_path: existing_path.clone(),
+                    before: Some(b"before\n".to_vec().into_boxed_slice()),
+                    after: Some(b"after\n".to_vec().into_boxed_slice()),
+                    op: Operation::Update,
+                    renamed_to: None,
+                    hunks: Vec::new(),
+                },
+            ],
+            findings: Vec::new(),
+        };
+
+        apply_files(&session, &plan)
+            .await
+            .expect("publish mode test plan");
+        let new_mode = std::fs::metadata(&new_path).expect("new metadata").mode() & 0o777;
+        assert_eq!(new_mode, 0o644 & !0o027, "new mode {new_mode:o}");
+        let existing_mode = std::fs::metadata(&existing_path)
+            .expect("existing metadata")
+            .mode()
+            & 0o777;
+        assert_eq!(existing_mode, 0o600, "existing mode {existing_mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn sibling_temp_is_born_with_the_decided_mode() {
         use std::os::unix::fs::MetadataExt as _;
 
@@ -956,5 +1217,320 @@ mod tests {
             drop(handle);
             tokio::fs::remove_file(temp).await.expect("remove temp");
         }
+    }
+
+    fn update(
+        workspace: &std::path::Path,
+        name: &str,
+        before: &[u8],
+        after: &[u8],
+    ) -> StagedFileOwned {
+        StagedFileOwned {
+            path: PathBuf::from(name),
+            absolute_path: workspace.join(name),
+            before: Some(before.to_vec().into_boxed_slice()),
+            after: Some(after.to_vec().into_boxed_slice()),
+            op: Operation::Update,
+            renamed_to: None,
+            hunks: Vec::new(),
+        }
+    }
+
+    fn plan_of(files: Vec<StagedFileOwned>) -> Plan {
+        Plan {
+            style: DialectId::Replace,
+            files,
+            findings: Vec::new(),
+        }
+    }
+
+    /// Names the temps and trash a commit may leave behind in `workspace`.
+    fn leftovers(workspace: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(workspace)
+            .expect("read workspace")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".dalgon-"))
+            .collect()
+    }
+
+    fn two_file_workspace() -> (tempfile::TempDir, PathBuf, Plan) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        std::fs::write(workspace.join("a.txt"), b"one\n").expect("seed a");
+        std::fs::write(workspace.join("b.txt"), b"two\n").expect("seed b");
+        let plan = plan_of(vec![
+            update(&workspace, "a.txt", b"one\n", b"ONE\n"),
+            update(&workspace, "b.txt", b"two\n", b"TWO\n"),
+        ]);
+        (directory, workspace, plan)
+    }
+
+    fn assert_files(workspace: &std::path::Path, a: &[u8], b: &[u8]) {
+        assert_eq!(std::fs::read(workspace.join("a.txt")).expect("read a"), a);
+        assert_eq!(std::fs::read(workspace.join("b.txt")).expect("read b"), b);
+        assert!(
+            leftovers(workspace).is_empty(),
+            "{:?}",
+            leftovers(workspace)
+        );
+    }
+
+    /// Cancels the call when the commit reaches `when`.
+    struct CancelAt<'a> {
+        when: Phase,
+        token: &'a CancellationToken,
+    }
+
+    impl Pace for CancelAt<'_> {
+        fn at(&self, phase: Phase) -> BoxFuture<'_, ()> {
+            if phase == self.when {
+                self.token.cancel();
+            }
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    /// Reports the first publication, then holds the commit there until released.
+    struct Hold {
+        published: tokio::sync::mpsc::Sender<()>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl Pace for Hold {
+        fn at(&self, phase: Phase) -> BoxFuture<'_, ()> {
+            if phase != Phase::Published {
+                return Box::pin(std::future::ready(()));
+            }
+            let _ = self.published.try_send(());
+            Box::pin(self.release.notified())
+        }
+    }
+
+    /// Runs one index query at the instant a concurrent build could capture
+    /// the pre-write bytes under the generation the first invalidation made.
+    struct BuildInWindow {
+        index: Arc<Index>,
+        workspace: PathBuf,
+    }
+
+    impl Pace for BuildInWindow {
+        fn at(&self, phase: Phase) -> BoxFuture<'_, ()> {
+            if phase != Phase::Staged {
+                return Box::pin(std::future::ready(()));
+            }
+            Box::pin(async move {
+                let found = candidates(&self.index, &self.workspace, "before_marker").await;
+                assert_eq!(
+                    found,
+                    [PathBuf::from("a.txt")],
+                    "the window build saw old bytes"
+                );
+            })
+        }
+    }
+
+    async fn candidates(index: &Index, workspace: &std::path::Path, text: &str) -> Vec<PathBuf> {
+        let clauses = vec![vec![text.as_bytes().to_vec()]];
+        index
+            .search_candidates(workspace, &clauses, false, None)
+            .await
+            .expect("query the index")
+            .expect("an index root is configured")
+    }
+
+    #[tokio::test]
+    async fn a_file_that_vanished_while_approving_is_stale_even_when_it_was_empty() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        let session = failed_rollback_session(&workspace);
+        let plan = plan_of(vec![update(&workspace, "empty.txt", b"", b"filled\n")]);
+
+        let error = apply_files(&session, &plan)
+            .await
+            .expect_err("a vanished target is stale, not an empty file");
+
+        assert_eq!(error.class, ErrorClass::Stale, "{error}");
+        assert!(
+            error.message.contains("changed while you were approving"),
+            "{error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(workspace.join("empty.txt")).is_err(),
+            "nothing is recreated"
+        );
+        assert_eq!(leftovers(&workspace), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_symlink_where_a_file_was_to_be_created_is_kept() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        let target = workspace.join("made.txt");
+        std::os::unix::fs::symlink(workspace.join("nowhere.txt"), &target)
+            .expect("dangling symlink");
+        let session = failed_rollback_session(&workspace);
+        let mut file = update(&workspace, "made.txt", b"", b"made\n");
+        file.before = None;
+        file.op = Operation::Create;
+
+        let error = apply_files(&session, &plan_of(vec![file]))
+            .await
+            .expect_err("the link occupies the name");
+
+        assert_eq!(error.class, ErrorClass::File, "{error}");
+        let metadata = std::fs::symlink_metadata(&target).expect("the link survives");
+        assert!(metadata.file_type().is_symlink());
+        assert!(!workspace.join("nowhere.txt").exists());
+        assert_eq!(leftovers(&workspace), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_create_whose_name_cannot_be_probed_is_refused_not_assumed_vacant() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        std::fs::write(workspace.join("blocker"), b"file\n").expect("seed blocker");
+        let session = failed_rollback_session(&workspace);
+        let mut file = update(&workspace, "blocker/new.txt", b"", b"made\n");
+        file.before = None;
+        file.op = Operation::Create;
+
+        let error = apply_files(&session, &plan_of(vec![file]))
+            .await
+            .expect_err("a name under a file cannot be proved free");
+
+        assert_eq!(error.class, ErrorClass::Io, "{error}");
+        assert!(error.message.contains("cannot read"), "{error}");
+        assert!(error.message.contains("Nothing was written"), "{error}");
+        assert_eq!(
+            std::fs::read(workspace.join("blocker")).expect("read blocker"),
+            b"file\n"
+        );
+        assert_eq!(leftovers(&workspace), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_call_cancelled_before_staging_writes_nothing() {
+        let (_directory, workspace, plan) = two_file_workspace();
+        let session = failed_rollback_session(&workspace);
+        session.cancel.cancel();
+
+        let settled = apply_with(&session, &plan, &Unpaced)
+            .await
+            .expect("a cancelled call is not a failure");
+
+        assert!(matches!(settled, Settled::Cancelled), "{settled:?}");
+        assert_files(&workspace, b"one\n", b"two\n");
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_publication_removes_every_temp_and_changes_nothing() {
+        let (_directory, workspace, plan) = two_file_workspace();
+        let session = failed_rollback_session(&workspace);
+        let pace = CancelAt {
+            when: Phase::Staged,
+            token: &session.cancel,
+        };
+
+        let settled = apply_with(&session, &plan, &pace)
+            .await
+            .expect("a cancelled call is not a failure");
+
+        assert!(matches!(settled, Settled::Cancelled), "{settled:?}");
+        assert_files(&workspace, b"one\n", b"two\n");
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_the_first_publication_is_ignored_until_the_plan_finishes() {
+        let (_directory, workspace, plan) = two_file_workspace();
+        let session = failed_rollback_session(&workspace);
+        let pace = CancelAt {
+            when: Phase::Published,
+            token: &session.cancel,
+        };
+
+        let settled = apply_with(&session, &plan, &pace)
+            .await
+            .expect("a started publication runs to the end");
+
+        assert!(matches!(settled, Settled::Done(_)), "{settled:?}");
+
+        assert!(
+            session.cancel.is_cancelled(),
+            "the call was cancelled mid-publication"
+        );
+        assert_files(&workspace, b"ONE\n", b"TWO\n");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_commit_after_the_first_publication_still_publishes_every_file() {
+        let (_directory, workspace, plan) = two_file_workspace();
+        let session = failed_rollback_session(&workspace);
+        let (published, mut reached) = tokio::sync::mpsc::channel(1);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hold = Arc::new(Hold {
+            published,
+            release: Arc::clone(&release),
+        });
+        let locks = plan.clone();
+
+        tokio::select! {
+            result = detached(&session, plan, hold) => {
+                panic!("the commit ended before it was held: {result:?}");
+            }
+            signal = reached.recv() => {
+                assert!(signal.is_some(), "the commit reached its first publication");
+            }
+        }
+        // The caller is gone, so the commit's own task is all that is left.
+        // It still holds the path locks: taking them again returns only once
+        // it has finished, and then reports the plan stale because the files
+        // already hold the after images.
+        release.notify_one();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(30), prepare_write_set(&session, &locks))
+                .await
+                .expect("the commit releases its locks");
+
+        let error = outcome.expect_err("the files already hold the after images");
+        assert_eq!(error.class, ErrorClass::Stale, "{error}");
+        assert_files(&workspace, b"ONE\n", b"TWO\n");
+    }
+
+    #[tokio::test]
+    async fn a_build_inside_the_write_window_never_serves_pre_write_bytes_as_fresh() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
+        let root = tempfile::tempdir().expect("index root");
+        std::fs::write(workspace.join("a.txt"), b"before_marker\n").expect("seed");
+        let index = Index::new(Some(root.path().to_path_buf()));
+        let mut session = failed_rollback_session(&workspace);
+        session.index = Arc::clone(&index);
+        let plan = plan_of(vec![update(
+            &workspace,
+            "a.txt",
+            b"before_marker\n",
+            b"after_marker\n",
+        )]);
+        let pace = BuildInWindow {
+            index: Arc::clone(&index),
+            workspace: workspace.clone(),
+        };
+
+        apply_with(&session, &plan, &pace)
+            .await
+            .expect("publish through the window");
+
+        assert_eq!(
+            candidates(&index, &workspace, "after_marker").await,
+            [PathBuf::from("a.txt")],
+            "the invalidation after publication discards the window build"
+        );
+        assert_eq!(
+            candidates(&index, &workspace, "before_marker").await,
+            Vec::<PathBuf>::new()
+        );
     }
 }

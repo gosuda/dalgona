@@ -29,6 +29,7 @@ use super::{
     write::{PatchSession, commit, plan, stage},
 };
 
+mod conflicts;
 mod observation;
 mod rename_containment;
 
@@ -80,6 +81,7 @@ fn test_session(workspace: &std::path::Path, symbols: bool) -> PatchSession {
         index: crate::search::index::Index::new(None),
         snapshots: Arc::new(SnapshotStore::new([7; 16])),
         cutoff: Some(u64::MAX),
+        cancel: tokio_util::sync::CancellationToken::new(),
     }
 }
 
@@ -350,6 +352,63 @@ async fn hashline_stale_tag_rejects() {
         .expect_err("stale");
     assert_eq!(error.class, super::ir::ErrorClass::Stale);
     assert_eq!(tokio::fs::read(&path).await.expect("read"), b"one\ntwo\n");
+}
+
+#[tokio::test]
+async fn commit_rejects_approval_gap_drift_across_two_files() {
+    // Commit-time stale gate (`prepare_write_set` re-reads every `before`
+    // digest under the canonical locks): a content change landing after
+    // staging rejects the whole plan with Stale and writes nothing, while a
+    // same-bytes rewrite (mtime bump only) still commits. Stage-time stale
+    // tests cannot see this approval gap.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let a_path = dir.path().join("a.txt");
+    let b_path = dir.path().join("b.txt");
+    tokio::fs::write(&a_path, b"alpha\n").await.expect("seed a");
+    tokio::fs::write(&b_path, b"beta\n").await.expect("seed b");
+    let session = test_session(dir.path(), false);
+    // Same-bytes rewrite bumps mtime without changing content: not stale.
+    let staged = plan(
+        &session,
+        DialectId::Replace,
+        "{\"changes\":[{\"path\":\"a.txt\",\"old\":\"alpha\",\"new\":\"ALPHA\"}]}",
+    )
+    .await
+    .expect("stage a-only change");
+    tokio::fs::write(&a_path, b"alpha\n")
+        .await
+        .expect("mtime-only touch");
+    let output = commit(&session, staged, &[]).await;
+    assert!(output.error_class.is_none(), "{}", output.text);
+    assert_eq!(tokio::fs::read(&a_path).await.expect("read a"), b"ALPHA\n");
+    // Two-file plan, then drift one target after staging.
+    let staged = plan(
+        &session,
+        DialectId::Replace,
+        "{\"changes\":[{\"path\":\"a.txt\",\"old\":\"ALPHA\",\"new\":\"alpha2\"},{\"path\":\"b.txt\",\"old\":\"beta\",\"new\":\"BETA\"}]}",
+    )
+    .await
+    .expect("stage two-file change");
+    tokio::fs::write(&b_path, b"drifted\n")
+        .await
+        .expect("approval-gap drift");
+    let output = commit(&session, staged, &[]).await;
+    assert_eq!(output.error_class, Some(super::ir::ErrorClass::Stale));
+    assert!(
+        output.text.contains("changed while you were approving"),
+        "{}",
+        output.text
+    );
+    assert!(
+        output.text.contains("Nothing was written"),
+        "{}",
+        output.text
+    );
+    assert_eq!(tokio::fs::read(&a_path).await.expect("read a"), b"ALPHA\n");
+    assert_eq!(
+        tokio::fs::read(&b_path).await.expect("read b"),
+        b"drifted\n"
+    );
 }
 
 #[cfg(feature = "symbols")]
@@ -2645,6 +2704,27 @@ async fn patch_dispatch_structured_changes_apply_for_replace() {
 }
 
 #[tokio::test]
+async fn patch_dispatch_cancelled_call_settles_as_interrupted_and_writes_nothing() {
+    let tool = envelope_tool("replace");
+    let name = classify_probe_name("cancelled");
+    let args = format!("{{\"changes\":[{{\"path\":\"{name}\",\"create\":\"body\\n\"}}]}}");
+    let cx = ToolCx::for_test_approved(Arc::new(NeverServices));
+    cx.cancel().cancel();
+    let raw = RawValue::parse(&args).expect("structured call is one JSON value");
+
+    let outcome = tool.run(ToolCall::new("probe", raw), cx).await;
+
+    assert!(
+        matches!(outcome, ToolOutcome::Err(dal_agent::ToolError::Cancelled)),
+        "a call cancelled before publication settles as interrupted"
+    );
+    assert!(
+        !std::env::temp_dir().join(&name).exists(),
+        "the cancelled call wrote nothing"
+    );
+}
+
+#[tokio::test]
 async fn patch_dispatch_malformed_json_gets_documented_error() {
     // `{`-leading args that decode as neither registered envelope are
     // refused with the documented invalid-input text.
@@ -2684,6 +2764,16 @@ mod modes {
     fn restrict(path: &std::path::Path, bits: u32) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))
             .expect("seed permissions");
+    }
+
+    /// The mode a file the patch creates must have under the ambient umask:
+    /// 0644 narrowed by the same umask that narrows an ordinary create.
+    fn expected_create_mode(dir: &std::path::Path) -> u32 {
+        let probe = dir.join("umask-probe");
+        std::fs::write(&probe, b"").expect("probe file");
+        let narrowed = file_mode(&probe) & 0o644;
+        std::fs::remove_file(&probe).expect("remove probe");
+        narrowed
     }
 
     #[tokio::test]
@@ -2878,5 +2968,118 @@ mod modes {
         );
         assert_eq!(file_mode(&destination), 0o750);
         assert!(std::fs::metadata(dir.path().join("a.txt")).is_err());
+    }
+
+    #[tokio::test]
+    async fn commit_update_preserves_0644_mode_and_does_not_become_0600_or_0000() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("plain.txt");
+        tokio::fs::write(&path, b"before\n").await.expect("seed");
+        restrict(&path, 0o644);
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"plain.txt\",\"old\":\"before\",\"new\":\"after\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"after\n");
+        let mode = file_mode(&path);
+        assert_eq!(mode, 0o644, "update preserves 0644 mode");
+        assert_ne!(mode, 0o600, "0644 file must not become 0600");
+        assert_ne!(mode, 0o000, "0644 file must not become 0000");
+    }
+
+    #[tokio::test]
+    async fn commit_create_mode_is_0644_narrowed_by_the_umask() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let path = dir.path().join("created.txt");
+        let session = test_session(dir.path(), false);
+        let input = "{\"changes\":[{\"path\":\"created.txt\",\"create\":\"created content\\n\"}]}";
+        let staged = plan(&session, DialectId::Replace, input)
+            .await
+            .expect("plan");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read"),
+            b"created content\n"
+        );
+        let mode = file_mode(&path);
+        assert_eq!(
+            mode,
+            expected_create_mode(dir.path()),
+            "a created file is 0644 narrowed by the umask: {mode:o}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_apply_patch_mode_preservation() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let session = test_session(dir.path(), false);
+
+        // 1. Create file via ApplyPatch (create-mode op)
+        let create_patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: created.txt\n",
+            "+first\n",
+            "*** End Patch\n",
+        );
+        let staged = plan(&session, DialectId::ApplyPatch, create_patch)
+            .await
+            .expect("plan create");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let created_mode = file_mode(&dir.path().join("created.txt"));
+        assert_eq!(
+            created_mode,
+            expected_create_mode(dir.path()),
+            "a created file is 0644 narrowed by the umask: {created_mode:o}"
+        );
+
+        // 2. Patch existing 0600 file via ApplyPatch
+        let secret = dir.path().join("secret.txt");
+        tokio::fs::write(&secret, b"line1\n")
+            .await
+            .expect("seed secret");
+        restrict(&secret, 0o600);
+        let update_patch_600 = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: secret.txt\n",
+            "@@\n",
+            "-line1\n",
+            "+line2\n",
+            "*** End Patch\n",
+        );
+        let staged = plan(&session, DialectId::ApplyPatch, update_patch_600)
+            .await
+            .expect("plan update 0600");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        assert_eq!(file_mode(&secret), 0o600, "0600 file must preserve 0600");
+
+        // 3. Patch existing 0644 file via ApplyPatch
+        let plain = dir.path().join("plain.txt");
+        tokio::fs::write(&plain, b"line1\n")
+            .await
+            .expect("seed plain");
+        restrict(&plain, 0o644);
+        let update_patch_644 = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: plain.txt\n",
+            "@@\n",
+            "-line1\n",
+            "+line2\n",
+            "*** End Patch\n",
+        );
+        let staged = plan(&session, DialectId::ApplyPatch, update_patch_644)
+            .await
+            .expect("plan update 0644");
+        let output = commit(&session, staged, &[]).await;
+        assert!(output.error_class.is_none(), "{}", output.text);
+        let plain_mode = file_mode(&plain);
+        assert_eq!(plain_mode, 0o644, "0644 file must preserve 0644");
+        assert_ne!(plain_mode, 0o600, "0644 file must not become 0600");
+        assert_ne!(plain_mode, 0o000, "0644 file must not become 0000");
     }
 }

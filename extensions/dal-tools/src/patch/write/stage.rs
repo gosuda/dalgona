@@ -148,8 +148,9 @@ pub(crate) async fn stage_file(
         text: &text,
     };
     // Apply content edits in descending view-offset order; here lines only.
-    // Collect line replacements/insertions first, then splice once.
-    let mut replacements: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    // Collect line replacements/insertions first, then splice once. Each span
+    // keeps its edit index so the overlap backstop can name both changes.
+    let mut replacements: Vec<(usize, usize, usize, Vec<u8>)> = Vec::new();
     for edit in &content_edits {
         if let Edit::Change {
             locator,
@@ -160,12 +161,17 @@ pub(crate) async fn stage_file(
             ..
         } = edit
         {
-            replacements
-                .extend(plan_change_edit(&cx, locator, *action, guard, body, *index).await?);
+            replacements.extend(
+                plan_change_edit(&cx, locator, *action, guard, body, *index)
+                    .await?
+                    .into_iter()
+                    .map(|(start, end, bytes)| (*index, start, end, bytes)),
+            );
         }
     }
-    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
-    for (start, end, replacement) in replacements {
+    check_byte_overlap(display, &replacements)?;
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.1));
+    for (_, start, end, replacement) in replacements {
         after.splice(start..end, replacement);
     }
     let op = if rename_to.is_some() {
@@ -189,6 +195,105 @@ pub(crate) async fn stage_file(
     })
 }
 
+/// Rejects byte spans from different edits that overlap after every locator
+/// resolved against the before-image. Line-addressed locators are caught
+/// earlier by [`super::super::resolve::check_overlap`]; text and symbol
+/// locators only know their spans once matched, so this backstop keeps
+/// overlapping model input on the clean resolve-error path instead of
+/// panicking the splice. Spans from one edit are exempt: a replace-every
+/// match may report overlapping occurrences that the descending splice
+/// deliberately collapses into one write.
+fn check_byte_overlap(
+    display: &Path,
+    spans: &[(usize, usize, usize, Vec<u8>)],
+) -> Result<(), EngineError> {
+    for (left_pos, left) in spans.iter().enumerate() {
+        for right in spans.iter().skip(left_pos + 1) {
+            if left.0 != right.0 && left.1.max(right.1) < left.2.min(right.2) {
+                let (first, second) = order_pair(left.0, right.0);
+                return Err(EngineError::new(
+                    ErrorClass::Resolve,
+                    format!(
+                        "patch: changes[{first}] and changes[{second}] overlap in {}. Merge them into one change.",
+                        display.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Orders an index pair so a diagnostic names the lower index first.
+pub(super) fn order_pair(left: usize, right: usize) -> (usize, usize) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+/// Names the first pair of edits to one file that cannot combine.
+///
+/// A create or a delete stages the whole file, a whole-file replacement
+/// covers every other change, and a file renames once, so any such edit beside
+/// another would be dropped or overwritten without a word. A rename may
+/// follow content changes, including a whole-file replacement.
+fn incompatible_pair(edits: &[Edit]) -> Option<(usize, usize)> {
+    if edits.len() < 2 {
+        return None;
+    }
+    if let Some(position) = edits
+        .iter()
+        .position(|edit| matches!(edit, Edit::Create { .. } | Edit::Delete { .. }))
+    {
+        let other = usize::from(position == 0);
+        return Some((edits[position].index(), edits[other].index()));
+    }
+    if let Some(position) = edits.iter().position(|edit| {
+        matches!(
+            edit,
+            Edit::Change {
+                locator: Locator::Whole,
+                ..
+            }
+        )
+    }) {
+        let other = edits
+            .iter()
+            .enumerate()
+            .find(|(at, edit)| *at != position && matches!(edit, Edit::Change { .. }));
+        if let Some((_, other)) = other {
+            return Some((edits[position].index(), other.index()));
+        }
+    }
+    let mut renames = edits
+        .iter()
+        .filter(|edit| matches!(edit, Edit::Rename { .. }));
+    match (renames.next(), renames.next()) {
+        (Some(first), Some(second)) => Some((first.index(), second.index())),
+        _ => None,
+    }
+}
+
+/// Refuses edits to one file that cannot combine, with the authored
+/// incompatible-shapes text. Planning runs this before the line-overlap scan
+/// so a whole-file replacement beside another change reports shapes, not an
+/// overlap.
+pub(super) fn check_shapes(display: &Path, edits: &[Edit]) -> Result<(), EngineError> {
+    let Some((left, right)) = incompatible_pair(edits) else {
+        return Ok(());
+    };
+    let (first, second) = order_pair(left, right);
+    Err(EngineError::new(
+        ErrorClass::Resolve,
+        format!(
+            "patch: changes[{first}] and changes[{second}] both change {} in ways that cannot combine.",
+            display.display()
+        ),
+    ))
+}
+
 /// Classifies the edit list: exactly one rename, last, with optional prior
 /// content edits; create and delete stage the file outright.
 async fn classify_edits(
@@ -198,34 +303,31 @@ async fn classify_edits(
     canonical: &Path,
     edits: Vec<Edit>,
 ) -> Result<StagePlan, EngineError> {
+    check_shapes(display, &edits)?;
     let mut rename_to: Option<RenameTarget> = None;
     let mut content_edits = Vec::new();
     for edit in edits {
         match edit {
             Edit::Rename { to, reference, .. } => {
-                if rename_to.is_some() {
-                    return Err(EngineError::new(
-                        ErrorClass::Resolve,
-                        "patch: overlapping rename in one file.".to_owned(),
-                    ));
-                }
                 let destination = super::resolve_rename_destination(&session.workspace, &to)?;
                 if let Some(reference) = reference {
+                    let current = read_target(canonical, display).await?;
                     prove_reference(
                         session,
                         style,
-                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )
-                    .await?;
+                        &current,
+                    )?;
                 }
                 rename_to = Some(destination);
             }
             Edit::Create { path, body, .. } => {
-                if let Ok(metadata) = tokio::fs::metadata(canonical).await {
+                // A symlink that resolves nowhere still occupies the name:
+                // publishing over it would silently destroy the link.
+                if let Ok(metadata) = tokio::fs::symlink_metadata(canonical).await {
                     if !metadata.is_file() {
                         return Err(non_regular_target(display));
                     }
@@ -246,19 +348,18 @@ async fn classify_edits(
                 }));
             }
             Edit::Delete { reference, .. } => {
+                let before = read_target(canonical, display).await?;
                 if let Some(reference) = reference {
                     prove_reference(
                         session,
                         style,
-                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )
-                    .await?;
+                        &before,
+                    )?;
                 }
-                let before = read_target(canonical, display).await?;
                 return Ok(StagePlan::Ready(StagedFileOwned {
                     path: display.to_path_buf(),
                     absolute_path: canonical.to_path_buf(),
@@ -316,10 +417,19 @@ async fn plan_change_edit(
             quoted: _,
         } => span_replacements(cx, *first, *last, action, index, body),
         Locator::Node { first_line } => {
-            node_replacements(cx, *first_line, action, guard, index, body).await
+            #[cfg(feature = "symbols")]
+            let spans = node_replacements(cx, *first_line, action, guard, index, body).await;
+            #[cfg(not(feature = "symbols"))]
+            let spans = node_replacements(cx, *first_line, action, guard, index, body);
+            spans
         }
         Locator::Symbol { name, ordinal, old } => {
-            symbol_replacements(cx, name, *ordinal, old.as_ref(), action, index, body).await
+            #[cfg(feature = "symbols")]
+            let spans =
+                symbol_replacements(cx, name, *ordinal, old.as_ref(), action, index, body).await;
+            #[cfg(not(feature = "symbols"))]
+            let spans = symbol_replacements(cx, name, *ordinal, old.as_ref(), action, index, body);
+            spans
         }
     }
 }
@@ -598,7 +708,7 @@ async fn node_replacements(
 }
 
 #[cfg(not(feature = "symbols"))]
-async fn node_replacements(
+fn node_replacements(
     cx: &ChangeCx<'_>,
     _first_line: usize,
     _action: Action,
@@ -744,7 +854,7 @@ async fn symbol_replacements(
 }
 
 #[cfg(not(feature = "symbols"))]
-async fn symbol_replacements(
+fn symbol_replacements(
     cx: &ChangeCx<'_>,
     _name: &str,
     _ordinal: Option<usize>,
@@ -884,7 +994,7 @@ async fn prove_guard(
             ))
         }
         Guard::Reference(token) => {
-            prove_reference(session, style, canonical, display, locator, index, token).await
+            prove_reference(session, style, display, locator, index, token, before)
         }
         Guard::DefTag(expected) => {
             // Definition-tag proof resolves the named definition through the
@@ -932,7 +1042,11 @@ async fn prove_guard(
             }
         }
         Guard::Absent => {
-            if std::fs::metadata(session.workspace.join(display)).is_ok() {
+            // A link that resolves nowhere still occupies the name.
+            if tokio::fs::symlink_metadata(session.workspace.join(display))
+                .await
+                .is_ok()
+            {
                 return Err(EngineError::new(
                     ErrorClass::File,
                     format!("patch: {} already exists.", display.display()),
@@ -952,16 +1066,18 @@ async fn prove_guard(
     }
 }
 
-async fn prove_reference(
+/// Proves the staged bytes are the snapshot a reference names. `current` is
+/// the one read the edits are computed from, so the proof binds to exactly
+/// the bytes that will be edited, and no second read can disagree with it.
+fn prove_reference(
     session: &PatchSession,
     style: super::super::ir::DialectId,
-    canonical: &Path,
     display: &Path,
     locator: &Locator,
     index: usize,
     token: &str,
+    current: &[u8],
 ) -> Result<(), EngineError> {
-    ensure_regular_target(canonical, display).await?;
     let reference = super::super::snapshot::ReadRef::parse(token).ok_or_else(|| {
         EngineError::new(
             ErrorClass::Proof,
@@ -984,10 +1100,8 @@ async fn prove_reference(
                 ),
             )
         })?;
-    // Digest continuity: current workspace bytes must equal the captured snapshot.
-    // Snapshot.path is workspace-relative; always resolve against the session workspace.
-    let current = tokio::fs::read(canonical).await.unwrap_or_default();
-    if blake3::hash(&current).as_bytes() != &snapshot.digest {
+    // Digest continuity: the staged bytes must equal the captured snapshot.
+    if blake3::hash(current).as_bytes() != &snapshot.digest {
         return Err(EngineError::new(
             ErrorClass::Stale,
             format!(

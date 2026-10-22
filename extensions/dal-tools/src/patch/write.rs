@@ -7,13 +7,12 @@ use std::{
 };
 
 use dal_core::{CallId, GenerationId, SessionId, TurnId};
+use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "symbols")]
-use super::ir::StagedFileOwned;
 use super::{
     ir::{
         Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, RenameTarget,
-        StagedBatch, StagedFile,
+        StagedBatch, StagedFile, StagedFileOwned,
     },
     resolve::{check_overlap, resolve_path},
     snapshot::SnapshotStore,
@@ -47,6 +46,10 @@ pub struct PatchSession {
     /// `None` means the host could not supply a cutoff: Enhanced is rejected
     /// with `observation_unavailable`, Light proceeds on snapshot evidence.
     pub cutoff: Option<u64>,
+    /// Cancellation of the owning call. A commit honors it until the first
+    /// target is published and ignores it afterwards, so a cancelled call
+    /// leaves either every change or none.
+    pub cancel: CancellationToken,
 }
 
 pub(super) fn non_regular_target(display: &Path) -> EngineError {
@@ -119,6 +122,7 @@ pub async fn plan(
             .as_encoded_bytes()
             .cmp(right.as_os_str().as_encoded_bytes())
     });
+    check_distinct_targets(&displays, &canonical_of, &groups)?;
     let mut files = Vec::with_capacity(displays.len());
     let mut staged_bytes = 0_usize;
     for display in displays {
@@ -126,6 +130,7 @@ pub async fn plan(
         let canonical = canonical_of
             .remove(&display)
             .unwrap_or_else(|| display.clone());
+        stage::check_shapes(&display, &edits)?;
         check_overlap(&edits, &display)?;
         let staged = stage::stage_file(session, style, &display, &canonical, edits).await?;
         staged_bytes = staged_bytes.saturating_add(
@@ -150,6 +155,7 @@ pub async fn plan(
         }
         files.push(staged);
     }
+    check_rename_destinations(&files)?;
     let staged_mib = staged_bytes.div_ceil(1 << 20);
     if staged_bytes > 64 << 20 {
         return Err(EngineError::new(
@@ -198,56 +204,134 @@ pub(crate) async fn plan_replacement(
     })
 }
 
+/// Two spellings of one target, such as a symlink and the file it names,
+/// would stage independent images of the same bytes, and the later
+/// publication would silently replace the earlier one. Refuses them before
+/// anything is staged.
+fn check_distinct_targets(
+    displays: &[PathBuf],
+    canonical_of: &HashMap<PathBuf, PathBuf>,
+    groups: &HashMap<PathBuf, Vec<Edit>>,
+) -> Result<(), EngineError> {
+    let mut claimed: HashMap<&Path, (&Path, usize)> = HashMap::new();
+    for display in displays {
+        let (Some(canonical), Some(first)) = (
+            canonical_of.get(display),
+            groups.get(display).and_then(|edits| edits.first()),
+        ) else {
+            continue;
+        };
+        if let Some(&(owner, owner_index)) = claimed.get(canonical.as_path()) {
+            let (low, high) = stage::order_pair(owner_index, first.index());
+            return Err(EngineError::new(
+                ErrorClass::Resolve,
+                format!(
+                    "patch: changes[{low}] and changes[{high}] both change {} in ways that cannot combine.",
+                    owner.display()
+                ),
+            ));
+        }
+        claimed.insert(canonical.as_path(), (display.as_path(), first.index()));
+    }
+    Ok(())
+}
+
+/// A rename publishes without replacing anything, so a destination that
+/// another change in the same call also writes would be clobbered or would
+/// fail midway. Refuses it before approval.
+fn check_rename_destinations(files: &[StagedFileOwned]) -> Result<(), EngineError> {
+    for (position, file) in files.iter().enumerate() {
+        let Some(destination) = file.renamed_to.as_ref() else {
+            continue;
+        };
+        let target = destination.absolute_path.as_path();
+        let contested = files.iter().enumerate().any(|(other, candidate)| {
+            other != position
+                && (candidate.absolute_path == target
+                    || candidate
+                        .renamed_to
+                        .as_ref()
+                        .is_some_and(|to| to.absolute_path == target))
+        });
+        if contested {
+            return Err(EngineError::new(
+                ErrorClass::File,
+                format!(
+                    "patch: cannot rename {} to {}: another change in this call also writes {}.",
+                    file.path.display(),
+                    destination.path.display(),
+                    destination.path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Runs staged observers and commits the plan atomically.
 pub async fn commit(
     session: &PatchSession,
-    mut plan: Plan,
+    plan: Plan,
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Output {
+    match commit_checked(session, plan, observers).await {
+        Ok(commit::Settled::Done(output)) => output,
+        Ok(commit::Settled::Cancelled) => refusal(ErrorClass::Io, commit::CANCELLED.to_owned()),
+        Err(error) => refusal(error.class, error.message),
+    }
+}
+
+/// An output that reports a refusal: its text and class, no changes.
+fn refusal(class: ErrorClass, text: String) -> Output {
+    Output {
+        text,
+        error_class: Some(class),
+        changes: Vec::new(),
+        display: Diff {
+            kind: "diff".into(),
+            files: Vec::new(),
+        },
+    }
+}
+
+/// [`commit`] with the outcome kept typed, so the tool can settle a
+/// cancelled commit as interrupted instead of as a failure.
+pub(crate) async fn commit_checked(
+    session: &PatchSession,
+    mut plan: Plan,
+    observers: &[Arc<dyn super::ir::EditObserver>],
+) -> Result<commit::Settled, EngineError> {
     // Pre-approval inspection (patch.rs, patch::apply_replacement) already ran
     // the observers on this exact plan; re-running would double-count each
     // edit in per-turn guard accounting. Inspect only when findings are empty.
     if plan.findings.is_empty() {
-        plan.findings = inspect(session, &plan, observers).await;
+        #[cfg(feature = "symbols")]
+        let findings = inspect(session, &plan, observers).await;
+        #[cfg(not(feature = "symbols"))]
+        let findings = inspect(session, &plan, observers);
+        plan.findings = findings;
     }
     if let Some(blocked) = plan
         .findings
         .iter()
         .find(|finding| finding.severity == FindingSeverity::Block)
     {
-        return Output {
-            text: blocked.text.to_string(),
-            error_class: Some(ErrorClass::Blocked),
-            changes: Vec::new(),
-            display: Diff {
-                kind: "diff".into(),
-                files: Vec::new(),
-            },
-        };
+        return Ok(commit::Settled::Done(refusal(
+            ErrorClass::Blocked,
+            blocked.text.to_string(),
+        )));
     }
-    match commit::apply_files(session, &plan).await {
-        Ok(output) => output,
-        Err(error) => Output {
-            text: error.message.clone(),
-            error_class: Some(error.class),
-            changes: Vec::new(),
-            display: Diff {
-                kind: "diff".into(),
-                files: Vec::new(),
-            },
-        },
-    }
+    commit::apply_detached(session, plan).await
 }
 
+#[cfg(feature = "symbols")]
 pub(crate) async fn inspect(
     session: &PatchSession,
     plan: &Plan,
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Vec<super::ir::EditFinding> {
-    #[cfg(feature = "symbols")]
     let (pre_parses, post_parses) =
         cached_parses(session, &plan.files, !observers.is_empty()).await;
-    #[cfg(feature = "symbols")]
     let views: Vec<StagedFile<'_>> = plan
         .files
         .iter()
@@ -262,7 +346,26 @@ pub(crate) async fn inspect(
             post_parse: post_parses[index].clone(),
         })
         .collect();
-    #[cfg(not(feature = "symbols"))]
+    let batch = StagedBatch {
+        session: session.session,
+        turn: session.turn,
+        call: session.call.clone(),
+        files: views,
+    };
+    let mut findings = Vec::new();
+    for observer in observers {
+        findings.extend(observer.inspect(&batch));
+    }
+    findings
+}
+
+/// Observer pass without the parser: staged views carry no parse snapshots.
+#[cfg(not(feature = "symbols"))]
+pub(crate) fn inspect(
+    session: &PatchSession,
+    plan: &Plan,
+    observers: &[Arc<dyn super::ir::EditObserver>],
+) -> Vec<super::ir::EditFinding> {
     let views: Vec<StagedFile<'_>> = plan
         .files
         .iter()
