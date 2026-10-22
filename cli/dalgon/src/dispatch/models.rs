@@ -1,4 +1,4 @@
-use std::{io::Write, process::ExitCode};
+use std::{borrow::Cow, io::Write, process::ExitCode};
 
 use dal_provider::{
     Catalog, CatalogEntry, EnvSnapshot, Listing, ProviderConfig, ProviderIdentity, ProviderSet,
@@ -80,7 +80,7 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
     let result = if args.json {
         print_json(&rows)
     } else {
-        print_table(&rows)
+        print_table(&rows, &startup.config)
     };
     if let Err(error) = result {
         if let Some(code) = exit::broken_pipe(&error) {
@@ -128,7 +128,7 @@ fn print_json(rows: &[&CatalogEntry]) -> std::io::Result<()> {
     writeln!(stdout, "{line}")
 }
 
-fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
+fn print_table(rows: &[&CatalogEntry], config: &dal_core::Config) -> std::io::Result<()> {
     let providers: Vec<String> = rows.iter().map(|entry| visible(&entry.provider)).collect();
     let ids: Vec<String> = rows.iter().map(|entry| visible(&entry.id)).collect();
     let contexts: Vec<String> = rows
@@ -144,9 +144,17 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
         "{:<provider_width$}  {:<id_width$}  {:<context_width$}  PRICE",
         "PROVIDER", "ID", "CONTEXT"
     )?;
+    let mut configured = false;
+    let mut estimated = false;
     for (((entry, provider), id), context) in rows.iter().zip(&providers).zip(&ids).zip(&contexts) {
-        let price = model_price(entry)
-            .as_ref()
+        let (price, source) = model_price(entry, config);
+        match source {
+            PriceSource::Configured => configured = true,
+            PriceSource::Live => estimated = true,
+            PriceSource::Snapshot => {}
+        }
+        let price = price
+            .as_deref()
             .map_or_else(|| "-".to_owned(), format_price);
         writeln!(
             stdout,
@@ -154,7 +162,17 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
         )?;
     }
     let (source, _, date) = price_source();
-    writeln!(stdout, "Prices: {source}, fetched {date}.")
+    write!(stdout, "Prices: {source}, fetched {date}.")?;
+    if configured {
+        write!(stdout, " Includes configured price overrides.")?;
+    }
+    if estimated {
+        write!(
+            stdout,
+            " Includes provider-reported price estimates (not billed totals)."
+        )?;
+    }
+    writeln!(stdout)
 }
 
 /// Renders a catalog field for the terminal table with control and format
@@ -213,9 +231,28 @@ fn context_text(entry: &CatalogEntry) -> String {
         .map_or_else(|| "unknown".to_owned(), |value| format!("{value} tokens"))
 }
 
-fn model_price(entry: &CatalogEntry) -> Option<dal_core::ModelPrice> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PriceSource {
+    Configured,
+    Live,
+    Snapshot,
+}
+
+fn model_price<'a>(
+    entry: &'a CatalogEntry,
+    config: &'a dal_core::Config,
+) -> (Option<Cow<'a, dal_core::ModelPrice>>, PriceSource) {
     let qualified = format!("{}/{}", entry.provider, entry.id);
-    compiled_price(&qualified)
+    if let Some(price) = config.price_for_model(&qualified) {
+        return (Some(Cow::Borrowed(price)), PriceSource::Configured);
+    }
+    if let Some(price) = entry.price.as_ref() {
+        return (Some(Cow::Borrowed(price)), PriceSource::Live);
+    }
+    (
+        compiled_price(&qualified).map(Cow::Owned),
+        PriceSource::Snapshot,
+    )
 }
 
 fn format_price(price: &dal_core::ModelPrice) -> String {
