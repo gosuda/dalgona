@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use crate::diagram::{DiagramKind, DiagramSettings, RenderCache, wire_source};
+use crate::diagram::{DiagramKind, DiagramSettings, RenderCache, WiredBlock, wire_source};
 use crate::render::{
     RenderLink, RenderRow, RenderSpan, RichLine, indent_row, linked_text, wired_rows,
     wrap_rich_line,
@@ -40,7 +40,7 @@ pub(crate) fn markdown_wired_rows(
         offset = next;
     }
     state.finish(cap, full, mode, &mut pieces);
-    state.flush_open(full, mode, &mut pieces);
+    state.flush_open(cap, full, mode, wire, &mut pieces);
     let mut rows = materialize(&pieces, cap, full, mode, wire);
     if rows.is_empty() {
         rows.push(RenderRow::plain(String::new(), Role::Text));
@@ -103,6 +103,28 @@ fn fence_rows(
         }
         rows
     }
+}
+
+/// The pending placeholder for an unclosed CLI-backed fence, or `None` when
+/// the fence keeps code rows: unwired renders, unparseable info, and sync
+/// kinds (mermaid/dot render inline, never pending). Only D2/nomnoml
+/// schedule async workers, so only they can hold a card pending. Never
+/// touches the cache — the source is partial, so no worker runs and the
+/// render budget is untouched.
+fn pending_placeholder(
+    info: &str,
+    cap: usize,
+    mode: WidthMode,
+    wire: Option<(&DiagramSettings, &RenderCache)>,
+) -> Option<Vec<RenderRow>> {
+    if !wire.is_some_and(|(settings, _)| settings.enabled) {
+        return None;
+    }
+    let kind = DiagramKind::parse(info)?;
+    if !matches!(kind, DiagramKind::D2 | DiagramKind::Nomnoml) {
+        return None;
+    }
+    Some(wired_rows(WiredBlock::Pending { kind }, cap, mode))
 }
 
 /// One completed fenced block inside a text: byte ranges into the source.
@@ -259,6 +281,9 @@ impl OpenFence {
     ) -> Vec<RenderRow> {
         if self.fence.closes(tail) {
             return self.close_rows(tail, cap, full, mode, wire);
+        }
+        if let Some(placeholder) = pending_placeholder(&self.info, cap, mode, wire) {
+            return placeholder;
         }
         let mut out = Vec::new();
         if !self.info.is_empty() {
@@ -427,14 +452,27 @@ impl LineState {
         }
     }
 
-    /// Emits a deferred fence still open at end-of-input as today's exact
-    /// fallback rows: the info row (when non-empty) plus `code_rows` per
+    /// Emits a deferred fence still open at end-of-input: the pending
+    /// placeholder for CLI-backed fences (the same row [`OpenFence::preview`]
+    /// shows mid-stream, so replay and render agree), otherwise today's exact
+    /// fallback rows — the info row (when non-empty) plus `code_rows` per
     /// buffered body line. Non-deferred open fences need no flush — their
     /// rows committed incrementally as the lines arrived.
-    fn flush_open(&mut self, full: usize, mode: WidthMode, pieces: &mut Vec<Piece>) {
+    fn flush_open(
+        &mut self,
+        cap: usize,
+        full: usize,
+        mode: WidthMode,
+        wire: Option<(&DiagramSettings, &RenderCache)>,
+        pieces: &mut Vec<Piece>,
+    ) {
         let Some(open) = self.deferred.take() else {
             return;
         };
+        if let Some(placeholder) = pending_placeholder(&open.info, cap, mode, wire) {
+            pieces.extend(placeholder.into_iter().map(Piece::Row));
+            return;
+        }
         if !open.info.is_empty() {
             pieces.push(Piece::Row(RenderRow::plain(escape(&open.info), Role::Dim)));
         }
@@ -536,11 +574,12 @@ fn tail_body_rows(open: &OpenFence, tail: &str, full: usize, mode: WidthMode) ->
 ///
 /// Committed work is cached, not replayed: every completed line renders once
 /// into `committed_rows` when its piece arrives, and each re-render copies at
-/// most the last `limit` rows. A fence piece re-materializes on a cache
-/// signal — the frame it commits, a `RenderCache::generation` roll, or a
-/// wire-context change — and a signal rebuild re-materializes the committed
-/// pieces once. Nothing of `LineState` or the committed rows is cloned per
-/// frame: the unfinished tail renders against the borrowed state.
+/// most the last `limit` rows. A fence piece renders at commit; while its
+/// card is still pending, a `RenderCache::generation` roll renders just that
+/// piece again and splices its rows into place, so a landed card never
+/// copies the rows around it. Only a wire-context change re-materializes
+/// every committed piece. Nothing of `LineState` or the committed rows is
+/// cloned per frame: the unfinished tail renders against the borrowed state.
 #[derive(Debug, Default)]
 pub(crate) struct MarkdownStream {
     layout: Option<(usize, usize, WidthMode)>,
@@ -552,12 +591,22 @@ pub(crate) struct MarkdownStream {
     committed_rows: Vec<RenderRow>,
     /// Pieces already accounted for in `committed_rows`.
     committed_pieces: usize,
+    /// The fence pieces whose card is still the pending placeholder, in
+    /// piece order, with the rows they occupy in `committed_rows`.
+    pending_fences: Vec<PendingFence>,
     /// The wire settings the committed rows were rendered under; a change
     /// re-materializes fence pieces, so a mid-stream settings toggle
     /// re-routes stored cards to code rows.
     wired: Option<DiagramSettings>,
     /// The `RenderCache::generation` those rows were rendered under.
     generation: u64,
+}
+
+/// A deferred fence piece still showing its pending placeholder.
+#[derive(Debug)]
+struct PendingFence {
+    piece: usize,
+    rows: Range<usize>,
 }
 
 impl MarkdownStream {
@@ -616,14 +665,13 @@ impl MarkdownStream {
         out
     }
 
-    /// Accounts for newly committed pieces, then re-materializes when a
-    /// cache signal asks for it. A `Piece::Row` renders once, at commit; a
-    /// `Piece::Fence` renders at commit and again only when
-    /// `RenderCache::generation` rolls or the wire context changes — the
-    /// existing cache signals, no second cache. A signal is rare (a worker
-    /// landed, settings toggled), so its rebuild re-materializes every
-    /// committed piece once from the symbolic pieces; per frame, only the
-    /// newly committed lines render and at most `limit` rows copy.
+    /// Accounts for newly committed pieces after the cache signals are
+    /// settled. A `Piece::Row` renders once, at commit; a `Piece::Fence`
+    /// renders at commit and, while its card is pending, again when
+    /// `RenderCache::generation` rolls — the existing cache signal, no
+    /// second cache. That roll renders only the pending pieces and splices
+    /// their rows in place; the committed rows around them are never copied.
+    /// A wire-context change is the one rebuild of every committed piece.
     fn refresh(
         &mut self,
         cap: usize,
@@ -633,29 +681,78 @@ impl MarkdownStream {
     ) {
         let generation = wire.map_or(self.generation, |(_, cache)| cache.generation());
         let settings = wire.map(|(settings, _)| *settings);
-        let signal = generation != self.generation || settings != self.wired;
+        let rewired = settings != self.wired;
+        let landed = generation != self.generation;
         self.generation = generation;
         self.wired = settings;
+        if rewired {
+            self.committed_rows.clear();
+            self.pending_fences.clear();
+            self.committed_pieces = 0;
+        } else if landed {
+            self.resolve_pending(cap, full, mode, wire);
+        }
         while self.committed_pieces < self.pieces.len() {
-            let at = self.committed_pieces;
-            match &self.pieces[at] {
-                Piece::Row(row) => self.committed_rows.push(row.clone()),
-                Piece::Fence { .. } => {
-                    let rows = self.fence_piece_rows(at, cap, full, mode, wire);
-                    self.committed_rows.extend(rows);
+            self.commit_piece(cap, full, mode, wire);
+        }
+    }
+
+    /// Commits the next piece: a prose row copies once, a fence renders its
+    /// card and, still pending, is remembered for [`Self::resolve_pending`].
+    fn commit_piece(
+        &mut self,
+        cap: usize,
+        full: usize,
+        mode: WidthMode,
+        wire: Option<(&DiagramSettings, &RenderCache)>,
+    ) {
+        let at = self.committed_pieces;
+        let start = self.committed_rows.len();
+        match &self.pieces[at] {
+            Piece::Row(row) => self.committed_rows.push(row.clone()),
+            Piece::Fence { .. } => {
+                let rows = self.fence_piece_rows(at, cap, full, mode, wire);
+                if rows.iter().any(|row| row.pending_diagram) {
+                    self.pending_fences.push(PendingFence {
+                        piece: at,
+                        rows: start..start + rows.len(),
+                    });
                 }
+                self.committed_rows.extend(rows);
             }
-            self.committed_pieces += 1;
         }
-        if !signal {
-            return;
+        self.committed_pieces += 1;
+    }
+
+    /// Renders again each fence still showing its placeholder and splices
+    /// the new rows over the old ones. A card that is still pending stays
+    /// listed at its shifted position; every other committed row keeps its
+    /// buffer and only moves when an earlier card changes height.
+    fn resolve_pending(
+        &mut self,
+        cap: usize,
+        full: usize,
+        mode: WidthMode,
+        wire: Option<(&DiagramSettings, &RenderCache)>,
+    ) {
+        let mut added = 0;
+        let mut removed = 0;
+        let mut still = Vec::new();
+        for fence in std::mem::take(&mut self.pending_fences) {
+            let start = fence.rows.start + added - removed;
+            let old = start..start + fence.rows.len();
+            let rows = self.fence_piece_rows(fence.piece, cap, full, mode, wire);
+            if rows.iter().any(|row| row.pending_diagram) {
+                still.push(PendingFence {
+                    piece: fence.piece,
+                    rows: start..start + rows.len(),
+                });
+            }
+            removed += old.len();
+            added += rows.len();
+            self.committed_rows.splice(old, rows).for_each(drop);
         }
-        // A signal is rare — a worker landed or the wire context changed — so
-        // the committed rows re-materialize once from the symbolic pieces.
-        // The per-frame path above (render at commit, copy the suffix) still
-        // meets the F1 budget; the pieces themselves never change here.
-        self.committed_rows = materialize(&self.pieces, cap, full, mode, wire);
-        self.committed_pieces = self.pieces.len();
+        self.pending_fences = still;
     }
 
     /// The rows one piece occupies: the committed row itself, or the fence's
@@ -1888,6 +1985,138 @@ mod tests {
                 "the resolved card replaces the placeholder on the next frame: {:?}",
                 rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
             );
+        }
+
+        #[test]
+        fn an_incomplete_cli_fence_holds_the_pending_placeholder() {
+            // An unclosed CLI-backed fence (d2/nomnoml render async) is still
+            // pending while the stream is incomplete: batch replay and live
+            // render must agree on the pending placeholder so the transition
+            // stays stable once the close lands the card. Sync kinds
+            // (mermaid) and unwired renders keep today's code rows.
+            for (text, kind) in [
+                ("intro\n```d2\na -> b", "d2"),
+                ("intro\n```d2\na -> b\n", "d2"),
+                ("intro\n```nomnoml\n[a -> b]", "nomnoml"),
+            ] {
+                let (settings, cache) = enabled();
+                let wire = Some((&settings, &cache));
+                let whole = markdown_wired_rows(text, 40, 40, WidthMode::Narrow, wire);
+                assert_eq!(whole.len(), 2, "{text:?}: {whole:?}");
+                assert_eq!(whole[0].text.as_str(), "intro");
+                assert!(
+                    whole[1].pending_diagram
+                        && whole[1].text.contains("rendering")
+                        && whole[1].text.contains(kind),
+                    "{text:?}: {whole:?}"
+                );
+                let mut stream = MarkdownStream::default();
+                let streamed = stream.rows(text, 40, 40, WidthMode::Narrow, usize::MAX, wire);
+                assert_eq!(streamed, whole, "{text:?}");
+                // The placeholder is unscheduled: no worker runs on a partial
+                // source, so the unwired budget rule still holds.
+                assert_eq!(cache.renders(), 0);
+            }
+            // Sync-kind incomplete fences keep code rows.
+            let (settings, cache) = enabled();
+            let wire = Some((&settings, &cache));
+            let mermaid = "before\n```mermaid\ngraph TD; A-->B";
+            assert_eq!(
+                markdown_wired_rows(mermaid, 40, 40, WidthMode::Narrow, wire),
+                markdown_wired_rows(mermaid, 40, 40, WidthMode::Narrow, None),
+            );
+            assert_eq!(cache.renders(), 0);
+        }
+
+        /// Length and address of each committed prose row's text buffer. A
+        /// row that was cloned owns a new buffer, so an address that moved
+        /// names bytes the stream copied again.
+        fn prose_buffers(stream: &MarkdownStream) -> Vec<(usize, *const u8)> {
+            stream
+                .committed_rows
+                .iter()
+                .filter(|row| row.text.starts_with("prior ") || row.text.starts_with("after "))
+                .map(|row| (row.text.len(), row.text.as_ptr()))
+                .collect()
+        }
+
+        /// The bytes of `before`'s rows that `after` holds in new buffers.
+        fn recopied_bytes(before: &[(usize, *const u8)], after: &[(usize, *const u8)]) -> usize {
+            before
+                .iter()
+                .zip(after)
+                .filter(|(was, now)| was.1 != now.1)
+                .map(|(was, _)| was.0)
+                .sum()
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn a_landed_card_copies_only_its_pending_segment() {
+            use std::fmt::Write as _;
+            use std::os::unix::fs::PermissionsExt;
+            let settings = DiagramSettings { enabled: true };
+            // A slow fake d2: the worker cannot settle during the first
+            // frame, so the placeholder is deterministic; when it lands the
+            // fallback card is taller than the one-row placeholder.
+            let tools = tempfile::tempdir().expect("temporary tool directory");
+            let d2 = tools.path().join("d2");
+            std::fs::write(&d2, b"#!/bin/sh\n/bin/sleep 1\nexit 1\n").expect("fake d2 tool");
+            std::fs::set_permissions(&d2, std::fs::Permissions::from_mode(0o700))
+                .expect("executable fake tool");
+            let cache = RenderCache::with_fonts(
+                Some(tools.path().as_os_str().to_owned()),
+                crate::diagram::FontSnapshot::default(),
+            );
+            let wire = Some((&settings, &cache));
+            let mut text = String::new();
+            for index in 0..2000 {
+                let _ = writeln!(text, "prior line {index:04}");
+            }
+            text.push_str("```d2\na -> b\n```\nafter one\nafter two\n");
+            let generation = cache.generation();
+            let mut stream = MarkdownStream::default();
+            let rows = stream.rows(&text, 40, 40, WidthMode::Narrow, usize::MAX, wire);
+            assert!(
+                rows.iter().any(|row| row.pending_diagram),
+                "{:?}",
+                texts(&rows)
+            );
+            let before = prose_buffers(&stream);
+            assert_eq!(before.len(), 2002);
+
+            for _ in 0..500 {
+                if cache.generation() > generation {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                cache.generation() > generation,
+                "background renderer did not finish"
+            );
+            let rows = stream.rows(&text, 40, 40, WidthMode::Narrow, usize::MAX, wire);
+            assert!(!rows.iter().any(|row| row.pending_diagram));
+            assert_eq!(
+                rows,
+                markdown_wired_rows(&text, 40, 40, WidthMode::Narrow, wire)
+            );
+            let after = prose_buffers(&stream);
+            assert_eq!(after.len(), before.len());
+            assert_eq!(
+                recopied_bytes(&before, &after),
+                0,
+                "the transition re-copied committed rows outside the pending card"
+            );
+
+            // The frames after the transition stay incremental.
+            text.push_str("later\n");
+            let rows = stream.rows(&text, 40, 40, WidthMode::Narrow, usize::MAX, wire);
+            assert_eq!(
+                rows,
+                markdown_wired_rows(&text, 40, 40, WidthMode::Narrow, wire)
+            );
+            assert_eq!(recopied_bytes(&before, &prose_buffers(&stream)), 0);
         }
 
         #[test]
