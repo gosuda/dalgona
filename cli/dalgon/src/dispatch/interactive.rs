@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dal_agent::{DefaultAuthority, Env, Host, Product};
+use dal_agent::{Env, Host, Product};
 use dal_core::Screen as ConfigScreen;
 use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -223,7 +223,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
     }
     let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color, binary);
-    let save_diagrams = diagram_saver(config.clone(), config_path.clone());
+    let save_diagrams = diagram_saver(config.clone(), config_path);
     if let Some(addr) = cli.connect.as_deref() {
         return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
     }
@@ -236,10 +236,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         Ok(endpoints) => endpoints,
         Err(error) => return host_exit(&dal_agent::HostError::Provider(error), &data_root),
     };
-    // The local process edge owns the user configuration path, so the
-    // host it starts may persist `SessionAndDefault` outcomes there. Remote
-    // hosts never write: `connect_remote` above takes no host write path.
-    let host = match Host::start_with_defaults(
+    let host = match Host::start(
         product,
         config,
         Env {
@@ -247,7 +244,6 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
             cwd,
             sandbox_helper: helper,
         },
-        DefaultAuthority::Local { path: config_path },
     )
     .await
     {
@@ -272,8 +268,9 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
     }
     let code = run_blocking(host, opts, model_source, save_diagrams).await;
-    let _ = shutdown.shutdown(std::time::Duration::from_secs(3)).await;
-    code
+    // The terminal is already restored here; the ladder closes the host.
+    let closed = exit::Ladder::begin().close_host(shutdown).await;
+    closed.skipped_by.map_or(code, ExitCode::from)
 }
 
 async fn run_blocking<H, M, S>(
