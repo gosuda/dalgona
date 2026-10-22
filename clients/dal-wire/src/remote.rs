@@ -6,7 +6,9 @@
 //! Connection loss cancels no server work: the client reconnects with
 //! exponential delays (100 ms doubling to 30 s, resetting on success),
 //! resubscribes from the last delivered `(gen, seq)`, and repaints from
-//! `session/view` on `resync`. Unsupported host operations return
+//! `session/view` on `resync`. A server that is draining answers the
+//! reconnect with `-32009`; the client waits it out like a lost connection
+//! instead of reporting an error. Unsupported host operations return
 //! [`WireError::Unsupported`](crate::error::WireError::Unsupported) instead
 //! of a silent emulation.
 //!
