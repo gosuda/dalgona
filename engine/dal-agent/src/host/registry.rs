@@ -11,7 +11,7 @@ use dal_core::{
 };
 use dal_store::{Journal, Store};
 use serde::Deserialize;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -24,7 +24,8 @@ use crate::error::HostError;
 use crate::ext::generation::Generation;
 use crate::ext::grants::GrantStore;
 use crate::ext::hooks::{
-    HookScope, ObserverReport, dispatch_session_end, dispatch_session_start, hook_fanout,
+    HookScope, ObserverReport, dispatch_session_end, dispatch_session_start,
+    hook_caller_with_continuation,
 };
 use crate::ext::script::ScriptCx;
 use crate::ext::services::{SessionBackend, SessionServices, SessionServicesDeps};
@@ -32,6 +33,7 @@ use crate::ext::{Caller, Services};
 use crate::session::SessionHandle;
 use crate::session::actor::{ActorDeps, DriverPorts, spawn};
 use crate::session::backend::{Backend, BackendDeps};
+use crate::session::continuation::ContinuationOwner;
 use crate::session::rt::{SessionRt, SessionRtDeps};
 use crate::session::script::SessionScriptHost;
 use crate::session::shared::ChildPromptPolicy;
@@ -177,8 +179,6 @@ struct ReplayedSession {
     pending: Vec<Effect>,
     /// The session job table.
     jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
-    /// The host defaults this session opened under; it keeps them for life.
-    defaults: crate::host::SessionDefaults,
 }
 
 /// The wired runtime pieces of one spawned session.
@@ -209,8 +209,6 @@ struct WiredSession {
     model: Option<ModelRoute>,
     /// The selected model identity, empty when no model is available.
     model_id: Box<str>,
-    /// The host defaults this session opened under, for the driver.
-    defaults: crate::host::SessionDefaults,
 }
 
 /// Owns a wired session until registry admission transfers its resources.
@@ -295,6 +293,7 @@ impl OpeningCleanup {
         };
         let runtime = self.runtime.clone();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let end_tasks = self.owner_tasks.clone();
         self.owner_tasks.spawn_cleanup(&runtime, async move {
             observe_session_end(
                 &generation,
@@ -304,6 +303,7 @@ impl OpeningCleanup {
                 &process_env,
                 script,
                 &end,
+                end_tasks,
             )
             .await;
             // Classification first: the opening and running turn resolve
@@ -403,7 +403,8 @@ impl Host {
     }
 
     /// Tears down one session whose table entry is already removed: end
-    /// hooks, cancellation, actor join, then the removal publication.
+    /// hooks, cancellation, actor join, provider session-state eviction,
+    /// then the removal publication.
     ///
     /// The removal happened before this runs, so the parent-scoped child
     /// list and child admission observe the reclaim before any teardown
@@ -412,7 +413,7 @@ impl Host {
     /// through its await owner's drop and the shared subtree teardown,
     /// parking the tail on the awaiting session's task owner, which its
     /// own close and the host shutdown always drain.
-    pub(crate) async fn teardown_taken(state: &HostState, entry: SessionEntry, id: SessionId) {
+    pub(crate) async fn teardown_taken(state: &HostState, mut entry: SessionEntry, id: SessionId) {
         let generation = state.shared.generation.borrow().clone();
         let event = SessionEnd {
             session: id,
@@ -431,6 +432,7 @@ impl Host {
         .attach(None);
         let process_env = Arc::clone(&state.shared.env);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let end_tasks = tasks.clone();
         tasks.spawn(async move {
             observe_session_end(
                 &generation,
@@ -440,6 +442,7 @@ impl Host {
                 &process_env,
                 script,
                 &event,
+                end_tasks,
             )
             .await;
             let _ = done_tx.send(());
@@ -453,7 +456,16 @@ impl Host {
         entry.driver.abort();
         entry.handle.shutdown().await;
         entry.overlay.clear();
-        let _ = entry.task.await;
+        if let Some(task) = entry.task.take() {
+            let _ = task.await;
+        }
+        entry.tasks.stop().await;
+        // Provider session state clears only after every producer is
+        // drained: end hooks completed, the actor joined, the driver
+        // aborted, and session tasks stopped, so no turn, request, or
+        // parked workflow can put rows back afterwards. Clearing earlier
+        // would let a still-driving turn resurrect its rows.
+        state.shared.providers.end_session(&id);
         state.publish(&HostUpdate::SessionRemoved { session: id });
     }
 
@@ -488,7 +500,10 @@ impl Host {
         ordered
     }
 
-    /// Closes every session within the grace period and reports the count.
+    /// Closes every session within one shared close grace and reports the
+    /// count: the whole close phase — every open session, plus every
+    /// descendant swept by its owner — spends at most `grace` of elapsed
+    /// time, never `grace` per session.
     pub async fn shutdown(self, grace: Duration) -> ShutdownReport {
         self.shutdown_with_status_wait(Some(grace), grace).await
     }
@@ -497,6 +512,10 @@ impl Host {
     ///
     /// Use this when a front end already waited for status kinds and must not
     /// spend the same status grace a second time.
+    ///
+    /// `close_grace` is one shared budget for every close, not a per-session
+    /// timeout. The trailing provider shutdown runs after the closes without
+    /// a timeout: durable provider completion can exceed `close_grace`.
     pub async fn shutdown_after_quiet_wait(self, close_grace: Duration) -> ShutdownReport {
         self.shutdown_with_status_wait(None, close_grace).await
     }
@@ -521,9 +540,16 @@ impl Host {
             .values()
             .map(|entry| entry.tasks.clone())
             .collect();
+        // One monotonic deadline shared by every close: a blocked session
+        // spends only the budget left on this clock, so the whole close
+        // phase stays inside `close_grace` no matter how many sessions are
+        // open. A close the clock outlives is dropped mid-teardown exactly
+        // like a timed-out close: its entry tail stays parked on its task
+        // owner and is counted in `tasks_remaining`.
+        let close_deadline = tokio::time::Instant::now() + close_grace;
         for id in &ids {
             let this = self.clone();
-            let _ = timeout(close_grace, this.close(*id)).await;
+            let _ = timeout_at(close_deadline, this.close(*id)).await;
         }
         // Every snapshot id that left the table was closed here, directly
         // or as a descendant swept by its owner's close; ids are unique,
@@ -531,9 +557,10 @@ impl Host {
         let live: HashSet<SessionId> = self.table_ids().into_iter().collect();
         let sessions_closed = ids.iter().filter(|id| !live.contains(id)).count();
         opening_tasks.stop().await;
-        // Provider shutdown joins its internally bounded refresh tasks. Do not
-        // wrap this await in `close_grace`: dropping that waiter would detach
-        // a credential write that can still commit after host shutdown.
+        // Provider shutdown joins its internally bounded refresh tasks. This
+        // await is deliberately unbounded: dropping the waiter would detach
+        // a credential write that can still commit after host shutdown, so
+        // durable provider completion may exceed the front-end close budget.
         self.state.shared.providers.shutdown().await;
         let tasks_remaining = task_owners.iter().fold(0_usize, |total, tasks| {
             total.saturating_add(tasks.tracked())
@@ -687,22 +714,6 @@ impl Host {
     }
 }
 
-/// The lookup the session services use to resolve a live turn's
-/// cancellation token through the actor's control cell. A turn that is not
-/// running resolves to `None`.
-type TurnCancelLookup = Arc<dyn Fn(dal_core::TurnId) -> Option<CancellationToken> + Send + Sync>;
-
-fn turn_cancel_lookup(
-    control: Arc<std::sync::Mutex<crate::session::control::ControlCell>>,
-) -> TurnCancelLookup {
-    Arc::new(move |turn| {
-        control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .token_for(turn)
-    })
-}
-
 /// The shareable ports of one live session.
 struct SessionPorts {
     id: SessionId,
@@ -724,6 +735,17 @@ struct ResolvedRef {
     child: bool,
     parent: Option<SessionId>,
     name: Option<Box<str>>,
+}
+
+/// Generation snapshots shared by every per-extension session setup.
+struct SetupInputs<'a> {
+    resolved: &'a ResolvedRef,
+    wired: &'a WiredSession,
+    cancel: &'a CancellationToken,
+    config: &'a Arc<dal_core::Config>,
+    rules: &'a [crate::ext::SessionRule],
+    tool_names: &'a [Box<str>],
+    rule_files: &'a [dal_core::RuleFile],
 }
 
 impl Host {
@@ -892,15 +914,14 @@ impl Host {
         journal: &mut Journal,
     ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
-        // One snapshot for the whole session: a default saved after this
-        // point reaches only sessions opened later.
-        let (defaults, configured_model) = self.state.shared.session_defaults();
-        let thinking = defaults.thinking;
+        let thinking = self.state.shared.config.thinking();
         let policy = replay_child_policy(journal.records())?;
-        let approval = policy
-            .as_ref()
-            .map_or(defaults.approval, |policy| policy.approval);
-        let mode = defaults.mode;
+        let approval = policy.as_ref().map_or_else(
+            || self.state.shared.config.approval(),
+            |policy| policy.approval,
+        );
+        let mode = self.state.shared.config.mode();
+        let configured_model = self.state.shared.config.model().map(ModelRoute::from_id);
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
                 model: configured_model.clone(),
@@ -971,7 +992,6 @@ impl Host {
             opening_texts,
             pending,
             jobs,
-            defaults,
         })
     }
 
@@ -994,7 +1014,6 @@ impl Host {
             opening_texts,
             pending,
             jobs,
-            defaults,
         } = replayed;
         let broker = Arc::new(Broker::new());
         let extensions = self.grants_and_overlay(&broker, cancel, resolved.workspace.as_path())?;
@@ -1015,7 +1034,6 @@ impl Host {
             host: Arc::clone(&self.state),
             tasks: tasks.clone(),
             backend: Arc::clone(&backend_cell),
-            thinking: defaults.thinking,
         });
         let backend = Arc::new(Backend::new(BackendDeps {
             session: resolved.id,
@@ -1040,11 +1058,12 @@ impl Host {
             procs: Arc::clone(backend.procs()),
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: backend.launcher().clone(),
-            approval: defaults.approval,
+            approval: self.state.shared.config.approval(),
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
         }));
+        let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
             grants: extensions.grants,
             broker: Arc::clone(&broker),
@@ -1058,7 +1077,12 @@ impl Host {
             overlay: Arc::clone(&extensions.overlay),
             history: opening_texts,
             sites: HashMap::new(),
-            turn_cancel: turn_cancel_lookup(Arc::clone(&ports.control)),
+            turn_cancel: Arc::new(move |turn| {
+                turn_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .token_for(turn)
+            }),
             cancel: cancel.clone(),
             resolutions: handle.resolutions(),
             ask_timeout: ask_timeout(&self.state.shared.config),
@@ -1081,7 +1105,6 @@ impl Host {
             jobs,
             model,
             model_id,
-            defaults,
         })
     }
 
@@ -1123,6 +1146,7 @@ impl Host {
         wired: &WiredSession,
         cancel: &CancellationToken,
         resumed: bool,
+        tasks: &SessionTasks,
     ) {
         let start_event = SessionStart {
             session: resolved.id,
@@ -1148,6 +1172,7 @@ impl Host {
             &self.state.shared.env,
             observer_script,
             &start_event,
+            tasks.clone(),
         )
         .await;
     }
@@ -1199,8 +1224,6 @@ impl Host {
                         tasks: tasks.clone(),
                         cancel: cancel.clone(),
                         ephemeral: resolved.ephemeral,
-                        mode: wired.defaults.mode,
-                        thinking: wired.defaults.thinking,
                     },
                 );
                 let ports = SessionPorts {
@@ -1227,7 +1250,7 @@ impl Host {
                         parent: resolved.parent,
                         generation: ports.generation,
                         driver,
-                        task: wired.task,
+                        task: Some(wired.task),
                         control: ports.control,
                         cancel,
                         backend: Arc::clone(&wired.backend),
@@ -1271,6 +1294,101 @@ impl Host {
         true
     }
 
+    /// Runs one extension's fallible session setup and installs its result.
+    ///
+    /// Extensions without a setup pass through; a cancelled, failed, or
+    /// duplicate setup fails the session open with `HostError::Config`.
+    async fn run_one_session_setup(
+        &self,
+        extension: &crate::ext::Extension,
+        inputs: &SetupInputs<'_>,
+    ) -> Result<(), HostError> {
+        let SetupInputs {
+            resolved,
+            wired,
+            cancel,
+            config,
+            rules,
+            tool_names,
+            rule_files,
+        } = inputs;
+        let Some(setup) = extension.session_setup() else {
+            return Ok(());
+        };
+        let owner = extension
+            .name()
+            .parse::<Name>()
+            .map_err(|error| HostError::Config {
+                message: error.to_string().into(),
+            })?;
+        let inherited_state = resolved
+            .parent
+            .and_then(|parent| self.entry_of(parent))
+            .and_then(|entry| entry.shared.owner_state(&owner));
+        let setup_owner = ContinuationOwner::new(wired.backend.tasks().clone());
+        let caller = Caller::new(
+            owner.clone(),
+            extension.origin(),
+            extension.inject(),
+            extension.state_version(),
+            crate::ext::CallerKind::Hook,
+            None,
+        )
+        .with_extension(extension)
+        .with_continuation(setup_owner.downgrade());
+        let cx = crate::ext::SessionCx {
+            session: resolved.id,
+            workspace: resolved.workspace.clone(),
+            parent: resolved.parent,
+            product: self.state.shared.product_name,
+            config: Arc::clone(config),
+            services: wired.services.clone(),
+            caller,
+            cancel: (*cancel).clone(),
+            data_root: self.state.shared.data_root.clone(),
+            rules: rules.to_vec(),
+            tool_names: tool_names.to_vec(),
+            rule_files: rule_files.to_vec(),
+            model: wired.model.clone(),
+            model_id: wired.model_id.clone(),
+            inherited_state,
+        };
+        let installs = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                setup_owner.release_if_live();
+                return Err(HostError::Config { message: "session setup cancelled".into() });
+            }
+            result = timeout(Duration::from_millis(crate::ext::hooks::HOOK_DEADLINE_MS), setup.open(cx)) => {
+                let installs = match result {
+                    Ok(Ok(installs)) => installs,
+                    Ok(Err(error)) => {
+                        setup_owner.release_if_live();
+                        return Err(HostError::Config { message: error.to_string().into() });
+                    }
+                    Err(_) => {
+                        setup_owner.release_if_live();
+                        return Err(HostError::Config { message: "session setup deadline exceeded".into() });
+                    }
+                };
+                setup_owner.release_if_live();
+                installs
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(HostError::Config {
+                message: "session setup cancelled".into(),
+            });
+        }
+        wired
+            .shared
+            .install_setup(owner, installs)
+            .map_err(|()| HostError::Config {
+                message: "duplicate session setup owner".into(),
+            })?;
+        Ok(())
+    }
+
     async fn run_session_setups(
         &self,
         resolved: &ResolvedRef,
@@ -1307,68 +1425,17 @@ impl Host {
             );
         }
         let rule_files = generation.rule_files().to_vec();
+        let inputs = SetupInputs {
+            resolved,
+            wired,
+            cancel,
+            config: &config,
+            rules: &rules,
+            tool_names: &tool_names,
+            rule_files: &rule_files,
+        };
         for extension in generation.extensions.iter() {
-            let Some(setup) = extension.session_setup() else {
-                continue;
-            };
-            let owner = extension
-                .name()
-                .parse::<Name>()
-                .map_err(|error| HostError::Config {
-                    message: error.to_string().into(),
-                })?;
-            let inherited_state = resolved
-                .parent
-                .and_then(|parent| self.entry_of(parent))
-                .and_then(|entry| entry.shared.owner_state(&owner));
-            let caller = Caller::new(
-                owner.clone(),
-                extension.origin(),
-                extension.inject(),
-                extension.state_version(),
-                crate::ext::CallerKind::Hook,
-                None,
-            )
-            .with_extension(extension);
-            let cx = crate::ext::SessionCx {
-                session: resolved.id,
-                workspace: resolved.workspace.clone(),
-                parent: resolved.parent,
-                product: self.state.shared.product_name,
-                config: Arc::clone(&config),
-                services: wired.services.clone(),
-                caller,
-                cancel: cancel.clone(),
-                data_root: self.state.shared.data_root.clone(),
-                rules: rules.clone(),
-                tool_names: tool_names.clone(),
-                rule_files: rule_files.clone(),
-                model: wired.model.clone(),
-                model_id: wired.model_id.clone(),
-                inherited_state,
-            };
-            let installs = tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
-                    return Err(HostError::Config { message: "session setup cancelled".into() });
-                }
-                result = timeout(Duration::from_millis(crate::ext::hooks::HOOK_DEADLINE_MS), setup.open(cx)) => {
-                    result
-                        .map_err(|_| HostError::Config { message: "session setup deadline exceeded".into() })?
-                        .map_err(|error| HostError::Config { message: error.to_string().into() })?
-                }
-            };
-            if cancel.is_cancelled() {
-                return Err(HostError::Config {
-                    message: "session setup cancelled".into(),
-                });
-            }
-            wired
-                .shared
-                .install_setup(owner, installs)
-                .map_err(|()| HostError::Config {
-                    message: "duplicate session setup owner".into(),
-                })?;
+            self.run_one_session_setup(extension, &inputs).await?;
         }
         Ok(())
     }
@@ -1416,7 +1483,7 @@ impl Host {
             tasks.clone(),
             owner_tasks,
         );
-        self.observe_start(&resolved, opening.wired(), &cancel, resumed)
+        self.observe_start(&resolved, opening.wired(), &cancel, resumed, &tasks)
             .await;
         self.activate_session(&resolved, &mut opening, cancel, &tasks, by, name_claim)
             .await
@@ -1576,6 +1643,7 @@ async fn observe_session_start(
     process_env: &Arc<crate::Env>,
     script: Option<ScriptCx>,
     event: &SessionStart,
+    tasks: SessionTasks,
 ) {
     let mut report = ObserverReport::default();
     let scope = HookScope {
@@ -1587,8 +1655,17 @@ async fn observe_session_start(
         turn_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
         script,
     };
-    for (index, extension, caller) in hook_fanout(generation, None) {
-        let cx = scope.cx(&caller, None);
+    for (index, extension) in generation.extensions.iter().enumerate() {
+        // One linear owner per hook iteration (decision b): session-start
+        // observers run sequentially and each can reach model inference.
+        let hook_owner = ContinuationOwner::new(tasks.clone());
+        let Some(hook_caller) =
+            hook_caller_with_continuation(extension, None, Some(hook_owner.downgrade()))
+        else {
+            hook_owner.release_if_live();
+            continue;
+        };
+        let cx = scope.cx(&hook_caller, None);
         let failed_before = report.failed;
         dispatch_session_start(
             extension.name(),
@@ -1606,7 +1683,14 @@ async fn observe_session_start(
             &mut report,
         )
         .await;
-        notify_observer_failure(services, &caller, "session_start", failed_before, &report);
+        notify_observer_failure(
+            services,
+            &hook_caller,
+            "session_start",
+            failed_before,
+            &report,
+        );
+        hook_owner.release_if_live();
     }
 }
 
@@ -1618,6 +1702,7 @@ async fn observe_session_end(
     process_env: &Arc<crate::Env>,
     script: Option<ScriptCx>,
     event: &SessionEnd,
+    tasks: SessionTasks,
 ) {
     let mut report = ObserverReport::default();
     let scope = HookScope {
@@ -1629,8 +1714,17 @@ async fn observe_session_end(
         turn_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
         script,
     };
-    for (index, extension, caller) in hook_fanout(generation, None) {
-        let cx = scope.cx(&caller, None);
+    for (index, extension) in generation.extensions.iter().enumerate() {
+        // One linear owner per hook iteration (decision b): session-end
+        // observers run sequentially and each can reach model inference.
+        let hook_owner = ContinuationOwner::new(tasks.clone());
+        let Some(hook_caller) =
+            hook_caller_with_continuation(extension, None, Some(hook_owner.downgrade()))
+        else {
+            hook_owner.release_if_live();
+            continue;
+        };
+        let cx = scope.cx(&hook_caller, None);
         let failed_before = report.failed;
         dispatch_session_end(
             extension.name(),
@@ -1648,7 +1742,14 @@ async fn observe_session_end(
             &mut report,
         )
         .await;
-        notify_observer_failure(services, &caller, "session_end", failed_before, &report);
+        notify_observer_failure(
+            services,
+            &hook_caller,
+            "session_end",
+            failed_before,
+            &report,
+        );
+        hook_owner.release_if_live();
     }
 }
 
@@ -1680,6 +1781,18 @@ mod tests {
     use dal_core::{RawJson, Record, Timestamp};
 
     use super::replay_child_policy;
+    use std::collections::{BTreeMap, HashSet};
+    use std::ffi::OsString;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use dal_core::{ClientId, Config, ConfigProduct, ServiceSet, SessionEnd, SessionId, Workspace};
+    use tokio::time::Instant;
+
+    use crate::agent::Agent;
+    use crate::ext::{BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook};
+    use crate::{Env, Host, HostUpdate, Product, SessionRef};
 
     fn policy_record(ext: &str, kind: &str, body: &str) -> Record {
         Record::Ext {
@@ -1724,5 +1837,434 @@ mod tests {
     fn other_records_leave_the_session_unrestricted() {
         let records = [policy_record("focus", "child_policy", "{}")];
         assert!(replay_child_policy(&records).expect("replays").is_none());
+    }
+
+    // ---- shutdown close-budget fixtures ------------------------------------
+
+    /// Bound for settle waits in the shutdown fixtures; failures assert.
+    const WAIT: Duration = Duration::from_secs(30);
+    /// Poll step for flag checks; the paused test clock advances it freely.
+    const POLL: Duration = Duration::from_millis(10);
+
+    const SCRIPT_END_LINE: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"done\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
+
+    /// Session-end observer used to block or pace closes under controlled
+    /// time. The n-th entered hook records its boundary, waits out `hold` of
+    /// virtual time, then waits on the n-th gate signal. Closes are
+    /// sequential inside the shutdown loop, so entry order is close order.
+    struct GatedEnd {
+        log: Arc<Mutex<Vec<(SessionId, String)>>>,
+        gates: Arc<Mutex<Vec<Option<tokio::sync::oneshot::Receiver<()>>>>>,
+        entered: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        released: Vec<Arc<AtomicBool>>,
+        hold: Duration,
+    }
+
+    struct EndGuard {
+        cancelled: Arc<AtomicUsize>,
+        completed: bool,
+    }
+
+    impl Drop for EndGuard {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl ObserveHook<SessionEnd> for GatedEnd {
+        fn call(
+            &self,
+            input: SessionEnd,
+            _cx: HookCx,
+        ) -> BoxFuture<'static, Result<(), HookError>> {
+            let log = Arc::clone(&self.log);
+            let gates = Arc::clone(&self.gates);
+            let entered = Arc::clone(&self.entered);
+            let cancelled = Arc::clone(&self.cancelled);
+            let released = self.released.clone();
+            let hold = self.hold;
+            Box::pin(async move {
+                let index = entered.fetch_add(1, Ordering::SeqCst);
+                let mut end_guard = EndGuard {
+                    cancelled,
+                    completed: false,
+                };
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((input.session, input.reason.into()));
+                if hold > Duration::ZERO {
+                    tokio::time::sleep(hold).await;
+                }
+                let receiver = gates
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)[index]
+                    .take();
+                if let Some(receiver) = receiver {
+                    let _ = receiver.await;
+                }
+                end_guard.completed = true;
+                released[index].store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    fn gated_end_extension(
+        log: Arc<Mutex<Vec<(SessionId, String)>>>,
+        gates: Arc<Mutex<Vec<Option<tokio::sync::oneshot::Receiver<()>>>>>,
+        entered: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        released: Vec<Arc<AtomicBool>>,
+        hold: Duration,
+    ) -> Extension {
+        ExtensionBuilder::new("shutdown_clock", "0.1.0", ServiceSet::EMPTY)
+            .expect("extension builder")
+            .on_session_end(GatedEnd {
+                log,
+                gates,
+                entered,
+                cancelled,
+                released,
+                hold,
+            })
+            .build()
+            .expect("extension")
+    }
+
+    struct ShutdownRig {
+        _tmp: tempfile::TempDir,
+        host: Host,
+        _agents: Vec<Agent>,
+    }
+
+    /// Starts a real host on the scripted provider with `sessions` open
+    /// sessions and no live turns, so shutdown exercises exactly the close
+    /// path under test.
+    async fn shutdown_rig(extension: Extension, sessions: usize) -> ShutdownRig {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let workspace_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data directory");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace directory");
+        let fixture = data.join("script.jsonl");
+        std::fs::write(&fixture, SCRIPT_END_LINE).expect("script fixture");
+        let config_text = format!(
+            "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+            fixture.to_string_lossy().replace('\\', "\\\\")
+        );
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text.as_str()))
+            .expect("config");
+        let product = Product {
+            name: "dal",
+            data_root: data,
+            defaults: "",
+            extensions: vec![extension],
+            bundled: Vec::new(),
+        };
+        let env = Env {
+            vars: BTreeMap::from([
+                (OsString::from("OPENAI_API_KEY"), OsString::from("sk-test")),
+                (
+                    OsString::from("HOME"),
+                    OsString::from(tmp.path().join("home")),
+                ),
+                (
+                    OsString::from("XDG_CACHE_HOME"),
+                    OsString::from(tmp.path().join("cache")),
+                ),
+            ]),
+            cwd: workspace_dir.clone(),
+            sandbox_helper: None,
+        };
+        let host = Host::start(product, config, env).await.expect("host");
+        let mut agents = Vec::new();
+        for index in 0..sessions {
+            let workspace = Workspace::new(workspace_dir.clone()).expect("workspace");
+            agents.push(
+                host.open(
+                    SessionRef::New {
+                        workspace,
+                        name: None,
+                    },
+                    ClientId::new(format!("shutdown-clock-{index}")),
+                )
+                .await
+                .expect("session"),
+            );
+        }
+        ShutdownRig {
+            _tmp: tmp,
+            host,
+            _agents: agents,
+        }
+    }
+
+    /// The send halves and shared gate halves of the shutdown test rig.
+    type GateChannels = (
+        Vec<tokio::sync::oneshot::Sender<()>>,
+        Arc<Mutex<Vec<Option<tokio::sync::oneshot::Receiver<()>>>>>,
+    );
+
+    fn gate_channels(count: usize) -> GateChannels {
+        let (senders, receivers): (Vec<_>, Vec<_>) = (0..count)
+            .map(|_| tokio::sync::oneshot::channel::<()>())
+            .unzip();
+        let gates = Arc::new(Mutex::new(
+            receivers.into_iter().map(Some).collect::<Vec<_>>(),
+        ));
+        (senders, gates)
+    }
+
+    fn release_flags(count: usize) -> Vec<Arc<AtomicBool>> {
+        (0..count)
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect()
+    }
+
+    fn recorded_ends(log: &Arc<Mutex<Vec<(SessionId, String)>>>) -> Vec<(SessionId, String)> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn wait_for(description: &str, mut settled: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !settled() {
+            assert!(Instant::now() < deadline, "never {description}");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Three sessions whose end hooks block on held gates: one shared
+    /// deadline bounds the whole close phase to a single grace (a fresh
+    /// per-session timeout would cost one grace per session), the blocked
+    /// tails stay parked and reported rather than detached, and every
+    /// entered hook is accounted for when cancellation drops its future.
+    #[tokio::test(start_paused = true)]
+    async fn one_deadline_bounds_the_whole_close_phase_with_blocked_sessions() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let released = release_flags(3);
+        let (senders, gates) = gate_channels(3);
+        let rig = shutdown_rig(
+            gated_end_extension(
+                Arc::clone(&log),
+                gates,
+                Arc::clone(&entered),
+                Arc::clone(&cancelled),
+                released.clone(),
+                Duration::ZERO,
+            ),
+            3,
+        )
+        .await;
+
+        let grace = Duration::from_millis(500);
+        let began = Instant::now();
+        let report = rig.host.clone().shutdown_after_quiet_wait(grace).await;
+        let elapsed = began.elapsed();
+
+        assert!(
+            elapsed >= grace,
+            "the shared deadline must be reached while closes block: {elapsed:?}"
+        );
+        assert!(
+            elapsed < grace * 2,
+            "the close phase cost more than one shared grace (a fresh \
+             per-session timeout costs one grace per session): {elapsed:?}"
+        );
+        assert!(
+            report.sessions_closed >= 1,
+            "the first close always runs to the deadline: {report:?}"
+        );
+        assert!(
+            report.tasks_remaining >= 1,
+            "blocked end tails are reported as pending work, never detached: {report:?}"
+        );
+        let ends = recorded_ends(&log);
+        assert!(
+            !ends.is_empty() && ends.iter().all(|(_, reason)| reason == "close"),
+            "every entered end hook observes its own close boundary: {ends:?}"
+        );
+        let target_entered = entered.load(Ordering::SeqCst);
+        assert!(
+            released[..target_entered]
+                .iter()
+                .all(|flag| !flag.load(Ordering::SeqCst)),
+            "no end hook completed while its gate was held"
+        );
+
+        drop(senders);
+        wait_for("the end hooks held at the deadline to be cancelled", || {
+            cancelled.load(Ordering::SeqCst) >= target_entered
+        })
+        .await;
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            target_entered,
+            "every end hook already entered at the deadline was cancelled"
+        );
+        wait_for("every subsequently entered end hook to settle", || {
+            let entered_count = entered.load(Ordering::SeqCst);
+            let completed = released[..entered_count]
+                .iter()
+                .filter(|flag| flag.load(Ordering::SeqCst))
+                .count();
+            completed + cancelled.load(Ordering::SeqCst) == entered_count
+        })
+        .await;
+    }
+
+    /// Three unblocked sessions: every close finishes inside the shared
+    /// budget, each session boundary is observed exactly once, the table
+    /// drains, and no tracked work survives.
+    #[tokio::test(start_paused = true)]
+    async fn unblocked_sessions_all_finish_inside_the_one_deadline() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let released = release_flags(3);
+        let (senders, gates) = gate_channels(3);
+        drop(senders);
+        let rig = shutdown_rig(
+            gated_end_extension(
+                Arc::clone(&log),
+                gates,
+                Arc::clone(&entered),
+                Arc::clone(&cancelled),
+                released.clone(),
+                Duration::ZERO,
+            ),
+            3,
+        )
+        .await;
+
+        let grace = Duration::from_millis(500);
+        let began = Instant::now();
+        let report = rig.host.clone().shutdown_after_quiet_wait(grace).await;
+        let elapsed = began.elapsed();
+
+        assert!(
+            elapsed < grace,
+            "no close needed the shared deadline: {elapsed:?}"
+        );
+        assert_eq!(
+            report.sessions_closed, 3,
+            "every open session closed: {report:?}"
+        );
+        assert_eq!(
+            report.tasks_remaining, 0,
+            "no tracked work survives shutdown: {report:?}"
+        );
+        let ends = recorded_ends(&log);
+        assert_eq!(ends.len(), 3, "one end boundary per session: {ends:?}");
+        assert!(
+            ends.iter().all(|(_, reason)| reason == "close"),
+            "shutdown closes, never other reasons: {ends:?}"
+        );
+        let unique: HashSet<SessionId> = ends.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            unique.len(),
+            3,
+            "each session observed its own boundary once: {ends:?}"
+        );
+        wait_for("every end hook to complete", || {
+            released.iter().all(|flag| flag.load(Ordering::SeqCst))
+        })
+        .await;
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            0,
+            "unblocked end hooks complete instead of being cancelled"
+        );
+        assert!(rig.host.table_ids().is_empty(), "the session table drained");
+    }
+
+    /// Two sessions whose end hooks each hold three quarters of the budget
+    /// in controlled time: the first close finishes and publishes inside the
+    /// one shared deadline, the second is cut at that same deadline — the
+    /// budget is spent across closes, never restarted per session.
+    #[tokio::test(start_paused = true)]
+    async fn the_close_budget_is_spent_across_closes_not_restarted_per_session() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let released = release_flags(2);
+        let (senders, gates) = gate_channels(2);
+        drop(senders);
+        let grace = Duration::from_millis(200);
+        let hold = grace * 3 / 4;
+        let rig = shutdown_rig(
+            gated_end_extension(
+                Arc::clone(&log),
+                gates,
+                Arc::clone(&entered),
+                Arc::clone(&cancelled),
+                released.clone(),
+                hold,
+            ),
+            2,
+        )
+        .await;
+        let mut subscription = rig.host.subscribe();
+
+        let began = Instant::now();
+        let report = rig.host.clone().shutdown_after_quiet_wait(grace).await;
+        let elapsed = began.elapsed();
+
+        assert!(
+            elapsed >= grace,
+            "the second close runs to the shared deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < grace * 3 / 2,
+            "one shared budget was spent across both closes; a fresh \
+             per-session budget would cost two holds: {elapsed:?}"
+        );
+        assert!(
+            report.sessions_closed >= 1,
+            "the close that finished inside the budget closed: {report:?}"
+        );
+        let mut removed = Vec::new();
+        while let Ok(Some(HostUpdate::SessionRemoved { session })) =
+            tokio::time::timeout(Duration::ZERO, subscription.next()).await
+        {
+            removed.push(session);
+        }
+        assert_eq!(
+            removed.len(),
+            1,
+            "exactly the close that finished inside the budget published its removal: {removed:?}"
+        );
+        let ends = recorded_ends(&log);
+        assert!(
+            ends.iter().any(|(id, _)| removed.contains(id)),
+            "the published removal is one of the closed sessions: {ends:?} vs {removed:?}"
+        );
+        wait_for("every entered end hook to complete or be cancelled", || {
+            let entered_count = entered.load(Ordering::SeqCst);
+            let completed = released[..entered_count]
+                .iter()
+                .filter(|flag| flag.load(Ordering::SeqCst))
+                .count();
+            completed + cancelled.load(Ordering::SeqCst) == entered_count
+        })
+        .await;
+        let entered_count = entered.load(Ordering::SeqCst);
+        let completed = released[..entered_count]
+            .iter()
+            .filter(|flag| flag.load(Ordering::SeqCst))
+            .count();
+        assert_eq!(entered_count, 2, "both close hooks entered");
+        assert_eq!(completed, 1, "the first released end hook completed");
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            entered_count - completed,
+            "the end hook cut off at the shared deadline was cancelled"
+        );
     }
 }

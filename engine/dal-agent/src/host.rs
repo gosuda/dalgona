@@ -8,7 +8,6 @@ pub(crate) mod ops;
 
 mod registry;
 
-pub(crate) mod default_store;
 mod start;
 
 /// Extension record identity for a child session's durable start policy.
@@ -283,67 +282,10 @@ impl Drop for NameClaim {
     }
 }
 
-/// Authority to persist `Save::SessionAndDefault` outcomes to the user
-/// `dal.toml`.
-///
-/// A single typed authority instead of a path/boolean pair, so an invalid
-/// combination (a path without permission, or permission without a path)
-/// cannot be constructed. Only the local process edge supplies `Local`;
-/// wire, serve, and A2A hosts are `Disabled` and never touch the server
-/// defaults file, even on loopback.
-#[derive(Clone, Debug)]
-pub enum DefaultAuthority {
-    /// Never write defaults (remote servers, tests, hosts without a user path).
-    Disabled,
-    /// Write the edge-resolved user configuration file in this process.
-    Local {
-        /// The edge-resolved user `dal.toml` path; the host owns the write.
-        path: PathBuf,
-    },
-}
-
-/// The host defaults one session opened under, read in one snapshot.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SessionDefaults {
-    /// The execution mode the session's turns run under.
-    pub(crate) mode: dal_core::Mode,
-    /// The reasoning level the session's requests describe.
-    pub(crate) thinking: dal_core::ThinkingLevel,
-    /// The approval policy a session without a child policy starts under.
-    pub(crate) approval: dal_core::ApprovalMode,
-}
-
-/// The live default model as request-time resolution consumes it.
-#[derive(Clone, Debug)]
-pub(crate) enum DefaultModel {
-    /// The committed structured `model_route`; resolves by route, so every
-    /// family survives exactly.
-    Route(dal_core::ModelRoute),
-    /// The legacy `model` string of a file without `model_route`; resolves
-    /// by reference through aliases and the catalog, as before.
-    Reference(Box<str>),
-}
-
 /// Product, configuration, and runtime handles shared by every session.
 pub(crate) struct HostShared {
-    /// The validated product configuration at startup.
-    ///
-    /// Immutable: non-default readers keep borrowing this without a lock.
-    /// The four mutable defaults (mode, thinking, approval, model route)
-    /// live in [`HostShared::defaults`] once a `SessionAndDefault` commit
-    /// lands; default readers use the snapshot helpers below.
+    /// The validated product configuration.
     pub(crate) config: Config,
-    /// The live configuration: a full clone of [`HostShared::config`] whose
-    /// four default fields advance on every successful default write.
-    /// Non-default fields never change after startup.
-    pub(crate) defaults: std::sync::RwLock<Config>,
-    /// Whether this host may persist defaults, and where.
-    pub(crate) default_authority: DefaultAuthority,
-    /// Serializes concurrent sessions' read-edit-write cycles on the
-    /// defaults file. Held across the bounded file IO only; the
-    /// configuration locks are never held across an await.
-    pub(crate) default_write: tokio::sync::Mutex<()>,
-
     /// The captured process inputs.
     pub(crate) env: Arc<Env>,
     /// The product name.
@@ -370,55 +312,6 @@ pub(crate) struct HostShared {
 }
 
 impl HostShared {
-    /// Copies the four live defaults out of the snapshot lock in one read,
-    /// for a session that is opening now: the settings it keeps, and the
-    /// default route seeded into its fold (the structured `model_route`
-    /// table when present, else the legacy `model` string decoded with
-    /// `ModelRoute::from_id`).
-    ///
-    /// The session keeps this copy for its whole life: a default another
-    /// session saves later reaches only sessions opened after the commit,
-    /// never a running one. The lock is released before the caller awaits
-    /// anything, so a catalog fetch or file write never stalls behind it.
-    pub(crate) fn session_defaults(&self) -> (SessionDefaults, Option<dal_core::ModelRoute>) {
-        let live = self
-            .defaults
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let defaults = SessionDefaults {
-            mode: live.mode(),
-            thinking: live.thinking(),
-            approval: live.approval(),
-        };
-        (defaults, live.default_model_route())
-    }
-
-    /// Copies the live reasoning level out of the snapshot lock, for
-    /// host-level readers that belong to no session.
-    pub(crate) fn default_thinking(&self) -> dal_core::ThinkingLevel {
-        self.defaults
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .thinking()
-    }
-
-    /// Copies the live default model out of the snapshot lock in the form
-    /// request-time resolution needs: the authoritative structured route
-    /// when one is committed, else the legacy reference string, so an old
-    /// file keeps its exact alias-and-catalog resolution. One read covers
-    /// both fields, so a concurrent default write cannot split them.
-    pub(crate) fn default_model(&self) -> Option<DefaultModel> {
-        let live = self
-            .defaults
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(route) = live.model_route() {
-            return Some(DefaultModel::Route(route.clone()));
-        }
-        live.model()
-            .map(|reference| DefaultModel::Reference(reference.into()))
-    }
-
     /// Stores the latest fetched provider catalog for command contexts.
     pub(crate) fn cache_catalog(&self, catalog: dal_provider::Catalog) {
         if let Ok(mut guard) = self.catalog.write() {
@@ -467,7 +360,7 @@ pub(crate) struct SessionEntry {
     /// The turn-driver task consuming the session's driver ports.
     pub(crate) driver: JoinHandle<()>,
     /// The actor task.
-    pub(crate) task: JoinHandle<()>,
+    pub(crate) task: Option<JoinHandle<()>>,
     /// The session cancellation token shared by backend and driver.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
     /// The session backend; close mints the session-end script host against it.
@@ -481,6 +374,16 @@ pub(crate) struct SessionEntry {
     pub(crate) reported: std::sync::atomic::AtomicBool,
     /// Whether the one grace prompt has already been consumed.
     pub(crate) prompted: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for SessionEntry {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.driver.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
 }
 
 /// The architecture product passed to [`Host::start`].

@@ -291,14 +291,19 @@ impl Host {
         let _ = by;
         let shared = Arc::clone(&self.state.shared);
         if let Some(found) = crate::ext::synthetic::find_route(&shared, &route) {
+            // One stream-scoped owner per relay call; the returned stream
+            // holds it until end or drop, then ends it explicitly.
+            let tasks = crate::session::tasks::SessionTasks::new();
+            let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
             let deps = crate::session::turn::RequestDeps {
                 session: SessionId::new_v7(),
                 host: Arc::clone(&self.state),
                 script: None,
+                continuation: Some(owner.downgrade()),
             };
             let cancel = CancellationToken::new();
             let stream = crate::ext::synthetic::open(&deps, found, request, &cancel).await;
-            return Ok(stream);
+            return Ok(own_relay_stream(stream, owner, tasks));
         }
         let catalog = shared
             .providers
@@ -330,8 +335,33 @@ impl Host {
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
             })?;
+        // One stream-scoped owner per relay call on every path: the next
+        // full-history request mints a fresh owner and a fresh resume, so no
+        // conversation is adopted across relay calls and no relay API changes.
+        let tasks = crate::session::tasks::SessionTasks::new();
+        let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
         let cancel = CancellationToken::new();
-        provider
+        if matches!(&request.model, ModelRoute::Api { family, .. } if *family == Family::Cursor) {
+            // Cursor relays run on the owned run: the provider and admission
+            // path are the run's own (permit before handshake, D6), while
+            // hooks, notices, and the request history travel unchanged in
+            // `request` as today. Non-Cursor relays take the one-shot path
+            // below, byte-identical to today.
+            let deps = crate::session::turn::RequestDeps {
+                session: SessionId::new_v7(),
+                host: Arc::clone(&self.state),
+                script: None,
+                continuation: Some(owner.downgrade()),
+            };
+            let stream =
+                crate::session::continuation::open_step(&deps, provider, &request, &cancel)
+                    .await
+                    .map_err(|error| HostError::Config {
+                        message: error.to_string().into(),
+                    })?;
+            return Ok(own_relay_stream(stream, owner, tasks));
+        }
+        let stream = provider
             .open(
                 SessionId::new_v7(),
                 &request,
@@ -342,27 +372,18 @@ impl Host {
             .await
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
-            })
+            })?;
+        Ok(own_relay_stream(stream, owner, tasks))
     }
 
-    /// Resolves the live default model through aliases and the catalog.
+    /// Resolves the configured default model through aliases and the catalog.
     ///
-    /// Returns `None` when no model is configured or the default does not
+    /// Returns `None` when no model is configured or the reference does not
     /// resolve. Mirrors the driver's request-time resolution for preflight
-    /// callers that must decide before a turn exists: a committed
-    /// structured route resolves by route, a legacy-only file by its
-    /// reference string.
+    /// callers that must decide before a turn exists.
     pub async fn default_route(&self) -> Option<ModelRoute> {
         let shared = &self.state.shared;
-        let default = shared.default_model()?;
-        let rendered;
-        let reference: &str = match &default {
-            super::DefaultModel::Route(route) => {
-                rendered = request_reference(route);
-                &rendered
-            }
-            super::DefaultModel::Reference(reference) => reference,
-        };
+        let reference = shared.config.model()?;
         if reference.is_empty() {
             return None;
         }
@@ -377,17 +398,71 @@ impl Host {
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        match &default {
-            super::DefaultModel::Route(route) => {
-                dal_provider::resolve_route(&catalog, &aliases, route)
-            }
-            super::DefaultModel::Reference(reference) => {
-                dal_provider::resolve(&catalog, &aliases, reference)
-            }
-        }
-        .ok()
-        .map(|resolved| resolved.route)
+        dal_provider::resolve(&catalog, &aliases, reference)
+            .ok()
+            .map(|resolved| resolved.route)
     }
+}
+
+/// State owned by one relay call's returned stream: the stream-scoped
+/// continuation owner and its fresh tasks.
+struct RelayOwnerState {
+    owner: Option<crate::session::continuation::ContinuationOwner>,
+    tasks: crate::session::tasks::SessionTasks,
+}
+
+/// Holds one relay call's owner and fresh tasks in its returned stream.
+///
+/// The stream ends at `ToolUse`/`EndTurn`, an error, or a drop — each ends
+/// the owner explicitly (`release_if_live`) and drains the fresh tasks. A
+/// clean terminal already resolved the run keepalive, so the drain ends at
+/// once; an early drop aborts the transport through the owner backstop and
+/// the inner stream's own cancellation action, which this wrapper observes
+/// but never replaces. Non-Cursor relays never park, so the release is a
+/// no-op for them by construction.
+fn own_relay_stream(
+    inner: dal_provider::EventStream,
+    owner: crate::session::continuation::ContinuationOwner,
+    tasks: crate::session::tasks::SessionTasks,
+) -> dal_provider::EventStream {
+    let stop_tasks = tasks.clone();
+    let source = futures::stream::unfold(
+        (
+            inner,
+            RelayOwnerState {
+                owner: Some(owner),
+                tasks,
+            },
+        ),
+        |(mut inner, mut state)| async move {
+            let item = inner.next().await;
+            let terminal = match &item {
+                None | Some(Err(_)) => true,
+                Some(Ok(event)) => {
+                    matches!(event, dal_provider::StreamEvent::Stop { .. })
+                }
+            };
+            if terminal {
+                if let Some(owner) = state.owner.take() {
+                    owner.release_if_live();
+                }
+                state.tasks.stop().await;
+            }
+            item.map(|item| (item, (inner, state)))
+        },
+    );
+    dal_provider::EventStream::new(source, move || {
+        // Early-drop path only: the source drop already ran the inner
+        // transport action and the owner backstop; this drains the fresh
+        // tasks. A clean terminal drops this action uncalled (the unfold
+        // above already stopped them; `stop` is idempotent either way).
+        let tasks = stop_tasks.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn(async move {
+                tasks.stop().await;
+            }));
+        }
+    })
 }
 
 /// Renders one entry as the public `session://` JSON document.
@@ -469,7 +544,7 @@ fn builtin_models(
         models.push(crate::session::context::model_info_for(
             &resolved.entry,
             &resolved.route,
-            shared.default_thinking(),
+            shared.config.thinking(),
         ));
     }
     models

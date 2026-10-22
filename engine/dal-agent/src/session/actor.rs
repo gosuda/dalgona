@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::control::ControlCell;
-use super::driver::{WatchDelivery, opening_model};
+use super::driver::{OpeningModel, WatchDelivery, opening_model};
 use super::shared::Shared;
 use super::status::{STATUS_POLL, sweep};
 use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
@@ -39,7 +39,6 @@ use crate::ext::hooks::{
     HookScope, dispatch_before_turn, dispatch_input, hook_fanout, input_failed_notice,
     join_before_turn,
 };
-use crate::host::default_store::{DefaultUpdate, persist_default};
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
@@ -59,6 +58,10 @@ pub(crate) struct TurnBatch {
     pub(crate) model: Option<ModelRoute>,
     /// The active provider family snapshot for this batch.
     pub(crate) family: Option<Family>,
+    /// The model identity the opening's input hooks saw, carried to the
+    /// turn's first request or the compaction before it. The driver drops it
+    /// once the requested route differs from the one the opening resolved.
+    pub(crate) opening: Option<OpeningModel>,
 }
 
 /// Driver ports the turn task consumes.
@@ -255,8 +258,6 @@ pub(crate) struct ActorDeps {
     pub(crate) backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     /// The owner for background work that must stop before the journal closes.
     pub(crate) tasks: crate::session::tasks::SessionTasks,
-    /// The default reasoning level this session opened under.
-    pub(crate) thinking: dal_core::ThinkingLevel,
 }
 
 /// Lifecycle latches for one session actor.
@@ -338,6 +339,9 @@ pub(crate) struct Actor {
     settling: Option<TurnId>,
     /// Broker resolutions held until their journal emit has been observed.
     pending_releases: Vec<Resolved>,
+    /// The approval mode the session started under, before any journaled
+    /// `Approval` record: what a replay restores when the journal holds none.
+    approval_seed: dal_core::ApprovalMode,
     broken: Option<Box<str>>,
     /// Capability-scoped services for hook dispatch, attached after spawn.
     services: Option<Arc<dyn Services>>,
@@ -346,9 +350,6 @@ pub(crate) struct Actor {
     /// right after the actor spawns.
     backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
     tasks: crate::session::tasks::SessionTasks,
-    /// The default reasoning level this session opened under; a default
-    /// saved later reaches only sessions opened after it.
-    thinking: dal_core::ThinkingLevel,
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
@@ -570,6 +571,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
+        approval_seed: deps.fold.approval_mode(),
         fold: deps.fold,
         broker: deps.broker,
         shared: deps.shared,
@@ -592,7 +594,6 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         services: None,
         backend: deps.backend,
         tasks: deps.tasks,
-        thinking: deps.thinking,
     };
     let handle = SessionHandle::new(
         deps.session,
@@ -797,7 +798,7 @@ impl Actor {
             &mut pending,
         );
         if !pending.is_empty() {
-            let batch = self.batch(pending, Vec::new());
+            let batch = self.batch(pending, Vec::new(), None);
             if self.driver_tx.send(batch).await.is_err() {
                 self.broken = Some("the turn driver is gone.".into());
             }
@@ -824,13 +825,19 @@ impl Actor {
     }
 
     /// Builds one driver batch with fold policy and model snapshots.
-    fn batch(&self, effects: Vec<Effect>, asks: Vec<(Request, AnswerWait)>) -> TurnBatch {
+    fn batch(
+        &self,
+        effects: Vec<Effect>,
+        asks: Vec<(Request, AnswerWait)>,
+        opening: Option<OpeningModel>,
+    ) -> TurnBatch {
         TurnBatch {
             effects,
             asks,
             policy: self.fold.policy(self.answerer_attached()),
             model: self.requested_route(),
             family: self.fold.active_family(),
+            opening,
         }
     }
 
@@ -950,6 +957,15 @@ impl Actor {
     {
         tokio::pin!(future);
         self.flags.enter_hook_wait();
+        // The steady-state loop sweeps broker deadlines every second; a hook
+        // suspended here would otherwise hold sweep-dependent requests
+        // (approvals/asks opened mid-opening) past their deadlines. Reuse the
+        // same sweep on the same cadence instead of duplicating it. The sweep
+        // folds through `execute`, which already stops at the hook-wait latch
+        // instead of driving a nested opening, so this cannot re-enter the
+        // suspended dispatcher.
+        let mut expiry_tick = tokio::time::interval(EXPIRY_TICK);
+        expiry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let output = loop {
             tokio::select! {
                 biased;
@@ -961,6 +977,7 @@ impl Actor {
                     }
                 }
                 () = self.resolutions.wait() => self.drain_resolutions().await,
+                _ = expiry_tick.tick() => self.sweep_expiry().await,
             }
         };
         self.flags.exit_hook_wait();
@@ -990,8 +1007,6 @@ impl Actor {
             self.drain_service_queued().await;
             let id = resolved.request.id;
             self.on_work(TurnWork::Answered { resolved }).await;
-            // Every drained item settles its id, including unknown-question
-            // fail-closed claims — that is what frees services admission.
             self.resolutions.mark_settled(id);
         }
         if !already_waiting {
@@ -1526,6 +1541,18 @@ impl Actor {
     /// loop, never a recursive future. `Shutdown` travels the command
     /// lane, so this opening-lane drain cannot re-enter this function.
     async fn on_shutdown(&mut self) {
+        // 0. Settle every live job as cancelled and flush its ledger end
+        // before tasks drain: detached reapers dropped by the stop below
+        // would otherwise abandon their rows with no terminal end, and the
+        // run waiting on them would never complete. Firing first still lets
+        // a live reaper stop its child through the group ladder; the settle
+        // here guarantees the end even when the reaper never wakes.
+        if let Some(backend) = self.backend.get() {
+            let jobs = Arc::clone(backend.jobs());
+            let mut table = jobs.lock().await;
+            table.cancel_all();
+            let _ = table.flush().await;
+        }
         // 1. Quiesce session tasks; their drops claim and enqueue.
         self.tasks.stop().await;
         // 2. No nested execute may open a turn past this point.
@@ -1584,57 +1611,21 @@ impl Actor {
         }
         self.sweep_expiry().await;
         self.flags.note_submit(&command);
-        let default = DefaultUpdate::requested(&command);
         let mut effects = Vec::new();
         let stepped = self.fold.step(
             Event::Command { cmd: command, by },
             Timestamp::now(),
             &mut effects,
         );
-        match (stepped, default) {
-            (Err(rejection), _) => {
+        match stepped {
+            Err(rejection) => {
                 let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
-            (Ok(()), None) => {
+            Ok(()) => {
                 let _ = self.execute(effects, Some(reply)).await;
             }
-            (Ok(()), Some(default)) => self.execute_then_persist(effects, default, reply).await,
         }
-    }
-
-    /// Runs one `Save::SessionAndDefault` setting, then persists it as the
-    /// product default only after its settings journal append succeeded.
-    ///
-    /// A rejected or journal-failed operation writes nothing and forwards its
-    /// outcome unchanged. A failed default write keeps the journaled session
-    /// as is and replies `PersistenceFailed` with the writer's distinct
-    /// wording (remote-gated or `default write failed`), never a success.
-    async fn execute_then_persist(
-        &mut self,
-        effects: Vec<Effect>,
-        default: DefaultUpdate,
-        reply: ReplyTx,
-    ) {
-        let (local, mut outcome) = oneshot::channel();
-        let _ = self.execute(effects, Some(local)).await;
-        // Setting commands settle their reply inside this frame; an absent
-        // outcome means the frame dropped it, and dropping `reply` here
-        // reports the same closed channel the plain path would.
-        let Ok(result) = outcome.try_recv() else {
-            return;
-        };
-        if result.is_err() {
-            let _ = reply.send(result);
-            return;
-        }
-        let result = match persist_default(&self.host.shared, &default).await {
-            Ok(()) => result,
-            Err(error) => Err(AgentError::PersistenceFailed {
-                message: error.to_string().into(),
-            }),
-        };
-        let _ = reply.send(result);
     }
 
     /// Fires the turn token before the fold step touches any channel.
@@ -1646,16 +1637,52 @@ impl Actor {
         }
     }
 
+    /// Sends one driver batch, warning while a bounded send parks behind a
+    /// convoyed driver instead of stalling the loop in silence.
+    async fn flush_driver_batch(
+        &mut self,
+        driver_effects: Vec<Effect>,
+        asks: Vec<(Request, AnswerWait)>,
+        opening: &mut Option<OpeningModel>,
+    ) {
+        if driver_effects.is_empty() && asks.is_empty() {
+            return;
+        }
+        let batch = self.batch(driver_effects, asks, opening.take());
+        let session = self.session;
+        let mut sending = Box::pin(self.driver_tx.send(batch));
+        let sent = loop {
+            if let Ok(sent) = tokio::time::timeout(Duration::from_secs(30), &mut sending).await {
+                break sent;
+            }
+            tracing::warn!(target: "dalgon.agent", session = %session, "driver batch outstanding");
+        };
+        if sent.is_err() {
+            self.broken = Some("the turn driver is gone.".into());
+        }
+    }
+
     async fn execute(&mut self, effects: Vec<Effect>, reply: Option<ReplyTx>) -> bool {
         let mut queue: VecDeque<Effect> = effects.into();
         let mut reply = reply;
+        // The identity the latest opening's input hooks saw; the next driver
+        // batch carries it. A broken or refused path drops it with this frame.
+        let mut opening: Option<OpeningModel> = None;
         loop {
+            // Terminal records landed by this pass, in journal order. A failed
+            // append settles only what precedes it: landed claims release with
+            // their journaled cause, the rest recycle for exactly-once retry.
+            // The pass owns both this list and the resolutions it holds:
+            // they are released or settled together before the pass ends, so
+            // no resolution is held while a nested frame can run.
+            let mut landed: Vec<RequestId> = Vec::new();
             let mut driver_effects = Vec::new();
             let mut asks = Vec::new();
             let parked_commands = self.pending_commands.len();
             while let Some(effect) = queue.pop_front() {
                 match effect {
                     Effect::Emit(emit) => {
+                        let resolved = resolved_request_ids(&emit.records);
                         if let Err(error) = self.append_observe(emit, &mut queue).await {
                             let message: Box<str> = error.to_string().into();
                             if let Some(tx) = reply.take() {
@@ -1666,9 +1693,11 @@ impl Actor {
                             }
                             self.fail_parked(parked_commands);
                             self.cancel_asks(asks);
-                            self.discard_pending();
+                            self.settle_pending_on_failure(&landed);
+                            self.restore_recorded_approval();
                             return false;
                         }
+                        landed.extend(resolved);
                     }
                     Effect::Reply(result) => {
                         if let Ok(Reply::Started(job)) = &result
@@ -1707,27 +1736,17 @@ impl Actor {
                 }
             }
             self.refresh_stats();
-            if !driver_effects.is_empty() || !asks.is_empty() {
-                let batch = self.batch(driver_effects, asks);
-                // A bounded send can park behind a convoyed driver; report
-                // long waits instead of stalling the loop in silence.
-                let session = self.session;
-                let mut sending = Box::pin(self.driver_tx.send(batch));
-                let sent = loop {
-                    if let Ok(sent) =
-                        tokio::time::timeout(Duration::from_secs(30), &mut sending).await
-                    {
-                        break sent;
-                    }
-                    tracing::warn!(target: "dalgon.agent", session = %session, "driver batch outstanding");
-                };
-                if sent.is_err() {
-                    self.broken = Some("the turn driver is gone.".into());
-                }
-            }
+            self.flush_driver_batch(driver_effects, asks, &mut opening)
+                .await;
+            // A failed append returned above, so every held resolution has
+            // landed: release them before the opening drive below, which
+            // pumps nested frames. A nested failure would otherwise settle
+            // this pass's landed claims as its own unlanded ones and
+            // recycle questions that already hold their terminal record.
+            self.deliver_pending();
             if self.flags.is_hook_waiting() {
-                // Finish the durable service commit and release its broker
-                // waiters below; the suspended hook, not this nested
+                // The durable service commit is finished and its broker
+                // waiters released; the suspended hook, not this nested
                 // execute, supplies the opening's eventual Guard.
                 break;
             }
@@ -1745,10 +1764,10 @@ impl Actor {
                     tracing::warn!(target: "dalgon.agent", session = %session, "turn opening outstanding");
                 }
             };
-            let Some(more) = more else { break };
+            let Some((more, carried)) = more else { break };
+            opening = carried;
             queue.extend(more);
         }
-        self.deliver_pending();
         true
     }
 
@@ -1779,17 +1798,43 @@ impl Actor {
             }
         }
     }
-    /// Delivers queued answers after their journal appends landed.
+    /// Delivers queued answers after their journal appends landed. Runs once
+    /// per queue pass, so no held resolution outlives the pass that landed it.
     fn deliver_pending(&mut self) {
         for resolved in self.pending_releases.drain(..) {
             self.broker.release(&resolved);
         }
     }
-    /// Cancels queued answers whose journal appends never landed.
-    fn discard_pending(&mut self) {
-        for resolved in self.pending_releases.drain(..) {
-            self.broker.cancel(&resolved);
+
+    /// Settles held resolutions after a failed journal append. Claims whose
+    /// terminal record already landed release with their journaled cause;
+    /// the rest fail closed and recycle their claim plus fold question, so
+    /// a retry journals the one outcome instead of meeting `AlreadyResolved`.
+    ///
+    /// The fold granted a refused `ApproveForSession` its allowance when it
+    /// stepped the answer, so the same failure drops every allowance the
+    /// journal holds no record for, before the next policy snapshot or
+    /// retry can act on it.
+    fn settle_pending_on_failure(&mut self, landed: &[RequestId]) {
+        let pending = std::mem::take(&mut self.pending_releases);
+        settle_pending_after_failure(&self.broker, &mut self.fold, pending, landed);
+        if revoke_unrecorded_allowances(&mut self.fold, self.journal.records()) {
+            self.shared.sync_ext(&self.fold);
         }
+    }
+
+    /// Puts the fold's approval mode back to what the journal records, after
+    /// a failed append.
+    ///
+    /// A refused `SetApproval` batch already moved the fold's mode when the
+    /// step ran, and the next driver batch snapshots that mode into its
+    /// policy. Authority follows persistence, so the mode returns to the last
+    /// journaled `Approval` entry, or to the starting mode when none landed:
+    /// the same value a replay restores. A batch that did land is in the
+    /// journal, so the restore leaves its mode alone.
+    fn restore_recorded_approval(&mut self) {
+        let recorded = recorded_approval(self.journal.records(), self.approval_seed);
+        self.fold.restore_recorded_approval(recorded);
     }
     /// Bound for one opening-hook drive.
     const OPENING_HOOK_DEADLINE: Duration = Duration::from_secs(600);
@@ -1805,7 +1850,12 @@ impl Actor {
     /// admitted content: transforms from an opening that did not finish are
     /// not admitted. A cancel that lands while the hooks run wins: the fold
     /// drops a verdict whose phase moved on.
-    async fn drive_opening(&mut self) -> Option<Vec<Effect>> {
+    ///
+    /// The returned model identity is the one the input hooks saw. It comes
+    /// back only when the guard admitted the input; the driver reuses it
+    /// for the first request while the requested route is unchanged, and an
+    /// explicit model selection that folds first still wins.
+    async fn drive_opening(&mut self) -> Option<(Vec<Effect>, Option<OpeningModel>)> {
         if self.settling.is_some() {
             return None;
         }
@@ -1823,11 +1873,11 @@ impl Actor {
             turn_deadline: deadline,
             script: self.hook_script(),
         };
-        let content = if run_input {
+        let (content, opening) = if run_input {
             self.fold_input_hooks(&scope, &generation, turn, content)
                 .await
         } else {
-            content
+            (content, None)
         };
         let event = BeforeTurn {
             turn,
@@ -1891,7 +1941,7 @@ impl Actor {
             if guard_ok {
                 self.mark_admitted_images(&admitted, &mut effects);
             }
-            return Some(effects);
+            return Some((effects, opening.filter(|_| guard_ok)));
         }
         self.control().cancel_opening();
         None
@@ -1976,32 +2026,33 @@ impl Actor {
     /// the first stopping extension ends the fold. A share that would leave
     /// non-empty input without parts is refused with one notice and keeps
     /// the running content, as a failed hook does. Every hook sees the model
-    /// the request will resolve (`opening_model`), so a hook can adapt its
-    /// content to the model's capabilities before anything is journaled.
+    /// the request resolves (`opening_model`), so a hook can adapt its
+    /// content to the model's capabilities before anything is journaled; the
+    /// returned identity is that same resolution, and the turn's first
+    /// request uses it instead of resolving the catalog again.
     async fn fold_input_hooks(
         &mut self,
         scope: &HookScope<'_>,
         generation: &Generation,
         turn: TurnId,
         content: Vec<Part>,
-    ) -> Vec<Part> {
+    ) -> (Vec<Part>, Option<OpeningModel>) {
         let hooked = hook_fanout(generation, Some(turn))
             .any(|(index, ..)| !generation.inputs(index).is_empty());
-        let model = if hooked {
+        let opening = if hooked {
             let shared = Arc::clone(&self.host.shared);
             let requested = self.requested_route();
-            // The session's opening thinking, not the live default: a default
-            // saved later reaches only sessions opened after it.
-            let thinking = self.thinking;
             // Boxed: the resolution future would otherwise push this fold
             // (and its `drive_opening` caller) over the `large_future` cap.
-            Box::pin(self.pump_opening(async move {
-                opening_model(&shared, requested.as_ref(), thinking).await
-            }))
+            Box::pin(
+                self.pump_opening(async move { opening_model(&shared, turn, requested).await }),
+            )
             .await
         } else {
             None
         };
+        let thinking = self.host.shared.config.thinking();
+        let model = opening.as_ref().map(|opening| opening.info(thinking));
         let mut event = InputEvent { content, model };
         for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
             let cx = scope.cx(&caller, Some(turn));
@@ -2026,7 +2077,7 @@ impl Actor {
                 break;
             }
         }
-        event.content
+        (event.content, opening)
     }
 
     /// Feeds the folded input content to the fold as one `Input` guard.
@@ -2081,7 +2132,7 @@ impl Actor {
             if breaks_session(&error) {
                 self.broken = Some(message.clone());
             }
-            return Err(AgentError::Invalid(ValidationError::new(message)));
+            return Err(AgentError::PersistenceFailed { message });
         }
         for kind in updates {
             self.observe(kind, queue);
@@ -2396,7 +2447,7 @@ impl Actor {
                 .broken
                 .clone()
                 .unwrap_or_else(|| "journal append failed.".into());
-            return Err(AgentError::Invalid(ValidationError::new(message)));
+            return Err(AgentError::PersistenceFailed { message });
         }
         Ok(())
     }
@@ -2945,6 +2996,80 @@ fn private_effect_conflict(
     )
 }
 
+/// The terminal consent records one emit carries, in journal order.
+fn resolved_request_ids(records: &[Record]) -> Vec<RequestId> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Resolved { request, .. } => Some(*request),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Drops the live session allowances the journal holds no `AllowAlways`
+/// record for, and reports whether any left.
+///
+/// Authority follows persistence: the fold grants an allowance when it steps
+/// the answer, ahead of the append that records it, so a refused batch must
+/// take the grant back. An allowance the journal already holds, from an
+/// earlier batch or from replay, stays.
+fn revoke_unrecorded_allowances(fold: &mut Session, records: &[Record]) -> bool {
+    if fold.allow_always().is_empty() {
+        return false;
+    }
+    fold.retain_recorded_allowances(|tool| {
+        records.iter().any(|record| {
+            matches!(record, Record::AllowAlways { tool: recorded, .. } if **recorded == *tool)
+        })
+    })
+}
+
+/// The approval mode a replay of `records` restores: the last journaled
+/// `Approval` entry, else the mode the session started under (`seed`).
+fn recorded_approval(records: &[Record], seed: dal_core::ApprovalMode) -> dal_core::ApprovalMode {
+    records
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            Record::Approval(entry) => match &entry.kind {
+                EntryKind::Approval { mode } => Some(*mode),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or(seed)
+}
+
+/// Splits durability-failed broker claims on the landed line: records the
+/// journal already holds release with their journaled cause, so their
+/// waiters see the durable outcome; the rest fail closed and recycle.
+///
+/// A recycled claim releases its broker slot only while the failed winner
+/// still holds it, and restores its fold question only then, so a retry
+/// journals the single outcome and a pruned slot gains no ghost question.
+/// Landed claims stay claimed: that, plus the fold dropping each resolved
+/// question, is what keeps the journal to one outcome per request id —
+/// linearizable first-wins in the broker, single-threaded fold steps in
+/// the actor, idempotent waiters that no-op once their sender is gone.
+fn settle_pending_after_failure(
+    broker: &Broker,
+    fold: &mut Session,
+    pending: Vec<Resolved>,
+    landed: &[RequestId],
+) {
+    for item in pending {
+        if landed.contains(&item.request.id) {
+            broker.release(&item);
+            continue;
+        }
+        broker.cancel(&item);
+        if broker.unclaim(item.request.id, &item.by) {
+            fold.restore_open_question(&item.request);
+        }
+    }
+}
+
 /// Whether a journal failure leaves the session unwritable. Mirrors
 /// `dal_store`'s `is_irreversible`: blob corruption and unrepairable journal
 /// damage break the session; refused or cleanly rolled-back writes do not.
@@ -3010,6 +3135,300 @@ fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_test_question(
+        fold: &mut Session,
+        broker: &Broker,
+        stamp: Timestamp,
+        question: dal_core::Question,
+    ) -> dal_core::Request {
+        let request = dal_core::Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question,
+            timeout: Duration::from_secs(60),
+            default: Answer::Cancel,
+        };
+        fold.step(
+            Event::RequestOpened {
+                request: request.clone(),
+            },
+            stamp,
+            &mut Vec::new(),
+        )
+        .expect("the question opens");
+        drop(broker.track(request.clone(), Instant::now() + Duration::from_secs(60)));
+        request
+    }
+
+    fn text_test_question() -> dal_core::Question {
+        dal_core::Question::Text {
+            prompt: "q".into(),
+            placeholder: None,
+        }
+    }
+
+    /// A failed frame releases what landed and recycles only what did not:
+    /// the landed retry stays blocked and re-emits nothing, while the
+    /// unlanded retry wins and journals the single outcome.
+    #[test]
+    fn failure_settle_releases_landed_and_recycles_only_unlanded() {
+        fn emitted_records(effects: &[Effect]) -> Vec<Record> {
+            effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Emit(emit) => Some(emit.records.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        }
+        fn resolve_effects(fold: &mut Session, stamp: Timestamp, item: &Resolved) -> Vec<Effect> {
+            let mut effects = Vec::new();
+            fold.step(
+                Event::GrantResolved {
+                    request: item.request.id,
+                    answer: item.answer.clone(),
+                    by: Some(item.by.clone()),
+                    was_default: item.was_default,
+                    cause: item.cause,
+                },
+                stamp,
+                &mut effects,
+            )
+            .expect("the resolution steps");
+            effects
+        }
+
+        let broker = Broker::new();
+        let stamp = Timestamp::UNIX_EPOCH;
+        let (mut fold, _) = Session::replay([], stamp).expect("empty replay");
+
+        let first = open_test_question(&mut fold, &broker, stamp, text_test_question());
+        let second = open_test_question(&mut fold, &broker, stamp, text_test_question());
+        let won_first = broker
+            .answer(first.id, Answer::Approve, ClientId::new("tui"))
+            .expect("the first answer wins");
+        let won_second = broker
+            .answer(second.id, Answer::Approve, ClientId::new("tui"))
+            .expect("the second answer wins");
+        let emit_first = resolve_effects(&mut fold, stamp, &won_first);
+        resolve_effects(&mut fold, stamp, &won_second);
+
+        // The frame lands the first emit, then fails on the second.
+        let mut journal = emitted_records(&emit_first);
+        let landed = resolved_request_ids(&journal);
+        settle_pending_after_failure(&broker, &mut fold, vec![won_first, won_second], &landed);
+
+        // Landed: the claim holds and the fold has no question left, so a
+        // retry can neither win nor emit a second record.
+        assert!(
+            matches!(
+                broker.answer(first.id, Answer::Approve, ClientId::new("tui")),
+                Err(AgentError::AlreadyResolved { .. })
+            ),
+            "the landed claim stays claimed"
+        );
+        let mut effects = Vec::new();
+        fold.step(
+            Event::GrantResolved {
+                request: first.id,
+                answer: Answer::Approve,
+                by: Some(ClientId::new("tui")),
+                was_default: false,
+                cause: ResolutionCause::Answered,
+            },
+            stamp,
+            &mut effects,
+        )
+        .expect("a duplicate resolution steps to Ok");
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Emit(_))),
+            "the landed retry emits no second record"
+        );
+
+        // Unlanded: the retry wins and journals the single outcome.
+        let retry = broker
+            .answer(second.id, Answer::Approve, ClientId::new("tui"))
+            .expect("the unlanded retry wins");
+        journal.extend(emitted_records(&resolve_effects(&mut fold, stamp, &retry)));
+        let outcomes: Vec<_> = journal
+            .iter()
+            .filter_map(|record| match record {
+                Record::Resolved { request, .. } => Some(*request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![first.id, second.id],
+            "the journal holds one outcome per request"
+        );
+    }
+
+    /// A refused grant batch takes its allowance back, while allowances the
+    /// journal holds stay: the live set never outruns what replay restores.
+    #[test]
+    fn failure_settle_drops_only_the_allowance_the_journal_lacks() {
+        let stamp = Timestamp::UNIX_EPOCH;
+        let held = || Record::AllowAlways {
+            at: stamp,
+            tool: "fixture__held".into(),
+            by: ClientId::new("tui"),
+        };
+        let (mut fold, _) = Session::replay([held()], stamp).expect("the grant replays");
+        let mut grant = |tool: &str| -> Vec<Record> {
+            let id = RequestId::new_v7();
+            let request = dal_core::Request {
+                id,
+                turn: None,
+                owner: dal_core::Owner::Core,
+                question: dal_core::Question::Approval {
+                    tool: tool.into(),
+                    preview: dal_core::Preview {
+                        title: "probe".into(),
+                        body: "run it".into(),
+                        digest: None,
+                    },
+                    grant: None,
+                    call: None,
+                },
+                timeout: Duration::from_secs(60),
+                default: Answer::Decline,
+            };
+            fold.step(Event::RequestOpened { request }, stamp, &mut Vec::new())
+                .expect("the approval opens");
+            let mut effects = Vec::new();
+            fold.step(
+                Event::GrantResolved {
+                    request: id,
+                    answer: Answer::ApproveForSession,
+                    by: Some(ClientId::new("tui")),
+                    was_default: false,
+                    cause: ResolutionCause::Answered,
+                },
+                stamp,
+                &mut effects,
+            )
+            .expect("the session grant steps");
+            effects
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::Emit(emit) => Some(emit.records),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        // One batch lands, the other is refused: the fold granted both when it
+        // stepped them.
+        let landed = grant("fixture__landed");
+        let _refused = grant("fixture__refused");
+        let mut journal = vec![held()];
+        journal.extend(landed);
+
+        assert!(
+            revoke_unrecorded_allowances(&mut fold, &journal),
+            "the refused grant leaves its allowance"
+        );
+        let names: Vec<&str> = fold.allow_always().iter().map(Name::as_str).collect();
+        assert_eq!(
+            names,
+            ["fixture__held", "fixture__landed"],
+            "only the allowance without a journal record leaves"
+        );
+        assert!(
+            !revoke_unrecorded_allowances(&mut fold, &journal),
+            "a second reconcile finds nothing to take back"
+        );
+    }
+
+    /// A replay restores the last journaled approval entry, and the starting
+    /// mode only when the journal holds none: an earlier recorded mode is
+    /// never replaced by the seed.
+    #[test]
+    fn recorded_approval_is_the_last_journaled_mode_else_the_seed() {
+        use dal_core::ApprovalMode;
+
+        let approval = |id: u64, mode: ApprovalMode| {
+            Record::Approval(dal_core::Entry {
+                id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
+                parent: None,
+                at: Timestamp::UNIX_EPOCH,
+                kind: EntryKind::Approval { mode },
+            })
+        };
+        let journal = [
+            approval(1, ApprovalMode::Edits),
+            approval(2, ApprovalMode::All),
+        ];
+        assert_eq!(
+            recorded_approval(&[], ApprovalMode::Ask),
+            ApprovalMode::Ask,
+            "no record: the starting mode"
+        );
+        assert_eq!(
+            recorded_approval(&journal[..1], ApprovalMode::Ask),
+            ApprovalMode::Edits,
+            "a recorded mode wins over the seed"
+        );
+        assert_eq!(
+            recorded_approval(&journal, ApprovalMode::Ask),
+            ApprovalMode::All,
+            "the last record wins"
+        );
+    }
+
+    /// A refused settings batch leaves the fold on the new mode until the
+    /// recorded one is restored; a mode that did land is left alone.
+    #[test]
+    fn failed_settings_batch_restores_the_recorded_approval() {
+        use dal_core::ApprovalMode;
+
+        let stamp = Timestamp::UNIX_EPOCH;
+        let edits = || {
+            Record::Approval(dal_core::Entry {
+                id: EntryId::new(NonZeroU64::new(1).expect("entry id")),
+                parent: None,
+                at: stamp,
+                kind: EntryKind::Approval {
+                    mode: ApprovalMode::Edits,
+                },
+            })
+        };
+        let (mut fold, _) = Session::replay([edits()], stamp).expect("the mode replays");
+        assert_eq!(fold.approval_mode(), ApprovalMode::Edits);
+        fold.step(
+            Event::Command {
+                cmd: Command::SetApproval {
+                    mode: ApprovalMode::All,
+                    save: dal_core::Save::SessionOnly,
+                },
+                by: ClientId::new("tui"),
+            },
+            stamp,
+            &mut Vec::new(),
+        )
+        .expect("the approval change steps");
+        assert_eq!(
+            fold.approval_mode(),
+            ApprovalMode::All,
+            "the step moves the mode before its record lands"
+        );
+
+        // The journal refused the batch: it still holds only the first record.
+        let journal = [edits()];
+        let recorded = recorded_approval(&journal, ApprovalMode::Ask);
+        assert!(fold.restore_recorded_approval(recorded));
+        assert_eq!(fold.approval_mode(), ApprovalMode::Edits);
+        assert!(
+            !fold.restore_recorded_approval(recorded),
+            "a second restore moves nothing"
+        );
+    }
 
     #[test]
     fn load_state_map_treats_a_missing_file_as_empty() {
@@ -3114,5 +3533,273 @@ mod tests {
         let (map, revisions) = load_state_map(Ok(bytes)).expect("stored map");
         assert_eq!(revisions, 4);
         assert_eq!(map.len(), 1);
+    }
+
+    struct PumpSuspend {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl crate::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for PumpSuspend {
+        fn call(
+            &self,
+            event: dal_core::ext::BeforeTurn,
+            _cx: crate::ext::HookCx,
+        ) -> crate::ext::BoxFuture<'static, Result<Option<String>, crate::ext::HookError>> {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if event.text.as_ref() != "target" {
+                    return Ok(None);
+                }
+                entered.notify_one();
+                release.notified().await;
+                Ok(None)
+            })
+        }
+    }
+
+    struct PumpEndModel;
+
+    impl crate::ext::ModelHandler for PumpEndModel {
+        fn run<'a>(
+            &'a self,
+            _request: dal_core::ModelRequest,
+            _cx: crate::ext::ModelCx<'a>,
+        ) -> crate::ext::BoxFuture<'a, Result<crate::ext::EventStream, crate::ext::ModelError>>
+        {
+            Box::pin(async {
+                let events: Vec<Result<dal_provider::StreamEvent, dal_provider::ProviderError>> = vec![
+                    Ok(dal_provider::StreamEvent::TextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(dal_provider::StreamEvent::ToolCallsDone { calls: Vec::new() }),
+                    Ok(dal_provider::StreamEvent::Usage {
+                        usage: dal_core::Usage {
+                            input_tokens: 1,
+                            cached_input_tokens: 0,
+                            output_tokens: 1,
+                            reasoning_tokens: None,
+                            cache_write_tokens: 0,
+                            cost_usd: None,
+                            premium_requests: None,
+                        },
+                    }),
+                    Ok(dal_provider::StreamEvent::Stop {
+                        reason: dal_provider::StopReason::EndTurn,
+                    }),
+                ];
+                Ok(crate::ext::EventStream::new(
+                    futures::stream::iter(events),
+                    || {},
+                ))
+            })
+        }
+    }
+
+    /// Builds the suspended-opening rig: temp dirs, suspend hook plus end
+    /// model, host, and a session submitted into the suspended hook.
+    async fn pump_suspended_rig() -> (
+        crate::host::Host,
+        crate::agent::Agent,
+        tempfile::TempDir,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let workspace_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace");
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hooks = crate::ext::ExtensionBuilder::new(
+            "suspend-hooks",
+            "0.1.0",
+            dal_core::ServiceSet::EMPTY,
+        )
+        .expect("hook extension")
+        .with_origin(dal_core::Origin::Builtin, None)
+        .on_before_turn(PumpSuspend {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        })
+        .build()
+        .expect("hook build");
+        let model =
+            crate::ext::ExtensionBuilder::new("fixture", "0.1.0", dal_core::ServiceSet::default())
+                .expect("model extension")
+                .model(crate::ext::ModelRecord {
+                    id: dal_core::ModelId::parse("fixture/end").expect("model id"),
+                    caps: dal_core::Caps {
+                        context_window: Some(100_000),
+                        thinking: Box::new([dal_core::ThinkingLevel::Off]),
+                        tool_use: false,
+                        image_input: false,
+                        custom_grammar: false,
+                    },
+                    handler: Arc::new(PumpEndModel),
+                    export: None,
+                })
+                .build()
+                .expect("model build");
+        let config = dal_core::Config::load(
+            dal_core::ConfigProduct::Dalgon,
+            &data,
+            "",
+            Some("model = \"fixture/end\"\n"),
+        )
+        .expect("config");
+        let host = crate::host::Host::start(
+            crate::host::Product {
+                name: "dal",
+                data_root: data.clone(),
+                defaults: "",
+                extensions: vec![hooks, model],
+                bundled: Vec::new(),
+            },
+            config,
+            crate::host::Env {
+                vars: std::collections::BTreeMap::new(),
+                cwd: workspace_dir.clone(),
+                sandbox_helper: None,
+            },
+        )
+        .await
+        .expect("host");
+        let agent = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: dal_core::Workspace::new(workspace_dir).expect("workspace"),
+                    name: None,
+                },
+                dal_core::ClientId::new("controller"),
+            )
+            .await
+            .expect("session");
+        agent
+            .submit(dal_core::Command::Prompt {
+                content: vec![dal_core::Part::Text {
+                    text: "target".into(),
+                }],
+                expect: dal_core::Expect::Idle,
+            })
+            .await
+            .expect("submit");
+        tokio::time::timeout(Duration::from_secs(30), entered.notified())
+            .await
+            .expect("the hook suspends the opening");
+        (host, agent, tmp, entered, release)
+    }
+
+    /// Folds a sweep-dependent slot with a 100 ms deadline through the
+    /// suspended opening lane and requires the pump sweep to settle it.
+    async fn pump_fold_suspended_ask(host: &crate::host::Host, id: SessionId) -> Request {
+        let (broker, handle) = {
+            let state = host
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let entry = state.get(&id).expect("live session");
+            (Arc::clone(&entry.broker), entry.handle.clone())
+        };
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let (request, waiter) = broker.open(
+            dal_core::Owner::Core,
+            dal_core::Question::Text {
+                prompt: "suspended".into(),
+                placeholder: None,
+            },
+            None::<dal_core::TurnId>,
+            deadline,
+        );
+        handle
+            .work(TurnWork::Asked {
+                request: request.clone(),
+            })
+            .await
+            .expect("the suspended opening folds the ask");
+
+        // The hook stays suspended throughout: without the pump sweep this
+        // times out and fails the test.
+        let settled = tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .expect("the sweep must settle the waiter while the opening stays suspended");
+        assert!(
+            matches!(settled.resolution, crate::broker::Resolution::Unavailable),
+            "expiry releases the waiter without an answer: {:?}",
+            settled.resolution
+        );
+        assert_eq!(
+            settled.cause,
+            Some(ResolutionCause::NoController),
+            "nobody attached, so the deadline has no controller"
+        );
+        assert_eq!(settled.by.as_str(), "core");
+        request
+    }
+
+    /// Releases the hook, closes, and requires exactly the fail-closed expiry
+    /// in the journal.
+    async fn pump_assert_fail_closed_expiry(
+        host: &crate::host::Host,
+        id: SessionId,
+        request: &Request,
+        temp: &tempfile::TempDir,
+        release: &Arc<tokio::sync::Notify>,
+    ) {
+        release.notify_one();
+        host.close(id).await.expect("close");
+        let data = temp.path().join("data");
+        let store = dal_store::Store::new(
+            data,
+            dal_core::Workspace::new(temp.path().join("workspace")).expect("workspace"),
+            dal_core::Product::Dal,
+        );
+        let (journal, _) = store.open_session(id).await.expect("reopen");
+        let resolved: Vec<_> = journal
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Resolved {
+                    request: answered,
+                    cause,
+                    was_default,
+                    ..
+                } if *answered == request.id => Some((*cause, *was_default)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![(Some(ResolutionCause::NoController), true)],
+            "the journal holds exactly the fail-closed expiry"
+        );
+    }
+
+    /// F4 (`report-consent-race-review.md`): broker deadlines are enforced
+    /// while an opening hook suspends the actor in `pump_opening`, not only
+    /// on the steady-state tick. A real host suspends a `before_turn` hook;
+    /// the test folds a broker slot with a 100 ms deadline through the
+    /// suspended opening lane and requires the fail-closed default to settle
+    /// the waiter and land in the journal before the hook is released.
+    /// Without the pump sweep the waiter never resolves and the outer
+    /// timeout fails the test.
+    ///
+    /// The slot bypasses extension services on purpose: services asks carry
+    /// a 60 s minimum timeout while hooks run under a 5 s budget, and an
+    /// ask future polled under advanced time would settle locally — so no
+    /// services-level request can isolate the sweep. The direct broker slot
+    /// is exactly what a sweep-dependent run approval looks like to the
+    /// actor, and the real-time hold stays well under the hook budget with
+    /// no virtual-time advance.
+    #[tokio::test]
+    async fn pump_opening_enforces_broker_deadlines_while_suspended() {
+        let (host, agent, tmp, _entered, release) = pump_suspended_rig().await;
+        let id = agent.session();
+        let request = pump_fold_suspended_ask(&host, id).await;
+        pump_assert_fail_closed_expiry(&host, id, &request, &tmp, &release).await;
     }
 }

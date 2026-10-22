@@ -178,47 +178,6 @@ impl ModelRoute {
         }
     }
 
-    /// Renders this route as the `family/id` reference persisted to `dal.toml`.
-    ///
-    /// API families use their persisted provider prefix (`openai-chat`,
-    /// `openai-responses`, `openai-codex`, `anthropic`, `bedrock`, `cursor`,
-    /// `devin`, `droid`, `gitlab`, `google-generative-ai`, `google-vertex`,
-    /// `google-gemini-cli`, `google-antigravity`, `mistral`, `ollama`,
-    /// `radius` for [`Family::PiMessages`]); synthetic and harness routes
-    /// render as their bare id. This is the legacy `model` string mirror:
-    /// best-effort for old readers, never the authoritative decode. The
-    /// authoritative form is the structured `model_route` table. Note the
-    /// intentional divergence from the UI `route_origin` spelling, which
-    /// renders [`Family::Responses`] as `openai`: persistence uses
-    /// `openai-responses` so old readers decode the family correctly.
-    #[must_use]
-    pub fn family_qualified_reference(&self) -> String {
-        match self {
-            Self::Api { family, model } => {
-                let prefix = match family {
-                    Family::Chat => "openai-chat",
-                    Family::Responses => "openai-responses",
-                    Family::Codex => "openai-codex",
-                    Family::Anthropic => "anthropic",
-                    Family::Bedrock => "bedrock",
-                    Family::Cursor => "cursor",
-                    Family::Devin => "devin",
-                    Family::Droid => "droid",
-                    Family::GitLab => "gitlab",
-                    Family::GoogleGenerativeAi => "google-generative-ai",
-                    Family::GoogleVertex => "google-vertex",
-                    Family::GoogleGeminiCli => "google-gemini-cli",
-                    Family::GoogleAntigravity => "google-antigravity",
-                    Family::Mistral => "mistral",
-                    Family::Ollama => "ollama",
-                    Family::PiMessages => "radius",
-                };
-                format!("{prefix}/{model}")
-            }
-            Self::Synthetic { id } | Self::Harness { id } => id.to_string(),
-        }
-    }
-
     /// Builds a provider route from a canonical model identifier.
     ///
     /// Known provider prefixes select their API family. Harness and synthetic

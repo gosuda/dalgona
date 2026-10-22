@@ -253,15 +253,6 @@ pub struct SettingsView {
     pub mode: Mode,
     /// The optional session display name.
     pub name: Option<Box<str>>,
-    /// The authoritative model scope committed by `SetScopedModels`, when
-    /// any. Stored verbatim: entries the current catalog omits are kept,
-    /// so a temporarily missing model never vanishes from the scope.
-    /// `None` means no scope was ever committed; the fold never authors
-    /// this field (it emits `None`, which the projection treats as
-    /// keep-existing). Absent on the wire when `None`, so views without a
-    /// committed scope keep their exact old encoding and old payloads parse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scoped_models: Option<Vec<Box<str>>>,
 }
 
 /// The counts of added and removed lines for one changed file.
@@ -473,7 +464,6 @@ mod tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
-                scoped_models: None,
             },
             open,
             changes,
