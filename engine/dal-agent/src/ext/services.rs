@@ -11,7 +11,8 @@
 //! Method routing:
 //! - `fs_read`, `fs_write`, `net`, `agents`, `jobs`, `turn`, `sidecar`,
 //!   `call_tool`, and `notify` delegate to the [`SessionBackend`] supplied at
-//!   construction. The backend performs no inject or grant checks.
+//!   construction, after the gate for the gated ones (`call_tool` and
+//!   `notify` have none). The backend performs no inject or grant checks.
 //! - `run` gates, then runs the exec approval ladder and the shared checked
 //!   launcher through [`ToolCxRuntime`], the same seam [`ToolCx::spawn`] uses.
 //!   Call-scoped grants, prefix and root enforcement, and job-end revocation
@@ -22,6 +23,12 @@
 //! - `infer` and `infer_stream` are the trusted Rust surface: no inject check
 //!   and no grant. Scripts never reach them; the Starlark `infer` slot calls
 //!   [`SessionServices::script_infer`], which gates `Service::Infer` first.
+//!   Every inference path hands the caller to the backend unchanged, so a
+//!   continuation slot attached to it reaches the same conversation as the
+//!   invocation that holds the slot; a caller without one runs one-shot.
+//! - `state` rides the sidecar inject slot and grant. The namespace is
+//!   derived from the caller here (`state_ns`); the one on the operation is
+//!   discarded, so a caller cannot name another owner's keys.
 //! - `append_record` journals one record on the current leaf through the
 //!   session actor before it answers; `records` reads the caller's own rows
 //!   on the current leaf path from the actor's published snapshot. No other
@@ -61,6 +68,7 @@ use dal_core::{
     StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
+use futures::FutureExt;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
@@ -105,6 +113,15 @@ pub struct SessionServices {
 /// settled yet, so it bounds the session's withdrawal claims too; the
 /// inbox derives its lane bound from this constant.
 pub(crate) const MAX_OPEN_ASKS: usize = 16;
+
+/// How often a waiting `ask` re-probes front-end attachment after admission.
+///
+/// The probe is synchronous, so a pending ask cannot sleep on it; it polls
+/// instead. One second shortens a detached wait from the configured ask
+/// timeout (minutes) to about a second, while adding one cheap atomic load
+/// per second per open ask. Timeouts shorter than this never see the probe
+/// fire: their local sleep wins first and behavior is unchanged.
+const DETACH_POLL: Duration = Duration::from_secs(1);
 
 /// Releases one extension-ask slot. The withdrawal is the request's first
 /// resolution: the inbox claims the broker slot under its lock, which wins
@@ -199,6 +216,33 @@ impl Drop for RunSlot<'_> {
 }
 
 impl SessionServices {
+    /// Maps one released waiter settlement onto the `ask` outcome.
+    ///
+    /// Shared by the ready-answer pre-check and the select answer arm so the
+    /// two cannot drift apart. Reads only the released settlement: the
+    /// broker CAS and cause attribution are untouched. `confirm` records
+    /// whether the question was a `Confirm`, whose approve/decline receipts
+    /// map onto boolean values.
+    fn settle_ask_answer(settled: Settled, confirm: bool) -> Result<Option<Answer>, ServiceError> {
+        let Settled {
+            answer, resolution, ..
+        } = settled;
+        match (resolution, answer) {
+            (Resolution::Unavailable, _) | (Resolution::Answered, Answer::Cancel) => Ok(None),
+            (_, value @ Answer::Value(_)) => Ok(Some(value)),
+            (_, Answer::Approve) if confirm => Ok(Some(Answer::Value(
+                dal_core::RawJson::parse("true")
+                    .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+            ))),
+            (_, Answer::Decline) if confirm => Ok(Some(Answer::Value(
+                dal_core::RawJson::parse("false")
+                    .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+            ))),
+            (Resolution::Cancelled, _) => Err(ServiceError::Cancelled),
+            _ => Ok(None),
+        }
+    }
+
     /// Derives the caller's state namespace: eval cells share the
     /// session eval namespace; every other caller owns the namespace its
     /// extension's `origin`, name, and `state_version` isolate.
@@ -317,7 +361,9 @@ impl SessionServices {
         let who = who.clone();
         Box::pin(async move {
             self.authorize_script_infer(&who, cancel.clone()).await?;
-            self.backend.infer_with_script(req, script, cancel).await
+            self.backend
+                .infer_with_script(&who, req, script, cancel)
+                .await
         })
     }
 
@@ -712,7 +758,7 @@ impl Services for SessionServices {
             if !self.backend.answerer_attached() {
                 return Ok(None);
             }
-            let (request, answer) = {
+            let (request, mut answer) = {
                 let mut open = self
                     .ask_open
                     .lock()
@@ -747,32 +793,49 @@ impl Services for SessionServices {
                 .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?;
             self.backend
                 .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => Err(ServiceError::Cancelled),
-                () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
-                () = sleep(self.ask_timeout) => {
-                    guard.expired = true;
-                    Ok(None)
-                },
-                Settled { answer, resolution, .. } = answer => {
+            // F3: the admission probe above only covers attach-at-open. A
+            // detached waiter fails closed with the same `Ok(None)` default
+            // instead of waiting out the full timeout, and marks the slot
+            // expired so the guard drop expires (never withdraws) it: before
+            // the broker deadline that claim is a no-op and the actor's
+            // expiry sweep journals the eventual `TimedOut`/`NoController`
+            // cause, so winner/cause semantics never change here.
+            let mut detach_poll = tokio::time::interval(DETACH_POLL);
+            detach_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let timeout = sleep(self.ask_timeout);
+            tokio::pin!(timeout);
+            loop {
+                // F2: an answer the actor already journaled and released must
+                // win over a local sleep that is also ready. The biased
+                // select below already orders the answer arm before the
+                // sleep arm; this pre-check also covers a release that lands
+                // between rounds. Both observe only released settlements, so
+                // the broker CAS is untouched. A `Pending` here registers
+                // only a noop waker that the select's answer poll replaces
+                // before awaiting, so no wakeup is lost.
+                if let Some(settled) = (&mut answer).now_or_never() {
                     guard.armed = false;
-                    match (resolution, answer) {
-                        (Resolution::Unavailable, _)
-                        | (Resolution::Answered, Answer::Cancel) => Ok(None),
-                        (_, value @ Answer::Value(_)) => Ok(Some(value)),
-                        (_, Answer::Approve) if confirm => Ok(Some(Answer::Value(
-                            dal_core::RawJson::parse("true")
-                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
-                        ))),
-                        (_, Answer::Decline) if confirm => Ok(Some(Answer::Value(
-                            dal_core::RawJson::parse("false")
-                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
-                        ))),
-                        (Resolution::Cancelled, _) => Err(ServiceError::Cancelled),
-                        _ => Ok(None),
+                    return Self::settle_ask_answer(settled, confirm);
+                }
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(ServiceError::Cancelled),
+                    () = self.cancel.cancelled() => return Err(ServiceError::Cancelled),
+                    settled = &mut answer => {
+                        guard.armed = false;
+                        return Self::settle_ask_answer(settled, confirm);
                     }
-                },
+                    _ = detach_poll.tick() => {
+                        if !self.backend.answerer_attached() {
+                            guard.expired = true;
+                            return Ok(None);
+                        }
+                    }
+                    () = &mut timeout => {
+                        guard.expired = true;
+                        return Ok(None);
+                    }
+                }
             }
         })
     }
@@ -943,12 +1006,14 @@ impl Services for SessionServices {
     ) -> ServiceFuture<'_, Option<dal_core::ModelRoute>> {
         Box::pin(async move { self.backend.model_ready(model).await })
     }
-    fn infer(&self, _who: &Caller, req: ModelRequest) -> ServiceFuture<'_, Inference> {
-        Box::pin(async move { self.backend.infer(req).await })
+    fn infer(&self, who: &Caller, req: ModelRequest) -> ServiceFuture<'_, Inference> {
+        let who = who.clone();
+        Box::pin(async move { self.backend.infer(&who, req).await })
     }
 
-    fn infer_stream(&self, _who: &Caller, req: ModelRequest) -> ServiceFuture<'_, EventStream> {
-        Box::pin(async move { self.backend.infer_stream(req).await })
+    fn infer_stream(&self, who: &Caller, req: ModelRequest) -> ServiceFuture<'_, EventStream> {
+        let who = who.clone();
+        Box::pin(async move { self.backend.infer_stream(&who, req).await })
     }
 
     fn call_tool(

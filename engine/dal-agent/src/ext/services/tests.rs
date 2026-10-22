@@ -50,6 +50,10 @@ struct FakeBackend {
     turn_reply: Mutex<Option<TurnOpReply>>,
     private_outcomes_reply: Mutex<Vec<PrivateEffect>>,
     sidecar_value: Mutex<Option<Vec<u8>>>,
+    /// Every state operation the backend received, exactly as received.
+    state_ops: Mutex<Vec<StateOp>>,
+    /// The scripted state outcome; unscripted reads answer `Unavailable`.
+    state_reply: Mutex<Option<Result<StateRecord, StateError>>>,
     infer_reply: Mutex<Option<Inference>>,
     seen_env: Mutex<Vec<String>>,
     env_value: Mutex<Option<String>>,
@@ -57,6 +61,7 @@ struct FakeBackend {
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
     headless: std::sync::atomic::AtomicBool,
+    seen_infer_callers: Mutex<Vec<Caller>>,
     /// Every path `fs_read` reached; a gate that refuses first leaves it empty.
     seen_reads: Mutex<Vec<String>>,
 }
@@ -167,15 +172,23 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(()) })
     }
 
-    fn state(&self, _op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
-        Box::pin(async move { Ok(Err(StateError::Unavailable)) })
+    fn state(&self, op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        self.state_ops.lock().unwrap().push(op);
+        let reply = self
+            .state_reply
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Err(StateError::Unavailable));
+        Box::pin(async move { Ok(reply) })
     }
 
     fn model_ready(&self, _model: ModelRoute) -> ServiceFuture<'_, Option<ModelRoute>> {
         Box::pin(async move { unreachable!("this test never probes model readiness") })
     }
 
-    fn infer(&self, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
+    fn infer(&self, caller: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
+        self.seen_infer_callers.lock().unwrap().push(caller.clone());
         let reply = self
             .infer_reply
             .lock()
@@ -185,8 +198,20 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(reply) })
     }
 
-    fn infer_stream(&self, _req: ModelRequest) -> ServiceFuture<'_, dal_provider::EventStream> {
-        Box::pin(async move { unreachable!("this test never streams") })
+    fn infer_stream(
+        &self,
+        caller: &Caller,
+        _req: ModelRequest,
+    ) -> ServiceFuture<'_, dal_provider::EventStream> {
+        self.seen_infer_callers.lock().unwrap().push(caller.clone());
+        Box::pin(async move {
+            Ok(dal_provider::EventStream::new(
+                futures::stream::empty::<
+                    Result<dal_provider::StreamEvent, dal_provider::ProviderError>,
+                >(),
+                || {},
+            ))
+        })
     }
 
     fn call_tool(
@@ -371,10 +396,6 @@ impl ToolCxRuntime for FakeRt {
     }
 
     fn detach(&self, _proc: Proc) -> JobId {
-        unreachable!("this test never detaches")
-    }
-
-    fn detach_command(&self, _proc: Proc, _command: Arc<str>) -> JobId {
         unreachable!("this test never detaches")
     }
 
@@ -1737,6 +1758,83 @@ async fn an_open_ask_times_out_at_its_absolute_deadline() {
         "the absolute timeout resolves to no answer: {outcome:?}"
     );
 }
+
+/// F3: an answerer that detaches mid-wait shortens the pending ask instead
+/// of leaving it to wait out its full timeout. Fails before the detachment
+/// watcher: the ask sleeps the whole 60s and the 10s join times out.
+#[tokio::test]
+async fn an_ask_shortens_when_the_answerer_detaches_mid_wait() {
+    let fx = fixture(Duration::from_secs(60));
+    let services = Arc::clone(&fx.services);
+    let waiting = spawn(async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "why?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    });
+    await_open(&fx.broker).await;
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), waiting.join())
+        .await
+        .expect("a detached ask never waits out its full timeout");
+    assert!(
+        matches!(outcome, Ok(None)),
+        "a detached ask fails closed like the headless admission: {outcome:?}"
+    );
+    assert!(
+        fx.inbox.take().is_none(),
+        "no withdrawal claim: the actor's expiry sweep still owns the cause"
+    );
+    assert_eq!(
+        fx.broker.open_requests().len(),
+        1,
+        "the broker slot stays open for the sweep; only the waiter shortens"
+    );
+}
+
+/// F2: an answer journaled and released before the local sleep fires wins
+/// over the synthesized timeout default when both are ready at the waiter's
+/// next poll. The future is polled by hand so no scheduling can resolve the
+/// race before the assertion: a spawned waiter may observe the answer first
+/// and pass even without the repair. Fails before the answer-first repair:
+/// the biased sleep arm reports `Ok(None)`.
+#[tokio::test(start_paused = true)]
+async fn an_answer_released_before_the_local_timeout_wins_over_it() {
+    let fx = fixture(Duration::from_secs(60));
+    let who = caller("focus", &["ask"], Some(turn()));
+    let mut ask = Box::pin(fx.services.ask(
+        &who,
+        Question::Text {
+            prompt: "why?".into(),
+            placeholder: None,
+        },
+    ));
+    assert!(
+        futures::poll!(ask.as_mut()).is_pending(),
+        "the ask waits for an answer"
+    );
+    answer_next(
+        &fx.broker,
+        Answer::Value(RawJson::parse("\"yes\"").unwrap()),
+    );
+    tokio::time::advance(Duration::from_secs(60)).await;
+    match futures::poll!(ask.as_mut()) {
+        std::task::Poll::Ready(Ok(Some(Answer::Value(body)))) => assert_eq!(
+            body,
+            RawJson::parse("\"yes\"").unwrap(),
+            "the journaled answer wins over the timeout"
+        ),
+        other => panic!("the journaled answer wins over the timeout: {other:?}"),
+    }
+}
 /// A fired turn token cancels turn-scoped service calls without touching
 /// the session token.
 #[tokio::test]
@@ -2063,6 +2161,639 @@ async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
     );
 }
 
+/// Settlement marks of unrelated turn cancellations; more than twice the
+/// size of the retired settled-set cap, so any eviction policy keyed on
+/// the set's size fires inside one churn.
+const SETTLEMENT_CHURN: usize = 8192;
+
+/// Drains `count` real turn-cancel claims through the inbox the way the
+/// actor does: every drained claim is marked settled although no services
+/// slot waits on it, so the marks are orphans.
+fn churn_cancellations(fx: &Fixture, count: usize) {
+    let turn = TurnId::new(NonZeroU64::new(2).unwrap());
+    for _ in 0..count {
+        let (request, _waiter) = fx.broker.open(
+            dal_core::Owner::Core,
+            Question::Text {
+                prompt: "churn?".into(),
+                placeholder: None,
+            },
+            turn,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
+        assert!(fx.broker.report_opened(request.id).is_none());
+    }
+    fx.inbox.cancel_turn(turn);
+    let mut drained = 0;
+    while let Some(claim) = fx.inbox.take() {
+        assert_eq!(claim.cause, ResolutionCause::Cancelled, "{claim:?}");
+        fx.inbox.mark_settled(claim.request.id);
+        drained += 1;
+    }
+    assert_eq!(drained, count, "every cancel claim reached the drain");
+}
+
+/// Takes the next claim the inbox queued, yielding until a dropped guard
+/// has run its withdrawal.
+async fn next_claim(fx: &Fixture) -> crate::broker::Resolved {
+    loop {
+        if let Some(claim) = fx.inbox.take() {
+            return claim;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// A real withdrawal receipt survives unrelated cancellation churn: the
+/// slot stays occupied until the actor's durable settlement, and the
+/// capacity reopens after it however many orphan marks arrive in between.
+/// A forgotten receipt would strand the slot and shrink the battery for
+/// good.
+#[tokio::test]
+async fn a_pending_ask_withdrawal_survives_cancellation_settlement_churn() {
+    use super::MAX_OPEN_ASKS;
+
+    let fx = fixture(Duration::from_secs(60));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let withdrawn = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    let mut live = Vec::new();
+    for _ in 1..MAX_OPEN_ASKS {
+        live.push(spawn(ask(Arc::clone(&fx.services))));
+    }
+    for _ in 0..100 {
+        if open_count(&fx.broker) >= MAX_OPEN_ASKS {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        open_count(&fx.broker),
+        MAX_OPEN_ASKS,
+        "the ask battery fills to its cap"
+    );
+
+    // The aborted task's armed guard claims a real withdrawal; the claim is
+    // unsettled, so its slot stays occupied while unrelated cancellations
+    // settle around it.
+    drop(withdrawn);
+    let claim = next_claim(&fx).await;
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn, "{claim:?}");
+    churn_cancellations(&fx, 64);
+    let busy = fx
+        .services
+        .ask(
+            &caller("focus", &["ask"], Some(turn())),
+            Question::Text {
+                prompt: "one more?".into(),
+                placeholder: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(busy, Err(ServiceError::Failed { .. })),
+        "unrelated settlements never free an unsettled withdrawal: {busy:?}"
+    );
+
+    // Durable settlement, then enough orphan marks to evict any receipt a
+    // size-capped set would hold: the capacity must still reopen.
+    fx.inbox.mark_settled(claim.request.id);
+    churn_cancellations(&fx, SETTLEMENT_CHURN);
+    let reopened = spawn(ask(Arc::clone(&fx.services)));
+    for _ in 0..100 {
+        if open_count(&fx.broker) >= MAX_OPEN_ASKS {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        open_count(&fx.broker),
+        MAX_OPEN_ASKS,
+        "the settled withdrawal's capacity reopens; a forgotten receipt strands it"
+    );
+    drop(reopened);
+    drop(live);
+}
+
+/// The run slot is exclusive, so a forgotten receipt would wedge `run`
+/// approvals for the rest of the session: the same churn must leave the
+/// settled withdrawal's slot reusable exactly once the actor settles it.
+#[tokio::test]
+async fn a_pending_run_withdrawal_survives_cancellation_settlement_churn() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    {
+        // Three runs take the broker approval path: the aborted one, the
+        // refused one, and the one admitted after settlement.
+        fx.rt.decisions.lock().unwrap().extend([
+            dal_core::Decision::Ask { grant: None },
+            dal_core::Decision::Ask { grant: None },
+            dal_core::Decision::Ask { grant: None },
+        ]);
+    }
+    let who = caller("focus", &["run"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let first_workspace = workspace.clone();
+    let first = spawn(async move {
+        services
+            .run(&who, run_request(&["git", "status"], first_workspace))
+            .await
+    });
+    // The capability grant asks first and persists: approve it so the run
+    // reaches its own approval, the slot under test.
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+
+    drop(first);
+    let claim = next_claim(&fx).await;
+    assert_eq!(claim.cause, ResolutionCause::Withdrawn, "{claim:?}");
+    churn_cancellations(&fx, 64);
+    let busy = fx
+        .services
+        .run(
+            &caller("focus", &["run"], Some(turn())),
+            run_request(&["git", "diff"], workspace.clone()),
+        )
+        .await;
+    assert!(
+        matches!(busy, Err(ServiceError::Failed { .. })),
+        "unrelated settlements never free an unsettled run withdrawal: {busy:?}"
+    );
+
+    fx.inbox.mark_settled(claim.request.id);
+    churn_cancellations(&fx, SETTLEMENT_CHURN);
+    let second_who = caller("focus", &["run"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let second = spawn(async move {
+        services
+            .run(&second_who, run_request(&["git", "diff"], workspace))
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    let error = second.join().await.unwrap_err();
+    assert!(
+        matches!(error, ServiceError::Denied(DenyReason::OutOfScope { .. })),
+        "the settled withdrawal's run slot reopens to a fresh approval: {error:?}"
+    );
+}
+
+/// Bounds a call that must be refused before any await. A gate regression
+/// falls through to a grant question nobody answers; this turns that into a
+/// failure instead of a hung test.
+async fn refused_at_once<T>(
+    call: impl Future<Output = Result<T, ServiceError>>,
+) -> Result<T, ServiceError> {
+    tokio::time::timeout(Duration::from_secs(5), call)
+        .await
+        .expect("the call is refused before any grant question opens")
+}
+
+/// Calls every method gated by the `missing` injection, as a caller that lacks
+/// only that one, and returns each verdict. `state` rides the sidecar slot, so
+/// the sidecar case covers it too.
+async fn uninjected_calls(
+    fx: &Fixture,
+    who: &Caller,
+    missing: Service,
+) -> Vec<Result<(), ServiceError>> {
+    use dal_core::{StateKey, StateNs};
+    let services = &fx.services;
+    match missing {
+        Service::FsRead => vec![
+            refused_at_once(services.fs_read(who, "a.txt"))
+                .await
+                .map(|_| ()),
+        ],
+        Service::FsWrite => {
+            vec![refused_at_once(services.fs_write(who, "a.txt", b"x".to_vec())).await]
+        }
+        Service::Net => {
+            let request = dal_core::FetchRequest {
+                method: dal_core::FetchMethod::Get,
+                url: "https://example.invalid/".into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                redirects: dal_core::RedirectPolicy::Follow,
+            };
+            vec![
+                refused_at_once(services.net(who, request))
+                    .await
+                    .map(|_| ()),
+            ]
+        }
+        Service::Run => {
+            let request = run_request(&["git", "status"], fx.temp.path().to_path_buf());
+            vec![
+                refused_at_once(services.run(who, request))
+                    .await
+                    .map(|_| ()),
+            ]
+        }
+        Service::Env => vec![refused_at_once(services.env(who, "HOME")).await.map(|_| ())],
+        Service::Ask => {
+            let question = Question::Text {
+                prompt: "proceed?".into(),
+                placeholder: None,
+            };
+            vec![
+                refused_at_once(services.ask(who, question))
+                    .await
+                    .map(|_| ()),
+                refused_at_once(services.open_asks(who)).await.map(|_| ()),
+            ]
+        }
+        Service::Mcp => vec![
+            refused_at_once(services.mcp(who, mcp_request()))
+                .await
+                .map(|_| ()),
+        ],
+        Service::Agents => {
+            vec![
+                refused_at_once(services.agents(who, AgentsOp::List))
+                    .await
+                    .map(|_| ()),
+            ]
+        }
+        Service::Jobs => vec![
+            refused_at_once(services.jobs(who, JobsOp::List))
+                .await
+                .map(|_| ()),
+        ],
+        Service::Turn => {
+            vec![
+                refused_at_once(services.turn(who, TurnOp::IsIdle))
+                    .await
+                    .map(|_| ()),
+            ]
+        }
+        Service::Sidecar => {
+            let read = StateOp::Read {
+                ns: StateNs::Eval,
+                key: StateKey::parse("counter").unwrap(),
+            };
+            vec![
+                refused_at_once(services.sidecar(who, sidecar_read()))
+                    .await
+                    .map(|_| ()),
+                refused_at_once(services.state(who, read)).await.map(|_| ()),
+            ]
+        }
+        Service::Infer => {
+            vec![refused_at_once(services.authorize_script_infer(who, fx.cancel.clone())).await]
+        }
+        other => panic!("service {other} has no injection gate under test"),
+    }
+}
+
+/// Every gated service checks its own injection slot before anything else: a
+/// caller that injects every other service is refused with `NotInjected`
+/// before a grant question opens or any backend work starts, so no method can
+/// borrow a sibling's slot. The loop walks the whole vocabulary, so a new
+/// service fails here until its gate is covered.
+#[tokio::test]
+async fn each_gated_service_refuses_a_caller_that_lacks_its_own_injection() {
+    for missing in Service::ALL {
+        let fx = fixture(Duration::from_secs(30));
+        let injected: Vec<&str> = Service::ALL
+            .into_iter()
+            .filter(|service| *service != missing)
+            .map(Service::as_str)
+            .collect();
+        let who = caller("focus", &injected, Some(turn()));
+        let verdicts = uninjected_calls(&fx, &who, missing).await;
+        assert!(!verdicts.is_empty(), "{missing}: no method was exercised");
+        for verdict in verdicts {
+            assert!(
+                matches!(verdict, Err(ServiceError::Denied(DenyReason::NotInjected))),
+                "{missing}: an uninjected call is denied for its own slot, got {verdict:?}"
+            );
+        }
+        assert_eq!(
+            open_count(&fx.broker),
+            0,
+            "{missing}: no grant question may open"
+        );
+        assert!(fx.backend.seen_reads.lock().unwrap().is_empty());
+        assert!(fx.backend.seen_env.lock().unwrap().is_empty());
+        assert!(fx.backend.state_ops.lock().unwrap().is_empty());
+        assert!(fx.backend.updates.lock().unwrap().is_empty());
+    }
+}
+
+/// `state` rides the sidecar slot and grant: without the slot nothing opens
+/// and nothing reaches the backend, and a declined grant reaches no state
+/// either.
+#[tokio::test]
+async fn state_is_gated_by_the_sidecar_slot_and_grant() {
+    use dal_core::{StateKey, StateNs};
+    let fx = fixture(Duration::from_secs(30));
+    let read = || StateOp::Read {
+        ns: StateNs::Eval,
+        key: StateKey::parse("counter").unwrap(),
+    };
+
+    let missing = caller("focus", &["ask"], Some(turn()));
+    assert!(matches!(
+        refused_at_once(fx.services.state(&missing, read())).await,
+        Err(ServiceError::Denied(DenyReason::NotInjected))
+    ));
+    assert_eq!(open_count(&fx.broker), 0, "no grant question may open");
+
+    let who = caller("focus", &["sidecar"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let declining = who.clone();
+    let declined = spawn(async move { services.state(&declining, read()).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(declined.join().await, Err(ServiceError::Declined)));
+    assert!(
+        fx.backend.state_ops.lock().unwrap().is_empty(),
+        "a refused grant reaches no state"
+    );
+
+    let services = Arc::clone(&fx.services);
+    let approving = who.clone();
+    let approved = spawn(async move { services.state(&approving, read()).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::ApproveForSession);
+    assert_eq!(
+        approved.join().await,
+        Ok(Err(StateError::Unavailable)),
+        "the unscripted backend answers its own typed failure"
+    );
+    assert_eq!(
+        fx.backend.state_ops.lock().unwrap().len(),
+        1,
+        "only the approved call reached the backend"
+    );
+}
+
+/// `state` never trusts the namespace on the operation: the service derives
+/// it from the host-minted caller, so a plugin handler cannot reach another
+/// plugin's keys or the eval namespace, an eval cell reaches only the eval
+/// namespace, and a stale revision comes back as the operation's own typed
+/// failure rather than a service error. Builtin handlers and cells skip the
+/// capability store, so no grant question is involved.
+#[tokio::test]
+async fn state_derives_its_namespace_from_the_caller() {
+    use dal_core::{Revision, StateKey, StateNs};
+    let fx = fixture(Duration::from_secs(30));
+    let key = StateKey::parse("counter").unwrap();
+    let revision = Revision::new(NonZeroU64::new(3).unwrap());
+    let stored = StateRecord {
+        present: true,
+        value: Some(RawJson::parse("1").unwrap()),
+        revision,
+    };
+    *fx.backend.state_reply.lock().unwrap() = Some(Ok(stored.clone()));
+    let version = std::num::NonZeroU32::new(7).unwrap();
+    let minted = |origin: Origin, kind: CallerKind| {
+        Caller::new(
+            "focus".parse::<Name>().unwrap(),
+            origin,
+            ServiceSet::from_names(["sidecar"]).unwrap(),
+            version,
+            kind,
+            Some(turn()),
+        )
+        .with_test_digest()
+    };
+    let handler = minted(Origin::Builtin, CallerKind::Handler);
+    let cell = minted(Origin::User, CallerKind::Cell { approved: true });
+    // A namespace no caller may reach by naming it.
+    let foreign = StateNs::Plugin {
+        origin: Origin::Bundled,
+        plugin: "other".parse::<Name>().unwrap(),
+        version: std::num::NonZeroU32::new(99).unwrap(),
+    };
+    let own = StateNs::Plugin {
+        origin: Origin::Builtin,
+        plugin: "focus".parse::<Name>().unwrap(),
+        version,
+    };
+    let eval = StateNs::Eval;
+    let written = RawJson::parse("2").unwrap();
+    let ops_in = |ns: &StateNs| {
+        [
+            StateOp::Read {
+                ns: ns.clone(),
+                key: key.clone(),
+            },
+            StateOp::Write {
+                ns: ns.clone(),
+                key: key.clone(),
+                value: written.clone(),
+                expected: revision,
+            },
+            StateOp::Delete {
+                ns: ns.clone(),
+                key: key.clone(),
+                expected: revision,
+            },
+        ]
+    };
+
+    for (who, derived) in [(&handler, &own), (&cell, &eval)] {
+        fx.backend.state_ops.lock().unwrap().clear();
+        for op in ops_in(&foreign) {
+            assert_eq!(fx.services.state(who, op).await, Ok(Ok(stored.clone())));
+        }
+        assert_eq!(
+            *fx.backend.state_ops.lock().unwrap(),
+            ops_in(derived).to_vec(),
+            "the caller never names its namespace"
+        );
+    }
+    assert_eq!(open_count(&fx.broker), 0, "no grant question was involved");
+
+    *fx.backend.state_reply.lock().unwrap() = Some(Err(StateError::Conflict));
+    let stale = StateOp::Delete {
+        ns: foreign,
+        key,
+        expected: revision,
+    };
+    assert_eq!(
+        fx.services.state(&handler, stale).await,
+        Ok(Err(StateError::Conflict)),
+        "a stale revision is the operation's typed failure, not a service error"
+    );
+}
+
+/// A run the exec ladder refuses outright, or that needs an approval nobody
+/// can raise, is a typed denial and never spawns or opens a question: the
+/// ladder's own reason passes through unchanged, while "no front end" and "no
+/// turn to ask under" take the shared headless denial that front ends parse
+/// back.
+#[tokio::test]
+async fn a_run_nobody_can_approve_is_denied_without_spawning() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    // Cells skip the capability store, so only the ladder decides here.
+    let cell = |at: Option<TurnId>| {
+        Caller::new(
+            "focus".parse::<Name>().unwrap(),
+            Origin::User,
+            ServiceSet::from_names(["run"]).unwrap(),
+            std::num::NonZeroU32::MIN,
+            CallerKind::Cell { approved: true },
+            at,
+        )
+        .with_test_digest()
+    };
+    let headless = |error: ServiceError| match error {
+        ServiceError::Denied(DenyReason::OutOfScope { what }) => {
+            dal_core::parse_headless_denial(&what).map(|(tool, rung)| (tool.to_owned(), rung))
+        }
+        _ => None,
+    };
+    fx.rt.decisions.lock().unwrap().extend([
+        dal_core::Decision::Deny {
+            reason: DenyReason::NoFrontEnd,
+        },
+        dal_core::Decision::Deny {
+            reason: DenyReason::out_of_scope("the ladder refused"),
+        },
+        dal_core::Decision::Ask { grant: None },
+    ]);
+
+    let error = fx
+        .services
+        .run(
+            &cell(Some(turn())),
+            run_request(&["git"], workspace.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        headless(error),
+        Some(("run".to_owned(), dal_core::Rung::All)),
+        "a ladder with no front end takes the shared headless denial"
+    );
+
+    let error = fx
+        .services
+        .run(
+            &cell(Some(turn())),
+            run_request(&["git"], workspace.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ServiceError::Denied(DenyReason::out_of_scope("the ladder refused")),
+        "any other ladder reason passes through unchanged"
+    );
+
+    let error = fx
+        .services
+        .run(&cell(None), run_request(&["git"], workspace))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        headless(error),
+        Some(("run".to_owned(), dal_core::Rung::All)),
+        "an approval with no turn to raise it under is headless"
+    );
+    assert_eq!(open_count(&fx.broker), 0, "no question opened for any run");
+    assert!(fx.rt.previews.lock().unwrap().is_empty());
+    assert!(fx.rt.spawns.lock().unwrap().is_empty(), "nothing spawned");
+}
+
+/// One released ask settlement maps onto exactly one typed outcome: a value
+/// passes through, a Confirm's approve and decline become booleans, a
+/// dismissal or a deadline default is "no answer", an approval verdict on any
+/// other question fails closed to "no answer", and only a cancelled request is
+/// an error.
+#[test]
+fn ask_settlements_map_onto_typed_outcomes() {
+    let settle = |resolution: Resolution, answer: Answer, confirm: bool| {
+        SessionServices::settle_ask_answer(
+            crate::broker::Settled {
+                answer,
+                by: ClientId::new("test-front-end"),
+                resolution,
+                cause: None,
+            },
+            confirm,
+        )
+    };
+    let json = |text: &str| Answer::Value(RawJson::parse(text).unwrap());
+
+    for confirm in [false, true] {
+        assert_eq!(
+            settle(Resolution::Answered, json("\"pick\""), confirm),
+            Ok(Some(json("\"pick\""))),
+            "a value answer passes through"
+        );
+        assert_eq!(
+            settle(Resolution::Answered, Answer::Cancel, confirm),
+            Ok(None),
+            "a dismissal is no answer"
+        );
+        assert_eq!(
+            settle(Resolution::Unavailable, Answer::Cancel, confirm),
+            Ok(None),
+            "a deadline default is no answer"
+        );
+        assert_eq!(
+            settle(Resolution::Cancelled, Answer::Cancel, confirm),
+            Err(ServiceError::Cancelled),
+            "a cancelled request is the one error"
+        );
+    }
+    assert_eq!(
+        settle(Resolution::Answered, Answer::Approve, true),
+        Ok(Some(json("true"))),
+        "a Confirm approval is true"
+    );
+    assert_eq!(
+        settle(Resolution::Answered, Answer::Decline, true),
+        Ok(Some(json("false"))),
+        "a Confirm decline is false"
+    );
+    assert_eq!(
+        settle(Resolution::Answered, Answer::ApproveForSession, true),
+        Ok(None),
+        "a session approval is not a Confirm answer"
+    );
+    for verdict in [Answer::Approve, Answer::ApproveForSession, Answer::Decline] {
+        assert_eq!(
+            settle(Resolution::Answered, verdict, false),
+            Ok(None),
+            "an approval verdict on a non-Confirm question fails closed"
+        );
+    }
+}
+
+/// Owner equality is the whole private-outcome authority, so no two live
+/// origins may render to the same owner text, and none may take the shared
+/// fallback spelling.
+#[test]
+fn every_live_origin_renders_to_its_own_owner_text() {
+    let texts: std::collections::HashSet<&str> = [Origin::Builtin, Origin::Bundled, Origin::User]
+        .into_iter()
+        .map(super::origin_text_shared)
+        .collect();
+    assert_eq!(texts.len(), 3, "origins never alias one owner: {texts:?}");
+    assert!(
+        !texts.contains("unknown"),
+        "a live origin never takes the fallback spelling: {texts:?}"
+    );
+}
+
 /// Mints a host-shaped caller for private-outcome reads: the authority under
 /// test is the (name, origin) pair, never the inject set.
 fn private_caller(name: &str, origin: Origin) -> Caller {
@@ -2328,4 +3059,157 @@ async fn private_outcomes_forward_needs_no_inject_or_grant() {
         .expect("private outcomes forward");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].r#loop, loop_id);
+}
+
+#[tokio::test]
+async fn infer_forwards_caller_continuation() {
+    let fx = fixture(Duration::from_secs(30));
+    *fx.backend.infer_reply.lock().unwrap() = Some(Inference { events: Vec::new() });
+
+    let owner = crate::session::continuation::ContinuationOwner::new(
+        crate::session::tasks::SessionTasks::new(),
+    );
+    let weak = owner.downgrade();
+    let expected_slot = weak.upgrade().expect("owner is alive");
+
+    let who_with_slot = caller("focus", &[], Some(turn())).with_continuation(weak.clone());
+    fx.services
+        .infer(&who_with_slot, model_request())
+        .await
+        .expect("infer succeeds");
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed infer caller");
+    let recorded_weak = recorded
+        .continuation()
+        .expect("recorded caller has continuation");
+    assert!(std::sync::Weak::ptr_eq(&recorded_weak, &weak));
+    let upgraded_slot = recorded_weak
+        .upgrade()
+        .expect("slot lives while owner lives");
+    assert!(Arc::ptr_eq(&upgraded_slot, &expected_slot));
+
+    let who_without_slot = caller("focus", &[], Some(turn()));
+    fx.services
+        .infer(&who_without_slot, model_request())
+        .await
+        .expect("infer succeeds");
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed infer caller");
+    assert!(
+        recorded.continuation().is_none(),
+        "services must not invent a continuation when caller has none"
+    );
+
+    let stream_who_with_slot = caller("focus", &[], Some(turn())).with_continuation(weak.clone());
+    let _stream = fx
+        .services
+        .infer_stream(&stream_who_with_slot, model_request())
+        .await
+        .expect("infer_stream succeeds");
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed infer_stream caller");
+    let recorded_weak = recorded
+        .continuation()
+        .expect("recorded caller has continuation");
+    assert!(std::sync::Weak::ptr_eq(&recorded_weak, &weak));
+    let upgraded_slot = recorded_weak
+        .upgrade()
+        .expect("slot lives while owner lives");
+    assert!(Arc::ptr_eq(&upgraded_slot, &expected_slot));
+
+    let stream_who_without_slot = caller("focus", &[], Some(turn()));
+    let _stream = fx
+        .services
+        .infer_stream(&stream_who_without_slot, model_request())
+        .await
+        .expect("infer_stream succeeds");
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed infer_stream caller");
+    assert!(
+        recorded.continuation().is_none(),
+        "services must not invent a continuation when caller has none"
+    );
+}
+
+#[tokio::test]
+async fn script_infer_forwards_caller_continuation() {
+    let fx = fixture(Duration::from_secs(30));
+    *fx.backend.infer_reply.lock().unwrap() = Some(Inference { events: Vec::new() });
+
+    let owner = crate::session::continuation::ContinuationOwner::new(
+        crate::session::tasks::SessionTasks::new(),
+    );
+    let weak = owner.downgrade();
+    let expected_slot = weak.upgrade().expect("owner is alive");
+
+    let gated_with_slot = caller("focus", &["infer"], Some(turn())).with_continuation(weak.clone());
+    let services = Arc::clone(&fx.services);
+    let cancel = fx.cancel.clone();
+    let who = gated_with_slot.clone();
+    let approved = spawn(async move {
+        services
+            .script_infer_with(&who, model_request(), None, cancel)
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::ApproveForSession);
+    approved.join().await.expect("approved script infer runs");
+
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed script_infer_with caller");
+    let recorded_weak = recorded
+        .continuation()
+        .expect("recorded caller has continuation");
+    assert!(std::sync::Weak::ptr_eq(&recorded_weak, &weak));
+    let upgraded_slot = recorded_weak
+        .upgrade()
+        .expect("slot lives while owner lives");
+    assert!(Arc::ptr_eq(&upgraded_slot, &expected_slot));
+
+    let gated_without_slot = caller("focus", &["infer"], Some(turn()));
+    fx.services
+        .script_infer_with(
+            &gated_without_slot,
+            model_request(),
+            None,
+            fx.cancel.clone(),
+        )
+        .await
+        .expect("reused grant allows script_infer_with without asking");
+    let recorded = fx
+        .backend
+        .seen_infer_callers
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("backend observed script_infer_with caller");
+    assert!(
+        recorded.continuation().is_none(),
+        "services must not invent a continuation when caller has none"
+    );
 }
