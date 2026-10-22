@@ -10,6 +10,7 @@
 - Redact captured working-directory paths in provider debug output.
 - Describe the `agent` tool with a flat object schema for Anthropic
   requests. Keep action-specific argument checks in the tool.
+- Report cancellation when `agent wait` observes a cancelled child.
 - Accept `/exit` as an alias for `/quit` in terminal sessions.
 - Detached jobs carry the command that started them. `exec` detaches now
   report the validated command text on their job row (`JobStatus::command`,

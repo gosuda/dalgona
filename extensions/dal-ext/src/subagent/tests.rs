@@ -592,6 +592,22 @@ async fn unknown_child_id_maps_to_the_named_error() {
 }
 
 #[tokio::test]
+async fn wait_on_a_cancelled_child_reports_cancellation() {
+    let id = dal_core::SessionId::new_v7();
+    let services = FakeServices::with(vec![Ok(AgentsReply::Cancelled { id })]);
+    let outcome = agent()
+        .run(
+            call(&format!(r#"{{"action":"wait","id":"{id}"}}"#)),
+            ToolCx::for_test(share(&services)),
+        )
+        .await;
+    assert_eq!(
+        outcome_text(outcome).expect_err("cancelled wait fails"),
+        format!("child \"{id}\" was cancelled.")
+    );
+}
+
+#[tokio::test]
 async fn nested_start_maps_to_the_depth_error() {
     let services = FakeServices::with(vec![Err(ServiceError::failed(
         Some(Service::Agents),

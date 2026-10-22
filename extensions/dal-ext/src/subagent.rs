@@ -235,6 +235,9 @@ impl AgentTool {
                             report_text(report).into_boxed_str(),
                         )))
                     }
+                    Ok(AgentsReply::Cancelled { id: cancelled }) => ToolOutcome::Err(
+                        ToolError::message(format!("child \"{cancelled}\" was cancelled.")),
+                    ),
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
                     )),
