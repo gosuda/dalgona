@@ -29,7 +29,7 @@ pub(crate) enum Placement {
 /// caret's offset below the block top at the last paint, plus any extra
 /// wrapped rows the width change added at or above the caret (`piece` and
 /// `reflow_extra` are zero on a height-only resize). A block whose top
-/// scrolled off the screen starts at the second row.
+/// scrolled off the screen starts at the first terminal row.
 #[must_use]
 pub(crate) fn located_top(reported_row: u16, offset: u16, piece: u16, extra: u16) -> u16 {
     reported_row
@@ -49,21 +49,17 @@ pub(crate) fn piece(cell_index_before_caret: usize, new_width: usize) -> u16 {
     u16::try_from(cell_index_before_caret / new_width.max(1)).unwrap_or(u16::MAX)
 }
 
-/// Returns the wrapped height of one known live row at `width` in cells.
-/// An empty row still occupies one row; `width` of 0 is treated as 1.
-#[must_use]
-pub(crate) fn wrapped_height(cells: usize, width: usize) -> u16 {
-    let width = width.max(1);
-    u16::try_from(cells.max(1).div_ceil(width)).unwrap_or(u16::MAX)
-}
-
 /// Returns the extra rows a width change adds above the caret: the sum of
-/// `wrapped_height(cells, new_width) - 1` over the given above-caret live
-/// rows. Callers pass only rows whose reflow cannot be verified.
+/// `cells / new_width` over the given above-caret live rows. A row that ends
+/// exactly on the edge still advances the caret piece, so exact multiples
+/// keep their full piece.
+/// Callers pass only rows whose reflow cannot be verified.
 #[must_use]
 pub(crate) fn reflow_extra(above_caret_cells: &[usize], new_width: usize) -> u16 {
+    let width = new_width.max(1);
     above_caret_cells.iter().fold(0_u16, |extra, cells| {
-        extra.saturating_add(wrapped_height(*cells, new_width).saturating_sub(1))
+        let pieces = u16::try_from(cells / width).unwrap_or(u16::MAX);
+        extra.saturating_add(pieces)
     })
 }
 
@@ -111,7 +107,7 @@ pub fn shrink_bytes(first_surplus_row: u16, surplus: u16, sync: bool) -> Vec<u8>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_bytes, located_top, piece, reflow_extra, shrink_bytes, wrapped_height};
+    use super::{commit_bytes, located_top, piece, reflow_extra, shrink_bytes};
 
     #[test]
     fn commit_and_shrink_use_one_bracket_pair_without_erase_display() {
@@ -151,11 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_height_and_reflow_extra_measure_known_rows() {
-        assert_eq!(wrapped_height(0, 60), 1);
-        assert_eq!(wrapped_height(60, 60), 1);
-        assert_eq!(wrapped_height(61, 60), 2);
-        assert_eq!(wrapped_height(180, 60), 3);
+    fn reflow_extra_measures_known_rows() {
         assert_eq!(reflow_extra(&[30, 61, 120], 60), 3);
         assert_eq!(reflow_extra(&[], 60), 0);
     }
