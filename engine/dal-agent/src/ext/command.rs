@@ -64,6 +64,12 @@ pub enum SaveError {
         /// The closed session.
         id: SessionId,
     },
+    /// The host rejected the command before changing session state.
+    #[error("rejected: {message}")]
+    Rejected {
+        /// The complete product text.
+        message: Box<str>,
+    },
     /// The effect applied but the save failed with the product text.
     #[error("save failed: {message}")]
     Failed {

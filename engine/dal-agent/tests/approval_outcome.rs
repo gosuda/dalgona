@@ -15,7 +15,8 @@ use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, T
 use dal_core::ext::{ExportId, ExportKind, OpSet};
 use dal_core::{
     Answer, ClientId, Command, Config, ConfigProduct, EntryKind, Expect, ModelInfo, Name, Part,
-    Preview, RawJson, Record, SessionId, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
+    Preview, RawJson, Record, ResolutionCause, SessionId, ToolClass, ToolSpec, UpdateKind,
+    Visibility, Workspace,
 };
 use dal_store::Store;
 
@@ -267,11 +268,17 @@ async fn journal_records(
     Ok(journal.records().to_vec())
 }
 
+/// One journaled `Resolved` record: its position and everything it states.
+struct Journaled {
+    at: usize,
+    answer: Answer,
+    by: ClientId,
+    was_default: bool,
+    cause: Option<ResolutionCause>,
+}
+
 /// The journaled resolution of `request` with its record position.
-fn journaled_resolution(
-    records: &[Record],
-    request: dal_core::RequestId,
-) -> Option<(usize, Answer, ClientId, bool)> {
+fn journaled_resolution(records: &[Record], request: dal_core::RequestId) -> Option<Journaled> {
     records
         .iter()
         .enumerate()
@@ -281,8 +288,15 @@ fn journaled_resolution(
                 answer,
                 by,
                 was_default,
+                cause,
                 ..
-            } if *answered == request => Some((index, answer.clone(), by.clone(), *was_default)),
+            } if *answered == request => Some(Journaled {
+                at: index,
+                answer: answer.clone(),
+                by: by.clone(),
+                was_default: *was_default,
+                cause: *cause,
+            }),
             _ => None,
         })
 }
@@ -334,18 +348,26 @@ async fn an_approved_tool_call_journals_the_answer_before_its_effect() -> TestRe
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
-    else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the approved answer is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Approve), "{answer:?}");
-    assert_eq!(by.as_str(), "probe");
-    assert!(!was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Approve),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "probe");
+    assert!(!resolved.was_default);
+    assert_eq!(
+        resolved.cause,
+        Some(ResolutionCause::Answered),
+        "a client answer journals the Answered cause"
+    );
     let Some(effect_at) = probe_result(&records) else {
         return Err("the probe result is not journaled".into());
     };
     assert!(
-        resolved_at < effect_at,
+        resolved.at < effect_at,
         "the answer must land in the journal before the result that used it"
     );
     resumed_shows(&session, id, request).await?;
@@ -365,18 +387,26 @@ async fn a_declined_tool_call_journals_the_answer_before_its_denial() -> TestRes
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
-    else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the declined answer is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Decline), "{answer:?}");
-    assert_eq!(by.as_str(), "probe");
-    assert!(!was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Decline),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "probe");
+    assert!(!resolved.was_default);
+    assert_eq!(
+        resolved.cause,
+        Some(ResolutionCause::Answered),
+        "a client decline is still an Answered resolution, not a default"
+    );
     let Some(effect_at) = probe_result(&records) else {
         return Err("the denial result is not journaled".into());
     };
     assert!(
-        resolved_at < effect_at,
+        resolved.at < effect_at,
         "the decline must land in the journal before the denial it produced"
     );
     resumed_shows(&session, id, request).await?;
@@ -393,20 +423,34 @@ async fn an_unanswered_tool_approval_journals_the_default_it_broadcasts() -> Tes
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(300)).await;
     tokio::time::resume();
-    let broadcast = wait_for_resolved(&mut session.subscription, request).await?;
+    let (broadcast, broadcast_cause) =
+        wait_for_resolved(&mut session.subscription, request).await?;
     assert!(matches!(broadcast, Answer::Decline), "{broadcast:?}");
+    assert_eq!(
+        broadcast_cause,
+        Some(ResolutionCause::TimedOut),
+        "the answerer stayed attached, so the deadline is a timeout"
+    );
     let dump = finish_turn(&mut session, WAIT).await?;
     assert!(dump.contains("no one answered within 300 s."), "{dump}");
     assert!(!dump.contains("the probe ran"), "{dump}");
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((_, answer, by, was_default)) = journaled_resolution(&records, request) else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the broadcast default is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Decline), "{answer:?}");
-    assert_eq!(by.as_str(), "core");
-    assert!(was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Decline),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "core");
+    assert!(resolved.was_default);
+    assert_eq!(
+        resolved.cause, broadcast_cause,
+        "the journal holds the cause the broadcast carried"
+    );
     Ok(())
 }
 
@@ -416,15 +460,17 @@ async fn an_unanswered_tool_approval_journals_the_default_it_broadcasts() -> Tes
 async fn wait_for_resolved(
     subscription: &mut Subscription,
     request: dal_core::RequestId,
-) -> Result<Answer, Box<dyn std::error::Error>> {
+) -> Result<(Answer, Option<ResolutionCause>), Box<dyn std::error::Error>> {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let delivery = next_delivery(subscription, WAIT).await?;
             if let Delivery::Update(update) = &delivery
-                && let UpdateKind::RequestResolved { id, answer, .. } = &update.kind
+                && let UpdateKind::RequestResolved {
+                    id, answer, cause, ..
+                } = &update.kind
                 && *id == request
             {
-                return Ok(answer.clone());
+                return Ok((answer.clone(), *cause));
             }
         }
     })

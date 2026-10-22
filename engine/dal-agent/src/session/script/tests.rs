@@ -169,6 +169,7 @@ struct Fixture {
     interpreters: Arc<Interpreters>,
     generation: Arc<Generation>,
     runs: Arc<AtomicUsize>,
+    _tmp: tempfile::TempDir,
 }
 
 /// Starts one real session with the product tools and the fixture export.
@@ -403,6 +404,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
         interpreters,
         generation,
         runs,
+        _tmp: tmp,
     }
 }
 

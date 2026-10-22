@@ -86,11 +86,18 @@ async fn codex_browser_login_completes_on_the_loopback_callback() {
     let outcome = outcome.expect("login");
     assert_eq!(&*outcome.provider, "openai-codex");
     assert_eq!(outcome.account.as_deref(), Some(ACCOUNT_ID));
-    assert!(matches!(
-        seen.as_slice(),
-        [LoginProgress::OpenUrl { url }, LoginProgress::Exchanging]
-            if url.contains("/oauth/authorize") && url.contains("code_challenge_method=S256")
-    ));
+    assert!(!seen.is_empty(), "expected browser progress, got {seen:?}");
+    let LoginProgress::OpenUrl { url } = &seen[0] else {
+        panic!("browser login must first open the authorize url, got {seen:?}");
+    };
+    assert!(
+        url.contains("/oauth/authorize") && url.contains("code_challenge_method=S256"),
+        "authorize url: {url}"
+    );
+    assert!(
+        matches!(seen.last(), Some(LoginProgress::Exchanging)),
+        "browser login must end with the code exchange, got {seen:?}"
+    );
     let stored = AuthStore::load(auth_json(dir.path())).expect("store");
     assert!(matches!(
         stored.credential("openai-codex"),

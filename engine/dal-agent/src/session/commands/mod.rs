@@ -27,6 +27,7 @@ use crate::ext::command::CommandCx;
 use crate::ext::{Caller, CallerKind};
 use crate::session::actor::TurnWork;
 use crate::session::contain::contained;
+use crate::session::continuation::ContinuationOwner;
 use crate::session::driver::DriverDeps;
 use crate::session::tasks::SessionTasks;
 
@@ -63,11 +64,6 @@ async fn execute(
         },
         Command::Export { path, format } => export(deps, path, format).await,
         Command::SetScopedModels(ids) => {
-            // The view carries the committed list verbatim, so a clear shows
-            // as `Some([])`: the projection reads a published `None` as
-            // keep-existing and could not carry it. The driver keeps its
-            // existing reading, where an empty list means no scope.
-            deps.shared.publish_scope(ids.clone());
             *scoped = if ids.is_empty() { None } else { Some(ids) };
             Ok(Reply::Done(Output::Nothing))
         }
@@ -116,6 +112,7 @@ async fn run_handler(
                 .any(|(_, other)| Arc::ptr_eq(other, handler))
         })
         .ok_or_else(|| invalid(&format!("command {name} has no owning extension.")))?;
+    let cmd_owner = ContinuationOwner::new(deps.tasks.clone());
     let caller = Caller::new(
         owner
             .name()
@@ -127,7 +124,8 @@ async fn run_handler(
         CallerKind::Handler,
         None,
     )
-    .with_extension(owner);
+    .with_extension(owner)
+    .with_continuation(cmd_owner.downgrade());
     let host = Arc::new(driver_host(deps, scoped, route).await);
     let cx = CommandCx::new(caller, deps.session, None, Arc::clone(&deps.services), host);
     // One script host per command run, against the current generation; its
@@ -144,12 +142,14 @@ async fn run_handler(
         Some(script) => cx.with_script(script),
         None => cx,
     };
-    match contained(async move { handler.run(args, cx).await }).await {
+    let result = match contained(async move { handler.run(args, cx).await }).await {
         Ok(result) => result.map_err(|error| invalid(&error.to_string())),
         Err(panic) => Err(invalid(&format!(
             "Command {name} crashed and did not finish: {panic}. Report this to the command's author."
         ))),
-    }
+    };
+    cmd_owner.release_if_live();
+    result
 }
 
 /// Cancels one background job without failing a missing row.

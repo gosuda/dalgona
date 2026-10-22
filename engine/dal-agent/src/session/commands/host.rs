@@ -201,6 +201,25 @@ async fn job_log_outcome(label: &str, text: &str, log_path: &std::path::Path) ->
     }
 }
 
+/// Maps a failed actor operation to its typed save outcome.
+///
+/// `SessionClosed` keeps its identity. Post-apply persistence failures
+/// arrive as [`AgentError::PersistenceFailed`] and become
+/// [`SaveError::Failed`] with the message preserved; the message names
+/// the failed persistence (journal today, distinctly-worded default
+/// writes in future). Every other [`AgentError`] is a pre-apply
+/// rejection that changed nothing, so it becomes
+/// [`SaveError::Rejected`].
+fn save_error(error: AgentError) -> SaveError {
+    match error {
+        AgentError::SessionClosed { id } => SaveError::SessionClosed { id },
+        AgentError::PersistenceFailed { message } => SaveError::Failed { message },
+        other => SaveError::Rejected {
+            message: other.to_string().into(),
+        },
+    }
+}
+
 /// Labels one command for job table rows.
 fn command_label(cmd: &Command) -> String {
     match cmd {
@@ -246,7 +265,7 @@ impl CommandHost for DriverHost {
     ) -> BoxFuture<'_, Result<(), SaveError>> {
         if super::untrusted_export_path_denied(caller.origin(), &command) {
             return Box::pin(async {
-                Err(SaveError::Failed {
+                Err(SaveError::Rejected {
                     message: super::EXPORT_PATH_DENIED.into(),
                 })
             });
@@ -258,12 +277,7 @@ impl CommandHost for DriverHost {
                 .submit(command, by)
                 .await
                 .map(|_| ())
-                .map_err(|error| match error {
-                    AgentError::SessionClosed { id } => SaveError::SessionClosed { id },
-                    other => SaveError::Failed {
-                        message: other.to_string().into(),
-                    },
-                })
+                .map_err(save_error)
         })
     }
 
@@ -489,19 +503,12 @@ impl CommandHost for DriverHost {
         let route = if let Some(route) = &self.route {
             route.clone()
         } else {
-            match self.host.shared.default_model() {
-                // A structured table resolves by route below, so families the
-                // legacy string cannot encode keep their levels.
-                Some(crate::host::DefaultModel::Route(route)) => route,
-                // No structured table: the legacy string keeps its existing
-                // alias-aware resolution path unchanged.
-                Some(crate::host::DefaultModel::Reference(reference)) => {
-                    match self.resolve_model_inner(&reference) {
-                        Ok(resolved) => resolved.route,
-                        Err(_) => return Vec::new(),
-                    }
-                }
-                None => return Vec::new(),
+            let Some(default) = self.host.shared.config.model() else {
+                return Vec::new();
+            };
+            match self.resolve_model_inner(default) {
+                Ok(resolved) => resolved.route,
+                Err(_) => return Vec::new(),
             }
         };
         if let Some(found) = crate::ext::synthetic::find_route(&self.host.shared, &route) {
@@ -837,5 +844,57 @@ mod tests {
         let log_path = dir.path().join("job.log");
         let outcome = job_log_outcome("export", "{}", &log_path).await;
         assert!(matches!(outcome, JobOutcome::Exited { code: 0 }));
+    }
+
+    /// The save-error boundary: post-apply persistence failures map to the
+    /// typed `Failed` outcome with the message preserved; every other
+    /// non-closed [`AgentError`] maps to `Rejected`; only a closed session
+    /// keeps its own identity. Asserts on variants and message passthrough,
+    /// never on product prose.
+    #[test]
+    fn save_error_separates_failed_rejected_and_closed() {
+        use super::save_error;
+        use crate::error::{ActualTurn, AgentError, ExpectedTurn, ValidationError};
+        use crate::ext::command::SaveError;
+        use dal_core::{BlobId, ClientId, RequestId, SessionId, TurnId};
+        use std::num::NonZeroU64;
+
+        let session = SessionId::new_v7();
+        let rejections = [
+            AgentError::WrongTurn {
+                expected: ExpectedTurn::NoRunningTurn,
+                actual: ActualTurn::Idle,
+            },
+            AgentError::AlreadyResolved {
+                id: RequestId::new_v7(),
+                by: ClientId::new("core"),
+            },
+            AgentError::SteerFull {
+                turn: TurnId::new(NonZeroU64::new(1).expect("nonzero turn")),
+            },
+            AgentError::Invalid(ValidationError::new("bad answer")),
+            AgentError::BlobNotFound {
+                id: BlobId::from_bytes(b"missing"),
+                session,
+            },
+            AgentError::SessionGone { session },
+        ];
+        for error in rejections {
+            assert!(
+                matches!(save_error(error), SaveError::Rejected { .. }),
+                "a rejection without state change must not report a save failure"
+            );
+        }
+        assert!(matches!(
+            save_error(AgentError::SessionClosed { id: session }),
+            SaveError::SessionClosed { .. }
+        ));
+        let text = "journal write failed: disk full";
+        assert!(matches!(
+            save_error(AgentError::PersistenceFailed {
+                message: text.into()
+            }),
+            SaveError::Failed { message } if message.as_ref() == text
+        ));
     }
 }

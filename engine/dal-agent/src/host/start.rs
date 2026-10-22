@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dal_core::Config;
 use dal_provider::{EnvSnapshot, ProviderConfig, ProviderIdentity, ProviderSet};
 
-use super::{DefaultAuthority, Env, Host, HostShared, HostState, Product};
+use super::{Env, Host, HostShared, HostState, Product};
 use crate::admission::{Admission, Limits};
 use crate::error::HostError;
 use crate::ext::generation::{Generation, ValidatedExtensions};
@@ -19,30 +19,28 @@ impl Host {
     /// # Errors
     /// Returns [`HostError::Config`] when extension registrations or provider
     /// configuration cannot be validated or initialized.
-    pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
-        Self::start_with_defaults(product, config, env, DefaultAuthority::Disabled).await
-    }
-
-    /// Builds the host state with an explicit default-write authority.
-    ///
-    /// Local CLI hosts pass `DefaultAuthority::Local` with the edge-resolved
-    /// user configuration path so `Save::SessionAndDefault` persists; wire,
-    /// serve, and A2A hosts pass `Disabled` and fail such saves truthfully
-    /// without touching the server file.
-    ///
-    /// # Errors
-    /// Returns [`HostError::Config`] when extension registrations or provider
-    /// configuration cannot be validated or initialized.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the public startup API is awaited by callers across the workspace; startup validation stays async for one composition shape"
-    )]
-    pub async fn start_with_defaults(
+    /// Awaiting is the only composition shape: callers `.await` this like any
+    /// async constructor while the body stays synchronous.
+    pub fn start(
         product: Product,
         config: Config,
         env: Env,
-        authority: DefaultAuthority,
+    ) -> impl Future<Output = Result<Self, HostError>> {
+        std::future::ready(Self::start_with_provider_setup(
+            product,
+            config,
+            env,
+            |_| Ok(()),
+        ))
+    }
+
+    /// Internal startup seam that allows configuring the [`ProviderSet`] before
+    /// login-site attachment or host sharing.
+    pub(crate) fn start_with_provider_setup(
+        product: Product,
+        config: Config,
+        env: Env,
+        setup: impl FnOnce(&mut ProviderSet) -> Result<(), HostError>,
     ) -> Result<Self, HostError> {
         raise_fd_soft_limit();
         let attaches: Vec<crate::ext::Attach> = product
@@ -69,7 +67,7 @@ impl Host {
             .collect();
         let (generation_tx, _) = tokio::sync::watch::channel(Arc::new(generation));
         let plugin_base = HostShared::base_names(&generation_tx.borrow());
-        let snapshot = dal_provider::EnvSnapshot::from_vars(&env.vars).with_cwd(env.cwd.clone());
+        let snapshot = EnvSnapshot::from_vars(&env.vars).with_cwd(env.cwd.clone());
         let login_site = dal_provider::LoginSite::new(
             product.data_root.join("auth.json"),
             product.data_root.join("cache"),
@@ -82,12 +80,13 @@ impl Host {
             &snapshot,
         )
         .map_err(HostError::Provider)?;
-        let providers = provider_set(&config, &env, &product.data_root)?;
+        let mut providers = provider_set(&config, snapshot, &product.data_root)?;
+        setup(&mut providers)?;
+        // The set exists before attach so the site clones the same grant cache
+        // handle; there is exactly one allocation.
+        let login_site = login_site.with_provider_set(&providers);
         let shared = Arc::new(HostShared {
-            config: config.clone(),
-            defaults: std::sync::RwLock::new(config),
-            default_authority: authority,
-            default_write: tokio::sync::Mutex::new(()),
+            config,
             env: Arc::new(env),
             product_name: product.name,
             data_root: product.data_root,
@@ -218,9 +217,13 @@ mod tests {
 }
 
 /// Builds the provider set from the typed provider configuration.
+///
+/// `snapshot` is the host's captured environment, built once in
+/// [`Host::start`] and shared with the login site so both read the same
+/// values.
 fn provider_set(
     config: &Config,
-    env: &Env,
+    snapshot: EnvSnapshot,
     data_root: &std::path::Path,
 ) -> Result<ProviderSet, HostError> {
     let provider_config =
@@ -236,7 +239,7 @@ fn provider_set(
     ProviderSet::new(
         &provider_config,
         identity,
-        EnvSnapshot::from_vars(&env.vars),
+        snapshot,
         data_root,
         &data_root.join("cache"),
     )
