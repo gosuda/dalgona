@@ -31,6 +31,8 @@ pub fn exec_reads_only(command: &str, _cwd: Option<&str>) -> bool {
         "env" => guards::env_ok(&mut tokens),
         "fd" => guards::fd_ok(&mut tokens),
         "rg" => guards::rg_ok(&mut tokens),
+        "tree" => guards::tree_ok(&mut tokens),
+        "file" => guards::file_ok(&mut tokens),
         _ => tokens.finish(),
     }
 }
@@ -299,6 +301,42 @@ mod guards {
     const CARGO_SUBCOMMANDS: &[&str] = &["metadata", "tree"];
     const FD_EXEC_WORDS: &[&str] = &["-x", "-X", "--exec", "--exec-batch"];
 
+    /// Reports a single-dash short-flag cluster containing one of `flags`
+    /// (for example `-Hx` runs `fd --exec`). The word is decoded with the
+    /// same shell-word rules as the exact and prefix checks, so quoting or
+    /// backslash escapes cannot smuggle a cluster past the raw bytes. The
+    /// standalone short flag and the long forms stay with those checks: a
+    /// word shorter than three decoded bytes, or one whose decoded second
+    /// byte is a dash, never matches here. Words that fail to decode match
+    /// closed (reported as a cluster) like the other guards. No allocation:
+    /// the decode streams byte by byte.
+    fn has_clustered_short(raw: &str, flags: &[u8]) -> bool {
+        let bytes = raw.as_bytes();
+        let mut index = 0;
+        let mut quote = 0u8;
+        let mut decoded = 0usize;
+        while index < bytes.len() {
+            match super::decode_word_byte(bytes, &mut index, &mut quote) {
+                super::ShellWordByte::Literal(byte) => {
+                    if decoded == 0 && byte != b'-' {
+                        return false;
+                    }
+                    if decoded == 1 && byte == b'-' {
+                        return false;
+                    }
+                    if decoded >= 1 && flags.contains(&byte) {
+                        return true;
+                    }
+                    decoded += 1;
+                }
+                super::ShellWordByte::Delimiter => {}
+                super::ShellWordByte::Invalid => return true,
+            }
+            index += 1;
+        }
+        false
+    }
+
     pub(super) fn find_ok(tokens: &mut super::Tokens<'_>) -> bool {
         loop {
             let argument = match tokens.next() {
@@ -332,9 +370,7 @@ mod guards {
             "branch" => branch_or_tag_ok(tokens, GIT_BRANCH_FLAGS),
             "tag" => branch_or_tag_ok(tokens, GIT_TAG_FLAGS),
             "stash" => stash_ok(tokens),
-            "remote" => tokens
-                .next()
-                .is_ok_and(|word| word.is_none_or(|word| GIT_REMOTE_WORDS.contains(&word))),
+            "remote" => remote_ok(tokens),
             "worktree" => tokens
                 .next()
                 .is_ok_and(|word| word.is_some_and(|word| word == "list")),
@@ -343,6 +379,41 @@ mod guards {
             }),
             _ => true,
         }
+    }
+
+    /// Accepts only the read-only `git remote` forms: bare (lists remotes),
+    /// `-v` with nothing after it, and `show`/`get-url` with at most one
+    /// remote name. Anything after `-v`, or a second word after
+    /// `show`/`get-url`, can reach a mutating subcommand such as `add`.
+    /// Words are compared shell-decoded, like the other guards, so quoting
+    /// cannot smuggle a flag past the raw bytes; `show`/`get-url` with flags
+    /// stay read-only operations either way.
+    fn remote_ok(tokens: &mut super::Tokens<'_>) -> bool {
+        let Ok(word) = tokens.next() else {
+            return false;
+        };
+        let Some(word) = word else {
+            return true;
+        };
+        if !GIT_REMOTE_WORDS
+            .iter()
+            .any(|allowed| super::shell_word_eq(word, allowed))
+        {
+            return false;
+        }
+        if super::shell_word_eq(word, "-v") {
+            return matches!(tokens.next(), Ok(None));
+        }
+        let Ok(name) = tokens.next() else {
+            return false;
+        };
+        let Some(name) = name else {
+            return true;
+        };
+        if super::shell_word_starts_with(name, "-") {
+            return false;
+        }
+        matches!(tokens.next(), Ok(None))
     }
 
     fn git_args_ok(mut tokens: super::Tokens<'_>) -> bool {
@@ -355,6 +426,11 @@ mod guards {
             if super::has_shell_expansion_or_glob(argument)
                 || super::shell_word_starts_with(argument, "--output")
                 || super::shell_word_starts_with(argument, "-o")
+                || super::shell_word_starts_with(argument, "-O")
+                || super::shell_word_starts_with(argument, "--open-files-in-pager")
+                || super::shell_word_starts_with(argument, "--textconv")
+                || super::shell_word_starts_with(argument, "--ext-diff")
+                || has_clustered_short(argument, b"oO")
             {
                 return false;
             }
@@ -430,6 +506,49 @@ mod guards {
                 || super::shell_word_starts_with(argument, "-X")
                 || super::shell_word_starts_with(argument, "--exec=")
                 || super::shell_word_starts_with(argument, "--exec-batch=")
+                || has_clustered_short(argument, b"xX")
+            {
+                return false;
+            }
+        }
+    }
+
+    /// Accepts `tree` argument lists that cannot write: rejects
+    /// glob/expansion plus `-o`/`--output`, which names an output file
+    /// (including clustered shorts such as `-Jo`). Other flags render to
+    /// stdout.
+    pub(super) fn tree_ok(tokens: &mut super::Tokens<'_>) -> bool {
+        loop {
+            let argument = match tokens.next() {
+                Ok(Some(argument)) => argument,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            if super::has_shell_expansion_or_glob(argument)
+                || super::shell_word_starts_with(argument, "-o")
+                || super::shell_word_starts_with(argument, "--output")
+                || has_clustered_short(argument, b"o")
+            {
+                return false;
+            }
+        }
+    }
+
+    /// Accepts `file` argument lists that cannot write: rejects
+    /// glob/expansion plus `-C`/`--compile`, which writes the magic database
+    /// (including clustered shorts such as `-zC`). `-m` only selects a
+    /// database to read.
+    pub(super) fn file_ok(tokens: &mut super::Tokens<'_>) -> bool {
+        loop {
+            let argument = match tokens.next() {
+                Ok(Some(argument)) => argument,
+                Ok(None) => return true,
+                Err(_) => return false,
+            };
+            if super::has_shell_expansion_or_glob(argument)
+                || super::shell_word_eq(argument, "-C")
+                || super::shell_word_starts_with(argument, "--compile")
+                || has_clustered_short(argument, b"C")
             {
                 return false;
             }
@@ -446,6 +565,8 @@ mod guards {
             if super::has_shell_expansion_or_glob(argument)
                 || super::shell_word_eq(argument, "--pre")
                 || super::shell_word_starts_with(argument, "--pre=")
+                || super::shell_word_eq(argument, "--hostname-bin")
+                || super::shell_word_starts_with(argument, "--hostname-bin=")
             {
                 return false;
             }

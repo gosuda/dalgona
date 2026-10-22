@@ -162,6 +162,92 @@ fn classifier_rejects_command_execution_and_output_options() {
 }
 
 #[test]
+fn classifier_rejects_write_flags_on_plain_read_commands() {
+    for command in [
+        "tree -o /tmp/out",
+        "tree --output=/tmp/out",
+        "tree -Jo JSON /tmp/out",
+        "tree '-Jo' /tmp/out",
+        "tree \\-Jo /tmp/out",
+        "file -C",
+        "file --compile",
+        "file -zC -m magic",
+        "file '-zC' -m magic",
+    ] {
+        assert!(
+            !exec_reads_only(command, None),
+            "classified unsafe: {command}"
+        );
+    }
+    for command in [
+        "tree -L 2",
+        "tree -a -I target",
+        "file a.txt",
+        "file -m magic a.txt",
+        "file -b a.txt",
+    ] {
+        assert!(
+            exec_reads_only(command, None),
+            "classified read-only: {command}"
+        );
+    }
+}
+
+#[test]
+fn classifier_bounds_git_remote_to_read_forms() {
+    for command in [
+        "git remote",
+        "git remote -v",
+        "git remote show",
+        "git remote show origin",
+        "git remote show 'origin'",
+        "git remote get-url origin",
+    ] {
+        assert!(
+            exec_reads_only(command, None),
+            "classified read-only: {command}"
+        );
+    }
+    for command in [
+        "git remote add origin https://example.test/x",
+        "git remote -v add origin https://example.test/x",
+        "git remote -v -v",
+        "git remote show origin extra",
+        "git remote show '-n'",
+        "git remote get-url '--all'",
+        "git remote remove origin",
+        "git remote rename a b",
+    ] {
+        assert!(
+            !exec_reads_only(command, None),
+            "classified unsafe: {command}"
+        );
+    }
+}
+
+#[test]
+fn classifier_rejects_program_running_search_options() {
+    for command in [
+        "git grep -Oless pattern",
+        "git grep -iOless pattern",
+        "git grep -nOvim pattern",
+        "git grep --open-files-in-pager=less pattern",
+        "git grep --textconv pattern",
+        "git log --ext-diff",
+        "git log -pOless",
+        "fd -Hx rm",
+        "fd '-Hx' rm",
+        "rg --hostname-bin fill pattern",
+        "rg --hostname-bin=fill pattern",
+    ] {
+        assert!(
+            !exec_reads_only(command, None),
+            "classified unsafe: {command}"
+        );
+    }
+}
+
+#[test]
 fn classifier_accepts_literal_quoted_find_patterns() {
     for command in ["find . -name '$HOME/*.rs'", "find . -name \\*.rs"] {
         assert!(
