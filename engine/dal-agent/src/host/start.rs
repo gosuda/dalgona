@@ -21,17 +21,14 @@ impl Host {
     /// configuration cannot be validated or initialized.
     /// Awaiting is the only composition shape: callers `.await` this like any
     /// async constructor while the body stays synchronous.
-    pub fn start(
-        product: Product,
-        config: Config,
-        env: Env,
-    ) -> impl Future<Output = Result<Self, HostError>> {
+    pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
         std::future::ready(Self::start_with_provider_setup(
             product,
             config,
             env,
             |_| Ok(()),
         ))
+        .await
     }
 
     /// Internal startup seam that allows configuring the [`ProviderSet`] before

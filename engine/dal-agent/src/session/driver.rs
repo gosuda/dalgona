@@ -639,7 +639,15 @@ impl Driver {
         // second server run is opened beside the parked conversation, and the
         // owner ends in the failure branch below (idempotent with the turn
         // terminal, which repeats it harmlessly).
-        if let Some(error) = self.respond_if_awaiting(turn, &cancel).await {
+        let abandoned = has_active_input(&request)
+            && matches!(&resolved.route, ModelRoute::Api { family, .. } if *family == Family::Cursor)
+            && self
+                .turns
+                .get(&turn)
+                .map(|state| state.owner.downgrade())
+                .and_then(|weak| weak.upgrade())
+                .is_some_and(|slot| slot.abandon());
+        if !abandoned && let Some(error) = self.respond_if_awaiting(turn, &cancel).await {
             // Cover failure: the turn ends here without opening a second
             // server run beside the parked conversation. The owner ends now
             // (idempotent; the turn terminal repeats it harmlessly), and the
@@ -1049,6 +1057,19 @@ struct ResolvedRequest {
 /// the pin on every round for a provider-less request.
 fn provider_pin_holds(current: Option<&ModelRoute>, requested: &ModelRoute) -> bool {
     current.is_none_or(|current| current.same_model(requested))
+}
+fn has_active_input(request: &ModelRequest) -> bool {
+    let Some(ContextItem::User { parts }) = request.context.last() else {
+        return false;
+    };
+    let mut texts = Vec::new();
+    for part in parts {
+        match part {
+            Part::Text { text } => texts.push(text.as_ref()),
+            Part::Image { .. } | Part::Blob { .. } => return true,
+        }
+    }
+    !texts.join("\n").trim().is_empty()
 }
 
 /// The model one turn opening resolved for its input hooks: the requested

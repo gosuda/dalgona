@@ -527,6 +527,17 @@ impl ContinuationSlot {
             SlotState::Idle | SlotState::Released => false,
         }
     }
+    pub(crate) fn abandon(&self) -> bool {
+        let mut state = self.lock_state();
+        let SlotState::Live(conversation) = &*state else {
+            return false;
+        };
+        if !conversation.stash.is_empty() {
+            return false;
+        }
+        *state = SlotState::Idle;
+        true
+    }
 }
 
 /// Runs the taken conversation through cover validation and the provider

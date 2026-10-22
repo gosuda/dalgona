@@ -193,8 +193,8 @@ pub(crate) async fn serve(
         data_root,
         stop: stop.clone(),
     };
-    let ladder = exit::Ladder::begin();
     let outcome = run_server(&stop, &mut signals, run, &snapshot).await;
+    let ladder = exit::Ladder::begin();
     let closed = if outcome.is_err() {
         ladder.close_host_after_quiet_wait(closing).await
     } else {
