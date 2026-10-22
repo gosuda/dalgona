@@ -27,6 +27,7 @@ dal-star = { path = "../dal-star" }
 dal-provider = { path = "../../engine/dal-provider" }
 proptest.workspace = true
 regex.workspace = true
+tempfile.workspace = true
 
 [[bin]]
 name = "docs-gen"
