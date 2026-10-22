@@ -830,9 +830,14 @@ impl HttpTransport {
         if let Some(token) = stream.token.as_deref() {
             request = request.bearer_auth(token);
         }
+        // The answer is best effort, but it still runs inside the call's
+        // budget: a server that holds this POST open must not hold the call
+        // past its deadline.
         let _ = tokio::select! {
             () = stream.cancel.cancelled() => None,
-            response = request.send() => response.ok(),
+            response = tokio::time::timeout_at(stream.deadline.expires, request.send()) => {
+                response.ok().and_then(Result::ok)
+            }
         };
     }
 

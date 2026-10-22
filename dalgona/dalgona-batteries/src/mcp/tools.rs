@@ -648,6 +648,20 @@ fn server_preview(key: &Key, declaration: &ServerDecl, tool: &str, arguments: &R
     }
 }
 
+/// Strips control characters from server-controlled text shown to the user.
+///
+/// Progress messages and elicitation prompts come from the server and reach a
+/// notice or an ask dialog verbatim. Without this, an escape sequence could
+/// repaint the terminal or a hostile prompt could spoof the approval surface.
+/// Newlines and tabs survive; everything else control is dropped. Length is
+/// already bounded upstream by the 1 MiB stdio line and 8 MiB HTTP caps.
+#[must_use]
+pub(crate) fn sanitize_server_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
+        .collect()
+}
+
 async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -> ToolOutcome {
     let services = cx.services();
     let req = McpRequest {
@@ -656,7 +670,16 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
         tool: remote.into(),
         arguments,
     };
-    match services.mcp(cx.caller(), req).await {
+    // The service takes no cancellation token, so the call's own token is
+    // raced here and the pipeline is dropped when it fires. The pipeline
+    // retires the request it dropped (stdio servers hear
+    // `notifications/cancelled`, HTTP closes the response stream).
+    let outcome = tokio::select! {
+        biased;
+        () = cx.cancel().cancelled() => return ToolOutcome::Interrupted,
+        outcome = services.mcp(cx.caller(), req) => outcome,
+    };
+    match outcome {
         Ok(response) if response.is_error => ToolOutcome::Err(ToolError::message(response.text)),
         Ok(response) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(response.text))),
         Err(ServiceError::Cancelled) => ToolOutcome::Interrupted,

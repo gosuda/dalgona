@@ -7,10 +7,8 @@
 //! (`dal-agent`, `dal-core`, `dal-store`, `dalgona-batteries`, `tokio`) is
 //! already a dependency of `dalgona-batteries`.
 //! PARENT RUN (exact, from workspace root):
-//! ```text
-//! env -u CARGO_BUILD_BUILD_DIR CARGO_TARGET_DIR=<target> TMPDIR=<tmp> CARGO_BUILD_JOBS=2 \
-//!   cargo test --locked --offline -p dalgona-batteries --test mcp_host_smoke
-//! ```
+//!   env -u `CARGO_BUILD_BUILD_DIR` `CARGO_TARGET_DIR`=<target> TMPDIR=<tmp> `CARGO_BUILD_JOBS=2` \
+//!     cargo test --locked --offline -p dalgona-batteries --test `mcp_host_smoke`
 //! FEATURE FLAGS: none. Default features. Unix only (`#![cfg(unix)]`).
 //!
 //! SCOPE: cancels only an in-flight `tools/call` on a ready server. It never
@@ -30,11 +28,10 @@
 //! and on failure; every failure message names the evidence directory.
 
 #![cfg(unix)]
-#![expect(clippy::expect_used, reason = "test assertions abort on failure")]
-#![expect(clippy::panic, reason = "test assertions abort on failure")]
 
 use std::{
     collections::BTreeMap,
+    error::Error as StdError,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -61,6 +58,8 @@ const ECHO_TOKEN: &str = "HOST-SMOKE-OK";
 const PROGRESS_MARK: &str = "smoke-working";
 /// Time the journal must stay byte-identical after close and child exit.
 const QUIET_WINDOW: Duration = Duration::from_millis(500);
+
+type TestResult = Result<(), Box<dyn StdError>>;
 
 /// Owned stdio fixture server, one call at a time. `wait` never answers;
 /// `echo` answers with [`ECHO_TOKEN`]; a cancellation is recorded verbatim.
@@ -216,24 +215,23 @@ impl SmokeHost {
         steps: Vec<String>,
         data: &Path,
         workspace: &Path,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn StdError>> {
         let evidence = data.parent().unwrap_or(data).to_path_buf();
-        fs::create_dir_all(data).expect("host data directory");
-        fs::create_dir_all(workspace).expect("host workspace directory");
+        fs::create_dir_all(data)?;
+        fs::create_dir_all(workspace)?;
         let script = data.join("script.jsonl");
-        fs::write(&script, format!("{}\n", steps.join("\n"))).expect("scripted provider fixture");
+        fs::write(&script, format!("{}\n", steps.join("\n")))?;
         let user = format!(
             "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
             script.display()
         );
-        let config =
-            Config::load(ConfigProduct::Dalgon, data, "", Some(&user)).expect("host config");
+        let config = Config::load(ConfigProduct::Dalgon, data, "", Some(&user))?;
         let mcp_config = dalgona_batteries::mcp::McpConfig {
             tokens_path: data.join("mcp").join("tokens.json"),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let skill = SkillRecord {
-            name: Name::parse(SKILL).expect("skill name"),
+            name: Name::parse(SKILL)?,
             description: "Host smoke fixture".into(),
             body: "Host smoke fixture skill".into(),
             letter2image: false,
@@ -241,15 +239,12 @@ impl SmokeHost {
                 servers: BTreeMap::from([(SERVER.into(), server)]),
             }),
         };
-        let inject = dal_core::ServiceSet::from_names(["env"]).expect("service names");
-        let skill_extension = dal_agent::ext::ExtensionBuilder::new("weather", "0.1.0", inject)
-            .expect("skill extension")
+        let inject = dal_core::ServiceSet::from_names(["env"])?;
+        let skill_extension = dal_agent::ext::ExtensionBuilder::new("weather", "0.1.0", inject)?
             .with_origin(dal_core::Origin::Bundled, None)
             .skill(skill)
-            .build()
-            .expect("skill extension registration");
-        let battery =
-            dalgona_batteries::mcp::mcp(&mcp_config).expect("bundled mcp battery registration");
+            .build()?;
+        let battery = dalgona_batteries::mcp::mcp(&mcp_config)?;
         let product = Product {
             name: "dalgona",
             data_root: data.to_path_buf(),
@@ -257,20 +252,17 @@ impl SmokeHost {
             extensions: vec![skill_extension, battery],
             bundled: Vec::new(),
         };
-        let host = Host::start(product, config, hosted_env(workspace))
-            .await
-            .expect("host starts");
+        let host = Host::start(product, config, hosted_env(workspace)).await?;
         let agent = host
             .open(
                 SessionRef::New {
-                    workspace: Workspace::new(workspace.to_path_buf()).expect("workspace"),
+                    workspace: Workspace::new(workspace.to_path_buf())?,
                     name: None,
                 },
                 ClientId::new("mcp-host-smoke"),
             )
-            .await
-            .expect("session opens");
-        let subscription = agent.subscribe(None).expect("subscription");
+            .await?;
+        let subscription = agent.subscribe(None)?;
         let smoke = Self {
             host,
             agent,
@@ -283,8 +275,8 @@ impl SmokeHost {
         let ready_by = Instant::now() + Duration::from_secs(10);
         let mut declared = false;
         while Instant::now() < ready_by && !declared {
-            smoke.answer_pending().await;
-            declared = smoke.status().await.contains("declared");
+            smoke.answer_pending().await?;
+            declared = smoke.status().await?.contains("declared");
             if !declared {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -294,30 +286,27 @@ impl SmokeHost {
             "mcp status never reported the declared server; evidence {}",
             smoke.evidence.display()
         );
-        smoke
+        Ok(smoke)
     }
 
     /// Answers one pending question through the real approval door.
-    async fn answer_pending(&self) -> bool {
-        let view = self.agent.view(PageReq::default()).expect("host view");
+    async fn answer_pending(&self) -> Result<bool, Box<dyn StdError>> {
+        let view = self.agent.view(PageReq::default())?;
         let Some(request) = view.open.first() else {
-            return false;
+            return Ok(false);
         };
         let answer = match &request.question {
             Question::Grant { .. } | Question::Approval { .. } => Answer::ApproveForSession,
             _ => Answer::Decline,
         };
-        self.agent
-            .answer(request.id, answer)
-            .await
-            .expect("front-end answer");
-        true
+        self.agent.answer(request.id, answer).await?;
+        Ok(true)
     }
 
     /// Drives updates until a turn ends; at most 300 rounds of 100 ms.
-    async fn turn_ended(&mut self) -> TurnId {
+    async fn turn_ended(&mut self) -> Result<TurnId, Box<dyn StdError>> {
         for _ in 0..300 {
-            if self.answer_pending().await {
+            if self.answer_pending().await? {
                 continue;
             }
             let update =
@@ -329,16 +318,17 @@ impl SmokeHost {
                 self.notices.push(notice.text.to_string());
             }
             if let UpdateKind::TurnEnded { turn, .. } = update.kind {
-                return turn;
+                return Ok(turn);
             }
         }
-        panic!(
+        Err(format!(
             "scripted turn did not end within its bound; evidence {}",
             self.evidence.display()
-        );
+        )
+        .into())
     }
 
-    async fn prompt_turn(&self) -> TurnId {
+    async fn prompt_turn(&self) -> Result<TurnId, Box<dyn StdError>> {
         let reply = self
             .agent
             .submit(Command::Prompt {
@@ -347,15 +337,14 @@ impl SmokeHost {
                     text: "exercise the MCP server".into(),
                 }],
             })
-            .await
-            .expect("scripted prompt");
+            .await?;
         let Reply::Accepted { turn, .. } = reply else {
-            panic!("prompt: {reply:?}");
+            return Err(format!("prompt: {reply:?}").into());
         };
-        turn
+        Ok(turn)
     }
 
-    async fn status(&self) -> String {
+    async fn status(&self) -> Result<String, Box<dyn StdError>> {
         match self
             .agent
             .submit(Command::Run {
@@ -363,24 +352,22 @@ impl SmokeHost {
                 args: "".into(),
                 expected: None,
             })
-            .await
-            .expect("mcp status command")
+            .await?
         {
-            Reply::Done(Output::Markdown(text)) => text.into(),
-            reply => panic!("unexpected mcp status reply: {reply:?}"),
+            Reply::Done(Output::Markdown(text)) => Ok(text.into()),
+            reply => Err(format!("unexpected mcp status reply: {reply:?}").into()),
         }
     }
 
-    fn results(&self, name: &str) -> Vec<ResultEntry> {
-        self.agent
-            .view(PageReq::default())
-            .expect("host view")
+    fn results(&self, name: &str) -> Result<Vec<ResultEntry>, Box<dyn StdError>> {
+        let view = self.agent.view(PageReq::default())?;
+        Ok(view
             .entries
             .items
             .iter()
             .filter_map(|entry| result_entry(entry.id, &entry.kind))
             .filter(|entry| entry.name == name)
-            .collect()
+            .collect())
     }
 
     /// Closes every session through the real Host and returns its report.
@@ -401,28 +388,29 @@ impl SmokeHost {
 }
 
 /// Decodes every complete line of the durable journal with the product codec.
-fn durable_records(journal: &Path, evidence: &Path) -> Vec<Record> {
-    let bytes = fs::read(journal).unwrap_or_else(|error| {
-        panic!(
+fn durable_records(journal: &Path, evidence: &Path) -> Result<Vec<Record>, Box<dyn StdError>> {
+    let bytes = fs::read(journal).map_err(|error| {
+        format!(
             "durable journal {} unreadable: {error}; evidence {}",
             journal.display(),
             evidence.display()
         )
-    });
+    })?;
     bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
             dal_core::decode(line)
-                .unwrap_or_else(|error| {
-                    panic!(
+                .map(|decoded| decoded.record)
+                .map_err(|error| {
+                    format!(
                         "journal line failed product decode: {error:?}; evidence {}",
                         evidence.display()
                     )
                 })
-                .record
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(Into::into)
 }
 
 fn durable_results(records: &[Record], call: &CallId) -> Vec<ResultEntry> {
@@ -436,12 +424,260 @@ fn durable_results(records: &[Record], call: &CallId) -> Vec<ResultEntry> {
         .collect()
 }
 
+/// Discovers the fixture server through the real tool boundary, then invokes
+/// the echo tool and checks the identity of its result.
+async fn discover_and_invoke(
+    smoke: &mut SmokeHost,
+    at: &str,
+) -> Result<ResultEntry, Box<dyn StdError>> {
+    smoke.prompt_turn().await?;
+    smoke.turn_ended().await?;
+    assert!(
+        smoke.status().await?.contains("ready"),
+        "server not ready after discovery; evidence {at}"
+    );
+    let discovered = smoke.results(ENTRY_TOOL)?;
+    assert_eq!(
+        discovered.len(),
+        1,
+        "entry tool result count; evidence {at}"
+    );
+    assert!(
+        !discovered[0].error
+            && discovered[0].text.contains(ECHO_TOOL)
+            && discovered[0].text.contains(WAIT_TOOL),
+        "discovery did not publish both tools: {:?}; evidence {at}",
+        discovered[0]
+    );
+
+    smoke.prompt_turn().await?;
+    smoke.turn_ended().await?;
+    let echo = smoke.results(ECHO_TOOL)?;
+    assert_eq!(echo.len(), 1, "echo result count; evidence {at}");
+    let echo = echo[0].clone();
+    assert!(
+        !echo.error && echo.text == ECHO_TOKEN,
+        "echo result identity mismatch: {echo:?}; evidence {at}"
+    );
+    assert!(
+        smoke
+            .notices
+            .iter()
+            .any(|notice| notice.contains(PROGRESS_MARK)),
+        "server progress never reached the host: {:?}; evidence {at}",
+        smoke.notices
+    );
+    Ok(echo)
+}
+
+/// A held call, its live error result, and the server record that names it.
+struct HeldCall {
+    turn: TurnId,
+    live: Vec<ResultEntry>,
+    note: String,
+}
+
+/// Holds one call, cancels its turn, and checks the live error result and
+/// the server cancellation record.
+async fn hold_and_cancel(
+    smoke: &mut SmokeHost,
+    pid_file: &Path,
+    call_file: &Path,
+    cancel_file: &Path,
+    at: &str,
+) -> Result<HeldCall, Box<dyn StdError>> {
+    let held_turn = smoke.prompt_turn().await?;
+    let call_seen_by = Instant::now() + Duration::from_secs(10);
+    let mut saw_call = false;
+    while Instant::now() < call_seen_by && !saw_call {
+        smoke.answer_pending().await?;
+        saw_call = fs::read_to_string(pid_file).is_ok_and(|contents| contents.ends_with('w'))
+            && fs::read_to_string(call_file).is_ok_and(|id| !id.is_empty());
+        if !saw_call {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    assert!(
+        saw_call,
+        "server never received the held call; evidence {at}"
+    );
+    let request_id = fs::read_to_string(call_file)
+        .map_err(|error| format!("recorded request id unreadable: {error}; evidence {at}"))?;
+
+    let cancelled_at = Instant::now();
+    smoke
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(held_turn),
+        })
+        .await
+        .map_err(|error| format!("cancel the held turn: {error:?}; evidence {at}"))?;
+    let ended = smoke.turn_ended().await?;
+    assert_eq!(ended, held_turn, "a different turn ended; evidence {at}");
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(10),
+        "cancelled turn waited on the call: {:?}; evidence {at}",
+        cancelled_at.elapsed()
+    );
+    assert!(
+        smoke.status().await?.contains("ready"),
+        "a cancelled call must not read as a crash; evidence {at}"
+    );
+    // The cancel fold settles every in-flight call with exactly one error
+    // result (dal-core fold cancel path), so an empty set is a failure.
+    let held_live = smoke.results(WAIT_TOOL)?;
+    assert!(
+        held_live.len() == 1 && held_live[0].error,
+        "held call must have exactly one error result: {held_live:?}; evidence {at}"
+    );
+
+    let notice_by = Instant::now() + Duration::from_secs(5);
+    wait_until(notice_by, "server cancellation notice", || {
+        fs::read_to_string(cancel_file).is_ok_and(|note| !note.is_empty())
+    })
+    .await;
+    let note = fs::read_to_string(cancel_file)
+        .map_err(|error| format!("cancellation notice unreadable: {error}; evidence {at}"))?;
+    assert!(
+        note.contains("notifications/cancelled")
+            && note.contains(&format!("\"requestId\":{request_id}")),
+        "notice does not name request {request_id}: {note}; evidence {at}"
+    );
+    Ok(HeldCall {
+        turn: held_turn,
+        live: held_live,
+        note,
+    })
+}
+
+/// Closes the host through the real Host, checks the shutdown report, and
+/// waits for the fixture child to exit. Returns the evidence directory.
+async fn close_host(
+    smoke: SmokeHost,
+    pid_file: &Path,
+    at: &str,
+) -> Result<PathBuf, Box<dyn StdError>> {
+    let pid: u32 = fs::read_to_string(pid_file)
+        .map_err(|error| format!("child pid unreadable: {error}; evidence {at}"))?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .map_err(|error| format!("numeric child pid unparsable: {error:?}; evidence {at}"))?;
+    let evidence = smoke.evidence.clone();
+    let report = smoke.close().await;
+    assert_eq!(
+        report,
+        ShutdownReport {
+            sessions_closed: 1,
+            status_quiet: true,
+            tasks_remaining: 0,
+        },
+        "host shutdown report; evidence {at}"
+    );
+    let exit_by = Instant::now() + Duration::from_secs(5);
+    wait_until(exit_by, "MCP child exit after close", || {
+        !process_is_live(pid)
+    })
+    .await;
+    Ok(evidence)
+}
+
+/// Paths and live records needed for the post-close durable checks.
+struct DurableInput<'a> {
+    data: &'a Path,
+    workspace: &'a Path,
+    evidence: &'a Path,
+    cancel_file: &'a Path,
+    session: SessionId,
+    echo: &'a ResultEntry,
+    held: &'a HeldCall,
+    at: &'a str,
+}
+
+/// Reads the journal back through the product store after close, then checks
+/// that nothing is published across the quiet window.
+async fn assert_durable_and_quiet(input: &DurableInput<'_>) -> TestResult {
+    let DurableInput {
+        data,
+        workspace,
+        evidence,
+        cancel_file,
+        session,
+        echo,
+        held,
+        at,
+    } = input;
+    let store = dal_store::Store::new(
+        data.to_path_buf(),
+        Workspace::new(workspace.to_path_buf())?,
+        dal_core::Product::Dalgona,
+    );
+    let journal = store.session_file(*session);
+    let durable_echo = dal_store::Store::read_session_entry(data, *session, echo.id)
+        .map_err(|error| format!("durable echo entry: {error:?}; evidence {at}"))?;
+    assert_eq!(
+        result_entry(durable_echo.id, &durable_echo.kind).as_ref(),
+        Some(*echo),
+        "durable echo entry differs from the live result; evidence {at}"
+    );
+
+    let closed_bytes = fs::read(&journal)
+        .map_err(|error| format!("journal bytes after close: {error}; evidence {at}"))?;
+    let records = durable_records(&journal, evidence)?;
+    assert_eq!(
+        durable_results(&records, &echo.call).as_slice(),
+        std::slice::from_ref(*echo),
+        "echo call must have exactly one durable result; evidence {at}"
+    );
+    for live in &held.live {
+        let durable = durable_results(&records, &live.call);
+        assert_eq!(
+            durable,
+            vec![live.clone()],
+            "held call durable result differs from the live one; evidence {at}"
+        );
+    }
+    let durable_held: Vec<ResultEntry> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::ToolResult(entry) => result_entry(entry.id, &entry.kind),
+            _ => None,
+        })
+        .filter(|entry| entry.name == WAIT_TOOL)
+        .collect();
+    assert_eq!(
+        durable_held, held.live,
+        "held call must have exactly one durable error result; evidence {at}"
+    );
+    assert!(
+        records.iter().any(|record| matches!(
+            record,
+            Record::TurnEnd { turn, stop: TurnEndStop::Cancelled, .. } if *turn == held.turn
+        )),
+        "journal lacks the cancelled end of the held turn; evidence {at}"
+    );
+
+    // 6. No publish after close: the journal and the server's cancel record
+    //    stay byte-identical across a quiet window after the child is gone.
+    tokio::time::sleep(QUIET_WINDOW).await;
+    assert_eq!(
+        fs::read(&journal)
+            .map_err(|error| format!("journal bytes after quiet window: {error}; evidence {at}"))?,
+        closed_bytes,
+        "journal changed after close; evidence {at}"
+    );
+    assert_eq!(
+        fs::read_to_string(cancel_file)
+            .map_err(|error| format!("cancel record after quiet window: {error}; evidence {at}"))?,
+        held.note,
+        "server cancel record changed after close; evidence {at}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one end-to-end host smoke keeps its discover, invoke, cancel, close, and read-back phases in order"
-)]
-async fn host_smoke_discover_invoke_cancel_close_and_read_back() {
+async fn host_smoke_discover_invoke_cancel_close_and_read_back() -> TestResult {
     let root = evidence_root();
     let data = root.join("host-data");
     let workspace = root.join("host-workspace");
@@ -479,193 +715,27 @@ async fn host_smoke_discover_invoke_cancel_close_and_read_back() {
         &data,
         &workspace,
     )
-    .await;
+    .await?;
     let session = smoke.agent.session();
     let at = root.display().to_string();
 
-    // 1. Discover through the real tool boundary.
-    smoke.prompt_turn().await;
-    smoke.turn_ended().await;
-    assert!(
-        smoke.status().await.contains("ready"),
-        "server not ready after discovery; evidence {at}"
-    );
-    let discovered = smoke.results(ENTRY_TOOL);
-    assert_eq!(
-        discovered.len(),
-        1,
-        "entry tool result count; evidence {at}"
-    );
-    assert!(
-        !discovered[0].error
-            && discovered[0].text.contains(ECHO_TOOL)
-            && discovered[0].text.contains(WAIT_TOOL),
-        "discovery did not publish both tools: {:?}; evidence {at}",
-        discovered[0]
-    );
-
-    // 2. Invoke: the result text is the server's own bytes.
-    smoke.prompt_turn().await;
-    smoke.turn_ended().await;
-    let echo = smoke.results(ECHO_TOOL);
-    assert_eq!(echo.len(), 1, "echo result count; evidence {at}");
-    let echo = echo[0].clone();
-    assert!(
-        !echo.error && echo.text == ECHO_TOKEN,
-        "echo result identity mismatch: {echo:?}; evidence {at}"
-    );
-    assert!(
-        smoke
-            .notices
-            .iter()
-            .any(|notice| notice.contains(PROGRESS_MARK)),
-        "server progress never reached the host: {:?}; evidence {at}",
-        smoke.notices
-    );
-
+    // 1+2. Discover through the real tool boundary, then invoke `echo`.
+    let echo = discover_and_invoke(&mut smoke, &at).await?;
     // 3. Hold a call, then cancel its turn once the server has it.
-    let held_turn = smoke.prompt_turn().await;
-    let call_seen_by = Instant::now() + Duration::from_secs(10);
-    let mut saw_call = false;
-    while Instant::now() < call_seen_by && !saw_call {
-        smoke.answer_pending().await;
-        saw_call = fs::read_to_string(&pid_file).is_ok_and(|contents| contents.ends_with('w'))
-            && fs::read_to_string(&call_file).is_ok_and(|id| !id.is_empty());
-        if !saw_call {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-    assert!(
-        saw_call,
-        "server never received the held call; evidence {at}"
-    );
-    let request_id = fs::read_to_string(&call_file).expect("recorded request id");
-
-    let cancelled_at = Instant::now();
-    smoke
-        .agent
-        .submit(Command::Cancel {
-            scope: CancelScope::Turn(held_turn),
-        })
-        .await
-        .expect("cancel the held turn");
-    let ended = smoke.turn_ended().await;
-    assert_eq!(ended, held_turn, "a different turn ended; evidence {at}");
-    assert!(
-        cancelled_at.elapsed() < Duration::from_secs(10),
-        "cancelled turn waited on the call: {:?}; evidence {at}",
-        cancelled_at.elapsed()
-    );
-    assert!(
-        smoke.status().await.contains("ready"),
-        "a cancelled call must not read as a crash; evidence {at}"
-    );
-    // The cancel fold settles every in-flight call with exactly one error
-    // result (dal-core fold cancel path), so an empty set is a failure.
-    let held_live = smoke.results(WAIT_TOOL);
-    assert!(
-        held_live.len() == 1 && held_live[0].error,
-        "held call must have exactly one error result: {held_live:?}; evidence {at}"
-    );
-
-    let notice_by = Instant::now() + Duration::from_secs(5);
-    wait_until(notice_by, "server cancellation notice", || {
-        fs::read_to_string(&cancel_file).is_ok_and(|note| !note.is_empty())
-    })
-    .await;
-    let note = fs::read_to_string(&cancel_file).expect("cancellation notice");
-    assert!(
-        note.contains("notifications/cancelled")
-            && note.contains(&format!("\"requestId\":{request_id}")),
-        "notice does not name request {request_id}: {note}; evidence {at}"
-    );
-
+    let held = hold_and_cancel(&mut smoke, &pid_file, &call_file, &cancel_file, &at).await?;
     // 4. Close through the real Host and assert its report contract.
-    let pid: u32 = fs::read_to_string(&pid_file)
-        .expect("child pid")
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .expect("numeric child pid");
-    let evidence = smoke.evidence.clone();
-    let report = smoke.close().await;
-    assert_eq!(
-        report,
-        ShutdownReport {
-            sessions_closed: 1,
-            status_quiet: true,
-            tasks_remaining: 0,
-        },
-        "host shutdown report; evidence {at}"
-    );
-    let exit_by = Instant::now() + Duration::from_secs(5);
-    wait_until(exit_by, "MCP child exit after close", || {
-        !process_is_live(pid)
+    let evidence = close_host(smoke, &pid_file, &at).await?;
+    // 5+6. Durable read-back after close; silence across the quiet window.
+    assert_durable_and_quiet(&DurableInput {
+        data: &data,
+        workspace: &workspace,
+        evidence: &evidence,
+        cancel_file: &cancel_file,
+        session,
+        echo: &echo,
+        held: &held,
+        at: &at,
     })
-    .await;
-
-    // 5. Durable read-back after close, through the product store.
-    let store = dal_store::Store::new(
-        data.clone(),
-        Workspace::new(workspace.clone()).expect("workspace"),
-        dal_core::Product::Dalgona,
-    );
-    let journal = store.session_file(session);
-    let durable_echo = dal_store::Store::read_session_entry(&data, session, echo.id)
-        .unwrap_or_else(|error| panic!("durable echo entry: {error:?}; evidence {at}"));
-    assert_eq!(
-        result_entry(durable_echo.id, &durable_echo.kind),
-        Some(echo.clone()),
-        "durable echo entry differs from the live result; evidence {at}"
-    );
-
-    let closed_bytes = fs::read(&journal).expect("journal bytes after close");
-    let records = durable_records(&journal, &evidence);
-    assert_eq!(
-        durable_results(&records, &echo.call),
-        vec![echo.clone()],
-        "echo call must have exactly one durable result; evidence {at}"
-    );
-    for held in &held_live {
-        let durable = durable_results(&records, &held.call);
-        assert_eq!(
-            durable,
-            vec![held.clone()],
-            "held call durable result differs from the live one; evidence {at}"
-        );
-    }
-    let durable_held: Vec<ResultEntry> = records
-        .iter()
-        .filter_map(|record| match record {
-            Record::ToolResult(entry) => result_entry(entry.id, &entry.kind),
-            _ => None,
-        })
-        .filter(|entry| entry.name == WAIT_TOOL)
-        .collect();
-    assert_eq!(
-        durable_held, held_live,
-        "held call must have exactly one durable error result; evidence {at}"
-    );
-    assert!(
-        records.iter().any(|record| matches!(
-            record,
-            Record::TurnEnd { turn, stop: TurnEndStop::Cancelled, .. } if *turn == held_turn
-        )),
-        "journal lacks the cancelled end of the held turn; evidence {at}"
-    );
-
-    // 6. No publish after close: the journal and the server's cancel record
-    //    stay byte-identical across a quiet window after the child is gone.
-    tokio::time::sleep(QUIET_WINDOW).await;
-    assert_eq!(
-        fs::read(&journal).expect("journal bytes after quiet window"),
-        closed_bytes,
-        "journal changed after close; evidence {at}"
-    );
-    assert_eq!(
-        fs::read_to_string(&cancel_file).expect("cancel record after quiet window"),
-        note,
-        "server cancel record changed after close; evidence {at}"
-    );
+    .await?;
+    Ok(())
 }

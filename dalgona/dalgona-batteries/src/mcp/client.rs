@@ -33,7 +33,7 @@ use super::{
     stdio::{ProcessEnvironment, StdioTransport},
     tools::{
         HeaderAnnotation, Key, MappedTool, RemoteTool, ServerEntryTool, ToolListCache, cache_ttl,
-        decode_tool_page, fold_tool_name, shape_result, tool_spec,
+        decode_tool_page, fold_tool_name, sanitize_server_text, shape_result, tool_spec,
     },
 };
 
@@ -65,6 +65,32 @@ struct Instance {
 struct InstanceState {
     phase: Phase,
     restarts_left: u32,
+    /// Whether the current `Starting` attempt spent restart budget. A first
+    /// start from `Declared` spends nothing; only a restart from `Failed`
+    /// does, so a withdrawn first start returns to `Declared`.
+    spent: bool,
+}
+
+impl InstanceState {
+    /// Withdraws a start that never admitted a transport.
+    ///
+    /// A first start took no budget and returns to `Declared`, so the next
+    /// call starts free. A restart refunds its attempt and returns to
+    /// `Failed`. Either way the next call starts clean instead of wedging on
+    /// `Starting`, and a cancelled attempt never counts as the session's one
+    /// restart while a genuine failure still does.
+    fn withdraw_start(&mut self) {
+        if matches!(self.phase, Phase::Stopped) {
+            return;
+        }
+        if self.spent {
+            self.spent = false;
+            self.restarts_left = (self.restarts_left + 1).min(RESTART_BUDGET);
+            self.phase = Phase::Failed;
+        } else {
+            self.phase = Phase::Declared;
+        }
+    }
 }
 
 enum Phase {
@@ -107,6 +133,7 @@ impl Instance {
             state: Mutex::new(InstanceState {
                 phase: Phase::Declared,
                 restarts_left: RESTART_BUDGET,
+                spent: false,
             }),
             starting: Mutex::new(()),
             last_notice: Mutex::new(None),
@@ -167,16 +194,19 @@ impl Transport {
         let body = protocol::request_body(id, method, params, version, ctx.client_version)?;
         match self {
             Self::Stdio(transport) => {
-                let mut events = transport.send(id, &body, &ctx.instance.cancel).await?;
-                let response = await_reply(id, &mut events, ctx).await;
-                transport.finish(id).await;
+                let mut inflight = transport.send(id, &body, &ctx.instance.cancel).await?;
+                let response = await_reply(id, &mut inflight.events, ctx).await;
+                // A reply or a server failure settles the slot. A timeout or
+                // a cancellation leaves it unsettled: dropping it retires the
+                // slot and tells the server to stop, exactly as when the
+                // caller's whole call is dropped before it gets here.
                 if matches!(
                     response,
                     Err(TransportError::Cancelled | TransportError::Mcp(McpError::Timeout { .. }))
                 ) {
-                    transport
-                        .cancel_request(id, version, &ctx.instance.cancel)
-                        .await;
+                    drop(inflight);
+                } else {
+                    inflight.settle().await;
                 }
                 response
             }
@@ -494,8 +524,19 @@ impl Client {
                         key: instance.key.display(),
                     });
                 }
-                Phase::Failed => state.restarts_left -= 1,
+                // A previous starter was dropped (its call was cancelled)
+                // before it admitted a transport. Only the holder of the
+                // starting lock sets this phase, so finding it set means the
+                // attempt never ran: withdraw it, then price the withdrawn
+                // phase below exactly like a fresh attempt, so a cancelled
+                // restart is priced again instead of running free.
+                Phase::Starting => state.withdraw_start(),
                 _ => {}
+            }
+            // A start from Failed spends one restart; a first start is free.
+            if matches!(state.phase, Phase::Failed) {
+                state.restarts_left = state.restarts_left.saturating_sub(1);
+                state.spent = true;
             }
             state.phase = Phase::Starting;
         }
@@ -535,7 +576,14 @@ impl Client {
                 Ok(ready)
             }
             Err(error) => {
-                instance.crash().await;
+                // A start the session cancelled never ran: it is withdrawn. A
+                // genuine start failure keeps the attempt it took, exactly
+                // like a running crash.
+                if instance.cancel.is_cancelled() {
+                    instance.state.lock().await.withdraw_start();
+                } else {
+                    instance.crash().await;
+                }
                 Err(error)
             }
         }
@@ -978,6 +1026,18 @@ impl Client {
             return "no MCP servers in this session.".into();
         }
         let instances = session.instances.lock().await;
+        // A start whose owning call was cancelled leaves `Starting` behind
+        // with no owner. Only a lock holder sets that phase, so finding it
+        // set while the lock is free means the attempt never ran: withdrawing
+        // it here keeps a cancelled start from reading as stuck.
+        for instance in instances.values() {
+            if let Ok(_starting) = instance.starting.try_lock() {
+                let mut state = instance.state.lock().await;
+                if matches!(state.phase, Phase::Starting) {
+                    state.withdraw_start();
+                }
+            }
+        }
         let mut rows = Vec::new();
         for (key, decl) in declarations.iter() {
             let (state, count, grant) = if let Some(instance) = instances.get(key) {
@@ -1351,10 +1411,12 @@ async fn answer_elicitation(
     who: &Caller,
 ) -> Result<String, McpError> {
     let params = request.get("params");
-    let message = params
-        .and_then(|value| value.get("message"))
-        .and_then(JsonValueTrait::as_str)
-        .unwrap_or("MCP server requests input");
+    let message = sanitize_server_text(
+        params
+            .and_then(|value| value.get("message"))
+            .and_then(JsonValueTrait::as_str)
+            .unwrap_or("MCP server requests input"),
+    );
     let properties = params
         .and_then(|value| value.get("requestedSchema"))
         .and_then(|value| value.get("properties"))
@@ -1389,10 +1451,7 @@ async fn answer_elicitation(
         };
         let answer = session.services.ask(who, question).await;
         let Ok(Some(Answer::Value(value))) = answer else {
-            if matches!(
-                answer,
-                Err(ServiceError::Denied(dal_core::DenyReason::NoFrontEnd))
-            ) {
+            if answer.is_err() {
                 return Err(McpError::NoAskFrontEnd);
             }
             return Ok("{\"action\":\"decline\"}".into());
@@ -1450,11 +1509,13 @@ async fn await_reply(
                 deadline = Instant::now() + ctx.budgets.call;
                 let mut last_notice = ctx.instance.last_notice.lock().await;
                 if last_notice.is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1)) {
-                    let text = value
-                        .get("params")
-                        .and_then(|params| params.get("message"))
-                        .and_then(JsonValueTrait::as_str)
-                        .unwrap_or("progress");
+                    let text = sanitize_server_text(
+                        value
+                            .get("params")
+                            .and_then(|params| params.get("message"))
+                            .and_then(JsonValueTrait::as_str)
+                            .unwrap_or("progress"),
+                    );
                     ctx.session.services.notify(
                         ctx.who,
                         Notice {

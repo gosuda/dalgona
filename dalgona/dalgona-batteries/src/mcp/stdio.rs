@@ -4,7 +4,10 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -20,7 +23,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    Budgets, McpError, STDERR_RING, TransportError, stderr_diagnostic,
+    Budgets, McpError, SHUTDOWN_GRACE, STDERR_RING, TransportError, stderr_diagnostic,
     tools::{Key, ServerDecl, resolve_executable},
 };
 
@@ -31,6 +34,8 @@ const PENDING_MAX: usize = 64;
 const EVENT_CAPACITY: usize = 8;
 
 const POST_KILL_WAIT: Duration = Duration::from_secs(1);
+
+const REDACTED: &str = "<redacted>";
 
 /// The process environment allowlist captured through the host's env service.
 #[derive(Clone, Debug, Default)]
@@ -44,17 +49,139 @@ pub(crate) struct ProcessEnvironment {
 pub(crate) struct StdioTransport {
     key: Key,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    pipe: StdinPipe,
     pending: Pending,
-    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    abandoned: mpsc::Sender<u64>,
+    stderr_tail: Arc<StderrRing>,
     stderr_done: watch::Receiver<bool>,
     reader_task: AbortOnDropHandle<()>,
     stderr_task: AbortOnDropHandle<()>,
+    abandon_task: AbortOnDropHandle<()>,
     cancel: CancellationToken,
+    /// Set once `shutdown` has reaped the tree, so a later drop never
+    /// signals a process group that no longer exists.
+    retired: AtomicBool,
 }
 
 /// Reply channels for in-flight requests, keyed by wire id.
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>;
+
+/// The bounded tail of a child's stderr and the declared values its excerpt
+/// must never repeat.
+struct StderrRing {
+    tail: Mutex<VecDeque<u8>>,
+    secrets: Box<[Box<str>]>,
+}
+
+impl StderrRing {
+    /// An empty ring that hides every declared environment value.
+    fn new(env: &std::collections::BTreeMap<Box<str>, Box<str>>) -> Arc<Self> {
+        // Empty values are declarable and must not join: replacing the empty
+        // pattern would splice the marker between every character.
+        let mut secrets: Vec<Box<str>> = env
+            .values()
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect();
+        // Longest first: when one value extends another, the longer match
+        // must win or the shorter leaves a remainder of the longer behind.
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        Arc::new(Self {
+            tail: Mutex::new(VecDeque::with_capacity(STDERR_RING)),
+            secrets: secrets.into(),
+        })
+    }
+}
+
+/// The child's stdin with its torn flag: every writer shares this one path,
+/// so a partial line left by a dropped write poisons all later lines alike.
+#[derive(Clone)]
+struct StdinPipe {
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    torn: Arc<AtomicBool>,
+}
+
+impl StdinPipe {
+    /// Writes one complete line. Returns `None` when stdin is already closed.
+    ///
+    /// The write is one buffer so a line is never split by this function, and
+    /// a dropped write marks stdin torn so no later line is appended to a
+    /// partial one.
+    async fn write_line(&self, body: &str) -> Option<io::Result<()>> {
+        let mut line = Vec::with_capacity(body.len() + 1);
+        line.extend_from_slice(body.as_bytes());
+        line.push(b'\n');
+        let mut stdin = self.stdin.lock().await;
+        if self.torn.load(Ordering::Acquire) {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdin holds a partial line",
+            )));
+        }
+        let stdin = stdin.as_mut()?;
+        let write = TornWrite {
+            torn: self.torn.as_ref(),
+            finished: false,
+        };
+        let result = stdin.write_all(&line).await;
+        write.finish();
+        Some(result)
+    }
+}
+
+/// One request awaiting its reply on the child's stdout.
+///
+/// The caller settles the slot once it holds an outcome. A caller that stops
+/// waiting instead (its call was cancelled and the future dropped) leaves the
+/// slot unsettled; dropping it then hands the id to the transport's abandon
+/// task, which retires the slot and sends `notifications/cancelled`, so no
+/// slot or server-side request outlives its caller.
+pub(crate) struct InFlight {
+    id: u64,
+    /// Replies and matching progress for this request.
+    pub(crate) events: mpsc::Receiver<Result<RawJson, McpError>>,
+    pending: Pending,
+    abandoned: mpsc::Sender<u64>,
+    settled: bool,
+}
+
+impl InFlight {
+    /// Retires the slot once the caller holds its outcome.
+    pub(crate) async fn settle(mut self) {
+        self.pending.lock().await.remove(&self.id);
+        self.settled = true;
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // A full queue already holds `PENDING_MAX` ids, the most slots that
+        // can exist; shedding the extra id leaves its slot to `shutdown`.
+        if !self.settled {
+            let _ = self.abandoned.try_send(self.id);
+        }
+    }
+}
+
+/// Flags stdin as torn when a write is dropped before its line finishes.
+struct TornWrite<'a> {
+    torn: &'a AtomicBool,
+    finished: bool,
+}
+
+impl TornWrite<'_> {
+    fn finish(mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for TornWrite<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.torn.store(true, Ordering::Release);
+        }
+    }
+}
 
 impl StdioTransport {
     /// Spawns a declared command without a shell and with only the captured env allowlist.
@@ -74,7 +201,7 @@ impl StdioTransport {
         // launch; resolution and spawn borrow the same lowering.
         let argv = launch.execution_argv();
         let argv: &[Box<str>] = argv.as_ref();
-        let resolved = resolve_program(&key, argv, environment).await?;
+        let resolved = resolve_program(&key, declaration, argv, environment).await?;
         let mut child = spawn_child(&key, resolved, argv, env, environment, budgets).await?;
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
@@ -89,11 +216,17 @@ impl StdioTransport {
         };
 
         let child = Arc::new(Mutex::new(child));
-        let stdin = Arc::new(Mutex::new(Some(stdin)));
+        let pipe = StdinPipe {
+            stdin: Arc::new(Mutex::new(Some(stdin))),
+            torn: Arc::new(AtomicBool::new(false)),
+        };
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
+        let stderr_tail = StderrRing::new(env);
         let (stderr_done_tx, stderr_done_rx) = watch::channel(false);
         let cancel = CancellationToken::new();
+        // Every id sent names a registered slot, and `PENDING_MAX` bounds the
+        // slots, so a queue of that size never sheds.
+        let (abandoned, abandoned_rx) = mpsc::channel(PENDING_MAX);
         #[expect(
             clippy::disallowed_methods,
             reason = "stdio server owns the abort-on-drop reader task"
@@ -101,7 +234,7 @@ impl StdioTransport {
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),
-            Arc::clone(&stdin),
+            pipe.clone(),
             Arc::clone(&pending),
             Arc::clone(&stderr_tail),
             stderr_done_rx.clone(),
@@ -117,17 +250,30 @@ impl StdioTransport {
             Arc::clone(&stderr_tail),
             stderr_done_tx,
         )));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "stdio server owns the abort-on-drop abandon task"
+        )]
+        let abandon_task = AbortOnDropHandle::new(tokio::spawn(retire_abandoned(
+            abandoned_rx,
+            Arc::clone(&pending),
+            pipe.clone(),
+            cancel.clone(),
+        )));
 
         Ok(Self {
             key,
             child,
-            stdin,
+            pipe,
             pending,
+            abandoned,
             stderr_tail,
             stderr_done: stderr_done_rx,
             reader_task,
             stderr_task,
+            abandon_task,
             cancel,
+            retired: AtomicBool::new(false),
         })
     }
 
@@ -141,7 +287,7 @@ impl StdioTransport {
         id: u64,
         body: &RawJson,
         cancel: &CancellationToken,
-    ) -> Result<mpsc::Receiver<Result<RawJson, McpError>>, TransportError> {
+    ) -> Result<InFlight, TransportError> {
         if cancel.is_cancelled() || self.cancel.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
@@ -151,7 +297,7 @@ impl StdioTransport {
                 message: "MCP request exceeds the stdio line limit".to_owned(),
             }));
         }
-        let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
+        let (sender, events) = mpsc::channel(EVENT_CAPACITY);
         {
             let mut pending = self.pending.lock().await;
             if pending.len() >= PENDING_MAX {
@@ -168,36 +314,37 @@ impl StdioTransport {
             }
             pending.insert(id, sender);
         }
-
-        let write = async {
-            let mut stdin = self.stdin.lock().await;
-            let Some(stdin) = stdin.as_mut() else {
-                let code = wait_child(&self.child, cancel).await;
-                return Err(self.exited_error(code).await);
-            };
-            if stdin.write_all(body.as_str().as_bytes()).await.is_err()
-                || stdin.write_all(b"\n").await.is_err()
-            {
-                let code = wait_child(&self.child, cancel).await;
-                return Err(self.exited_error(code).await);
-            }
-            Ok(())
+        // No await separates the slot's insertion from the guard that owns it,
+        // so a dropped caller always leaves the guard to retire the slot.
+        let inflight = InFlight {
+            id,
+            events,
+            pending: Arc::clone(&self.pending),
+            abandoned: self.abandoned.clone(),
+            settled: false,
         };
+
         let write_result = tokio::select! {
             () = cancel.cancelled() => Err(TransportError::Cancelled),
             () = self.cancel.cancelled() => Err(TransportError::Cancelled),
-            result = async { write.await.map_err(TransportError::Mcp) } => result,
+            result = self.pipe.write_line(body.as_str()) => Ok(result),
+        };
+        let write_result = match write_result {
+            Err(error) => Err(error),
+            Ok(Some(Ok(()))) => Ok(()),
+            Ok(Some(Err(_))) if self.pipe.torn.load(Ordering::Acquire) => {
+                Err(TransportError::Mcp(self.poisoned_shutdown().await))
+            }
+            Ok(Some(Err(_)) | None) => {
+                let code = wait_child(&self.child, cancel).await;
+                Err(TransportError::Mcp(self.exited_error(code).await))
+            }
         };
         if let Err(error) = write_result {
-            self.pending.lock().await.remove(&id);
+            inflight.settle().await;
             return Err(error);
         }
-        Ok(receiver)
-    }
-
-    /// Removes a completed or cancelled request from the response table.
-    pub(crate) async fn finish(&self, id: u64) {
-        self.pending.lock().await.remove(&id);
+        Ok(inflight)
     }
 
     /// Returns the bounded stderr excerpt retained for crash diagnostics.
@@ -219,13 +366,18 @@ impl StdioTransport {
     pub(crate) async fn shutdown(&self, grace: Duration) -> Result<(), McpError> {
         clear_pending(&self.pending).await;
         self.cancel.cancel();
-        self.stdin.lock().await.take();
+        self.pipe.stdin.lock().await.take();
 
         let mut child = self.child.lock().await;
-        let outcome = match timeout(grace, child.wait()).await {
+        let waited = timeout(grace, child.wait()).await;
+        // The tree outlives its leader: a server that exits when stdin closes
+        // can still leave descendants in its group, so the group is signalled
+        // whether or not the leader finished inside the grace.
+        let swept = child.start_kill();
+        let outcome = match waited {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) => Err(-1),
-            Err(_) => match child.start_kill() {
+            Err(_) => match swept {
                 Ok(()) => match timeout(POST_KILL_WAIT, child.wait()).await {
                     Ok(Ok(_)) => Ok(()),
                     Ok(Err(_)) | Err(_) => Err(-1),
@@ -234,6 +386,8 @@ impl StdioTransport {
             },
         };
         drop(child);
+        self.retired.store(true, Ordering::Release);
+        self.abandon_task.abort();
         self.reader_task.abort();
         let result = match outcome {
             Ok(()) => Ok(()),
@@ -250,26 +404,20 @@ impl StdioTransport {
         cancel: &CancellationToken,
     ) -> Result<(), TransportError> {
         let write = async {
-            let mut stdin = self.stdin.lock().await;
-            let Some(stdin) = stdin.as_mut() else {
-                let code = wait_child(&self.child, cancel).await;
-                return Err(TransportError::Mcp(self.exited_error(code).await));
-            };
-            stdin
-                .write_all(body.as_str().as_bytes())
-                .await
-                .map_err(|error| {
-                    TransportError::Mcp(McpError::Start {
-                        key: self.key.display(),
-                        cause: error.to_string(),
-                    })
-                })?;
-            stdin.write_all(b"\n").await.map_err(|error| {
-                TransportError::Mcp(McpError::Start {
+            match self.pipe.write_line(body.as_str()).await {
+                Some(Ok(())) => Ok(()),
+                Some(Err(_)) if self.pipe.torn.load(Ordering::Acquire) => {
+                    Err(TransportError::Mcp(self.poisoned_shutdown().await))
+                }
+                Some(Err(error)) => Err(TransportError::Mcp(McpError::Start {
                     key: self.key.display(),
                     cause: error.to_string(),
-                })
-            })
+                })),
+                None => {
+                    let code = wait_child(&self.child, cancel).await;
+                    Err(TransportError::Mcp(self.exited_error(code).await))
+                }
+            }
         };
         tokio::select! {
             () = cancel.cancelled() => Err(TransportError::Cancelled),
@@ -278,13 +426,58 @@ impl StdioTransport {
         }
     }
 
-    /// Notifies the server that one correlated request no longer has a waiting caller.
-    pub(crate) async fn cancel_request(&self, id: u64, _version: &str, cancel: &CancellationToken) {
+    /// Stops a transport whose stdin holds a partial line and reports the crash.
+    ///
+    /// A torn stdin cannot carry another line, so the tree is poisoned: it is
+    /// shut down through the normal path (grace, then the group signal) instead
+    /// of being left running beside a fresh instance.
+    async fn poisoned_shutdown(&self) -> McpError {
+        self.shutdown(SHUTDOWN_GRACE).await.ok();
+        let code = self
+            .child
+            .lock()
+            .await
+            .try_wait()
+            .ok()
+            .flatten()
+            .map_or(-1, exit_code);
+        self.exited_error(code).await
+    }
+}
+
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        if self.retired.load(Ordering::Acquire) {
+            return;
+        }
+        // A transport dropped without `shutdown` (its owner was cancelled or
+        // replaced) still owns a live tree. Tokio's kill-on-drop reaches only
+        // the leader, so the group is signalled here; an exited leader means
+        // the group id may already belong to someone else, so it is left be.
+        if let Ok(mut child) = self.child.try_lock()
+            && child.try_wait().is_ok_and(|status| status.is_none())
+        {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Retires the request slots whose callers stopped waiting and tells the
+/// server to stop working on them.
+async fn retire_abandoned(
+    mut abandoned: mpsc::Receiver<u64>,
+    pending: Pending,
+    pipe: StdinPipe,
+    cancel: CancellationToken,
+) {
+    while let Some(id) = abandoned.recv().await {
+        pending.lock().await.remove(&id);
         let body = format!(
             r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{{"requestId":{id}}}}}"#
         );
-        if let Ok(body) = RawJson::parse(&body) {
-            let _ = self.notify(&body, cancel).await;
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = pipe.write_line(&body) => {}
         }
     }
 }
@@ -321,9 +514,28 @@ async fn wait_child(child: &Arc<Mutex<Box<dyn ChildWrapper>>>, cancel: &Cancella
     }
 }
 
-async fn read_stderr_excerpt(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
-    let mut tail = tail.lock().await;
-    String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+/// Returns the retained stderr tail with every declared environment value
+/// replaced, so a server that echoes its own configuration never carries a
+/// secret into the failure text. Replacement runs before the bound: a short
+/// value replaced by a longer marker could otherwise push the excerpt past
+/// the ring size, so the text is trimmed from the front at a character
+/// boundary afterwards.
+async fn read_stderr_excerpt(ring: &StderrRing) -> String {
+    let mut tail = ring.tail.lock().await;
+    let text = String::from_utf8_lossy(tail.make_contiguous()).into_owned();
+    drop(tail);
+    let mut text = ring
+        .secrets
+        .iter()
+        .fold(text, |text, secret| text.replace(&**secret, REDACTED));
+    if text.len() > STDERR_RING {
+        let mut cut = text.len() - STDERR_RING;
+        while !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        text.drain(..cut);
+    }
+    text
 }
 
 async fn wait_for_stderr(done: &mut watch::Receiver<bool>) {
@@ -338,7 +550,7 @@ async fn wait_for_stderr(done: &mut watch::Receiver<bool>) {
 
 async fn crash_error(
     child: &Arc<Mutex<Box<dyn ChildWrapper>>>,
-    stderr_tail: &Arc<Mutex<VecDeque<u8>>>,
+    stderr_tail: &StderrRing,
     stderr_done: &mut watch::Receiver<bool>,
     key: &Key,
     cancel: &CancellationToken,
@@ -354,8 +566,13 @@ async fn crash_error(
 }
 
 /// Resolves the declared argv[0] on the captured PATH snapshot.
+///
+/// The failure names the declaration's public target identity, never the
+/// program: an opaque command's executable is as hidden here as it is in the
+/// grant preview.
 async fn resolve_program(
     key: &Key,
+    declaration: &ServerDecl,
     command: &[Box<str>],
     environment: &ProcessEnvironment,
 ) -> Result<std::path::PathBuf, McpError> {
@@ -373,7 +590,10 @@ async fn resolve_program(
         })?
         .ok_or_else(|| McpError::Start {
             key: key.display(),
-            cause: format!("command {program:?} was not found on PATH"),
+            cause: format!(
+                "launch program was not found on PATH ({})",
+                declaration.redacted_target()
+            ),
         })
 }
 
@@ -441,9 +661,9 @@ async fn spawn_child(
 async fn read_stdout(
     stdout: ChildStdout,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    pipe: StdinPipe,
     pending: Pending,
-    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_tail: Arc<StderrRing>,
     mut stderr_done: watch::Receiver<bool>,
     key: Key,
     cancel: CancellationToken,
@@ -502,11 +722,11 @@ async fn read_stdout(
                     return;
                 }
             };
-            let mut stdin = stdin.lock().await;
-            if let Some(stdin) = stdin.as_mut()
-                && (stdin.write_all(response.as_bytes()).await.is_err()
-                    || stdin.write_all(b"\n").await.is_err())
-            {
+            // The server's answer goes through the same single-buffer write as
+            // every other line, so a dropped reply marks stdin torn instead of
+            // splitting a line. Closed stdin means shutdown already took it
+            // and owns the cleanup, so only a write fault crashes here.
+            if matches!(pipe.write_line(&response).await, Some(Err(_))) {
                 let error =
                     crash_error(&child, &stderr_tail, &mut stderr_done, &key, &cancel).await;
                 fail_pending(&pending, error).await;
@@ -628,18 +848,14 @@ async fn clear_pending(pending: &Pending) {
     pending.lock().await.clear();
 }
 
-async fn read_stderr(
-    mut stderr: ChildStderr,
-    tail: Arc<Mutex<VecDeque<u8>>>,
-    done: watch::Sender<bool>,
-) {
+async fn read_stderr(mut stderr: ChildStderr, ring: Arc<StderrRing>, done: watch::Sender<bool>) {
     let mut buffer = [0_u8; 4096];
     loop {
         let count = match stderr.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
-        let mut tail = tail.lock().await;
+        let mut tail = ring.tail.lock().await;
         if count >= STDERR_RING {
             tail.clear();
             tail.extend(&buffer[count - STDERR_RING..count]);

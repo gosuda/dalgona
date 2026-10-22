@@ -406,8 +406,14 @@ fn read_tokens_strict(path: &Path) -> io::Result<TokenFile> {
     if bytes.is_empty() {
         return Ok(TokenFile::default());
     }
-    sonic_rs::from_slice::<TokenFile>(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    // The decoder's own error quotes the bytes around the failure, and in
+    // this file those bytes are credentials, so the reason stays generic.
+    sonic_rs::from_slice::<TokenFile>(&bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the token file is not a valid token document",
+        )
+    })
 }
 
 /// Returns the record stored under this exact issuer and canonical resource.
@@ -841,6 +847,38 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).expect("read token file"),
             b"not a token file"
+        );
+        std::fs::remove_file(path.with_extension("lock")).expect("remove token lock");
+        std::fs::remove_file(path).expect("remove token file");
+    }
+
+    #[test]
+    fn a_corrupt_token_file_failure_never_quotes_its_credentials() {
+        let path =
+            std::env::temp_dir().join(format!("dalgona-mcp-tokens-{}.json", uuid::Uuid::new_v4()));
+        let record = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "fresh".to_owned(),
+            refresh_token: None,
+            scopes: Vec::new(),
+        };
+        // Created through the store so the file keeps its private mode and
+        // the read reaches the decoder.
+        persist_token(&path, "https://i", "https://r", record.clone()).expect("first token");
+        // The document breaks right after the access token, so a decoder that
+        // quotes the bytes around the failure would quote the credential.
+        std::fs::write(
+            &path,
+            br#"{"tokens":{"https://i":{"https://r":{"client_id":"c","access_token":"SECRET0123456789""#,
+        )
+        .expect("corrupt token file");
+        let error = persist_token(&path, "https://other.example", "https://r", record)
+            .expect_err("an unreadable store refuses the write");
+        let text = error.to_string();
+        assert!(text.contains("could not read MCP tokens"), "{text}");
+        assert!(
+            !text.contains("SECRET") && !text.contains("0123456789"),
+            "the failure quotes the credential: {text}"
         );
         std::fs::remove_file(path.with_extension("lock")).expect("remove token lock");
         std::fs::remove_file(path).expect("remove token file");
