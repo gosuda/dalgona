@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::{
     AgentInfo, AgentReport, Deserialize, Duration, EntryId, JobId, JobOutcome, Mail, RawJson,
     Receipt, Serialize, SessionId,
@@ -424,11 +422,6 @@ pub struct JobStatus {
     pub state: JobStateView,
     /// An optional path to the job's log.
     pub log: Option<std::path::PathBuf>,
-    /// The command text the starter supplied, shared so repeated list and
-    /// status reads never copy it; `None` when the starter supplied none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
-    pub command: Option<Arc<str>>,
     /// When the job last produced output or changed state.
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub last_activity_at: jiff::Timestamp,

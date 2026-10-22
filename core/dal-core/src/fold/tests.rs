@@ -6302,7 +6302,7 @@ mod capture_policy {
             replay_of(kind).map(RawJson::as_str),
             Some(r#"{"records":["r1"]}"#)
         );
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
     }
 
     /// Debug half of GAP-3c: the protocol violations trip their assertions.
@@ -6340,7 +6340,7 @@ mod capture_policy {
         ));
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(closing(
             vec![captured(first), refused(ReplayRefusal::NoRecords)],
@@ -6348,7 +6348,7 @@ mod capture_policy {
         ));
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(closing(
             vec![refused(ReplayRefusal::NoRecords), captured(second)],
@@ -6371,7 +6371,7 @@ mod capture_policy {
         let (_, _, out) = run(late(captured(r#"{"records":["late"]}"#)));
         let (_, kind) = only_assistant(&out);
         assert!(replay_of(kind).is_none());
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(late(refused(ReplayRefusal::NoRecords)));
         let (_, kind) = only_assistant(&out);
@@ -6389,6 +6389,6 @@ mod capture_policy {
         let (_, _, out) = run(response);
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(early));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
     }
 }
