@@ -2507,8 +2507,8 @@ fn mistral_signed_reply() -> String {
     let mut body = String::new();
     for data in [
         r#"{"type":"conversation.response.started","conversation_id":"conv-1"}"#,
-        r#"{"type":"message.output.delta","output_index":0,"id":"e1","content":[{"type":"thinking","thinking":[{"type":"text","text":"alpha "}],"signature":"SIG-A"}]}"#,
-        r#"{"type":"message.output.delta","output_index":0,"id":"e2","content":[{"type":"thinking","thinking":[{"type":"text","text":"beta"}],"signature":"SIG-B"}]}"#,
+        r#"{"type":"message.output.delta","output_index":0,"id":"e1","content":{"type":"thinking","thinking":[{"type":"text","text":"alpha "}],"signature":"SIG-A"}}"#,
+        r#"{"type":"message.output.delta","output_index":0,"id":"e2","content":{"type":"thinking","thinking":[{"type":"text","text":"beta"}],"signature":"SIG-B"}}"#,
         r#"{"type":"message.output.delta","output_index":0,"id":"e3","content":"Answer."}"#,
         r#"{"type":"conversation.response.done","usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
     ] {
