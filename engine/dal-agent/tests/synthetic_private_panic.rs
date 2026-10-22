@@ -58,17 +58,31 @@ impl Tool for Explode {
     }
 }
 
-const USAGE: &str = r#"{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}}"#;
+fn usage_step(premium: Option<f64>) -> String {
+    let usage = dal_core::Usage {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        premium_requests: premium,
+        cost_usd: None,
+    };
+    let usage = sonic_rs::to_string(&usage).expect("usage fixture");
+    format!(r#"{{"type":"usage","usage":{usage}}}"#)
+}
 
-fn tool_step() -> String {
+fn tool_step(premium: Option<f64>) -> String {
+    let usage = usage_step(premium);
     format!(
-        r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":"p1","name":"explode"}},{{"type":"tool_calls_done","calls":[{{"id":"p1","name":"explode","args":{{"kind":"parsed","value":{{}}}}}}]}},{USAGE},{{"type":"stop","reason":"tool_use"}}]}}"#
+        r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":"p1","name":"explode"}},{{"type":"tool_calls_done","calls":[{{"id":"p1","name":"explode","args":{{"kind":"parsed","value":{{}}}}}}]}},{usage},{{"type":"stop","reason":"tool_use"}}]}}"#
     )
 }
 
-fn text_step(text: &str) -> String {
+fn text_step(text: &str, premium: Option<f64>) -> String {
+    let usage = usage_step(premium);
     format!(
-        r#"{{"kind":"events","events":[{{"type":"text_delta","text":"{text}"}},{{"type":"tool_calls_done","calls":[]}},{USAGE},{{"type":"stop","reason":"end_turn"}}]}}"#
+        r#"{{"kind":"events","events":[{{"type":"text_delta","text":"{text}"}},{{"type":"tool_calls_done","calls":[]}},{usage},{{"type":"stop","reason":"end_turn"}}]}}"#
     )
 }
 
@@ -167,7 +181,13 @@ async fn prompt_to_end(
 
 #[tokio::test]
 async fn a_panicking_private_tool_ends_its_turn_and_the_session_stays_usable() {
-    let (tmp, host) = rig(&[tool_step(), text_step("recovered"), text_step("second")]).await;
+    let (tmp, host) = rig(&[
+        tool_step(Some(1.5)),
+        text_step("recovered", Some(2.5)),
+        tool_step(None),
+        text_step("second", Some(2.5)),
+    ])
+    .await;
     let agent = host
         .open(
             SessionRef::New {
@@ -190,10 +210,22 @@ async fn a_panicking_private_tool_ends_its_turn_and_the_session_stays_usable() {
         dump.contains("recovered"),
         "the model saw the error and answered\n{dump}"
     );
+    assert_eq!(
+        view.usage.usage.premium_requests,
+        Some(4.0),
+        "multi-round private loop sums known premium contributors"
+    );
     let second = prompt_to_end(&agent, &mut subscription, "again").await;
     assert!(
         second.contains("TurnEnded"),
         "a second prompt ended\n{second}"
+    );
+    let view_again = agent
+        .view(dal_core::PageReq::default())
+        .expect("view again");
+    assert_eq!(
+        view_again.usage.usage.premium_requests, None,
+        "any missing contributor in private loop leaves aggregate None"
     );
     host.shutdown(Duration::from_secs(1)).await;
 }

@@ -42,6 +42,7 @@ enum Mode {
     Fifo,
     Usd,
     Agent,
+    ScopedInfer,
 }
 
 struct Handler {
@@ -212,6 +213,40 @@ impl Handler {
         let result = handle.result().await;
         self.log.push(format!("agent {:?}", result.err()));
     }
+
+    async fn scoped_infer(&self, cx: &ModelCx<'_>) {
+        let spec = ScopeSpec {
+            limit: 2,
+            on_error: OnError::Settle,
+            budget: Budget {
+                usd: Some(1.0),
+                ..Budget::default()
+            },
+        };
+        let scope = match cx.scope(spec) {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.log.push(format!("scope error {error:?}"));
+                return;
+            }
+        };
+        match scope.infer(request(api_route())) {
+            Ok(first) => {
+                let _ = scope.next().await;
+                let usage = first.usage();
+                let second = scope.infer(request(api_route()));
+                self.log.push(format!(
+                    "usage cost {:?} premium {:?} second {:?}",
+                    usage.cost_usd,
+                    usage.premium_requests,
+                    second.err(),
+                ));
+            }
+            Err(error) => {
+                self.log.push(format!("infer error {error:?}"));
+            }
+        }
+    }
 }
 
 impl ModelHandler for Handler {
@@ -261,6 +296,10 @@ impl ModelHandler for Handler {
                     self.agent(&cx).await;
                     Ok(done_stream())
                 }
+                Mode::ScopedInfer => {
+                    self.scoped_infer(&cx).await;
+                    Ok(done_stream())
+                }
             }
         })
     }
@@ -282,6 +321,12 @@ fn text_step(text: &str, input: u64, output: u64) -> String {
     )
 }
 
+fn text_step_with_cost(text: &str, input: u64, output: u64, cost: f64) -> String {
+    format!(
+        "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":\"{text}\"}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":{input},\"cached_input_tokens\":0,\"output_tokens\":{output},\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":{cost}}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}"
+    )
+}
+
 struct Rig {
     host: Host,
     log: Log,
@@ -290,7 +335,7 @@ struct Rig {
     _tmp: tempfile::TempDir,
 }
 
-const MODELS: [(&str, Mode); 15] = [
+const MODELS: [(&str, Mode); 16] = [
     ("acme/echo", Mode::Forward("api")),
     ("acme/double", Mode::DoubleForward),
     ("acme/loop", Mode::Forward("acme/loop")),
@@ -301,6 +346,7 @@ const MODELS: [(&str, Mode); 15] = [
     ("acme/fifo", Mode::Fifo),
     ("acme/usd", Mode::Usd),
     ("acme/agent", Mode::Agent),
+    ("acme/scoped", Mode::ScopedInfer),
     ("acme/d1", Mode::Forward("acme/d2")),
     ("acme/d2", Mode::Forward("acme/d3")),
     ("acme/d3", Mode::Forward("acme/d4")),
@@ -309,15 +355,29 @@ const MODELS: [(&str, Mode); 15] = [
 ];
 
 async fn rig(steps: &[String], model: &str) -> Rig {
+    rig_configured(steps, model, "", None).await
+}
+
+async fn rig_configured(
+    steps: &[String],
+    model: &str,
+    extra_config: &str,
+    cache_json: Option<&str>,
+) -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace = tmp.path().join("w");
     std::fs::create_dir_all(&data).expect("data dir");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
+    if let Some(json) = cache_json {
+        let cache_dir = data.join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        std::fs::write(cache_dir.join("models.json"), json).expect("models cache");
+    }
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, steps.join("\n")).expect("fixture");
     let user = format!(
-        "model = \"{model}\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        "model = \"{model}\"\n\n[providers.scripted]\nfixture = \"{}\"\n{extra_config}\n",
         fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
@@ -350,13 +410,17 @@ async fn rig(steps: &[String], model: &str) -> Rig {
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await.expect("host");
-    Rig {
+    let rig = Rig {
         host,
         log,
         data,
         workspace,
         _tmp: tmp,
+    };
+    if model == "gpt-6-luna" {
+        let _ = rig.host.default_route().await;
     }
+    rig
 }
 
 async fn relay(rig: &Rig, id: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
@@ -619,5 +683,117 @@ async fn unregistered_synthetic_ids_never_reach_a_handler() {
         rig.log.lines().is_empty(),
         "no handler ran: {:?}",
         rig.log.lines()
+    );
+}
+
+#[tokio::test]
+async fn price_precedence_configured_spelling_beats_canonical_id() {
+    let prices = r#"
+[prices."gpt-6-luna"]
+input = 40.0
+cached_input = 10.0
+output = 80.0
+reasoning = 0.0
+
+[prices."openai/gpt-6-luna"]
+input = 120.0
+cached_input = 30.0
+output = 240.0
+reasoning = 0.0
+"#;
+    let rig = rig_configured(&[text_step("p", 1_000_000, 0)], "gpt-6-luna", prices, None).await;
+    let _ = relay(&rig, "acme/scoped").await;
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/scoped".to_owned(),
+            "usage cost Some(40.0) premium None second Some(Exhausted)".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn price_precedence_configured_canonical_id_beats_compiled_fallback() {
+    let prices = r#"
+[prices."openai/gpt-6-luna"]
+input = 120.0
+cached_input = 30.0
+output = 240.0
+reasoning = 0.0
+"#;
+    let rig = rig_configured(&[text_step("p", 1_000_000, 0)], "gpt-6-luna", prices, None).await;
+    let _ = relay(&rig, "acme/scoped").await;
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/scoped".to_owned(),
+            "usage cost Some(120.0) premium None second Some(Exhausted)".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn price_precedence_explicit_configured_zero_beats_compiled_fallback() {
+    let prices = r#"
+[prices."openai/gpt-6-luna"]
+input = 0.0
+cached_input = 0.0
+output = 0.0
+reasoning = 0.0
+"#;
+    let rig = rig_configured(&[text_step("p", 1_000_000, 0)], "gpt-6-luna", prices, None).await;
+    let _ = relay(&rig, "acme/scoped").await;
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/scoped".to_owned(),
+            "usage cost Some(0.0) premium None second None".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn price_precedence_live_long_context_flat_price_beats_compiled_fallback() {
+    let cache_json = r#"{"version":1,"entries":[{"provider":"openai","id":"gpt-6-luna","display":"GPT-6 Luna Live","hidden":false,"context_window":1000000,"max_output":8192,"thinking":{"kind":"unknown_adaptive"},"image_input":false,"remote_compact":false,"billing":{"premium_multiplier":null,"price":{"input":15.0,"cached_input":0.01,"cache_write":null,"output":25.0,"reasoning":0.0,"tiers":[]}}}]}"#;
+    let rig = rig_configured(
+        &[text_step("p", 1_000_000, 0)],
+        "gpt-6-luna",
+        "",
+        Some(cache_json),
+    )
+    .await;
+    let _ = relay(&rig, "acme/scoped").await;
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/scoped".to_owned(),
+            "usage cost Some(15.0) premium None second Some(Exhausted)".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn price_precedence_provider_reported_usd_beats_local_price() {
+    let prices = r#"
+[prices."gpt-6-luna"]
+input = 100.0
+cached_input = 0.0
+output = 0.0
+reasoning = 0.0
+"#;
+    let rig = rig_configured(
+        &[text_step_with_cost("p", 1_000_000, 0, 0.0042)],
+        "gpt-6-luna",
+        prices,
+        None,
+    )
+    .await;
+    let _ = relay(&rig, "acme/scoped").await;
+    assert_eq!(
+        rig.log.lines(),
+        vec![
+            "ran acme/scoped".to_owned(),
+            "usage cost Some(0.0042) premium None second None".to_owned(),
+        ]
     );
 }
