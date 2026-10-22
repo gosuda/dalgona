@@ -279,6 +279,7 @@ fn job_outcomes_are_terminal_and_distinct() {
 }
 
 fn check_job_outcome(outcome: &JobOutcome, fragment: &str) {
+    let outcome = JobOutcome::clone(outcome);
     let record = Record::Job {
         at: at(),
         job: dal_core::JobId::new_v7(),
@@ -299,7 +300,7 @@ fn check_job_outcome(outcome: &JobOutcome, fragment: &str) {
     else {
         panic!("expected settled outcome");
     };
-    assert_eq!(&back_outcome, outcome);
+    assert_eq!(back_outcome, outcome);
 }
 
 #[test]
@@ -337,6 +338,7 @@ fn owner_core_and_extension_never_alias_across_the_codec() {
 }
 
 fn check_owner_round_trip(who: &Owner) {
+    let who = Owner::clone(who);
     let record = Record::Inferred {
         at: at(),
         who: who.clone(),
@@ -348,7 +350,7 @@ fn check_owner_round_trip(who: &Owner) {
     let Record::Inferred { who: back_who, .. } = back else {
         panic!("expected inferred");
     };
-    assert_eq!(&back_who, who);
+    assert_eq!(back_who, who);
 }
 
 #[test]

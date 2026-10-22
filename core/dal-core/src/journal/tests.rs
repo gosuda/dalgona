@@ -1729,20 +1729,13 @@ fn direct_block_decode_accepts_reasoning_replay_null() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// End to end inside the core: a turn whose provider streamed reasoning text
-/// and no replay event journals the null placeholder, and the lines the fold
-/// emitted re-open as a session. Every record the writer produced must read
-/// back through the journal decoder.
-#[test]
-fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::{
-        Effect, Event, Inference, ModelRoute, Record, Session, Stop, StreamChannel, StreamEvent,
-    };
-
-    let stamp = crate::Timestamp::UNIX_EPOCH;
-    let mut session = Session::replay([], stamp)?.0;
-    let mut effects = Vec::new();
-    let turn = drive_reasoning_turn(&mut session, &mut effects, stamp)?;
+fn end_reasoning_turn(
+    session: &mut crate::Session,
+    turn: crate::TurnId,
+    stamp: crate::Timestamp,
+    effects: &mut Vec<crate::Effect>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{Event, Family, Inference, ModelRoute, Stop, StreamChannel, StreamEvent, Usage};
 
     session.step(
         Event::StreamEnded {
@@ -1781,8 +1774,53 @@ fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn s
             partial: None,
         },
         stamp,
+        effects,
+    )?;
+    Ok(())
+}
+
+/// End to end inside the core: a turn whose provider streamed reasoning text
+/// and no replay event journals the null placeholder, and the lines the fold
+/// emitted re-open as a session. Every record the writer produced must read
+/// back through the journal decoder.
+#[test]
+fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        ClientId, Command, Effect, Event, Expect, HookEvent, HookOutcome, HookVerdict, Part, Phase,
+        Session,
+    };
+
+    let stamp = crate::Timestamp::UNIX_EPOCH;
+    let mut session = Session::replay([], stamp)?.0;
+    let mut effects = Vec::new();
+    session.step(
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "question".into(),
+                }],
+            },
+            by: ClientId::new("test"),
+        },
+        stamp,
         &mut effects,
     )?;
+    let Phase::Opening { turn, .. } = session.phase() else {
+        return Err("the prompt did not open a turn".into());
+    };
+    let turn = *turn;
+    session.step(
+        Event::Guard {
+            turn,
+            call: None,
+            extension: None,
+            outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))?,
+        },
+        stamp,
+        &mut effects,
+    )?;
+    end_reasoning_turn(&mut session, turn, stamp, &mut effects)?;
 
     let mut records = Vec::new();
     for effect in &effects {
@@ -1815,47 +1853,6 @@ fn folded_reasoning_turn_without_replay_event_re_opens() -> Result<(), Box<dyn s
     }
     Session::replay_lines(lines.iter().map(Vec::as_slice), stamp)?;
     Ok(())
-}
-
-/// Opens a turn on `session` the way the fold does for a plain prompt and
-/// returns the reserved turn id; the caller finishes the stream.
-fn drive_reasoning_turn(
-    session: &mut crate::fold::Session,
-    effects: &mut Vec<crate::Effect>,
-    stamp: crate::Timestamp,
-) -> Result<crate::TurnId, Box<dyn std::error::Error>> {
-    use crate::{
-        ClientId, Command, Event, Expect, HookEvent, HookOutcome, HookVerdict, Part, Phase,
-    };
-
-    session.step(
-        Event::Command {
-            cmd: Command::Prompt {
-                expect: Expect::Idle,
-                content: vec![Part::Text {
-                    text: "question".into(),
-                }],
-            },
-            by: ClientId::new("test"),
-        },
-        stamp,
-        effects,
-    )?;
-    let Phase::Opening { turn, .. } = session.phase() else {
-        return Err("the prompt did not open a turn".into());
-    };
-    let turn = *turn;
-    session.step(
-        Event::Guard {
-            turn,
-            call: None,
-            extension: None,
-            outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))?,
-        },
-        stamp,
-        effects,
-    )?;
-    Ok(turn)
 }
 
 // Private audit records: v1 wire, rejection, parity spot-check, branch omission.
