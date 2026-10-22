@@ -545,7 +545,17 @@ fn clap_exit(error: &clap::Error) -> ExitCode {
 }
 
 /// Renders one configuration failure with its fix line.
-fn config_exit(binary: &str, error: &ConfigError) -> ExitCode {
+///
+/// Corrupt compiled defaults are an internal invariant failure, not a user
+/// configuration error: they exit with the internal status and point at the
+/// process log.
+fn config_exit(binary: &str, error: &ConfigError, log_path: &Path) -> ExitCode {
+    if let ConfigError::DefaultsInvalid { message } = error {
+        return two_lines(
+            cli::texts::internal_error_at("config", message, log_path),
+            exit::ExitKind::Internal,
+        );
+    }
     two_lines(
         config_error_lines(error, binary),
         exit::ExitKind::RequestedFailure,
@@ -557,10 +567,29 @@ fn config_exit(binary: &str, error: &ConfigError) -> ExitCode {
 ///
 /// The unknown-key catalog names the closest key at suggestion distance or
 /// lists the product's key table in table order; both end with the config
-/// docs pointer. Any other error keeps its rendered text and the fix hint.
+/// docs pointer. Invalid `[rules]` and `[eval] uses` values, a non-table
+/// `[judge]`, and a TOML syntax failure render through the lines their owner
+/// supplies, so the CLI never rewrites a value or recomputes a position. Any
+/// other error keeps its rendered text and the fix hint.
 fn config_error_lines(error: &ConfigError, binary: &str) -> [String; 2] {
-    if let Some([first, second]) = error.rules_lines(binary) {
-        return [first, second];
+    if let Some(lines) = error
+        .rules_lines(binary)
+        .or_else(|| error.eval_lines(binary))
+    {
+        return lines;
+    }
+    if let Some([what, fix]) = error.judge_lines() {
+        return [format!("{binary}: {}: {what}", edge::CONFIG_FILE_NAME), fix];
+    }
+    if let ConfigError::Syntax { line, message } = error {
+        let place = line.map_or_else(
+            || edge::CONFIG_FILE_NAME.to_owned(),
+            |line| format!("{}:{line}", edge::CONFIG_FILE_NAME),
+        );
+        return [
+            format!("{binary}: {place}: {message}"),
+            cli::texts::CONFIG_FIX_HINT.into(),
+        ];
     }
     if let ConfigError::UnknownKey {
         key,
@@ -610,6 +639,13 @@ pub(crate) fn host_exit(error: &HostError, data_root: &Path) -> ExitCode {
             ],
             exit::ExitKind::RequestedFailure,
         );
+    }
+    if let HostError::Provider(error) = error
+        && let Some(fix) = error.fix()
+    {
+        let _ = writeln!(std::io::stderr().lock(), "dalgon: {error}");
+        let _ = writeln!(std::io::stderr().lock(), "{fix}");
+        return exit::code(exit::ExitKind::RequestedFailure);
     }
     let _ = writeln!(std::io::stderr().lock(), "dalgon: {error}");
     let hint = if matches!(error, HostError::SessionBusy { .. }) {
@@ -730,9 +766,13 @@ fn assemble_startup(
     let config_path = edge::config_file_path(&roots);
     let user_toml = match edge::read_user_config(&config_path) {
         Ok(user) => user,
-        Err(edge::EdgeError::Io { path, source, .. }) => {
+        Err(edge::EdgeError::Io {
+            operation,
+            path,
+            source,
+        }) => {
             return Err(two_lines(
-                cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+                cli::texts::startup_file_failed(operation, &path, &source.to_string()),
                 exit::ExitKind::RequestedFailure,
             ));
         }
@@ -755,7 +795,13 @@ fn assemble_startup(
     };
     let base = match Config::load(kind, &roots.data, factory.defaults, user_toml.as_deref()) {
         Ok(config) => config,
-        Err(error) => return Err(config_exit(factory.binary, &error)),
+        Err(error) => {
+            return Err(config_exit(
+                factory.binary,
+                &error,
+                &edge::data_root_log_path(&roots.data),
+            ));
+        }
     };
     let (mode, model) = split_mode_model(cli.mode, cli.model.clone());
     let config = base.with_overrides(&ConfigOverrides {
@@ -792,6 +838,55 @@ fn user_sets_serve_bind(user_toml: Option<&str>) -> bool {
         .and_then(|text| toml::from_str::<toml::Table>(text).ok())
         .and_then(|table| table.get("serve")?.as_table()?.get("bind").cloned())
         .is_some()
+}
+
+/// Renders a plugin load failure with the plugin's name, or `None` when the
+/// error carries no plugin to name.
+///
+/// A configured plugin with no directory is the missing-plugin error. Every
+/// other failure names the plugin whose directory holds the failing file and
+/// keeps the loader's own `path:line:col: message` detail.
+fn plugin_load_lines(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+    plugins_dir: &Path,
+) -> Option<[String; 2]> {
+    use dal_star::LoadError;
+
+    let error = error.downcast_ref::<LoadError>()?;
+    if let LoadError::UnknownPlugin { name, dir } = error {
+        return Some(cli::texts::plugin_missing(name, &dir.join(&**name)));
+    }
+    let name = failing_plugin(error, plugins_dir)?;
+    Some(cli::texts::plugin_failed_to_load(&name, &error.render()))
+}
+
+/// Names the plugin whose directory holds the file a load error points at.
+fn failing_plugin(error: &dal_star::LoadError, plugins_dir: &Path) -> Option<String> {
+    use dal_star::LoadError;
+
+    let path = match error {
+        LoadError::Eval { path, .. }
+        | LoadError::Registration { path, .. }
+        | LoadError::PluginRebound { path, .. }
+        | LoadError::UnsupportedEntry { path }
+        | LoadError::InvalidPlugin { path, .. }
+        | LoadError::Uses { path, .. }
+        | LoadError::Schema { path, .. }
+        | LoadError::Asset { path, .. }
+        | LoadError::Unreadable { path, .. } => path,
+        LoadError::NameMismatch { dir, .. } => return Some(dir.to_string()),
+        LoadError::MissingEntryFile { dir } => return Some(dir.file_name()?.to_str()?.to_owned()),
+        _ => return None,
+    };
+    let relative = path.strip_prefix(plugins_dir).ok()?;
+    Some(
+        relative
+            .components()
+            .next()?
+            .as_os_str()
+            .to_str()?
+            .to_owned(),
+    )
 }
 
 /// Maps an `resolve_roots` failure to its usage diagnostics.
@@ -843,6 +938,7 @@ fn build_once(
     data_root: PathBuf,
     config: &Config,
 ) -> Result<dal_agent::Product, ExitCode> {
+    let plugins_dir = data_root.join("plugins");
     match (factory.build)(&BuildCx { data_root, config }) {
         Ok(product) => Ok(product),
         Err(BuildError::Registration(error)) => Err(two_lines(
@@ -853,10 +949,12 @@ fn build_once(
             ref section,
             ref source,
         }) if section.as_ref() == "plugins" => Err(two_lines(
-            [
-                format!("plugin load failed: {source}"),
-                cli::texts::CONFIG_FIX_HINT.into(),
-            ],
+            plugin_load_lines(&**source, &plugins_dir).unwrap_or_else(|| {
+                [
+                    format!("plugin load failed: {source}"),
+                    cli::texts::CONFIG_FIX_HINT.into(),
+                ]
+            }),
             exit::ExitKind::RequestedFailure,
         )),
         Err(error) => Err(two_lines(
@@ -943,13 +1041,63 @@ mod config_exit_tests {
     }
 
     #[test]
-    fn rules_values_keep_their_rules_lines() {
+    fn invalid_rules_values_name_the_key_value_and_allowed_range() {
         let lines = lines_for("[rules]\nmax_retries = \"many\"\n");
+        assert!(
+            lines[0].starts_with("dalgon: dal.toml:")
+                && lines[0].contains("rules.max_retries")
+                && lines[0].contains("many"),
+            "the diagnostic identifies the config key and rejected value: {}",
+            lines[0]
+        );
+        assert!(lines[1].contains("whole number"), "{}", lines[1]);
+        let bounds = lines[1]
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|token| !token.is_empty());
+        assert_eq!(bounds.collect::<Vec<_>>(), ["0", "20"], "{}", lines[1]);
+    }
+
+    #[test]
+    fn syntax_failures_name_the_file_and_the_parser_line() {
+        let lines = lines_for("mode = \"normal\"\nmode = \"eval-first\"\n");
+        let prefix = format!("dalgon: {}:2: ", crate::edge::CONFIG_FILE_NAME);
+        assert!(
+            lines[0].starts_with(&prefix) && lines[0].len() > prefix.len(),
+            "the first line carries the file, the line, and the parser message: {}",
+            lines[0]
+        );
+        assert_eq!(lines[1], crate::cli::texts::CONFIG_FIX_HINT);
+    }
+
+    #[test]
+    fn non_table_judge_uses_the_judge_lines() {
+        let lines = lines_for("judge = 3\n");
         assert_eq!(
             lines[0],
-            "dalgon: dal.toml: rules.max_retries many is invalid"
+            format!(
+                "dalgon: {}: judge must be a table",
+                crate::edge::CONFIG_FILE_NAME
+            )
         );
-        assert_eq!(lines[1], "Use a whole number from 0 to 20.");
+        assert!(lines[1].starts_with("Use a [judge] table"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn invalid_eval_uses_render_for_the_dalgona_product() {
+        let error = dal_core::Config::load(
+            ConfigProduct::Dalgona,
+            Path::new("/t"),
+            "",
+            Some("[eval]\nuses = [\"nope\"]\n"),
+        )
+        .unwrap_err();
+        let lines = config_error_lines(&error, "dalgona");
+        assert_eq!(lines[0], "dalgona: dal.toml: eval.uses \"nope\" is invalid");
+        assert!(
+            lines[1].starts_with("Use an exact operation id"),
+            "{}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -961,6 +1109,78 @@ mod config_exit_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod plugin_load_tests {
+    use super::{BuildCx, BuildError, Config, plugin_load_lines};
+    use dal_core::ConfigProduct;
+
+    /// Builds the dal product over a temporary data root holding `files`
+    /// under `plugins/`, and renders the plugin failure it reports.
+    fn failure_lines(plugins_key: &str, files: &[(&str, &str)]) -> [String; 2] {
+        let dir = tempfile::tempdir().expect("temporary data root");
+        for (path, text) in files {
+            let full = dir.path().join("plugins").join(path);
+            std::fs::create_dir_all(full.parent().expect("a file path")).expect("plugin dir");
+            std::fs::write(full, text).expect("plugin file");
+        }
+        let config = Config::load(
+            ConfigProduct::Dalgon,
+            dir.path(),
+            "",
+            Some(&format!("plugins = {plugins_key}\n")),
+        )
+        .expect("the configuration is valid");
+        let built = crate::product::build(&BuildCx {
+            data_root: dir.path().to_path_buf(),
+            config: &config,
+        });
+        let Err(BuildError::Section { source, .. }) = built else {
+            panic!("the plugin set must fail to load");
+        };
+        plugin_load_lines(&*source, &dir.path().join("plugins"))
+            .expect("a plugin failure renders as plugin lines")
+    }
+
+    #[test]
+    fn a_configured_plugin_without_a_directory_is_missing() {
+        let lines = failure_lines("[\"gone\"]", &[]);
+        let prefix = "dalgon: plugin \"gone\" is missing: ";
+        let location = lines[0]
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("the missing-plugin prefix: {}", lines[0]));
+        assert!(
+            std::path::Path::new(location).ends_with("plugins/gone"),
+            "the path names the plugin directory: {location}"
+        );
+        assert_eq!(
+            lines[1],
+            "Remove \"gone\" from the plugins key in dal.toml, or create that directory with a plugin.star file."
+        );
+    }
+
+    #[test]
+    fn an_evaluation_failure_names_the_plugin_and_its_location() {
+        let lines = failure_lines(
+            "[\"bad\"]",
+            &[(
+                "bad/plugin.star",
+                "load(\"@dal/v1\", \"dal\")\n\nx = 1 + \"a\"\n",
+            )],
+        );
+        assert!(
+            lines[0].starts_with("dalgon: plugin \"bad\" failed to load: ")
+                && lines[0].contains("plugin.star:3:"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(
+            lines[1],
+            "Fix the error and run dalgon again, or remove \"bad\" from the plugins key."
+        );
+    }
+}
+
 #[cfg(test)]
 mod serve_bind_provenance_tests {
     use super::user_sets_serve_bind;
