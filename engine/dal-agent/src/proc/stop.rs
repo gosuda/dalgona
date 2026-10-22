@@ -196,8 +196,10 @@ pub(super) fn sweep_recorded(pids: &[u32]) {
 ///
 /// `JobObjectChild::wait` blocks until the whole job empties, so a detached
 /// grandchild holding a pipe would stall the normal-exit path before any
-/// sweep runs. Polling `try_wait` detects the leader exit; terminating the
-/// job at once then frees descendant-held pipes before capture joins EOF.
+/// sweep runs. Windows polls the outer wrapper because its job-object
+/// `try_wait` semantics are platform-specific; Unix call sites instead use
+/// `inner_mut().try_wait()` to observe only the native leader before signaling
+/// the outer process-group wrapper and retaining its later `wait()` for reaping.
 #[cfg(windows)]
 pub(super) async fn wait_leader_exit(
     child: &mut Box<dyn ChildWrapper>,

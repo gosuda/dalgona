@@ -20,6 +20,7 @@ use dal_core::{
 };
 
 const REFUSAL: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
+const OVERLAP: &str = "sandbox: the writable path";
 
 const STEP_CALL: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"probe-call\",\"name\":\"fixture__probe\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"probe-call\",\"name\":\"fixture__probe\",\"args\":{\"kind\":\"parsed\",\"value\":{}}}]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}]}\n";
 
@@ -85,23 +86,93 @@ impl Tool for SpawnProbe {
     }
 }
 
-/// Starts one host with the probe tool registered and runs one turn whose
-/// provider step calls it; returns the final view, the workspace path, and
-/// the retained temp guard so assertions observe a live filesystem.
+/// Filesystem layout for one probe turn: the data and workspace directories
+/// under test, the captured home/cache/temp roots, and the retained temp
+/// guard so assertions observe a live filesystem.
+struct ProbeDirs {
+    guard: tempfile::TempDir,
+    data: std::path::PathBuf,
+    workspace_dir: std::path::PathBuf,
+    home: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    captured_temp: std::path::PathBuf,
+}
+
+/// Shared layout: the captured temp root is the fixture parent, so the
+/// protected data directory overlaps an automatic grant.
+fn shared_probe_dirs() -> Result<ProbeDirs, std::io::Error> {
+    let guard = tempfile::tempdir()?;
+    let data = guard.path().join("data");
+    let workspace_dir = guard.path().join("w");
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&workspace_dir)?;
+    Ok(ProbeDirs {
+        home: guard.path().join("home"),
+        cache: guard.path().join("cache"),
+        captured_temp: guard.path().to_path_buf(),
+        data,
+        workspace_dir,
+        guard,
+    })
+}
+
+/// Isolated layout: the captured temp root is a sibling of (never a parent
+/// of) the protected data directory, so no overlap refusal can fire.
+fn isolated_probe_dirs() -> Result<ProbeDirs, std::io::Error> {
+    let guard = tempfile::tempdir()?;
+    let data = guard.path().join("data");
+    let workspace_dir = guard.path().join("w");
+    let home = guard.path().join("home");
+    let cache = guard.path().join("cache");
+    let captured_temp = guard.path().join("stemp");
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&workspace_dir)?;
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cache)?;
+    std::fs::create_dir_all(&captured_temp)?;
+    Ok(ProbeDirs {
+        guard,
+        data,
+        workspace_dir,
+        home,
+        cache,
+        captured_temp,
+    })
+}
+
+async fn run_probe_turn(
+    sandbox: bool,
+) -> Result<(dal_core::View, std::path::PathBuf, tempfile::TempDir), Box<dyn std::error::Error>> {
+    drive_probe_turn(shared_probe_dirs()?, sandbox).await
+}
+
+/// A sandbox-on probe turn on the isolated layout, where the missing-helper
+/// door is what the test observes.
+async fn run_probe_turn_without_overlap()
+-> Result<(dal_core::View, std::path::PathBuf, tempfile::TempDir), Box<dyn std::error::Error>> {
+    drive_probe_turn(isolated_probe_dirs()?, true).await
+}
+
+/// Shared probe-turn driver: builds the scripted fixture, starts one host
+/// with the probe tool registered, and runs one turn whose provider step
+/// calls it; returns the final view, the workspace path, and the retained
+/// temp guard so assertions observe a live filesystem.
 #[expect(
     clippy::too_many_lines,
     reason = "one linear fixture build keeps the boundary test readable"
 )]
-async fn run_probe_turn(
+async fn drive_probe_turn(
+    dirs: ProbeDirs,
     sandbox: bool,
 ) -> Result<(dal_core::View, std::path::PathBuf, tempfile::TempDir), Box<dyn std::error::Error>> {
-    let tmp = tempfile::tempdir()?;
-    let data = tmp.path().join("data");
-    let workspace_dir = tmp.path().join("w");
-    let captured_temp = tmp.path().join("stemp");
-    std::fs::create_dir_all(&data)?;
-    std::fs::create_dir_all(&workspace_dir)?;
-    std::fs::create_dir_all(&captured_temp)?;
+    let ProbeDirs {
+        guard: tmp,
+        data,
+        workspace_dir,
+        home,
+        cache,
+        captured_temp,
+    } = dirs;
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, format!("{STEP_CALL}{STEP_END}"))?;
     let mut user = format!(
@@ -147,14 +218,16 @@ async fn run_probe_turn(
     let env = Env {
         vars: BTreeMap::from([
             (OsString::from("OPENAI_API_KEY"), OsString::from("sk-test")),
-            (
-                OsString::from("HOME"),
-                OsString::from(tmp.path().join("home")),
-            ),
+            (OsString::from("HOME"), home.as_os_str().to_owned()),
             (
                 OsString::from("XDG_CACHE_HOME"),
-                OsString::from(tmp.path().join("cache")),
+                cache.as_os_str().to_owned(),
             ),
+            // The shared layout points the captured temp root at the
+            // fixture parent on every platform (TMPDIR on Unix, TMP/TEMP
+            // on Windows), so the protected data directory overlaps it
+            // independent of the ambient process temp. The isolated layout
+            // points it at a sibling directory, so no overlap can fire.
             (
                 OsString::from("TMPDIR"),
                 captured_temp.as_os_str().to_owned(),
@@ -222,7 +295,6 @@ async fn run_probe_turn(
 }
 
 /// One probe turn with the sandbox configured on and no helper.
-#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn sandbox_on_turn()
 -> Result<(dal_core::View, std::path::PathBuf, tempfile::TempDir), Box<dyn std::error::Error>> {
     run_probe_turn(true).await
@@ -234,17 +306,16 @@ async fn sandbox_off_turn()
     run_probe_turn(false).await
 }
 
-/// The helper-less refusal is the Linux contract: macOS enforces through
-/// Seatbelt (always present on a macOS host) and Windows refuses every
-/// sandboxed spawn with its own setup text.
-#[cfg(all(not(windows), not(target_os = "macos")))]
+/// The captured temp root is the fixture parent, so the protected data
+/// directory sits under the automatic temp grant on every platform; the
+/// sandbox-on door must refuse with the overlap text and never spawn.
 #[tokio::test]
-async fn sandbox_on_without_helper_refuses_and_never_spawns() {
+async fn sandbox_on_with_protected_data_under_temp_refuses_and_never_spawns() {
     let (view, workspace_dir, _guard) = sandbox_on_turn().await.expect("sandbox-on turn");
     let dump = format!("{view:?}");
     assert!(
-        dump.contains(REFUSAL),
-        "the refusal text reaches the journal: {dump}"
+        dump.contains(OVERLAP),
+        "protected data under an automatic root must be refused: {dump}"
     );
     assert!(
         !workspace_dir.join("probe.txt").exists(),
@@ -263,5 +334,30 @@ async fn sandbox_off_spawns_directly() {
     assert!(
         workspace_dir.join("probe.txt").exists(),
         "the probe child ran directly and wrote its file"
+    );
+}
+
+/// With no overlap to hide behind and no helper configured, the sandbox-on
+/// door must refuse with its setup text and never spawn: a direct-spawn
+/// fallback would have created the file.
+#[tokio::test]
+async fn sandbox_on_without_helper_and_without_overlap_refuses_with_setup_text_and_never_spawns() {
+    let (view, workspace_dir, _guard) = run_probe_turn_without_overlap()
+        .await
+        .expect("sandbox-on turn without helper");
+    let dump = format!("{view:?}");
+    #[cfg(target_os = "macos")]
+    assert!(
+        dump.contains("/usr/bin/sandbox-exec"),
+        "macOS refuses without the Seatbelt utility before any spawn: {dump}"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        dump.contains(REFUSAL),
+        "the missing helper refuses with its exact setup text: {dump}"
+    );
+    assert!(
+        !workspace_dir.join("probe.txt").exists(),
+        "a refused sandbox must never spawn the child unsandboxed"
     );
 }
