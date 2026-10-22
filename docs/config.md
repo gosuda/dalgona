@@ -31,8 +31,10 @@ The table shows dal's built-in defaults before product TOML, user settings, and 
 | `prices` | table | `none` | the `prices` setting |
 | `prices.<model-id>.input` | number | `none` | the `prices.<model-id>.input` setting |
 | `prices.<model-id>.cached_input` | number | `none` | the `prices.<model-id>.cached_input` setting |
+| `prices.<model-id>.cache_write` | number | `none` | the `prices.<model-id>.cache_write` setting; `none` keeps the historical fallback to the applicable input rate |
 | `prices.<model-id>.output` | number | `none` | the `prices.<model-id>.output` setting |
 | `prices.<model-id>.reasoning` | number | `none` | the `prices.<model-id>.reasoning` setting |
+| `prices.<model-id>.tiers` | list | `[]` | request-wide context tiers in any order; each tier has `size` (input threshold) and optional `input`, `cached_input`, `cache_write`, `output`, `reasoning` overrides |
 | `rules` | table | `none` | rule matching and retry settings; field defaults apply when omitted |
 | `rules.watch` | bool | `true` | whether to watch stream rules |
 | `rules.interrupt` | string | `always` | interrupt mode when a rule does not set its own |
@@ -55,10 +57,64 @@ The table shows dal's built-in defaults before product TOML, user settings, and 
 | `eval` | table | `none` | the `eval` setting |
 | `eval.uses` | list | `[]` | the operations that eval cells may request, such as `tools.read`, `tools.search`, `tools.patch`, `tools.exec`, or an exported `tools.<plugin>.<tool>`; each effect still goes through normal approval, with at most 64 entries and no wildcards or duplicates; empty means eval cells can only compute and cannot act |
 
-`[aliases]` maps model aliases. `[serve]` holds router settings. `[limits]` holds run budgets. `[plugin.<name>]` holds per-plugin settings.
+`[aliases]` maps model aliases. `[serve]` holds router settings. `[limits]` holds run budgets. `[plugin.<name>]` holds per-plugin settings. `[providers.<id>]` configures named provider endpoints or overrides built-in provider routes.
+
+A `[providers.<id>]` table sets connection and authentication settings:
+
+- `api`: wire API family (`openai_chat`, `openai_responses`, `openai_codex`, `anthropic`, `bedrock`, `cursor`, `devin`, `droid`, `gitlab`, `google-generative-ai`, `google-vertex`, `google-gemini-cli`, `google-antigravity`, `mistral`, `ollama`, or `pi-messages`).
+- `base_url`: endpoint base URL.
+- `transport`: transport protocol, either `"https"` (default) or `"websocket"` (supported for `openai_responses` and `openai_codex`).
+- `key_env`: name of the environment variable that holds the API key. Required for custom named providers unless `auth = "none"`. For built-in providers, `key_env` is optional and overrides the default environment variable.
+- `auth`: authorization header style for API keys:
+  - `"bearer"`: sends the key in an `Authorization: Bearer <key>` header (default for chat and responses).
+  - `"x-api-key"`: sends the key in an `x-api-key: <key>` header (default for Anthropic).
+  - `"api-key"`: sends the key in an `api-key: <key>` header.
+  - `"none"`: sends no API-key authorization header; the entry carries no API key and builds no credential header. It does not make an OAuth-only family usable without its required credential: such a credential-less row is still refused at request admission.
+- `max_concurrent_requests`: maximum simultaneous requests for this provider, between 1 and 64 (default 4).
+- `api_version`: the `api-version` query value for an Azure-shaped entry. An entry value wins over `AZURE_OPENAI_API_VERSION`.
+- `deployments`: a table mapping catalog model ids to Azure deployment names. An entry value wins model by model over `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`; a model with no mapping is sent under its own id. Quote a model id that holds a dot (`"gpt-5.5" = "..."`), or TOML reads the dot as a table path.
+
+## Azure OpenAI
+
+Azure is a shape on a Chat or Responses entry, not a separate `api` value: an entry with `auth = "api-key"`, an `api_version`, or a `deployments` table is sent through the Azure adapter. The key travels in an `api-key` header, never as `Bearer`; OAuth sign-in is refused for these entries.
+
+For Azure entries, an explicit `base_url` always wins. When you omit it, `AZURE_OPENAI_BASE_URL` takes precedence over `AZURE_OPENAI_RESOURCE_NAME`. The resource name must be one valid DNS label, but dal does not validate it when a higher-priority URL already supplies the endpoint. Blank environment values are ignored. Non-Azure entries ignore these Azure variables.
+
+Configure the built-in OpenAI provider and select a provider-qualified model:
+
+```toml
+[providers.openai]
+auth = "api-key"
+key_env = "AZURE_OPENAI_API_KEY"
+api_version = "2025-03-01-preview"
+
+[providers.openai.deployments]
+"gpt-5.4" = "my-gpt54-deployment"
+```
+
+With `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` in the environment, select `openai/gpt-5.4` (for example with `/model openai/gpt-5.4`). When neither `api_version` nor `AZURE_OPENAI_API_VERSION` is set, Responses defaults to `v1` and Chat to `2024-10-21`.
+
+`dal.toml` strictly refuses supplied secrets. Setting keys such as `api_key`, `key`, or `secret` directly in configuration is rejected as an unknown key at load time. Credentials must come from environment variables named by `key_env` or through `dalgon login`.
+
+Stored credentials live in `auth.json` under your product's data directory (`$XDG_DATA_HOME/dal/auth.json` or `$XDG_DATA_HOME/dalgona/auth.json`), written atomically with mode `0600` permissions (owner read and write only). Non-owner permission bits and symbolic links are refused. Stored entries record raw API keys, OAuth tokens, or structured envelopes; for example, GitHub Copilot stores a JSON envelope holding the token alongside any enterprise domain and discovered API endpoint.
+
+Built-in providers resolve credentials from specific environment variables:
+- `COPILOT_GITHUB_TOKEN`: GitHub token for GitHub Copilot (`github-copilot`) authentication.
+- `GITLAB_TOKEN`: personal access token for GitLab Duo API key authentication.
+- `GITLAB_CLIENT_ID`: overrides the default OAuth client ID for GitLab Duo.
+- `GITLAB_REDIRECT_URI`: overrides the loopback redirect URI for GitLab Duo browser OAuth callback.
+- `RADIUS_API_KEY`: API key for Radius (`radius`), sent as a bearer token.
+
+Bedrock entries (`api = "bedrock"`) authenticate through captured AWS credential sources (environment variables such as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, shared credentials and configuration files under `~/.aws/`, SSO tokens, external credential processes, or IAM roles) or a stored bearer token in `auth.json`. Provider readiness verifies credential availability against the effective configured provider family, including configured aliases, without performing network requests or writing to cache.
 
 ```toml
 plugins = ["todo"]
+
+[providers.custom]
+api = "openai_chat"
+base_url = "https://api.example.com/v1"
+key_env = "CUSTOM_API_KEY"
+auth = "api-key"
 ```
 
 Every config error names the key and the fix.

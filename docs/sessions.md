@@ -1,6 +1,6 @@
 # Sessions, history, and compaction
 
-Sessions live under the data root. Use `-c` to continue a session or `-r` to resume one. Names label sessions. Exit lines and `/name` print the `-r` argument in the exact form the shell accepts; names that are unsafe to paste degrade to the session id. Use `/tree`, `/fork`, and `/clone` to inspect or change branches. Use `/export` to write a shareable file. Read an entry at `session://<id>/<entry>`. `--no-session` runs without saving.
+Sessions live under the data root. Use `-c` to continue a session or `-r` to resume one. Names label sessions. Use `/tree`, `/fork`, and `/clone` to inspect or change branches. Use `/export` to write a shareable file. Read an entry at `session://<id>/<entry>`. `--no-session` runs without saving.
 
 Child sessions also write a `dal-agent` `child_policy` record with their inherited approval mode and tool allowlist; an absent tool list means unrestricted access. Session replay requires at most one policy record; duplicate or conflicting records fail replay.
 
@@ -9,7 +9,7 @@ Child sessions also write a `dal-agent` `child_policy` record with their inherit
 
 For saved sessions, dal writes a turn-ID reservation to the journal before it acknowledges a prompt, follow-up, or wake allocation. A record counts as saved only after it is synced to disk. The first reservation creates the journal even if the turn never starts.
 
-Private tool effects also require saved receipts. In a saved session, the first private loop or effect receipt creates the journal even if no user turn has started. Ephemeral sessions keep these records in memory and do not create journal files.
+Private tool effects also require saved receipts. In a saved session, the first private loop or effect receipt creates the journal even if no user turn has started. dal saves the start receipt before running the effect. Ephemeral sessions keep these records in memory and do not create journal files.
 
 Cancelling queued work does not release its identity. Later turns keep their allocated IDs. When a session reopens, unused reservations remain consumed. Queued text is not restored, so submit it again if you still want to run it. A reservation alone does not create a completed turn.
 
