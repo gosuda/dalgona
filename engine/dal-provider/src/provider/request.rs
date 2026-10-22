@@ -54,7 +54,7 @@ use crate::{
     },
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
     lifecycle::AttemptFailure,
-    retry::RequestState,
+    retry::{RequestState, RetryDecision},
     stream::{EventStream, NoticeSink},
     thinking::{
         self, BeforeRequestPatch, Effort, RequestLimits, ThinkingNotice, ThinkingPlan, WireThinking,
@@ -1449,14 +1449,7 @@ async fn google_antigravity_attempt(
 ///
 /// Endpoint selection stays with the caller (`antigravity::endpoints`); this
 /// owns only the failover rule, so a test can drive it with loopback
-/// endpoints. An error status is classified through the established
-/// `google_status_failure` (which consumes the body and releases the
-/// response) and fails over only on a transient pre-byte status
-/// (`408`/`429`-non-quota/`500`/`502`/`503`/`504`/`529`, the shared retry
-/// table's retryable set); terminal quota (`Provider(Quota)`), account
-/// verification, and all other statuses return at once. The last endpoint's
-/// own failure is the attempt's failure. No retry sleep, discovery call,
-/// config knob, or session state lives here.
+/// endpoints.
 pub(super) async fn antigravity_failover<F>(
     context: &StreamContext,
     secrets: &[Box<str>],
@@ -1469,57 +1462,61 @@ where
     F: Fn() -> Result<google_shared::GoogleWire, ProviderError>,
 {
     let mut last_failure: Option<AttemptFailure> = None;
-    let total = endpoints.len();
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        let is_last = index + 1 == total;
+    for endpoint in endpoints {
         let mut wire = build().map_err(AttemptFailure::Provider)?;
         wire.base_override = Some(endpoint.clone());
-        let response = match send_google_wire(context, cancel, wire).await {
+        match send_google_wire(context, cancel, wire).await {
+            Ok(Some(response)) => {
+                match google_decoded(
+                    context,
+                    secrets,
+                    cancel,
+                    response,
+                    true,
+                    Some(response_slot.clone()),
+                )
+                .await
+                {
+                    Ok(stream) => return Ok(stream),
+                    Err(failure) => {
+                        let retryable = match &failure {
+                            AttemptFailure::Response {
+                                status,
+                                code,
+                                message,
+                                ..
+                            } => matches!(
+                                crate::retry::classify(
+                                    Some(*status),
+                                    code.as_deref(),
+                                    message,
+                                    &RequestState {
+                                        family: context.family,
+                                        provider: &context.provider,
+                                        model: &context.model,
+                                        oauth: true,
+                                        refreshed: false,
+                                        delivered: false,
+                                    },
+                                ),
+                                RetryDecision::Retry(_)
+                            ),
+                            AttemptFailure::Provider(ProviderError::Transport { .. }) => true,
+                            AttemptFailure::Provider(_) => false,
+                        };
+                        if retryable {
+                            last_failure = Some(failure);
+                        } else {
+                            return Err(failure);
+                        }
+                    }
+                }
+            }
             Ok(None) => return Ok(None),
-            Err(failure) => {
-                if is_last || !is_antigravity_body_failure_failover(&failure) {
-                    return Err(failure);
-                }
-                last_failure = Some(failure);
-                continue;
-            }
-            Ok(Some(response)) => response,
-        };
-        if response.status().is_success() {
-            return google_decoded(
-                context,
-                secrets,
-                cancel,
-                response,
-                true,
-                Some(response_slot.clone()),
-            )
-            .await;
-        }
-        match google_status_failure(
-            response,
-            context.family,
-            &context.provider,
-            &context.model,
-            true,
-            secrets,
-            cancel,
-        )
-        .await
-        {
-            Ok(None) => return Ok(None),
-            Err(failure) => {
-                if is_last || !is_antigravity_body_failure_failover(&failure) {
-                    return Err(failure);
-                }
+            Err(failure @ AttemptFailure::Provider(ProviderError::Transport { .. })) => {
                 last_failure = Some(failure);
             }
-            Ok(Some(failure)) => {
-                if is_last || !is_antigravity_status_failover(&failure) {
-                    return Err(failure);
-                }
-                last_failure = Some(failure);
-            }
+            Err(failure) => return Err(failure),
         }
     }
     Err(last_failure.unwrap_or_else(|| {
@@ -1528,38 +1525,6 @@ where
             reason: String::from("the antigravity endpoints answered nothing"),
         })
     }))
-}
-
-/// Whether a mapped Antigravity error status fails over to the next endpoint.
-///
-/// Only a transient pre-byte `Response` status does: `408`, non-quota `429`,
-/// and `500`/`502`/`503`/`504`/`529` (the shared retry table's retryable
-/// set). Quota never reaches here as a `Response` (the shared classifier
-/// maps it to `Provider(Quota)`, which is terminal), and an account
-/// verification message stays terminal even on a transient status because a
-/// second endpoint cannot clear account state.
-fn is_antigravity_status_failover(failure: &AttemptFailure) -> bool {
-    match failure {
-        AttemptFailure::Response {
-            status, message, ..
-        } => {
-            let transient = matches!(*status, 408 | 429 | 500 | 502 | 503 | 504 | 529);
-            transient && !message.contains("Account verification required.")
-        }
-        AttemptFailure::Provider(_) => false,
-    }
-}
-
-/// Whether a body-read failure inside `google_status_failure` fails over.
-///
-/// A transport failure happens before any stream byte, so the next endpoint
-/// may still serve; every other provider error (limit, auth, quota) returns
-/// at once.
-fn is_antigravity_body_failure_failover(failure: &AttemptFailure) -> bool {
-    matches!(
-        failure,
-        AttemptFailure::Provider(ProviderError::Transport { .. })
-    )
 }
 
 /// Sends one Google wire and decodes its SSE reply through the shared
@@ -2061,6 +2026,31 @@ fn build_ollama_stream_request(
     Ok((request.body(body), user_agent, secrets, None))
 }
 
+fn build_pi_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::pi_messages::request_body(&context.request, &context.provider, &context.thinking)
+            .map_err(|error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::pi_messages::ENDPOINT_PATH,
+    )?;
+    let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
+    Ok((
+        context.client.post(url).header(header, value).body(body),
+        user_agent,
+        secrets,
+        None,
+    ))
+}
+
 pub(crate) fn build_stream_request(
     context: &StreamContext,
     credential: &Credential,
@@ -2112,35 +2102,9 @@ pub(crate) fn build_stream_request(
         }),
         Family::Mistral => build_mistral_stream_request(context, credential, secrets, user_agent),
         Family::Ollama => build_ollama_stream_request(context, credential, secrets, user_agent),
-        Family::PiMessages => build_pi_messages_stream(context, credential, secrets),
+        Family::PiMessages => build_pi_stream_request(context, credential, secrets, user_agent),
         Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
-}
-
-/// Builds the streaming request for the pi-messages family: one POST with a
-/// mandatory auth header.
-fn build_pi_messages_stream(
-    context: &StreamContext,
-    credential: &Credential,
-    secrets: Vec<Box<str>>,
-) -> Result<StreamRequestParts, ProviderError> {
-    let body =
-        family::pi_messages::request_body(&context.request, &context.provider, &context.thinking)
-            .map_err(|error| ProviderError::InvalidRequest {
-            message: error.to_string(),
-        })?;
-    let url = http::endpoint(
-        context.family,
-        &context.base_url,
-        family::pi_messages::ENDPOINT_PATH,
-    )?;
-    let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
-    Ok((
-        context.client.post(url).header(header, value).body(body),
-        context.user_agent.clone(),
-        secrets,
-        None,
-    ))
 }
 
 fn build_anthropic_stream_request(
