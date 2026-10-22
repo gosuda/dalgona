@@ -98,9 +98,18 @@ fn require_seatbelt_at(seatbelt: &Path) -> Result<(), SandboxSetupError> {
 /// Resolves the session launcher, failing closed before any child starts.
 pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, SandboxSetupError> {
     if !inputs.sandbox_on {
+        // Direct launches stay under the mandatory lifetime policy on
+        // macOS, so the Seatbelt utility is required here as well.
+        #[cfg(target_os = "macos")]
+        require_seatbelt()?;
         return Ok(Launcher::Direct);
     }
     let roots = resolve_roots(inputs)?;
+    // The overlap refusal above precedes platform availability, so a
+    // protected root under an automatic grant reports the overlap on every
+    // platform even where the Seatbelt utility is absent.
+    #[cfg(target_os = "macos")]
+    require_seatbelt()?;
     #[cfg(windows)]
     {
         let helper = inputs.helper.ok_or_else(|| {
@@ -153,6 +162,10 @@ pub(crate) fn session_launcher(
     helper: Option<&Path>,
 ) -> Result<Launcher, SandboxSetupError> {
     if !config.sandbox() {
+        // Direct launches stay under the mandatory lifetime policy on
+        // macOS, so the Seatbelt utility is required here as well.
+        #[cfg(target_os = "macos")]
+        require_seatbelt()?;
         return Ok(Launcher::Direct);
     }
     let home = platform_home(vars).ok_or_else(|| {
@@ -247,21 +260,69 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
                 home.display(),
             )));
         }
-        for protected in inputs.protected_roots {
-            if canonical == *protected
-                || canonical.starts_with(protected)
-                || protected.starts_with(&canonical)
-            {
+        push_unique(canonical, &mut roots);
+    }
+    // No launcher may receive an automatic or configured writable root
+    // that contains protected state, or that lies inside protected state.
+    let protected = inputs
+        .protected_roots
+        .iter()
+        .map(|root| canonicalize_protected_root(root))
+        .collect::<Result<Vec<_>, _>>()?;
+    for root in &roots {
+        for guarded in &protected {
+            if root == guarded || root.starts_with(guarded) || guarded.starts_with(root) {
                 return Err(SandboxSetupError::new(format!(
-                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = \"off\" in dal.toml.",
-                    canonical.display(),
-                    protected.display(),
+                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Change the workspace, temporary directory, cache, or sandbox_writable entry, or set sandbox = \"off\" in dal.toml.",
+                    root.display(),
+                    guarded.display(),
                 )));
             }
         }
-        push_unique(canonical, &mut roots);
     }
     Ok(roots)
+}
+
+/// Resolves an existing protected root or its deepest existing ancestor.
+/// A missing tail is preserved, so a not-yet-created data directory cannot
+/// escape overlap validation through a symlinked parent.
+fn canonicalize_protected_root(root: &Path) -> Result<PathBuf, SandboxSetupError> {
+    if !root.is_absolute() {
+        return Err(SandboxSetupError::new(format!(
+            "sandbox: protected root {} must be absolute",
+            root.display(),
+        )));
+    }
+    let mut current = root;
+    let mut missing: Vec<&OsStr> = Vec::new();
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut canonical) => {
+                if !missing.is_empty() && !canonical.is_dir() {
+                    return Err(SandboxSetupError::new(format!(
+                        "sandbox: protected root {} has a non-directory parent",
+                        root.display(),
+                    )));
+                }
+                canonical.extend(missing.into_iter().rev());
+                return Ok(canonical);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(current).is_ok() {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                }
+                let Some(name) = current.file_name() else {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                };
+                let Some(parent) = current.parent() else {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                };
+                missing.push(name);
+                current = parent;
+            }
+            Err(source) => return Err(cannot_open(&root.to_string_lossy(), &source)),
+        }
+    }
 }
 
 /// Expands one writable entry: absolute stays, a leading `~/` resolves
@@ -729,6 +790,59 @@ mod tests {
         );
     }
 
+    fn assert_overlap_rejected(setup: &SandboxInputs<'_>, writable: &Path, guarded: &Path) {
+        let error = resolve_launcher(setup).expect_err("overlapping root must block launch");
+        let writable = std::fs::canonicalize(writable).expect("canonical writable");
+        let guarded = std::fs::canonicalize(guarded).expect("canonical protected");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "sandbox: the writable path {} overlaps {}",
+                writable.display(),
+                guarded.display(),
+            )),
+            "unexpected: {error}",
+        );
+    }
+
+    #[test]
+    fn automatic_workspace_equal_parent_and_child_of_protected_are_rejected() {
+        let tree = tempfile::tempdir().expect("tree");
+        let home = tempfile::tempdir().expect("home");
+        let protected = tree.path().join("data");
+        let child = protected.join("plugins");
+        std::fs::create_dir_all(&child).expect("protected tree");
+        let guarded = [protected.clone()];
+
+        for workspace in [protected.as_path(), tree.path(), child.as_path()] {
+            let setup = inputs(workspace, home.path(), home.path(), &[], &guarded, None);
+            assert_overlap_rejected(&setup, workspace, &protected);
+        }
+    }
+
+    #[test]
+    fn automatic_temp_and_cache_containing_protected_are_rejected() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        let temp = tempfile::tempdir().expect("temp");
+        let cache = tempfile::tempdir().expect("cache");
+
+        for automatic in [temp.path(), cache.path()] {
+            let protected = automatic.join("credentials");
+            std::fs::create_dir(&protected).expect("protected directory");
+            let guarded = [protected.clone()];
+            let mut setup = inputs(
+                workspace.path(),
+                home.path(),
+                cache.path(),
+                &[],
+                &guarded,
+                None,
+            );
+            setup.temp = temp.path().to_path_buf();
+            assert_overlap_rejected(&setup, automatic, &protected);
+        }
+    }
+
     #[test]
     fn platform_temp_prefers_captured_vars_over_ambient() {
         let home = tempfile::tempdir().expect("home");
@@ -822,9 +936,68 @@ mod tests {
         assert_eq!(platform_temp(&vars, home.path()), expected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn missing_protected_tail_beneath_symlink_is_still_guarded() {
+        let tree = tempfile::tempdir().expect("tree");
+        let home = tempfile::tempdir().expect("home");
+        let actual = tree.path().join("real");
+        let alias = tree.path().join("alias");
+        std::fs::create_dir(&actual).expect("actual dir");
+        std::os::unix::fs::symlink(&actual, &alias).expect("alias");
+        let guarded = [alias.join("missing/data")];
+        let setup = inputs(&actual, home.path(), home.path(), &[], &guarded, None);
+        let error = resolve_roots(&setup).expect_err("symlinked protected root must block");
+        let canonical = std::fs::canonicalize(&actual).expect("canonical actual");
+        assert!(
+            error.to_string().contains(&format!(
+                "overlaps {}",
+                canonical.join("missing/data").display(),
+            )),
+            "unexpected: {error}",
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sandbox_argv_routes_through_helper_or_refuses_without_one() {
+        let job = JobId::new_v7();
+        let target = OsString::from("sh");
+        let target_args = [OsString::from("-c"), OsString::from("true")];
+        let roots = [PathBuf::from("/work/project")];
+        let refused = sandbox_argv(&target, &target_args, &job, None, &roots)
+            .expect_err("a missing helper refuses the spawn");
+        assert_eq!(
+            refused.to_string(),
+            "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
+        );
+        let helper = Path::new("/opt/dalgon/bin/dalgon");
+        let (program, args, profile) =
+            sandbox_argv(&target, &target_args, &job, Some(helper), &roots)
+                .expect("a helper resolves the sandboxed argv");
+        assert_eq!(program, OsString::from("/opt/dalgon/bin/dalgon"));
+        assert_eq!(profile, None);
+        let text: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "__sandbox".to_string(),
+                "--allow".to_string(),
+                "/work/project".to_string(),
+                "--".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                "true".to_string(),
+            ],
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
-    fn missing_seatbelt_fails_closed_when_sandbox_enabled() {
+    fn missing_seatbelt_fails_closed_for_both_launch_modes() {
         let error = require_seatbelt_at(Path::new("/dal-probe/missing-seatbelt"))
             .expect_err("a missing utility is rejected");
         assert_eq!(
@@ -939,6 +1112,84 @@ mod tests {
         let launcher = resolve_launcher(&with_helper).expect("abi 3 resolves");
         assert!(matches!(launcher, Launcher::Sandbox { .. }));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_rejects_malformed_outputs_with_exact_fail_closed_text() {
+        const UNKNOWN: &str = "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI unknown.";
+        // A nonzero exit never admits the launcher.
+        let failing_dir = tempfile::tempdir().expect("failing helper");
+        let failing = probe_helper_script(failing_dir.path(), "exit 1");
+        assert_eq!(
+            probe_landlock_abi(&failing)
+                .expect_err("nonzero exit fails closed")
+                .to_string(),
+            UNKNOWN,
+        );
+        // Output without the trailing newline is not one decimal line.
+        let bare_dir = tempfile::tempdir().expect("bare helper");
+        let bare = probe_helper_script(bare_dir.path(), "printf '3'");
+        assert_eq!(
+            probe_landlock_abi(&bare)
+                .expect_err("missing newline fails closed")
+                .to_string(),
+            UNKNOWN,
+        );
+        // A non-decimal token reports itself, exactly.
+        let text_dir = tempfile::tempdir().expect("text helper");
+        let text = probe_helper_script(text_dir.path(), "printf 'v3\\n'");
+        assert_eq!(
+            probe_landlock_abi(&text)
+                .expect_err("non-decimal output fails closed")
+                .to_string(),
+            "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI v3.",
+        );
+        // An empty line reports the unknown ABI, not an empty one.
+        let empty_dir = tempfile::tempdir().expect("empty helper");
+        let empty = probe_helper_script(empty_dir.path(), "printf '\\n'");
+        assert_eq!(
+            probe_landlock_abi(&empty)
+                .expect_err("empty output fails closed")
+                .to_string(),
+            UNKNOWN,
+        );
+        // A decimal that overflows u32 reports itself, exactly.
+        let wide_dir = tempfile::tempdir().expect("wide helper");
+        let wide = probe_helper_script(wide_dir.path(), "printf '4294967296\\n'");
+        assert_eq!(
+            probe_landlock_abi(&wide)
+                .expect_err("u32 overflow fails closed")
+                .to_string(),
+            "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI 4294967296.",
+        );
+        // An unspawnable helper exhausts its one retry, then fails closed.
+        let missing = failing_dir.path().join("no-such-helper");
+        assert_eq!(
+            probe_landlock_abi(&missing)
+                .expect_err("unspawnable helper fails closed")
+                .to_string(),
+            UNKNOWN,
+        );
+    }
+
+    #[test]
+    fn session_launcher_without_home_fails_closed_with_exact_text() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = dal_core::Config::load(
+            dal_core::ConfigProduct::Dalgon,
+            temp.path(),
+            "",
+            Some("sandbox = true"),
+        )
+        .expect("config");
+        let error = session_launcher(&config, &BTreeMap::new(), temp.path(), &[], None)
+            .expect_err("sandbox on without HOME fails closed");
+        assert_eq!(
+            error.to_string(),
+            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in dal.toml.",
+        );
+    }
+
     #[test]
     fn sandbox_notice_reports_roots_when_on_and_none_when_off_or_unresolvable() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -983,6 +1234,52 @@ mod tests {
                 &[]
             )
             .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn platform_home_and_cache_follow_captured_vars() {
+        let home = tempfile::tempdir().expect("home");
+        let vars = BTreeMap::from([(OsString::from("HOME"), home.path().as_os_str().to_owned())]);
+        assert_eq!(platform_home(&vars), Some(home.path().to_path_buf()));
+        assert_eq!(platform_home(&BTreeMap::new()), None);
+        let cache = tempfile::tempdir().expect("cache");
+        let cached = BTreeMap::from([
+            (OsString::from("HOME"), home.path().as_os_str().to_owned()),
+            (
+                OsString::from("XDG_CACHE_HOME"),
+                cache.path().as_os_str().to_owned(),
+            ),
+        ]);
+        assert_eq!(platform_cache(&cached, home.path()), cache.path());
+        for invalid in [OsString::from(""), OsString::from("relative/cache")] {
+            let vars = BTreeMap::from([(OsString::from("XDG_CACHE_HOME"), invalid)]);
+            assert_eq!(
+                platform_cache(&vars, home.path()),
+                home.path().join(".cache"),
+            );
+        }
+    }
+
+    #[test]
+    fn relative_protected_root_is_rejected_with_exact_text() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        let empty: Vec<Box<str>> = vec![];
+        let guarded = [PathBuf::from("relative/root")];
+        let setup = inputs(
+            workspace.path(),
+            home.path(),
+            home.path(),
+            &empty,
+            &guarded,
+            None,
+        );
+        let error = resolve_roots(&setup).expect_err("relative protected root rejected");
+        assert_eq!(
+            error.to_string(),
+            "sandbox: protected root relative/root must be absolute",
         );
     }
 }
