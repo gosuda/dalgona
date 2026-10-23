@@ -1025,10 +1025,9 @@ async fn remote_host_identity_and_reconnect() -> Result<()> {
         // already on the dead link fails instead of being re-sent, so no
         // server work is duplicated.
         let first = host.sessions(&query).await;
-        assert!(
-            matches!(first, Err(dal_wire::WireError::Transport(_))),
-            "in-flight call on a dropped link fails: {first:?}"
-        );
+        let Err(dal_wire::WireError::Transport(_)) = first else {
+            panic!("in-flight call on a dropped link fails")
+        };
         // Later calls reconnect transparently: retry until the new
         // connection answers or the deadline passes.
         let deadline = tokio::time::Instant::now() + WAIT;

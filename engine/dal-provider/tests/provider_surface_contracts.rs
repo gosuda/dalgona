@@ -94,7 +94,7 @@ fn client_id_overrides_never_name_a_key_variable() {
             let keys = other.key.map_or(&[][..], |key| key.env);
             assert!(
                 !keys.contains(&name),
-                "{} reads {name} as client id but {} reads it as key",
+                "{} and {} disagree on one provider environment name",
                 def.id,
                 other.id
             );

@@ -696,10 +696,9 @@ mod copilot {
         cancel2.cancel();
         let (io2, _rx2) = LoginIo::channel(None, cancel2);
         let result2 = login("github-copilot", Method::Device, io2, &site).await;
-        assert!(
-            matches!(result2, Err(ProviderError::LoginCancelled)),
-            "cancellation must never be swallowed: got {result2:?}"
-        );
+        let Err(ProviderError::LoginCancelled) = result2 else {
+            panic!("cancellation must never be swallowed")
+        };
     }
 
     async fn start_truncated_discovery_peer() -> (String, AbortOnDrop) {
