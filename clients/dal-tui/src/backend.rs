@@ -62,6 +62,10 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     }
     /// Returns busy extension status rows already published at attach time.
     fn ext_status(&self) -> Vec<ExtStatus>;
+    /// Returns the session committed scope for the scoped-models picker.
+    fn committed_scope(&self) -> Vec<Box<str>> {
+        Vec::new()
+    }
     /// Whether the session workspace lives on this machine's disk. A remote
     /// host's workspace path names the host's disk, so the default denies and
     /// no client reads a workspace it does not own; the in-process host allows.
@@ -227,6 +231,10 @@ impl TuiAgent for Agent {
 
     fn ext_status(&self) -> Vec<ExtStatus> {
         self.ext_status()
+    }
+
+    fn committed_scope(&self) -> Vec<Box<str>> {
+        self.scoped_models()
     }
 
     fn workspace_is_local(&self) -> bool {

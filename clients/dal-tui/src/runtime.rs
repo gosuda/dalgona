@@ -1753,7 +1753,10 @@ impl Surfaces {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
                         None
                     }
-                    Chooser::ScopedModels | Chooser::Thinking => {
+                    Chooser::ScopedModels => {
+                        Some(Self::scoped_models_choice(agent, model_source, &filter))
+                    }
+                    Chooser::Thinking => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
                         None
@@ -1817,6 +1820,29 @@ impl Surfaces {
                 None
             }
         }
+    }
+
+    fn scoped_models_choice<A, M>(
+        agent: &A,
+        model_source: &mut M,
+        filter: &str,
+    ) -> crate::picker::PickerUi
+    where
+        A: TuiAgent,
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        let active = agent.committed_scope();
+        let rows = model_source()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|model| {
+                model.scoped_id.map(|id| crate::picker::ScopedModelRow {
+                    id,
+                    label: model.label,
+                })
+            })
+            .collect::<Vec<_>>();
+        crate::picker::scoped_models_picker(rows, &active, filter)
     }
 
     /// Runs the host- and agent-backed requests the input pass queued.
@@ -6842,7 +6868,7 @@ mod loop_tests {
     /// A session whose journal the test appends to: `view` answers with every
     /// entry appended so far, as the host does after the same updates.
     #[derive(Clone, Default)]
-    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>);
+    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>, Vec<Box<str>>);
 
     impl TuiAgent for Ledger {
         type Subscription = Silent;
@@ -6878,6 +6904,10 @@ mod loop_tests {
 
         fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
             Vec::new()
+        }
+
+        fn committed_scope(&self) -> Vec<Box<str>> {
+            self.1.clone()
         }
     }
 
@@ -7248,6 +7278,71 @@ mod loop_tests {
         assert_eq!(notices[0].role, crate::theme::Role::Error);
         assert!(notices[0].text.starts_with("note: /new"), "{notices:?}");
         assert!(rig.rows().is_empty(), "the refusal is not a transcript row");
+    }
+
+    #[test]
+    fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
+        let mut rig = Rig::new();
+        rig.agent.1 = vec!["openai/gpt-6".into(), "anthropic/opus-4".into()];
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![
+            crate::picker::ModelOption {
+                label: "GPT 6".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("openai/gpt-6".into()),
+            },
+            crate::picker::ModelOption {
+                label: "Opus 4".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness {
+                        id: "opus-4".into(),
+                    },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("anthropic/opus-4".into()),
+            },
+        ];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("the chooser opens the picker");
+        assert!(picker.is_multi());
+        assert_eq!(picker.visible_len(), 2);
+        assert!(
+            picker.is_checked(0),
+            "the first committed id arrives checked"
+        );
+        assert!(
+            picker.is_checked(1),
+            "the second committed id arrives checked"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "the supported picker posts no unsupported notice"
+        );
     }
 
     /// The plain text of every row one frame paints over the rig's surfaces,

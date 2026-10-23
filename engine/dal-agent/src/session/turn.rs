@@ -59,6 +59,8 @@ pub(crate) async fn model_ready(
     let aliases: Vec<(Box<str>, Box<str>)> = host
         .shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -374,6 +376,8 @@ async fn open_stream(
         .host
         .shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))

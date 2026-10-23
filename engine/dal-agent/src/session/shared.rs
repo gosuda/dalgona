@@ -78,6 +78,7 @@ pub(crate) struct Shared {
     child_prompt_policy: OnceLock<ChildPromptPolicy>,
     /// The tool-round bound the next turn takes; the turn consumes it.
     next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
+    scoped: Mutex<Option<Vec<Box<str>>>>,
     service_grants: ServiceGrants,
 }
 
@@ -145,6 +146,7 @@ impl Shared {
             tool_allowlist: OnceLock::new(),
             child_prompt_policy: OnceLock::new(),
             next_turn_step_cap: Mutex::new(None),
+            scoped: Mutex::new(None),
             service_grants: ServiceGrants::default(),
         }
     }
@@ -221,6 +223,21 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .projection
             .approval()
+    }
+
+    pub(crate) fn set_scoped(&self, scoped: Option<Vec<Box<str>>>) {
+        *self
+            .scoped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scoped;
+    }
+
+    pub(crate) fn scoped_models(&self) -> Vec<Box<str>> {
+        self.scoped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
     }
 
     /// Refreshes fold-owned promotion and always-allowed sets on every call,

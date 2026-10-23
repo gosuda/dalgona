@@ -793,7 +793,15 @@ impl Actor {
     async fn into_run(mut self, mut pending: Vec<Effect>) {
         let compact = {
             let generation = self.host.shared.generation.borrow();
-            super::driver::compact_limits(self.host.shared.config.compact_ratio(), &generation)
+            super::driver::compact_limits(
+                self.host
+                    .shared
+                    .config
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .compact_ratio(),
+                &generation,
+            )
         };
         self.step(
             Event::Limits {
@@ -1113,7 +1121,15 @@ impl Actor {
         at: Option<dal_core::EntryId>,
         by: ClientId,
     ) -> Result<SessionId, AgentError> {
-        let max = self.host.shared.config.agents().max_depth.get();
+        let max = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agents()
+            .max_depth
+            .get();
         if self.depth + 1 > max {
             return Err(AgentError::Invalid(ValidationError::new(
                 crate::error::HostError::max_depth(max).to_string(),
@@ -2074,7 +2090,13 @@ impl Actor {
         } else {
             None
         };
-        let thinking = self.host.shared.config.thinking();
+        let thinking = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thinking();
         let model = opening.as_ref().map(|opening| opening.info(thinking));
         let mut event = InputEvent { content, model };
         for (index, extension, caller) in hook_fanout(generation, Some(turn)) {

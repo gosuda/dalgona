@@ -244,9 +244,16 @@ pub(crate) fn spawn(ports: DriverPorts, deps: DriverDeps) -> JoinHandle<()> {
     )]
     tokio::spawn(
         Driver {
+            scoped: {
+                let initial = deps.shared.scoped_models();
+                if initial.is_empty() {
+                    None
+                } else {
+                    Some(initial)
+                }
+            },
             deps,
             turns: HashMap::new(),
-            scoped: None,
             last_model: None,
             last_catalog_entry: None,
             tool_boundaries: ToolBoundaries::default(),
@@ -567,10 +574,15 @@ impl Driver {
         }
         self.last_model = Some((resolved.route.clone(), resolved.family));
         self.last_catalog_entry = Some(resolved.entry.clone());
-        let compact = compact_limits(
-            self.deps.host.shared.config.compact_ratio(),
-            &self.turn(turn).generation,
-        );
+        let compact_ratio = self
+            .deps
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .compact_ratio();
+        let compact = compact_limits(compact_ratio, &self.turn(turn).generation);
         let max_steps = self
             .turn(turn)
             .step_cap
@@ -599,7 +611,15 @@ impl Driver {
         // The decision-request boundary: one environment capture per
         // provider request freezes the authority, the cutoff, and the
         // policy fingerprint for every cell of this round.
-        let allowed = self.deps.host.shared.config.eval_uses().clone();
+        let allowed = self
+            .deps
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .eval_uses()
+            .clone();
         let fingerprint =
             crate::session::script::SessionScriptHost::policy_fingerprint(&batch.policy, &allowed);
         let cutoff = Some(self.deps.shared.cursor());
@@ -1143,7 +1163,14 @@ async fn resolve_requested(
 
 /// Resolves the configured default model.
 async fn resolve_default(shared: &HostShared) -> Result<ResolvedRequest, Box<str>> {
-    resolve_reference(shared, shared.config.model().unwrap_or(""), None).await
+    let reference: String = shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .model()
+        .unwrap_or("")
+        .to_owned();
+    resolve_reference(shared, &reference, None).await
 }
 
 /// Resolves `reference`, or the model `route` names when one is given.
@@ -1181,6 +1208,8 @@ async fn resolve_catalog(
     shared.cache_catalog(catalog.clone());
     let aliases: Vec<(Box<str>, Box<str>)> = shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -1264,8 +1293,22 @@ impl Driver {
         resolved: &ResolvedRequest,
         params: RequestParams,
     ) -> ModelRequest {
-        let mode = self.deps.host.shared.config.mode();
-        let thinking = self.deps.host.shared.config.thinking();
+        let mode = self
+            .deps
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mode();
+        let thinking = self
+            .deps
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thinking();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
         let info = model_info_for(
@@ -1567,7 +1610,14 @@ impl Driver {
     /// from a boundary event, and an empty resolved is dropped outside
     /// the resolving stage.
     async fn resolve(&mut self, turn: TurnId) {
-        let mode = self.deps.host.shared.config.mode();
+        let mode = self
+            .deps
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mode();
         let workspace = self.deps.workspace.clone();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
@@ -1627,7 +1677,14 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
-            mode: self.deps.host.shared.config.mode(),
+            mode: self
+                .deps
+                .host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mode(),
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
@@ -2064,7 +2121,14 @@ impl Driver {
             Some(turn) => self.compaction_cancel(turn)?,
         };
         let params = RequestParams {
-            thinking: self.deps.host.shared.config.thinking(),
+            thinking: self
+                .deps
+                .host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .thinking(),
             ..RequestParams::default()
         };
         let mut refused: Option<Box<str>> = None;

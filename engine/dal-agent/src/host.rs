@@ -287,7 +287,7 @@ impl Drop for NameClaim {
 /// Product, configuration, and runtime handles shared by every session.
 pub(crate) struct HostShared {
     /// The validated product configuration.
-    pub(crate) config: Config,
+    pub(crate) config: std::sync::RwLock<Config>,
     /// The captured process inputs.
     pub(crate) env: Arc<Env>,
     /// The product name.

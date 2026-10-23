@@ -533,7 +533,11 @@ impl Backend {
         ));
         let jobs_dir = scheme_store.session_jobs_dir(session);
         let launcher = crate::proc::sandbox::session_launcher(
-            &host.shared.config,
+            &host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             &host.shared.env.vars,
             workspace.as_path(),
             std::slice::from_ref(&host.shared.data_root),
@@ -1280,7 +1284,15 @@ impl Backend {
     /// The depth limit when this session may not start a child: a child
     /// of this session would sit one level deeper than `agents.max_depth`.
     fn depth_refusal(&self) -> Option<u32> {
-        let max = self.host.shared.config.agents().max_depth.get();
+        let max = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agents()
+            .max_depth
+            .get();
         let depth = self
             .host
             .sessions
@@ -1547,6 +1559,8 @@ impl Backend {
             .host
             .shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))

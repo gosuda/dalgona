@@ -83,7 +83,7 @@ impl Host {
         // handle; there is exactly one allocation.
         let login_site = login_site.with_provider_set(&providers);
         let shared = Arc::new(HostShared {
-            config,
+            config: std::sync::RwLock::new(config),
             env: Arc::new(env),
             product_name: product.name,
             data_root: product.data_root,

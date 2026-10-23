@@ -118,16 +118,6 @@ pub(crate) enum PickerAction {
     /// One scoped-model row: carries the `{provider}/{id}` the scope gate
     /// matches. Entering the row alone scopes that one model; in a
     /// multi-select the checked rows win instead.
-    // `cfg_attr` (not bare `expect`): the picker tests exercise this, so
-    // the expectation would be unfulfilled on test targets.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "unwired /scoped-models row: \
-        no TUI caller builds it until provider ids reach ModelOption"
-        )
-    )]
     ScopeModel(Box<str>),
     /// Load the row's stored text into the composer as the draft.
     SetDraft(Box<str>),
@@ -229,14 +219,6 @@ impl PickerUi {
 
     /// Marks the picker multi-select: space toggles the focused row, Enter
     /// submits every checked row, and `checked` seeds the initial set.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the unwired \
-        scoped-models constructor uses multi-select"
-        )
-    )]
     pub(crate) fn with_multi(&mut self, checked: impl IntoIterator<Item = usize>) {
         self.multi = true;
         self.checked = checked.into_iter().collect();
@@ -549,14 +531,6 @@ pub(crate) fn model_picker(models: &[ModelOption], filter: &str) -> PickerUi {
 
 /// One scoped-model row: `id` is the `{provider}/{id}` the session's scope
 /// gate matches against resolved routes.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "unwired /scoped-models rows need \
-    provider ids ModelOption does not carry"
-    )
-)]
 pub(crate) struct ScopedModelRow {
     /// Scoped id in `{provider}/{id}` form.
     pub(crate) id: Box<str>,
@@ -570,14 +544,6 @@ pub(crate) struct ScopedModelRow {
 /// as a selectable row of its own, after the catalog rows, labelled as not in
 /// the current model list: it keeps its scope until the user unchecks it, and
 /// unchecking every row submits the empty list that clears the scope.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "unwired /scoped-models picker kept \
-    for the Chooser::ScopedModels wiring"
-    )
-)]
 pub(crate) fn scoped_models_picker(
     rows: Vec<ScopedModelRow>,
     active: &[Box<str>],

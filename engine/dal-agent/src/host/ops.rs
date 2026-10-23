@@ -67,6 +67,8 @@ impl Host {
     ) -> Vec<ModelInfo> {
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -314,6 +316,8 @@ impl Host {
             })?;
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -383,22 +387,29 @@ impl Host {
     /// callers that must decide before a turn exists.
     pub async fn default_route(&self) -> Option<ModelRoute> {
         let shared = &self.state.shared;
-        let reference = shared.config.model()?;
+        let reference: String = shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned)?;
         if reference.is_empty() {
             return None;
         }
-        if let Some(found) = crate::ext::synthetic::find(shared, reference) {
+        if let Some(found) = crate::ext::synthetic::find(shared, &reference) {
             return Some(found.route());
         }
         let catalog = shared.providers.catalog().await.ok()?;
         shared.cache_catalog(catalog.clone());
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        dal_provider::resolve(&catalog, &aliases, reference)
+        dal_provider::resolve(&catalog, &aliases, &reference)
             .ok()
             .map(|resolved| resolved.route)
     }
@@ -525,6 +536,8 @@ fn builtin_models(
 ) -> Vec<ModelInfo> {
     let aliases: Vec<(Box<str>, Box<str>)> = shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -545,7 +558,11 @@ fn builtin_models(
             &resolved.entry,
             &resolved.route,
             &resolved.provider,
-            shared.config.thinking(),
+            shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .thinking(),
         ));
     }
     models

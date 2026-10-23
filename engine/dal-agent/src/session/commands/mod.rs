@@ -65,6 +65,7 @@ async fn execute(
         Command::Export { path, format } => export(deps, path, format).await,
         Command::SetScopedModels(ids) => {
             *scoped = if ids.is_empty() { None } else { Some(ids) };
+            deps.shared.set_scoped(scoped.clone());
             Ok(Reply::Done(Output::Nothing))
         }
         Command::Fork(entry) => branch(deps, Some(entry), by).await,

@@ -278,7 +278,12 @@ async fn persist_default(
             });
         }
     };
-    let mut config = host.shared.config.clone();
+    let mut config = host
+        .shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let updated = match persist {
         PersistDefault::Model(route) => {
             let text = default_model_text(&route);
@@ -323,7 +328,14 @@ async fn persist_default(
     })
     .await;
     match outcome {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => {
+            *host
+                .shared
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+            Ok(())
+        }
         Ok(Err(reason)) => Err(SaveError::Failed {
             message: reason.into(),
         }),
@@ -636,10 +648,18 @@ impl CommandHost for DriverHost {
         let route = if let Some(route) = &self.route {
             route.clone()
         } else {
-            let Some(default) = self.host.shared.config.model() else {
+            let Some(default) = self
+                .host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model()
+                .map(str::to_owned)
+            else {
                 return Vec::new();
             };
-            match self.resolve_model_inner(default) {
+            match self.resolve_model_inner(&default) {
                 Ok(resolved) => resolved.route,
                 Err(_) => return Vec::new(),
             }
@@ -720,7 +740,14 @@ impl CommandHost for DriverHost {
         _turn: Option<TurnId>,
         route: &ModelRoute,
     ) -> Box<str> {
-        match self.host.shared.config.edit_style() {
+        match self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .edit_style()
+        {
             dal_core::EditStyleInput::Scalar(style) => style.clone(),
             dal_core::EditStyleInput::Table(rows) => {
                 let reference = crate::host::ops::request_reference(route);
@@ -912,6 +939,8 @@ impl DriverHost {
             .host
             .shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -1180,6 +1209,15 @@ mod tests {
         let reloaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(saved.as_str()))
             .expect("saved file loads");
         assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+        let live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(live.as_deref(), Some("beta/gpt-4o"));
         let _ = host.shutdown(std::time::Duration::from_secs(5)).await;
     }
 
@@ -1193,8 +1231,8 @@ mod tests {
         use crate::ext::{Caller, CallerKind};
         use crate::session::driver::DriverDeps;
         use dal_core::{
-            ClientId, Command, Config, ConfigProduct, Family, ModelRoute, Name, Origin, Save,
-            ServiceSet, Workspace,
+            ApprovalMode, ClientId, Command, Config, ConfigProduct, Family, ModelRoute, Name,
+            Origin, PageReq, Save, ServiceSet, Workspace,
         };
         use std::collections::BTreeMap;
         use std::num::NonZeroU32;
@@ -1293,6 +1331,25 @@ mod tests {
         let reloaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(saved.as_str()))
             .expect("saved file loads");
         assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+        let live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(live.as_deref(), Some("beta/gpt-4o"));
+        let _fresh = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("default-persist-fresh"),
+            )
+            .await
+            .expect("fresh session opens");
         let other = ModelRoute::Api {
             family: Family::Chat,
             model: "gpt-4o".into(),
@@ -1309,6 +1366,48 @@ mod tests {
             again, saved,
             "a session-only save must leave the file bytes unchanged"
         );
+        let still_live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(still_live.as_deref(), Some("beta/gpt-4o"));
+        cx.submit_wait(Command::SetApproval {
+            mode: ApprovalMode::All,
+            save: Save::SessionAndDefault,
+        })
+        .await
+        .expect("default approval persists");
+        let saved_approval = std::fs::read_to_string(&config_path).expect("config file reads");
+        assert!(
+            saved_approval.contains("approval = \"all\""),
+            "{saved_approval}"
+        );
+        let live_approval = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .approval();
+        assert_eq!(live_approval, ApprovalMode::All);
+        let fresh_after = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("default-persist-fresh-approval"),
+            )
+            .await
+            .expect("fresh session opens after approval persist");
+        let fresh_view = fresh_after
+            .view(PageReq::default())
+            .expect("fresh session view snapshots");
+        assert_eq!(fresh_view.settings.approval, ApprovalMode::All);
         let _ = host.shutdown(std::time::Duration::from_secs(5)).await;
     }
 

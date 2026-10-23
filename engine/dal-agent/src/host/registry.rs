@@ -1142,20 +1142,50 @@ impl Host {
     }
 
     /// Replays the journal into the fold and shared data plane.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one replay walks the whole journal-to-shared pipeline in place"
+    )]
     async fn replay_session(
         &self,
         resolved: &ResolvedRef,
         journal: &mut Journal,
     ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
-        let thinking = self.state.shared.config.thinking();
+        let thinking = self
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thinking();
         let policy = replay_child_policy(journal.records())?;
         let approval = policy.as_ref().map_or_else(
-            || self.state.shared.config.approval(),
+            || {
+                self.state
+                    .shared
+                    .config
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .approval()
+            },
             |policy| policy.approval,
         );
-        let mode = self.state.shared.config.mode();
-        let configured_model = self.state.shared.config.model().map(ModelRoute::from_id);
+        let mode = self
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mode();
+        let configured_model = self
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(ModelRoute::from_id);
         let requested_model = self
             .default_route()
             .await
@@ -1232,6 +1262,10 @@ impl Host {
     }
 
     /// Spawns the actor, backend, runtime, and services for one session.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one wiring pass keeps every Deps struct next to its spawn"
+    )]
     fn wire_session(
         &self,
         resolved: &ResolvedRef,
@@ -1294,7 +1328,13 @@ impl Host {
             procs: Arc::clone(backend.procs()),
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: backend.launcher().clone(),
-            approval: self.state.shared.config.approval(),
+            approval: self
+                .state
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .approval(),
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
@@ -1321,11 +1361,26 @@ impl Host {
             }),
             cancel: cancel.clone(),
             resolutions: handle.resolutions(),
-            ask_timeout: ask_timeout(&self.state.shared.config),
+            ask_timeout: ask_timeout(
+                &self
+                    .state
+                    .shared
+                    .config
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
             ephemeral: resolved.ephemeral,
             workspace: resolved.workspace.clone(),
         }));
-        notify_ask_clamp(&self.state.shared.config, &backend);
+        notify_ask_clamp(
+            &self
+                .state
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &backend,
+        );
         backend.set_services(&services);
         Ok(WiredSession {
             handle,
@@ -1356,7 +1411,14 @@ impl Host {
             GrantStore::with_runtime_scoped(
                 self.state.shared.data_root.clone(),
                 workspace.to_path_buf(),
-                ask_timeout(&self.state.shared.config),
+                ask_timeout(
+                    &self
+                        .state
+                        .shared
+                        .config
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
                 Arc::clone(broker),
             )
             .map_err(|error| HostError::Config {
@@ -1651,7 +1713,14 @@ impl Host {
         cancel: &CancellationToken,
     ) -> Result<(), HostError> {
         let generation = &wired.ext_generation;
-        let config = Arc::new(self.state.shared.config.clone());
+        let config = Arc::new(
+            self.state
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        );
         let mut rules = Vec::new();
         let mut tool_names = Vec::new();
         for extension in generation.extensions.iter() {
@@ -1816,7 +1885,14 @@ impl Host {
 
     /// Returns the child-session depth limit from the typed `[agents]` table.
     fn max_depth(&self) -> u32 {
-        self.state.shared.config.agents().max_depth.get()
+        self.state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agents()
+            .max_depth
+            .get()
     }
 
     fn depth_of(&self, parent: SessionId) -> Result<u32, HostError> {

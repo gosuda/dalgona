@@ -91,14 +91,17 @@ pub(crate) struct Found {
 
 /// Resolves `reference` (one alias expansion first) to a registered model.
 pub(crate) fn find(shared: &HostShared, reference: &str) -> Option<Found> {
-    let target = shared
+    let target: String = shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .get(reference)
-        .map_or(reference, AsRef::as_ref);
+        .map_or(reference, AsRef::as_ref)
+        .to_owned();
     let generation = shared.generation.borrow().clone();
     let (ext, record) = {
-        let (ext, record) = generation.model(target)?;
+        let (ext, record) = generation.model(&target)?;
         (ext, record.clone())
     };
     Some(Found {
@@ -436,13 +439,21 @@ struct Run {
 
 pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelPrice> {
     let reference = request_reference(route);
-    if let Some(price) = shared.config.price_for_model(&reference) {
-        return Some(price.clone());
+    if let Some(price) = shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .price_for_model(&reference)
+        .cloned()
+    {
+        return Some(price);
     }
     let catalog = shared.cached_catalog();
     let resolved = catalog.as_ref().and_then(|catalog| {
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -452,11 +463,15 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
     let canonical = resolved
         .as_ref()
         .map(|r| format!("{}/{}", r.provider, r.entry.id));
-    if let Some(price) = canonical
-        .as_deref()
-        .and_then(|key| shared.config.price_for_model(key))
-    {
-        return Some(price.clone());
+    if let Some(price) = canonical.as_deref().and_then(|key| {
+        shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .price_for_model(key)
+            .cloned()
+    }) {
+        return Some(price);
     }
     if let Some(price) = resolved.as_ref().and_then(|r| r.entry.price.as_ref()) {
         return Some(price.clone());
