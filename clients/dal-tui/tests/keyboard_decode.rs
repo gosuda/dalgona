@@ -5,9 +5,9 @@
 //! cancel) in BOTH terminal modes (`kitty = true/false`). DESIGN.md is the
 //! contract; `keys::BINDINGS` is the table under test.
 //!
-//! Also covers the repaired gaps from `.outline/sdd/report-keyboard-verify.md`:
-//! picker Ctrl+P/N/B/F chords, Undo on Ctrl+-, `AcceptCycleCompletion` on
-//! Shift+Tab/BackTab, and `DialogFocusRight` on Tab.
+//! Also covers picker Ctrl+P/N/B/F chords, Undo on Ctrl+-,
+//! `AcceptCycleCompletion` on Shift+Tab/BackTab, and `DialogFocusRight` on
+//! Tab.
 
 #![cfg(test)]
 

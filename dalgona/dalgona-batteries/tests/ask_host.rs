@@ -3,8 +3,7 @@
 //! The ask battery over a real host: fail-closed without an answerer, the
 //! `[ask]` deadline, and the answer round trip. All three are decided by the
 //! host's broker machinery, so a scripted `Services` stub cannot stand in
-//! for them. Row mapping lives in
-//! `.outline/sdd/report-rich-ask-residual.md`.
+//! for them.
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;

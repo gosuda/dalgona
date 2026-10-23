@@ -830,9 +830,8 @@ async fn the_battery_decides_exactly_what_the_oracle_decides() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// part-36 residual: registration literals, the cancel-token arm, drifted
-// inputs, and doc invariants. Row mapping lives in
-// `.outline/sdd/report-rich-ask-residual.md`.
+// Registration literals, the cancel-token arm, drifted inputs, and doc
+// invariants.
 
 const EXPECTED_DESCRIPTION: &str = "Ask the user one to four short questions and wait for the answers. Each question is\nsingle-select, multi-select, or free text; add a preview only when seeing a plan or a\ndiff would change the choice. Apply two filters before asking: if the evidence already\ncollected can answer the question, explore instead; if the ideal state settles it,\nresolve to that instead. An owner decision always survives as a question: irreversible,\ndestructive, safety-critical, or cross-cutting product choices. If the call returns no\nanswer, continue on best judgment and do not ask again this turn. Never use it for\npermission requests; permission goes through approval.";
 

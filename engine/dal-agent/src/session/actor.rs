@@ -3831,7 +3831,7 @@ mod tests {
         );
     }
 
-    /// F4 (`report-consent-race-review.md`): broker deadlines are enforced
+    /// Broker deadlines are enforced
     /// while an opening hook suspends the actor in `pump_opening`, not only
     /// on the steady-state tick. A real host suspends a `before_turn` hook;
     /// the test folds a broker slot with a 100 ms deadline through the
