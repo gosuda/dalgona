@@ -90,6 +90,7 @@ fn idle_view() -> Result<View, dal_tui::TuiError> {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

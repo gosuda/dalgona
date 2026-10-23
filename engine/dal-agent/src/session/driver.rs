@@ -1277,6 +1277,14 @@ impl Driver {
         resolve_requested(&self.deps.host.shared, &route, provider).await
     }
 
+    /// The execution mode this session runs under: the folded session
+    /// settings, seeded from the host config at open and refined by
+    /// `SetMode` folds. Never the live host-wide config, which
+    /// `persist_default` rewrites for future sessions.
+    fn session_mode(&self) -> dal_core::Mode {
+        self.deps.shared.mode()
+    }
+
     /// Returns the turn's active route, when the actor snapshotted one.
     fn turn_model(&self, turn: TurnId) -> Option<ModelRoute> {
         self.turns
@@ -1293,14 +1301,7 @@ impl Driver {
         resolved: &ResolvedRequest,
         params: RequestParams,
     ) -> ModelRequest {
-        let mode = self
-            .deps
-            .host
-            .shared
-            .config
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .mode();
+        let mode = self.session_mode();
         let thinking = self
             .deps
             .host
@@ -1610,14 +1611,7 @@ impl Driver {
     /// from a boundary event, and an empty resolved is dropped outside
     /// the resolving stage.
     async fn resolve(&mut self, turn: TurnId) {
-        let mode = self
-            .deps
-            .host
-            .shared
-            .config
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .mode();
+        let mode = self.session_mode();
         let workspace = self.deps.workspace.clone();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
@@ -1677,14 +1671,7 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
-            mode: self
-                .deps
-                .host
-                .shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .mode(),
+            mode: self.session_mode(),
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
@@ -3123,5 +3110,91 @@ mod tests {
         assert_eq!(summary.tokens_after, 6_000 + 700);
         let past_the_total = summarize("capture", 3_000, 4_000, None, &compaction);
         assert_eq!(past_the_total.tokens_after, 700);
+    }
+
+    /// Two session snapshots opened from one host config seed, as the
+    /// registry seeds them with the same mode at open.
+    fn two_sessions(mode: dal_core::Mode) -> (Shared, Shared) {
+        let session = || {
+            Shared::new(
+                false,
+                Gen::new(std::num::NonZeroU64::MIN),
+                dal_core::ThinkingLevel::Medium,
+                dal_core::ApprovalMode::Ask,
+                mode,
+            )
+        };
+        (session(), session())
+    }
+
+    /// Publishes the `SetMode` fold outcome to one session only, the way the
+    /// actor publishes `UpdateKind::Settings` after a `SetMode` command.
+    fn publish_mode(shared: &Shared, mode: dal_core::Mode) {
+        shared.publish(dal_core::UpdateKind::Settings(dal_core::SettingsView {
+            model: None,
+            thinking: dal_core::ThinkingLevel::Medium,
+            approval: dal_core::ApprovalMode::Ask,
+            mode,
+            name: None,
+            scoped_models: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn fresh_session_seeds_mode_from_host_config() {
+        for mode in [dal_core::Mode::Normal, dal_core::Mode::EvalFirst] {
+            let (first, second) = two_sessions(mode);
+            assert_eq!(first.mode(), mode);
+            assert_eq!(second.mode(), mode);
+        }
+    }
+
+    /// Pins the session-owned mode value the request path consumes
+    /// (`Driver::session_mode` at the `ModelRequest` construction): after
+    /// session A saves `EvalFirst` as the host default and folds it locally,
+    /// session B must keep `Normal` even though the host default diverged.
+    /// Wiring (all three sites call `session_mode`, zero host-config mode
+    /// reads remain) is verified by grep; see the seed test below.
+    #[test]
+    fn session_mode_for_request_ignores_other_session_setmode() {
+        let host_default = dal_core::Mode::EvalFirst;
+        let (first, second) = two_sessions(dal_core::Mode::Normal);
+        publish_mode(&first, host_default);
+        assert_eq!(second.mode(), dal_core::Mode::Normal);
+        assert_ne!(second.mode(), host_default);
+        assert!(!second.mode().projection().eval_first);
+        assert!(first.mode().projection().eval_first);
+    }
+
+    /// Pins the session-owned mode value the resolve path consumes
+    /// (`Driver::session_mode` at `resolve_calls` classification): after
+    /// session A saves `EvalFirst` as the host default and folds it locally,
+    /// session B must stay outside the eval-enabled classification even
+    /// though the host default diverged.
+    #[test]
+    fn session_mode_for_resolve_ignores_other_session_setmode() {
+        let host_default = dal_core::Mode::EvalFirst;
+        let (first, second) = two_sessions(dal_core::Mode::Normal);
+        publish_mode(&first, host_default);
+        assert_eq!(second.mode(), dal_core::Mode::Normal);
+        assert_ne!(second.mode(), host_default);
+        assert!(!matches!(
+            second.mode(),
+            dal_core::Mode::EvalFirst | dal_core::Mode::EvalOnly
+        ));
+    }
+
+    /// Pins the session-owned mode value the dispatch path consumes
+    /// (`Driver::session_mode` at `DispatchCtx` construction): after session
+    /// A saves `EvalFirst` as the host default and folds it locally, session
+    /// B must keep `Normal` even though the host default diverged.
+    #[test]
+    fn session_mode_for_dispatch_ignores_other_session_setmode() {
+        let host_default = dal_core::Mode::EvalFirst;
+        let (first, second) = two_sessions(dal_core::Mode::Normal);
+        publish_mode(&first, host_default);
+        assert_eq!(second.mode(), dal_core::Mode::Normal);
+        assert_ne!(second.mode(), host_default);
+        assert_eq!(first.mode(), host_default);
     }
 }

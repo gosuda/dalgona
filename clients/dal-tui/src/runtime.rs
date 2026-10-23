@@ -994,6 +994,7 @@ fn boot<A: TuiAgent>(
         columns: io.size().map_or(80, |(columns, _)| columns),
         branch,
         view,
+        view_arrived: true,
     };
     surfaces.dialog.resync(surfaces.view.open.clone());
     surfaces.live.seed_ext_status(&agent.ext_status());
@@ -1410,6 +1411,7 @@ fn terminal_kitty(state: &std::sync::Mutex<TermState>) -> bool {
 /// inputs move together through every drain.
 struct Surfaces {
     view: dal_core::View,
+    view_arrived: bool,
     session: Session,
     dialog: DialogUi,
     live: Live,
@@ -1696,8 +1698,19 @@ impl Surfaces {
                 }
                 continue;
             }
+            let pending_scope = match &command {
+                Command::SetScopedModels(ids) => Some(ids.clone()),
+                _ => None,
+            };
             let submit_reply = opts.rt.block_on(agent.submit(command));
+            let applied_scope = match &submit_reply {
+                Ok(Reply::Done(_)) => pending_scope,
+                _ => None,
+            };
             self.fold_submit_reply(opts, agent, host, model_source, submit_reply)?;
+            if let Some(ids) = applied_scope {
+                self.view.settings.scoped_models = ids;
+            }
         }
         Ok(())
     }
@@ -1753,9 +1766,7 @@ impl Surfaces {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
                         None
                     }
-                    Chooser::ScopedModels => {
-                        Some(Self::scoped_models_choice(agent, model_source, &filter))
-                    }
+                    Chooser::ScopedModels => self.scoped_models_choice(model_source, &filter),
                     Chooser::Thinking => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
@@ -1822,16 +1833,20 @@ impl Surfaces {
         }
     }
 
-    fn scoped_models_choice<A, M>(
-        agent: &A,
+    fn scoped_models_choice<M>(
+        &mut self,
         model_source: &mut M,
         filter: &str,
-    ) -> crate::picker::PickerUi
+    ) -> Option<crate::picker::PickerUi>
     where
-        A: TuiAgent,
         M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     {
-        let active = agent.committed_scope();
+        if !self.view_arrived {
+            self.live
+                .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
+            return None;
+        }
+        let active = &self.view.settings.scoped_models;
         let rows = model_source()
             .unwrap_or_default()
             .into_iter()
@@ -1842,7 +1857,7 @@ impl Surfaces {
                 })
             })
             .collect::<Vec<_>>();
-        crate::picker::scoped_models_picker(rows, &active, filter)
+        Some(crate::picker::scoped_models_picker(rows, active, filter))
     }
 
     /// Runs the host- and agent-backed requests the input pass queued.
@@ -6635,6 +6650,7 @@ mod loop_tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
+                scoped_models: Vec::new(),
             },
             open: Vec::new(),
             changes: Vec::new(),
@@ -6689,6 +6705,7 @@ mod loop_tests {
         let diagram_cache = crate::diagram::RenderCache::default();
         let mut surfaces = super::Surfaces {
             view: idle_view(),
+            view_arrived: false,
             session: super::Session::default(),
             dialog: crate::dialog::DialogUi::default(),
             live: crate::live::Live::default(),
@@ -6880,6 +6897,7 @@ mod loop_tests {
         fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
             let mut view = idle_view();
             view.entries.items = self.0.lock().expect("ledger").clone();
+            view.settings.scoped_models = self.1.clone();
             std::future::ready(Ok(view))
         }
 
@@ -6905,10 +6923,6 @@ mod loop_tests {
         fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
             Vec::new()
         }
-
-        fn committed_scope(&self) -> Vec<Box<str>> {
-            self.1.clone()
-        }
     }
 
     /// The loop's surfaces over a ledger agent. Updates enter through the same
@@ -6920,7 +6934,7 @@ mod loop_tests {
         opts: TuiOptions,
         seq: u64,
         entries: u64,
-        _runtime: tokio::runtime::Runtime,
+        runtime: tokio::runtime::Runtime,
     }
 
     impl Rig {
@@ -6933,6 +6947,7 @@ mod loop_tests {
             let diagram_cache = crate::diagram::RenderCache::default();
             let surfaces = super::Surfaces {
                 view: idle_view(),
+                view_arrived: false,
                 session: super::Session::default(),
                 dialog: crate::dialog::DialogUi::default(),
                 live: crate::live::Live::default(),
@@ -6949,7 +6964,7 @@ mod loop_tests {
                 opts,
                 seq: 0,
                 entries: 0,
-                _runtime: runtime,
+                runtime,
             }
         }
 
@@ -7284,6 +7299,12 @@ mod loop_tests {
     fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
         let mut rig = Rig::new();
         rig.agent.1 = vec!["openai/gpt-6".into(), "anthropic/opus-4".into()];
+        let arrived = rig
+            .runtime
+            .block_on(rig.agent.view(super::snapshot_page()))
+            .expect("the agent view arrives");
+        rig.surfaces.view = arrived;
+        rig.surfaces.view_arrived = true;
         let host = FakeHost {
             agent: FakeAgent {
                 log: Log::default(),
@@ -7343,6 +7364,158 @@ mod loop_tests {
             rig.surfaces.live.notices().is_empty(),
             "the supported picker posts no unsupported notice"
         );
+    }
+
+    #[derive(Clone)]
+    struct ViewScopedAgent {
+        view: View,
+    }
+
+    impl TuiAgent for ViewScopedAgent {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(Ok(self.view.clone()))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn scoped_chooser_reply_opens_the_picker_on_the_remote_view_scope() {
+        let mut rig = Rig::new();
+        let mut view = idle_view();
+        view.settings.scoped_models = vec!["openai/gpt-6".into(), "anthropic/opus-4".into()];
+        let agent = ViewScopedAgent { view };
+        let arrived = rig
+            .runtime
+            .block_on(agent.view(super::snapshot_page()))
+            .expect("the remote view arrives");
+        rig.surfaces.view = arrived;
+        rig.surfaces.view_arrived = true;
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![
+            crate::picker::ModelOption {
+                label: "GPT 6".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("openai/gpt-6".into()),
+            },
+            crate::picker::ModelOption {
+                label: "Opus 4".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness {
+                        id: "opus-4".into(),
+                    },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("anthropic/opus-4".into()),
+            },
+        ];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("the chooser opens the picker");
+        assert!(picker.is_multi());
+        assert_eq!(picker.visible_len(), 2);
+        assert!(
+            picker.is_checked(0),
+            "the first view-carried id arrives checked"
+        );
+        assert!(
+            picker.is_checked(1),
+            "the second view-carried id arrives checked"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "the view-carried scope posts no notice"
+        );
+    }
+
+    #[test]
+    fn scoped_chooser_reply_without_a_view_refuses_the_picker() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![crate::picker::ModelOption {
+            label: "GPT 6".into(),
+            command: dal_core::Command::SetModel {
+                model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                save: dal_core::command::Save::SessionOnly,
+            },
+            scoped_id: Some("openai/gpt-6".into()),
+        }];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "no view means no picker, never an empty scope"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].text.contains("not available"), "{notices:?}");
     }
 
     /// The plain text of every row one frame paints over the rig's surfaces,

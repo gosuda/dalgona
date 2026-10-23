@@ -75,6 +75,7 @@ impl Projection {
                 approval,
                 mode,
                 name: None,
+                scoped_models: Vec::new(),
             },
             usage: UsageView {
                 usage: Usage {

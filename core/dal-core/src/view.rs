@@ -261,6 +261,9 @@ pub struct SettingsView {
     pub mode: Mode,
     /// The optional session display name.
     pub name: Option<Box<str>>,
+    /// The committed model scope ids restricting this session, empty when unrestricted.
+    #[serde(default)]
+    pub scoped_models: Vec<Box<str>>,
 }
 
 /// The counts of added and removed lines for one changed file.
@@ -514,6 +517,7 @@ mod tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
+                scoped_models: Vec::new(),
             },
             open,
             changes,

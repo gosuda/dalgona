@@ -360,6 +360,7 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

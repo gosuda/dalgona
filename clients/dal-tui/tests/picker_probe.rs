@@ -378,6 +378,7 @@ fn idle_view() -> Result<View, TuiError> {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

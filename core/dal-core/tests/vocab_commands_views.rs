@@ -634,6 +634,7 @@ fn settings_and_usage_views_round_trip() -> TestResult {
         approval: ApprovalMode::Ask,
         mode: Mode::Normal,
         name: None,
+        scoped_models: Vec::new(),
     };
     assert_eq!(
         sonic_rs::from_str::<SettingsView>(&sonic_rs::to_string(&settings)?)?,

@@ -80,6 +80,7 @@ fn view(workspace: Workspace) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: Some("Moon".into()),
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

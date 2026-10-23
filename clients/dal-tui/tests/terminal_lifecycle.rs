@@ -72,6 +72,7 @@ fn idle_view(sid: SessionId, entries: Vec<EntryView>) -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

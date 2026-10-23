@@ -225,6 +225,16 @@ impl Shared {
             .approval()
     }
 
+    /// The execution mode the session runs under now.
+    pub(crate) fn mode(&self) -> Mode {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .effective_settings()
+            .mode
+    }
+
     pub(crate) fn set_scoped(&self, scoped: Option<Vec<Box<str>>>) {
         *self
             .scoped
@@ -443,13 +453,18 @@ impl Shared {
 
     /// Applies one update kind, publishes it, and offers it to subscribers.
     pub(crate) fn publish(&self, kind: UpdateKind) {
+        let scoped = self.scoped_models();
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.projection.apply(&kind);
         let kind = match kind {
-            UpdateKind::Settings(_) => UpdateKind::Settings(inner.projection.effective_settings()),
+            UpdateKind::Settings(_) => {
+                let mut settings = inner.projection.effective_settings();
+                settings.scoped_models = scoped;
+                UpdateKind::Settings(settings)
+            }
             other => other,
         };
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
@@ -474,11 +489,15 @@ impl Shared {
 
     /// Snapshots the materialized view with leaf paging applied.
     pub(crate) fn snapshot(&self, args: SnapshotArgs) -> View {
-        self.inner
+        let scoped = self.scoped_models();
+        let mut view = self
+            .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .projection
-            .snapshot(args)
+            .snapshot(args);
+        view.settings.scoped_models = scoped;
+        view
     }
 
     /// The last terminal stop the projection recorded, when any.
@@ -519,12 +538,14 @@ impl Shared {
 
     /// Captures a view and its full leaf path from one projection state.
     pub(crate) fn snapshot_with_leaf_entries(&self, args: SnapshotArgs) -> (View, Vec<EntryView>) {
+        let scoped = self.scoped_models();
         let inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entries = inner.projection.leaf_entries();
-        let view = inner.projection.snapshot(args);
+        let mut view = inner.projection.snapshot(args);
+        view.settings.scoped_models = scoped;
         (view, entries)
     }
     /// Reports whether a live approval-answering subscriber watches this

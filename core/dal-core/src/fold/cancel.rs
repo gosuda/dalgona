@@ -402,6 +402,7 @@ impl Session {
             approval: self.settings.approval,
             mode: self.settings.mode,
             name: self.settings.name.clone(),
+            scoped_models: Vec::new(),
         }
     }
 
