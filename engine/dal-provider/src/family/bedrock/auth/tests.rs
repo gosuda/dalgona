@@ -1022,6 +1022,56 @@ async fn helper_stderr_never_enters_errors() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn credential_process_refuses_relative_program_paths() {
+    let dir = TestDir::new("process-relative-path");
+    dir.write(
+        ".aws/credentials",
+        "[default]\ncredential_process = ./helper\n",
+    );
+    let env = snapshot(&dir, &[]);
+    let error = resolver(env, dir.path())
+        .resolve_credentials(
+            "amazon-bedrock",
+            &options(None, "us-east-1"),
+            &cancel(),
+            deadline(),
+        )
+        .await
+        .expect_err("relative program is refused");
+    let ProviderError::InvalidRequest { message } = &error else {
+        panic!("relative program must be refused as an invalid request, got {error:?}");
+    };
+    assert!(message.contains("relative path"), "{message}");
+    assert!(message.contains("absolute path"), "{message}");
+    assert!(!message.contains("./helper"), "{message}");
+    for command in ["helper", "/usr/bin/helper"] {
+        dir.write(
+            ".aws/credentials",
+            &format!("[default]\ncredential_process = {command}\n"),
+        );
+        let env = snapshot(&dir, &[]);
+        let error = resolver(env, dir.path())
+            .resolve_credentials(
+                "amazon-bedrock",
+                &options(None, "us-east-1"),
+                &cancel(),
+                deadline(),
+            )
+            .await
+            .expect_err("missing helper still fails past the guard");
+        assert!(
+            !matches!(
+                &error,
+                ProviderError::InvalidRequest { message }
+                    if message.contains("relative path")
+            ),
+            "bare and absolute programs pass the guard, got {error:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn helper_stdout_never_enters_errors() {
     let dir = TestDir::new("redact-stdout");
     let helper = write_helper(

@@ -857,6 +857,13 @@ async fn read_credential_process(
             ),
         });
     }
+    if (program.contains('/') || program.contains('\\')) && !Path::new(program).is_absolute() {
+        return Err(ProviderError::InvalidRequest {
+            message: format!(
+                "AWS profile '{profile}' credential_process names a relative path; use an absolute path or a command found on PATH"
+            ),
+        });
+    }
     let cwd = ctx.env.cwd().ok_or_else(|| ProviderError::InvalidRequest {
         message: format!(
             "AWS profile '{profile}' credential_process has no captured working directory"
