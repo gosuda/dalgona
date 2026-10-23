@@ -29,7 +29,7 @@ fn decode_key(bytes: &[u8]) -> Key {
     let events = decode_all(bytes);
     assert_eq!(events.len(), 1, "one key from {bytes:?}, got {events:?}");
     let InputEvent::Key(key) = events[0] else {
-        panic!("key from {bytes:?}, got {events:?}");
+        unreachable!("key from {bytes:?}, got {events:?}");
     };
     key
 }

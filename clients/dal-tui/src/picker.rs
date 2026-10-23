@@ -1,5 +1,6 @@
 //! Pickers and settings rows: model, resume, tree, settings, help.
 
+use dal_agent::login::Method;
 use dal_core::{Command, EntryKind, EntryView, Family, JournalPart, ModelInfo, ModelRoute, View};
 
 use crate::copy::ids;
@@ -105,6 +106,15 @@ pub(crate) enum PickerAction {
     },
     /// Open the remove-all confirmation.
     ConfirmLogoutAll,
+    /// Sign in to a provider with an explicit method: multi-method
+    /// providers list one row per method, so device sign-in stays
+    /// reachable without a typed method argument.
+    Login {
+        /// The provider id.
+        provider: Box<str>,
+        /// The method this row signs in with.
+        method: Method,
+    },
     /// One scoped-model row: carries the `{provider}/{id}` the scope gate
     /// matches. Entering the row alone scopes that one model; in a
     /// multi-select the checked rows win instead.

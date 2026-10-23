@@ -444,10 +444,84 @@ pub(crate) async fn resolved_elsewhere(
 mod tests {
     use std::time::Duration;
 
-    use dal_core::{Answer, Owner, Question, Request, RequestId};
+    use dal_core::{Answer, Choice, Owner, Question, RawJson, Request, RequestId};
     use sonic_rs::JsonValueTrait;
 
-    use super::{AcpVersion, build_question};
+    use super::super::super::ServerAnswer;
+    use super::{AcpVersion, build_question, map_client_answer};
+
+    fn options() -> Vec<Choice> {
+        ["Alpha", "Beta", "Gamma"]
+            .into_iter()
+            .map(|label| Choice {
+                label: label.into(),
+                description: None,
+            })
+            .collect()
+    }
+
+    fn select(multi: bool) -> Question {
+        Question::Select {
+            prompt: "Pick".into(),
+            options: options(),
+            multi,
+            preview: None,
+        }
+    }
+
+    fn mapped(question: &Question, result: sonic_rs::Value) -> Answer {
+        map_client_answer(question, &ServerAnswer { result })
+    }
+
+    fn bare(text: &str) -> Answer {
+        Answer::Value(RawJson::parse(text).expect("raw json"))
+    }
+
+    /// The ask battery decodes the bare spellings the wire adapters send: a
+    /// string for single and text, an array of strings for multi. The mapper
+    /// must keep emitting exactly those, never an object.
+    #[test]
+    fn ask_answers_map_to_the_bare_values_the_battery_decodes() {
+        let single = mapped(
+            &select(false),
+            sonic_rs::json!({"outcome": "selected", "optionId": "choice-0"}),
+        );
+        assert_eq!(single, bare(r#""Alpha""#));
+
+        let multi = mapped(
+            &select(true),
+            sonic_rs::json!({
+                "outcome": "accept",
+                "choice-0": true,
+                "choice-1": false,
+                "choice-2": true,
+            }),
+        );
+        assert_eq!(multi, bare(r#"["Alpha","Gamma"]"#));
+
+        let text = mapped(
+            &Question::Text {
+                prompt: "Pick".into(),
+                placeholder: None,
+            },
+            sonic_rs::json!({"outcome": "accept", "answer": "because"}),
+        );
+        assert_eq!(text, bare(r#""because""#));
+    }
+
+    #[test]
+    fn ask_dismissals_never_become_values() {
+        let single = mapped(&select(false), sonic_rs::json!({"outcome": "cancelled"}));
+        assert_eq!(single, Answer::Cancel);
+        let multi = mapped(&select(true), sonic_rs::json!({"outcome": "cancel"}));
+        assert_eq!(multi, Answer::Cancel);
+        let text = Question::Text {
+            prompt: "Pick".into(),
+            placeholder: None,
+        };
+        let text = mapped(&text, sonic_rs::json!({"outcome": "cancel"}));
+        assert_eq!(text, Answer::Cancel);
+    }
 
     #[test]
     fn grant_permission_request_includes_declared_server_details() {

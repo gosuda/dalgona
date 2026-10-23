@@ -28,7 +28,7 @@ mod value;
 /// Watch the output stream, resolve fire actions, and deliver fires.
 pub mod watch;
 
-pub use extension::{TtsrDeps, TtsrSessionState, extension};
+pub use extension::{TtsrDeps, TtsrSessionState, extension, extension_with_lanes};
 pub use value::{
     Bucket, CONDITION_MAX_BYTES, ConditionSource, InterruptMode, NAME_MAX_BYTES, Name, Origin,
     Problem, ProblemKind, RepeatMode, Rule, RuleAction, ScopeSpec, Severity, ToolPat, ToolScope,

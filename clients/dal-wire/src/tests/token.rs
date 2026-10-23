@@ -159,6 +159,7 @@ fn debug_output_never_contains_token_bytes() {
     let token = create(&path, false).expect("create token");
     let loaded = load(&path).expect("load created token");
     let rendered = format!("{loaded:?}");
+    assert_eq!(rendered, "SecretToken([REDACTED])");
     assert!(!rendered.contains(&token));
 }
 
@@ -234,9 +235,7 @@ fn missing_and_non_regular_paths_fail_closed() {
 fn oversized_first_line_is_invalid_not_truncated_to_valid() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("serve.token");
-    let token = create(&path, false).expect("create valid token prefix");
-    std::fs::write(&path, format!("{token}{}", "a".repeat(5000)))
-        .expect("write oversized token file");
+    std::fs::write(&path, "a".repeat(5000)).expect("write oversized token file");
     set_private_mode(&path);
     assert!(matches!(load(&path), Err(TokenError::Invalid { .. })));
     assert!(matches!(

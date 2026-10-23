@@ -20,17 +20,15 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     error::Error,
     time::{Duration, Instant},
 };
 
+use pty::vt::{FollowedScreen, VtRecorder};
 use pty::{PtyProcess, dalgon_command_with_fixture, shell_quote, wait_for_path};
 use support::TestDir;
-use vt::{FollowedScreen, VtRecorder};
 
 #[test]
 fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -81,6 +79,7 @@ fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         terminal.collect_for(Duration::from_millis(200))?;
     }
+
     terminal.write(b"\x04")?;
     terminal.wait_for(
         dal_tui::copy::ids::TURN_CANCELLED.as_bytes(),

@@ -258,11 +258,12 @@ async fn setup_keeps_recorded_route_after_compaction() {
     );
 }
 
-/// A configuration whose structured default names `provider` for `family`
-/// and `model` (the legacy mirror carries the family prefix only).
-fn provider_default(family_wire: &str, prefix: &str, model: &str, provider: &str) -> String {
+/// A configuration whose default names `provider` for `model` under the
+/// family `family_wire`, written as the merged `model` string the branch
+/// persists (no `[model_route]` table remains).
+fn provider_default(family_wire: &str, model: &str, provider: &str) -> String {
     format!(
-        "model = \"{prefix}/{model}\"\n\n[model_route]\nkind = \"api\"\nfamily = \"{family_wire}\"\nmodel = \"{model}\"\nprovider = \"{provider}\"\n"
+        "model = \"{provider}/{model}\"\n\n[providers.{provider}]\napi = \"{family_wire}\"\nbase_url = \"http://127.0.0.1:1\"\nauth = \"none\"\n"
     )
 }
 
@@ -279,7 +280,7 @@ async fn setup_keeps_the_configured_provider_for_the_model_a_response_recorded()
     // The response records its family and model but no provider; the
     // configured default names the same model with its provider, and that is
     // the route the session's own turns send.
-    let config = provider_default("openai_chat", "openai-chat", "gpt-4o", "acme");
+    let config = provider_default("openai_chat", "gpt-4o", "acme");
     let records = vec![recorded(
         2,
         "gpt-4o",
@@ -296,7 +297,7 @@ async fn setup_keeps_the_configured_provider_for_the_model_a_response_recorded()
 
 #[tokio::test]
 async fn setup_does_not_lend_the_configured_provider_to_another_model_or_family() {
-    let config = provider_default("openai_chat", "openai-chat", "gpt-4o", "acme");
+    let config = provider_default("openai_chat", "gpt-4o", "acme");
     // Another native model: the response's own provider-less route stands.
     let records = vec![recorded(
         2,
@@ -312,7 +313,7 @@ async fn setup_does_not_lend_the_configured_provider_to_another_model_or_family(
     );
     // Another API family under the same model name: the response was
     // produced by a different route than the configured one.
-    let config = provider_default("openai_responses", "openai-responses", "gpt-4o", "acme");
+    let config = provider_default("openai_responses", "gpt-4o", "acme");
     let records = vec![recorded(
         2,
         "gpt-4o",

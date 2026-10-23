@@ -155,7 +155,9 @@ impl<T> LosslessQueue<T> {
 }
 
 /// Drives one extension's observer hooks without ever failing the turn.
-/// Each failure is counted in `report`; the actor logs the text.
+/// Each failure is counted in `report`; the actor logs the text. A cancel is
+/// not a failure: it ends the chain, starts no later observer, and counts
+/// nothing.
 async fn drive_observe<I: Clone + 'static>(
     ext: &str,
     cx: &DispatchCx<'_>,
@@ -165,14 +167,16 @@ async fn drive_observe<I: Clone + 'static>(
 ) {
     let deadline = cx.deadline();
     for hook in hooks {
-        if let Err(err) = settle(
-            hook.call(event.clone(), cx.mint(deadline)),
+        let settled = settle(
+            || hook.call(event.clone(), cx.mint(deadline)),
             cx.cancel,
             deadline,
         )
-        .await
-        {
-            report.note(ext, &err);
+        .await;
+        match settled {
+            Ok(()) => {}
+            Err(crate::ext::HookError::Cancelled) => break,
+            Err(err) => report.note(ext, &err),
         }
     }
 }

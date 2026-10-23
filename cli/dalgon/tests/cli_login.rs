@@ -11,6 +11,23 @@ use support::CliFixture;
 /// The state column of a provider that holds no credential.
 const NOT_CONFIGURED: &str = "not configured";
 
+/// One parsed `login status` row: the provider id plus the state columns.
+///
+/// The renderer pads the id to width 14 (`{id:<14}{state:<15}{kind}`), so ids
+/// longer than 14 run into the state column with no gap; the split searches
+/// for the state marker from the right instead of splitting on whitespace.
+fn status_row(line: &str) -> Result<(String, String), std::io::Error> {
+    for marker in ["not configured", "ready", "expired"] {
+        if let Some(pos) = line.rfind(marker) {
+            let (id, rest) = line.split_at(pos);
+            return Ok((id.trim_end().to_owned(), rest.to_owned()));
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "unrecognised login status row: {line:?}"
+    )))
+}
+
 /// One `login status` row: the provider id, its state (`ready`, `expired`, or
 /// `not configured`), and the detail after the state (the credential kind and
 /// expiry date; empty for `not configured`).
@@ -208,6 +225,7 @@ fn status_reports_oauth_expiry_without_exposing_tokens() -> Result<(), Box<dyn E
         .find(|row| row.state == NOT_CONFIGURED)
         .ok_or("status lists a provider with no credential")?;
     assert_eq!(sole_hint_provider(&output.stderr)?, first_missing.provider);
+
     Ok(())
 }
 
@@ -233,7 +251,44 @@ fn status_with_no_credentials_prints_the_first_login_hint() -> Result<(), Box<dy
     // The hint names the first provider the table lists.
     let first = rows.first().ok_or("status printed no rows")?;
     assert_eq!(sole_hint_provider(&output.stderr)?, first.provider);
+
     Ok(())
+}
+
+/// Runs `login status` with the fixture isolation plus extra captured
+/// environment. Mirrors `support::CliFixture` (`env_clear`, `PATH`,
+/// `HOME`, `XDG_*`, isolated cwd) so AWS inputs stay captured, isolated,
+/// and offline; `AWS_EC2_METADATA_DISABLED` is always set to keep the
+/// ambient probe off IMDS/network. No live keys, network, or commands.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness: the fixture launches the built dalgon binary and forwards its own environment"
+)]
+fn bedrock_status(
+    fixture: &CliFixture,
+    extra_env: &[(&str, &str)],
+) -> Result<std::process::Output, std::io::Error> {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dalgon"));
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    command
+        .args(["login", "status"])
+        .env("HOME", &fixture.home)
+        .env("XDG_CONFIG_HOME", &fixture.config)
+        .env("XDG_DATA_HOME", &fixture.data)
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("AWS_REGION", "us-east-1")
+        .current_dir(fixture.cwd());
+    for (name, value) in extra_env {
+        command.env(name, value);
+    }
+    command.output()
 }
 
 /// A provider the CLI does not sign in to is a usage error before any key is
@@ -350,5 +405,222 @@ fn piped_key_forgives_only_its_trailing_line_ending() -> Result<(), Box<dyn Erro
             "{input:?} wrote a credential file"
         );
     }
+    Ok(())
+}
+
+/// Configures one ambient Bedrock route without any login-provider
+/// credential. `auth = "none"` keeps the route credential-less at the
+/// config layer so readiness comes only from the captured AWS chain or
+/// the stored bearer; the status path performs no network.
+fn write_bedrock_config(fixture: &CliFixture) -> std::io::Result<()> {
+    fixture.write_config(
+        "[providers.my-bedrock]\n\
+         api = \"bedrock\"\n\
+         base_url = \"http://127.0.0.1:9\"\n\
+         auth = \"none\"\n",
+    )
+}
+
+fn find_bedrock_row(rows: &[(String, String)]) -> Option<&(String, String)> {
+    rows.iter().find(|(id, _)| id == "my-bedrock")
+}
+
+#[test]
+fn configured_bedrock_with_static_env_keys_reports_ready() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    write_bedrock_config(&fixture)?;
+    // Placeholder inputs only: non-empty values make the captured static
+    // chain present without any real credential or network.
+    let output = bedrock_status(
+        &fixture,
+        &[
+            ("AWS_ACCESS_KEY_ID", "test-key-id"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret-key"),
+        ],
+    )?;
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "configured Bedrock with captured static keys must succeed"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<(String, String)> = text.lines().map(status_row).collect::<Result<_, _>>()?;
+    let (_, rest) = find_bedrock_row(&rows).unwrap_or_else(|| {
+        panic!("configured Bedrock provider missing from login status: {text:?}")
+    });
+    assert_eq!(
+        rest.split_whitespace().next(),
+        Some("ready"),
+        "configured Bedrock with static keys must be ready: {rest:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("dalgon login my-bedrock"),
+        "Bedrock has no interactive login: {stderr:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_bedrock_without_credentials_reports_not_configured_with_aws_hint()
+-> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    write_bedrock_config(&fixture)?;
+    let output = bedrock_status(&fixture, &[])?;
+
+    assert_eq!(output.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<(String, String)> = text.lines().map(status_row).collect::<Result<_, _>>()?;
+    let (_, rest) = find_bedrock_row(&rows).unwrap_or_else(|| {
+        panic!("configured Bedrock provider missing from login status: {text:?}")
+    });
+    assert_eq!(
+        rest, "not configured",
+        "absent Bedrock credentials must read not configured"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AWS"),
+        "absent Bedrock must hint AWS environment/shared-config/SSO setup: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("dalgon login my-bedrock"),
+        "absent Bedrock must never suggest an interactive login: {stderr:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_bedrock_with_bearer_env_reports_ready() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    write_bedrock_config(&fixture)?;
+    // Bearer-env proof only: placeholder token via the captured bearer
+    // environment source, no static keys and no auth.json. A custom
+    // `my-bedrock` auth.json member is not a valid store shape today
+    // (AuthFileVisitor accepts only built-in PROVIDERS rows), so no
+    // stored-only custom-bearer proof is baked here; see READY report.
+    let output = bedrock_status(
+        &fixture,
+        &[("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-placeholder")],
+    )?;
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Bedrock bearer env must succeed"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<(String, String)> = text.lines().map(status_row).collect::<Result<_, _>>()?;
+    let (_, rest) = find_bedrock_row(&rows).unwrap_or_else(|| {
+        panic!("configured Bedrock provider missing from login status: {text:?}")
+    });
+    assert_eq!(
+        rest.split_whitespace().next(),
+        Some("ready"),
+        "Bedrock bearer env must be ready: {rest:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("dalgon login my-bedrock"),
+        "Bedrock has no interactive login: {stderr:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_groq_override_to_bedrock_with_stored_key_reports_single_ready_row()
+-> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    // Stored-only acceptance on a valid store shape: `groq` is an existing
+    // Compatible preset, so `[providers.groq] api = "bedrock"` decodes and
+    // its `api_key` auth.json member loads. Control note: `groq` sits in
+    // the login catalog, so this row is ready GREEN pre-join via the login
+    // path; post-join the CLI must still show exactly one `groq` row (no
+    // login + Bedrock double-count) with ready status.
+    fixture
+        .write_config("[providers.groq]\napi = \"bedrock\"\nbase_url = \"http://127.0.0.1:9\"\n")?;
+    fixture.write_auth(r#"{"groq":{"kind":"api_key","key":"test-groq-placeholder"}}"#)?;
+    let output = bedrock_status(&fixture, &[])?;
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stored groq Bedrock override must succeed"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<(String, String)> = text.lines().map(status_row).collect::<Result<_, _>>()?;
+    let matches: Vec<&(String, String)> = rows.iter().filter(|(id, _)| id == "groq").collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one groq row, no duplicate login/Bedrock rows: {text:?}"
+    );
+    assert_eq!(
+        matches[0].1.split_whitespace().next(),
+        Some("ready"),
+        "stored groq Bedrock override must be ready: {text:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_long_ids_keep_whitespace_token_boundaries() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    // Seeded canonical long id: `github-copilot` fills the padded id field,
+    // so the fixed-width renderer glues it to the state column.
+    fixture
+        .write_auth(r#"{"github-copilot":{"kind":"api_key","key":"test-copilot-placeholder"}}"#)?;
+    // Effective custom Bedrock long id: exercises the pending-row path with a
+    // name well past the padded width.
+    fixture.write_config(
+        "[providers.custom-bedrock-longname]\napi = \"bedrock\"\nbase_url = \"http://127.0.0.1:9\"\nauth = \"none\"\n",
+    )?;
+    let output = bedrock_status(
+        &fixture,
+        &[
+            ("AWS_ACCESS_KEY_ID", "test-key-id"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret-key"),
+        ],
+    )?;
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "seeded copilot plus ready Bedrock must succeed"
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Token boundaries as humans/scripts consume them: split on whitespace,
+    // never on format literals or space counts. Rows are located by id
+    // substring with no order pin.
+    let copilot = text
+        .lines()
+        .find(|line| line.contains("github-copilot"))
+        .unwrap_or_else(|| panic!("github-copilot row missing: {text:?}"));
+    assert!(
+        copilot
+            .split_whitespace()
+            .eq(["github-copilot", "ready", "api_key"]),
+        "long ready id must stay whitespace-separated: {copilot:?}"
+    );
+    let qwen = text
+        .lines()
+        .find(|line| line.contains("qwen-token-plan-cn"))
+        .unwrap_or_else(|| panic!("qwen-token-plan-cn row missing: {text:?}"));
+    assert!(
+        qwen.split_whitespace()
+            .eq(["qwen-token-plan-cn", "not", "configured"]),
+        "long unconfigured id must stay whitespace-separated: {qwen:?}"
+    );
+    let bedrock = text
+        .lines()
+        .find(|line| line.contains("custom-bedrock-longname"))
+        .unwrap_or_else(|| panic!("custom-bedrock-longname row missing: {text:?}"));
+    assert!(
+        bedrock
+            .split_whitespace()
+            .eq(["custom-bedrock-longname", "ready", "bedrock"]),
+        "long Bedrock id must stay whitespace-separated: {bedrock:?}"
+    );
     Ok(())
 }

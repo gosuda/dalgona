@@ -454,6 +454,37 @@ pub(crate) fn internal_error_at(module: &str, message: &str, log_path: &Path) ->
     ]
 }
 
+/// A startup file operation failed: `operation` is `create`, `read`, or
+/// `write`, and `message` is the operating-system text.
+pub(crate) fn startup_file_failed(operation: &str, path: &Path, message: &str) -> [String; 2] {
+    [
+        format!("dalgon: cannot {operation} {}: {message}", path.display()),
+        format!(
+            "Fix the permissions on {}, or point the XDG variables at a writable location.",
+            path.display()
+        ),
+    ]
+}
+
+/// A configured plugin has no directory at `dir`.
+pub(crate) fn plugin_missing(name: &str, dir: &Path) -> [String; 2] {
+    [
+        format!("dalgon: plugin \"{name}\" is missing: {}", dir.display()),
+        format!(
+            "Remove \"{name}\" from the plugins key in dal.toml, or create that directory with a plugin.star file."
+        ),
+    ]
+}
+
+/// A configured plugin failed to load; `detail` is the loader's own
+/// diagnostic, including `path:line:col` where the failure has a location.
+pub(crate) fn plugin_failed_to_load(name: &str, detail: &str) -> [String; 2] {
+    [
+        format!("dalgon: plugin \"{name}\" failed to load: plugin load failed: {detail}"),
+        format!("Fix the error and run dalgon again, or remove \"{name}\" from the plugins key."),
+    ]
+}
+
 pub(crate) fn internal_error(module: &str, message: &str) -> [String; 2] {
     [
         format!("dalgon: internal error: {module}: {message}"),

@@ -33,18 +33,12 @@
 //!   This module follows the oh-my-pi pin; the senpi comparison must be
 //!   re-checked against `b8c1d3a8` at the join.
 //!
-//! # Registration join (integration owner, P0 serialization)
+//! # Provider integration
 //!
-//! This tree is inert until the join declares `mod cursor;` in
-//! `family/mod.rs`. The join also adds `prost` 0.14.4 (derive only, no
-//! `protoc`/`prost-build`) and `flate2` 1.1.10 to the workspace manifest and
-//! `dal-provider` manifest, wires `Family::Cursor` through the
-//! registry/config/api/transport/catalog arms, constructs
-//! [`ProviderRun`](crate::run::ProviderRun) over [`decode::RunStream`] with
-//! [`decode::CursorTransport`], and applies
-//! [`ToolNames::restoring`](crate::stream::EventStream::restoring). The exact
-//! manifest is the worker's final report; nothing outside this tree is
-//! touched here.
+//! The provider registry exposes Cursor through its HTTP-backed provider
+//! path. [`decode::open_run`] owns one bidirectional Connect `Run` exchange;
+//! [`lower::build_run`] prepares its opening request and [`decode::Session`]
+//! handles streamed messages, tool events, and replies.
 //!
 //! # Durable-assistant-entry binding
 //!
@@ -63,10 +57,10 @@
 //! consumes the capture (session resume, checkpoint persistence across
 //! steps, route-aware replay lookup) is S3-owned (`engine/dal-agent`
 //! session/actor paths); this module only produces the typed capture. A turn
-//! whose records are absent, or no longer cover it, yields no capture and
-//! rebuilds from content. Records that are present but malformed yield a
-//! refused capture instead, which the fold journals without a payload and
-//! fails the turn on, so a fault is never hidden by a silent rebuild.
+//! whose records cannot stand for it because replay is absent, stale, or
+//! uncovered yields no capture and rebuilds from content. Present malformed
+//! checkpoint records instead produce a typed refusal, preventing silent
+//! rebuilding over corrupt replay state.
 //!
 //! # Approval seam
 //!

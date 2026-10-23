@@ -29,7 +29,7 @@ use crate::{
         devin::{
             PATH_ASSIGN, PATH_AUTH, PATH_CHAT, PATH_DISCOVERY,
             connect::{ConnectError, decode_unary},
-            decode::decode_discovery,
+            decode::{DiscoveredModel, decode_discovery},
             history::router_prompt,
             proto::{AssignModelResponse, GetUserJwtResponse},
             request::{
@@ -54,7 +54,7 @@ use crate::{
     },
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
     lifecycle::AttemptFailure,
-    retry::RequestState,
+    retry::{RequestState, RetryDecision},
     stream::{EventStream, NoticeSink},
     thinking::{
         self, BeforeRequestPatch, Effort, RequestLimits, ThinkingNotice, ThinkingPlan, WireThinking,
@@ -723,6 +723,7 @@ pub(crate) fn droid_default_upstream(model: &str) -> &'static str {
 /// the real client (the backend gates on the version, like Devin's pinned
 /// CLI identity).
 const ANTIGRAVITY_CLIENT_VERSION: &str = "2.19.1";
+const ACCOUNT_VERIFICATION_PREFIX: &str = "Account verification required.";
 
 /// The default `x-api-provider` per Droid model id, transcribed from the
 /// first entry of each `upstream-rotation` in the pinned Factory registry.
@@ -833,6 +834,87 @@ fn azure_parts(
     ))
 }
 
+/// Resolves the chat model for one Devin turn through the adapter's own
+/// discovery: only a row the server marks as a router (and never a
+/// composite) earns an `AssignModel` call; every other uid chats directly.
+/// Returns the serving uid with its assignment JWT, if any.
+async fn resolve_devin_chat_model(
+    context: &StreamContext,
+    credential: &Credential,
+    wire_key: &str,
+    router_uid: &str,
+    base: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<(String, Option<String>, Vec<DiscoveredModel>)>, AttemptFailure> {
+    let discovery_url =
+        http::endpoint(Family::Devin, base, PATH_DISCOVERY).map_err(AttemptFailure::Provider)?;
+    let discovery_response = devin_unary(
+        &context.client,
+        discovery_url,
+        UNARY_HEADERS,
+        discovery_body(wire_key),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(discovery_response) = discovery_response else {
+        return Ok(None);
+    };
+    let discovery_bytes = devin_body(discovery_response, credential, cancel).await?;
+    let Some(discovery_bytes) = discovery_bytes else {
+        return Ok(None);
+    };
+    let rows = decode_discovery(&discovery_bytes).map_err(AttemptFailure::Provider)?;
+    let routed = rows
+        .iter()
+        .find(|row| row.uid.as_str() == router_uid)
+        .is_some_and(|row| row.is_model_router && row.harness_count == 0);
+    if !routed {
+        return Ok(Some((router_uid.to_owned(), None, rows)));
+    }
+    let cascade_id = context.session.to_string();
+    let assign_url =
+        http::endpoint(Family::Devin, base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
+    let assign_response = devin_unary(
+        &context.client,
+        assign_url,
+        UNARY_HEADERS,
+        assign_body(
+            wire_key,
+            router_uid,
+            &cascade_id,
+            router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
+        ),
+        &context.user_agent,
+        cancel,
+    )
+    .await?;
+    let Some(assign_response) = assign_response else {
+        return Ok(None);
+    };
+    let assign_bytes = devin_body(assign_response, credential, cancel).await?;
+    let Some(assign_bytes) = assign_bytes else {
+        return Ok(None);
+    };
+    let assigned: AssignModelResponse =
+        decode_unary(&assign_bytes, "AssignModelResponse").map_err(|err| devin_protocol(&err))?;
+    let assignment = assigned
+        .assignment
+        .filter(|assignment| {
+            !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
+        })
+        .ok_or_else(|| {
+            AttemptFailure::Provider(ProviderError::InvalidRequest {
+                message: String::from("devin assignment did not resolve a serving model"),
+            })
+        })?;
+    Ok(Some((
+        assignment.model_uid,
+        Some(assignment.assignment_jwt),
+        rows,
+    )))
+}
+
 /// Runs one Devin turn: `GetUserJwt`, `AssignModel`, then one
 /// `GetChatMessage` stream.
 ///
@@ -871,42 +953,14 @@ async fn devin_attempt(
     // 2. Resolve the route through the adapter's own discovery: only a row
     // the server marks as a router (and never a composite) earns an
     // `AssignModel` call; every other uid chats directly.
-    let discovery_url =
-        http::endpoint(Family::Devin, &base, PATH_DISCOVERY).map_err(AttemptFailure::Provider)?;
-    let discovery_response = devin_unary(
-        &context.client,
-        discovery_url,
-        UNARY_HEADERS,
-        discovery_body(&wire_key),
-        &context.user_agent,
-        cancel,
-    )
-    .await?;
-    let Some(discovery_response) = discovery_response else {
+    let Some((chat_model_uid, assignment_jwt, rows)) =
+        resolve_devin_chat_model(context, credential, &wire_key, &router_uid, &base, cancel)
+            .await?
+    else {
         return Ok(None);
     };
-    let discovery_bytes = devin_body(discovery_response, credential, cancel).await?;
-    let Some(discovery_bytes) = discovery_bytes else {
-        return Ok(None);
-    };
-    let rows = decode_discovery(&discovery_bytes).map_err(AttemptFailure::Provider)?;
-    let routed = rows
-        .iter()
-        .find(|row| row.uid == router_uid)
-        .is_some_and(|row| row.is_model_router && row.harness_count == 0);
 
     let cascade_id = context.session.to_string();
-    let (chat_model_uid, assignment_jwt) = if routed {
-        let Some((chat_model_uid, assignment_jwt)) =
-            devin_assign(context, credential, cancel, &wire_key, &cascade_id, &base).await?
-        else {
-            return Ok(None);
-        };
-        (chat_model_uid, assignment_jwt)
-    } else {
-        (router_uid, None)
-    };
-
     let execution_id = Uuid::new_v4().to_string();
     // The server's own ceiling for the resolved serving uid wins over the
     // catalog row; the caller's explicit cap wins over both.
@@ -979,60 +1033,6 @@ async fn devin_attempt(
         None,
         secrets,
         None,
-    )))
-}
-
-/// Assigns the router model on Devin when the discovery marks it as a
-/// router: sends the `AssignModel` unary call and returns the serving
-/// model uid with its assignment JWT. `None` when the server stays silent
-/// (the caller then yields no stream).
-async fn devin_assign(
-    context: &StreamContext,
-    credential: &Credential,
-    cancel: &CancellationToken,
-    wire_key: &str,
-    cascade_id: &str,
-    base: &str,
-) -> Result<Option<(String, Option<String>)>, AttemptFailure> {
-    let router_uid = context.request.model.id().to_owned();
-    let assign_url =
-        http::endpoint(Family::Devin, base, PATH_ASSIGN).map_err(AttemptFailure::Provider)?;
-    let assign_response = devin_unary(
-        &context.client,
-        assign_url,
-        UNARY_HEADERS,
-        assign_body(
-            wire_key,
-            &router_uid,
-            cascade_id,
-            router_prompt(&context.request).map_err(AttemptFailure::Provider)?,
-        ),
-        &context.user_agent,
-        cancel,
-    )
-    .await?;
-    let Some(assign_response) = assign_response else {
-        return Ok(None);
-    };
-    let assign_bytes = devin_body(assign_response, credential, cancel).await?;
-    let Some(assign_bytes) = assign_bytes else {
-        return Ok(None);
-    };
-    let assigned: AssignModelResponse =
-        decode_unary(&assign_bytes, "AssignModelResponse").map_err(|err| devin_protocol(&err))?;
-    let assignment = assigned
-        .assignment
-        .filter(|assignment| {
-            !assignment.model_uid.is_empty() && !assignment.assignment_jwt.is_empty()
-        })
-        .ok_or_else(|| {
-            AttemptFailure::Provider(ProviderError::InvalidRequest {
-                message: String::from("devin assignment did not resolve a serving model"),
-            })
-        })?;
-    Ok(Some((
-        assignment.model_uid,
-        Some(assignment.assignment_jwt),
     )))
 }
 
@@ -1464,14 +1464,7 @@ async fn google_antigravity_attempt(
 ///
 /// Endpoint selection stays with the caller (`antigravity::endpoints`); this
 /// owns only the failover rule, so a test can drive it with loopback
-/// endpoints. An error status is classified through the established
-/// `google_status_failure` (which consumes the body and releases the
-/// response) and fails over only on a transient pre-byte status
-/// (`408`/`429`-non-quota/`500`/`502`/`503`/`504`/`529`, the shared retry
-/// table's retryable set); terminal quota (`Provider(Quota)`), account
-/// verification, and all other statuses return at once. The last endpoint's
-/// own failure is the attempt's failure. No retry sleep, discovery call,
-/// config knob, or session state lives here.
+/// endpoints.
 pub(super) async fn antigravity_failover<F>(
     context: &StreamContext,
     secrets: &[Box<str>],
@@ -1484,60 +1477,64 @@ where
     F: Fn() -> Result<google_shared::GoogleWire, ProviderError>,
 {
     let mut last_failure: Option<AttemptFailure> = None;
-    let total = endpoints.len();
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        if cancel.is_cancelled() {
-            return Ok(None);
-        }
-        let is_last = index + 1 == total;
+    for endpoint in endpoints {
         let mut wire = build().map_err(AttemptFailure::Provider)?;
         wire.base_override = Some(endpoint.clone());
-        let response = match send_google_wire(context, cancel, wire).await {
+        match send_google_wire(context, cancel, wire).await {
+            Ok(Some(response)) => {
+                match google_decoded(
+                    context,
+                    secrets,
+                    cancel,
+                    response,
+                    true,
+                    Some(response_slot.clone()),
+                )
+                .await
+                {
+                    Ok(stream) => return Ok(stream),
+                    Err(failure) => {
+                        let retryable = match &failure {
+                            AttemptFailure::Response {
+                                status,
+                                code,
+                                message,
+                                ..
+                            } => {
+                                !message.starts_with(ACCOUNT_VERIFICATION_PREFIX)
+                                    && matches!(
+                                        crate::retry::classify(
+                                            Some(*status),
+                                            code.as_deref(),
+                                            message,
+                                            &RequestState {
+                                                family: context.family,
+                                                provider: &context.provider,
+                                                model: &context.model,
+                                                oauth: true,
+                                                refreshed: false,
+                                                delivered: false,
+                                            },
+                                        ),
+                                        RetryDecision::Retry(_)
+                                    )
+                            }
+                            AttemptFailure::Provider(ProviderError::Transport { .. }) => true,
+                            AttemptFailure::Provider(_) => false,
+                        };
+                        if retryable {
+                            last_failure = Some(failure);
+                        } else {
+                            return Err(failure);
+                        }
+                    }
+                }
+            }
             Ok(None) => return Ok(None),
-            Err(failure) => {
-                if is_last || !is_antigravity_body_failure_failover(&failure) {
-                    return Err(failure);
-                }
-                last_failure = Some(failure);
-                continue;
-            }
-            Ok(Some(response)) => response,
-        };
-        if response.status().is_success() {
-            return google_decoded(
-                context,
-                secrets,
-                cancel,
-                response,
-                true,
-                Some(response_slot.clone()),
-            )
-            .await;
-        }
-        match google_status_failure(
-            response,
-            context.family,
-            &context.provider,
-            &context.model,
-            true,
-            secrets,
-            cancel,
-        )
-        .await
-        {
-            Ok(None) => return Ok(None),
-            Err(failure) => {
-                if is_last || !is_antigravity_body_failure_failover(&failure) {
-                    return Err(failure);
-                }
+            Err(failure @ AttemptFailure::Provider(ProviderError::Transport { .. })) => {
                 last_failure = Some(failure);
             }
-            Ok(Some(failure)) => {
-                if is_last || !is_antigravity_status_failover(&failure) {
-                    return Err(failure);
-                }
-                last_failure = Some(failure);
-            }
+            Err(failure) => return Err(failure),
         }
     }
     Err(last_failure.unwrap_or_else(|| {
@@ -1546,38 +1543,6 @@ where
             reason: String::from("the antigravity endpoints answered nothing"),
         })
     }))
-}
-
-/// Whether a mapped Antigravity error status fails over to the next endpoint.
-///
-/// Only a transient pre-byte `Response` status does: `408`, non-quota `429`,
-/// and `500`/`502`/`503`/`504`/`529` (the shared retry table's retryable
-/// set). Quota never reaches here as a `Response` (the shared classifier
-/// maps it to `Provider(Quota)`, which is terminal), and an account
-/// verification message stays terminal even on a transient status because a
-/// second endpoint cannot clear account state.
-fn is_antigravity_status_failover(failure: &AttemptFailure) -> bool {
-    match failure {
-        AttemptFailure::Response {
-            status, message, ..
-        } => {
-            let transient = matches!(*status, 408 | 429 | 500 | 502 | 503 | 504 | 529);
-            transient && !message.contains("Account verification required.")
-        }
-        AttemptFailure::Provider(_) => false,
-    }
-}
-
-/// Whether a body-read failure inside `google_status_failure` fails over.
-///
-/// A transport failure happens before any stream byte, so the next endpoint
-/// may still serve; every other provider error (limit, auth, quota) returns
-/// at once.
-fn is_antigravity_body_failure_failover(failure: &AttemptFailure) -> bool {
-    matches!(
-        failure,
-        AttemptFailure::Provider(ProviderError::Transport { .. })
-    )
 }
 
 /// Sends one Google wire and decodes its SSE reply through the shared
@@ -1701,7 +1666,7 @@ async fn google_status_failure(
     {
         let message = transport_mod::redact_text(
             format!(
-                "Account verification required. Visit {url} to continue, then retry your request."
+                "{ACCOUNT_VERIFICATION_PREFIX} Visit {url} to continue, then retry your request."
             ),
             secrets,
         );
@@ -2000,25 +1965,119 @@ type StreamRequestParts = (
     Option<Box<str>>,
 );
 
+fn build_chat_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
+            ProviderError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::chat::ENDPOINT_PATH,
+    )?;
+    let mut request = context.client.post(url);
+    // A credential-less row (a keyless local gateway such as
+    // llama.cpp, configured `auth = "none"`) sends no header.
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
+fn build_mistral_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::mistral::request_body(&context.request, &context.thinking).map_err(|error| {
+            ProviderError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::mistral::ENDPOINT_PATH,
+    )?;
+    let mut request = context.client.post(url);
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
+fn build_ollama_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
+    let policy =
+        family::ollama::WirePolicy::for_model(deployment, &context.model, &context.entry.thinking);
+    let body = family::ollama::request_body(&context.request, &context.thinking, policy).map_err(
+        |error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        },
+    )?;
+    let base = family::ollama::trim_api_suffix(&context.base_url);
+    let url = http::endpoint(context.family, base, family::ollama::ENDPOINT_PATH)?;
+    let mut request = context.client.post(url);
+    if let Some((header, value)) =
+        optional_auth_header(context.auth, credential, context.family, &context.provider)?
+    {
+        request = request.header(header, value);
+    }
+    Ok((request.body(body), user_agent, secrets, None))
+}
+
+fn build_pi_stream_request(
+    context: &StreamContext,
+    credential: &Credential,
+    secrets: Vec<Box<str>>,
+    user_agent: Box<str>,
+) -> Result<StreamRequestParts, ProviderError> {
+    let body =
+        family::pi_messages::request_body(&context.request, &context.provider, &context.thinking)
+            .map_err(|error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let url = http::endpoint(
+        context.family,
+        &context.base_url,
+        family::pi_messages::ENDPOINT_PATH,
+    )?;
+    let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
+    Ok((
+        context.client.post(url).header(header, value).body(body),
+        user_agent,
+        secrets,
+        None,
+    ))
+}
+
 pub(crate) fn build_stream_request(
     context: &StreamContext,
     credential: &Credential,
 ) -> Result<StreamRequestParts, ProviderError> {
     let route_family = context.family;
+    let user_agent = context.user_agent.clone();
     let secrets = credential_secrets(credential);
     match route_family {
-        Family::Chat => build_openai_compatible_stream(
-            context,
-            credential,
-            secrets,
-            family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
-                ProviderError::InvalidRequest {
-                    message: error.to_string(),
-                }
-            })?,
-            family::chat::ENDPOINT_PATH,
-            None,
-        ),
+        Family::Chat => build_chat_stream_request(context, credential, secrets, user_agent),
         Family::Responses => {
             let wire = build_responses_wire_from_context(context, credential)?;
             let url = http::endpoint(route_family, &context.base_url, "responses")?;
@@ -2059,96 +2118,11 @@ pub(crate) fn build_stream_request(
         Family::GoogleGeminiCli => Err(ProviderError::InvalidRequest {
             message: String::from("Gemini CLI requests use the dedicated subprocess adapter"),
         }),
-        Family::Mistral => build_openai_compatible_stream(
-            context,
-            credential,
-            secrets,
-            family::mistral::request_body(&context.request, &context.thinking).map_err(
-                |error| ProviderError::InvalidRequest {
-                    message: error.to_string(),
-                },
-            )?,
-            family::mistral::ENDPOINT_PATH,
-            None,
-        ),
-        Family::Ollama => {
-            let deployment = family::ollama::Deployment::of(&context.provider, &context.base_url);
-            let policy = family::ollama::WirePolicy::for_model(
-                deployment,
-                &context.model,
-                &context.entry.thinking,
-            );
-            build_openai_compatible_stream(
-                context,
-                credential,
-                secrets,
-                family::ollama::request_body(&context.request, &context.thinking, policy).map_err(
-                    |error| ProviderError::InvalidRequest {
-                        message: error.to_string(),
-                    },
-                )?,
-                family::ollama::ENDPOINT_PATH,
-                Some(family::ollama::trim_api_suffix(&context.base_url)),
-            )
-        }
-        Family::PiMessages => build_pi_messages_stream(context, credential, secrets),
+        Family::Mistral => build_mistral_stream_request(context, credential, secrets, user_agent),
+        Family::Ollama => build_ollama_stream_request(context, credential, secrets, user_agent),
+        Family::PiMessages => build_pi_stream_request(context, credential, secrets, user_agent),
         Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
     }
-}
-
-/// Builds the streaming request for the pi-messages family: one POST with a
-/// mandatory auth header.
-fn build_pi_messages_stream(
-    context: &StreamContext,
-    credential: &Credential,
-    secrets: Vec<Box<str>>,
-) -> Result<StreamRequestParts, ProviderError> {
-    let body =
-        family::pi_messages::request_body(&context.request, &context.provider, &context.thinking)
-            .map_err(|error| ProviderError::InvalidRequest {
-            message: error.to_string(),
-        })?;
-    let url = http::endpoint(
-        context.family,
-        &context.base_url,
-        family::pi_messages::ENDPOINT_PATH,
-    )?;
-    let (header, value) = auth_header(context.auth, credential, context.family, &context.provider)?;
-    Ok((
-        context.client.post(url).header(header, value).body(body),
-        context.user_agent.clone(),
-        secrets,
-        None,
-    ))
-}
-
-/// Builds the streaming request for the OpenAI-compatible families (Chat,
-/// Mistral, Ollama): one POST on the family endpoint with an optional auth
-/// header, the built body, and the standard user agent. A credential-less
-/// row (a keyless local gateway such as llama.cpp, configured
-/// `auth = "none"`) sends no header.
-fn build_openai_compatible_stream(
-    context: &StreamContext,
-    credential: &Credential,
-    secrets: Vec<Box<str>>,
-    body: Vec<u8>,
-    path: &'static str,
-    base_override: Option<&str>,
-) -> Result<StreamRequestParts, ProviderError> {
-    let base = base_override.unwrap_or(&context.base_url);
-    let url = http::endpoint(context.family, base, path)?;
-    let mut request = context.client.post(url);
-    if let Some((header, value)) =
-        optional_auth_header(context.auth, credential, context.family, &context.provider)?
-    {
-        request = request.header(header, value);
-    }
-    Ok((
-        request.body(body),
-        context.user_agent.clone(),
-        secrets,
-        None,
-    ))
 }
 
 fn build_anthropic_stream_request(

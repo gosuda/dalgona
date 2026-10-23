@@ -54,7 +54,7 @@ fn empty_view() -> Result<View, Box<dyn std::error::Error>> {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
-            scoped_models: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),

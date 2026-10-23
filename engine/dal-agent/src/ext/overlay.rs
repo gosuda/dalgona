@@ -14,7 +14,7 @@ mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use dal_core::ext::{McpBlock, McpDeclaration};
 use dal_core::{Name, Origin, Service, ServiceSet, Visibility};
@@ -381,11 +381,21 @@ impl TurnTools {
     }
 
     /// Ensures the caller granted the declaring extension's current MCP set.
+    ///
+    /// Same-invocation continuation: the dispatch root passes this
+    /// invocation's explicit [`Weak`] here; it attaches via
+    /// [`Caller::with_continuation`] and never by owner-name matching.
+    /// `None` keeps today's one-shot grant check (tests, non-session
+    /// paths). Granted authorities, origin attribution, and terminal effects
+    /// are unchanged; the strong owner stays held by the dispatch root
+    /// through the awaited grant check with explicit release at invocation
+    /// end.
     pub(crate) async fn authorize_mcp(
         &self,
         generation: &Generation,
         name: &Name,
         turn: dal_core::TurnId,
+        continuation: Option<Weak<crate::session::continuation::ContinuationSlot>>,
     ) -> Result<(), ServiceError> {
         let Some(entry) = self.entry(name) else {
             return Ok(());
@@ -423,6 +433,10 @@ impl TurnTools {
             caller.with_extension(extension)
         } else {
             caller
+        };
+        let caller = match continuation {
+            Some(slot) => caller.with_continuation(slot),
+            None => caller,
         };
         runtime
             .grants

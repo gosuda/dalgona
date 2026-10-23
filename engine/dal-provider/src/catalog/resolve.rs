@@ -91,6 +91,7 @@ pub fn resolve_route(
     ) {
         return bare;
     }
+
     // Every family retries under the catalog's single configured owner for
     // that family when there is one; a lone custom Chat or Responses owner
     // serves typed routes without guessing. When several owners share the
@@ -222,8 +223,6 @@ fn canonical_family_owner(catalog: &Catalog, family: Family) -> Option<&str> {
 }
 
 /// Maps a family-qualified route prefix to the provider that serves it.
-/// `openai-chat` resolves to the `openai` row when that row serves the Chat
-/// family; the family filter rejects a custom `openai` rebind.
 fn family_provider(prefix: &str) -> Option<(&'static str, Family)> {
     match prefix {
         "openai-responses" => Some((OPENAI.id, Family::Responses)),

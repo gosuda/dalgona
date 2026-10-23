@@ -217,7 +217,12 @@ impl TurnDigest {
     /// Mixes assistant parts into the digest: non-empty text, non-empty
     /// thinking, and every tool call with normalized id, internal name,
     /// and canonical arguments.
+    #[cfg(test)]
     pub(crate) fn assistant_parts(&mut self, parts: &[AssistantPart]) {
+        self.assistant_parts_with_ids(parts, None);
+    }
+
+    fn assistant_parts_with_ids(&mut self, parts: &[AssistantPart], wire_ids: Option<&WireIds>) {
         for part in parts {
             match part {
                 AssistantPart::Text { text, .. } => self.assistant_text(text.as_ref()),
@@ -225,7 +230,15 @@ impl TurnDigest {
                 AssistantPart::ToolCall {
                     call, name, args, ..
                 } => {
-                    self.assistant_tool_call(call.as_str(), name.as_ref(), args.as_str());
+                    if let Some(wire_ids) = wire_ids {
+                        self.assistant_tool_call_wire(
+                            wire_ids.lookup(call.as_str()).as_str(),
+                            name.as_ref(),
+                            args.as_str(),
+                        );
+                    } else {
+                        self.assistant_tool_call(call.as_str(), name.as_ref(), args.as_str());
+                    }
                 }
             }
         }
@@ -249,17 +262,22 @@ impl TurnDigest {
     /// normalize, so wire and journal spellings agree), the internal name,
     /// and the canonical argument text.
     pub(crate) fn assistant_tool_call(&mut self, call: &str, name: &str, args: &str) {
-        self.push(
-            "cursor-assistant-tool-call",
-            normalize_call_id(call).as_bytes(),
-        );
+        self.assistant_tool_call_wire(&normalize_call_id(call), name, args);
+    }
+
+    fn assistant_tool_call_wire(&mut self, wire_id: &str, name: &str, args: &str) {
+        self.push("cursor-assistant-tool-call", wire_id.as_bytes());
         self.push("cursor-assistant-tool-call", name.as_bytes());
         self.push("cursor-assistant-tool-call", args.as_bytes());
     }
 
     /// Mixes one tool result into the digest.
     pub(crate) fn tool_result(&mut self, call: &str, is_error: bool, parts: &[Part]) {
-        self.push("cursor-tool-result", normalize_call_id(call).as_bytes());
+        self.tool_result_wire(&normalize_call_id(call), is_error, parts);
+    }
+
+    fn tool_result_wire(&mut self, wire_id: &str, is_error: bool, parts: &[Part]) {
+        self.push("cursor-tool-result", wire_id.as_bytes());
         self.push(
             "cursor-tool-result",
             if is_error { b"error" } else { b"ok" },
@@ -294,57 +312,6 @@ impl TurnDigest {
         }
         out
     }
-}
-
-/// Encodes the run request carrying the lowered state as the stream's
-/// first frame.
-fn encode_run_frame(
-    root: Vec<Vec<u8>>,
-    turns: Vec<Vec<u8>>,
-    action: Action,
-    rules: &[super::proto::CursorRule],
-    tools: &[McpToolDefinition],
-    display_model_id: &str,
-    wire: &WireModel,
-    conversation_id: &str,
-) -> Result<Vec<u8>, CursorBodyError> {
-    let run_request = AgentRunRequest {
-        conversation_state: Some(ConversationStateStructure {
-            root_prompt_messages_json: root,
-            turns,
-        }),
-        action: Some(action.into_proto(rules, tools)),
-        model_details: Some(ModelDetails {
-            model_id: wire.details_id.to_string(),
-            display_model_id: display_model_id.to_string(),
-            display_name: wire.display_name.to_string(),
-            display_name_short: wire.display_name.to_string(),
-            aliases: Vec::new(),
-            thinking_details: None,
-            max_mode: wire.max_mode.then_some(true),
-        }),
-        requested_model: Some(RequestedModel {
-            model_id: wire.model_id.to_string(),
-            max_mode: wire.max_mode,
-            parameters: wire
-                .parameters
-                .iter()
-                .map(|(id, value)| RequestedModelParameter {
-                    id: id.to_string(),
-                    value: value.to_string(),
-                })
-                .collect(),
-        }),
-        mcp_tools: Some(McpTools {
-            tools: tools.to_vec(),
-        }),
-        conversation_id: Some(conversation_id.to_owned()),
-    };
-    let client_message = AgentClientMessage {
-        message: Some(client_message::Body::RunRequest(run_request)),
-    };
-    super::frame::encode_frame(&client_message.encode_to_vec(), 0)
-        .map_err(|_| CursorBodyError::FrameTooLarge)
 }
 
 /// Builds the run request frame and session seeds for one request.
@@ -385,9 +352,6 @@ pub(crate) fn build_run(
     let history = &request.context[..history_end];
     let has_active_user = active.is_some();
 
-    // Allocate unique wire ids for every internal call id in history order
-    // before lowering, so root records and display turns agree even when two
-    // distinct ids normalize alike. Exact repeats reuse their wire id.
     let mut wire_ids = WireIds::new();
     for item in history {
         if let ContextItem::Assistant { parts, .. } = item {
@@ -423,16 +387,12 @@ pub(crate) fn build_run(
         None => Action::Resume,
     };
 
-    let first_frame = encode_run_frame(
-        root,
+    let state = ConversationStateStructure {
+        root_prompt_messages_json: root,
         turns,
-        action,
-        &rules,
-        &tools,
-        model.as_ref(),
-        wire,
-        conversation_id,
-    )?;
+    };
+    let action = action.into_proto(&rules, &tools);
+    let first_frame = first_frame(state, action, &tools, wire, model.as_ref(), conversation_id)?;
 
     let mut digest = TurnDigest::new();
     digest.route(&route);
@@ -448,6 +408,51 @@ pub(crate) fn build_run(
         digest,
         has_active_user,
     })
+}
+
+/// Encodes the first framed run request from lowered history and route.
+fn first_frame(
+    state: ConversationStateStructure,
+    action: ConversationAction,
+    tools: &[McpToolDefinition],
+    wire: &WireModel,
+    model: &str,
+    conversation_id: &str,
+) -> Result<Vec<u8>, CursorBodyError> {
+    let run_request = AgentRunRequest {
+        conversation_state: Some(state),
+        action: Some(action),
+        model_details: Some(ModelDetails {
+            model_id: wire.details_id.to_string(),
+            display_model_id: model.to_string(),
+            display_name: wire.display_name.to_string(),
+            display_name_short: wire.display_name.to_string(),
+            aliases: Vec::new(),
+            thinking_details: None,
+            max_mode: wire.max_mode.then_some(true),
+        }),
+        requested_model: Some(RequestedModel {
+            model_id: wire.model_id.to_string(),
+            max_mode: wire.max_mode,
+            parameters: wire
+                .parameters
+                .iter()
+                .map(|(id, value)| RequestedModelParameter {
+                    id: id.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+        }),
+        mcp_tools: Some(McpTools {
+            tools: tools.to_vec(),
+        }),
+        conversation_id: Some(conversation_id.to_owned()),
+    };
+    let client_message = AgentClientMessage {
+        message: Some(client_message::Body::RunRequest(run_request)),
+    };
+    super::frame::encode_frame(&client_message.encode_to_vec(), 0)
+        .map_err(|_| CursorBodyError::FrameTooLarge)
 }
 
 /// Advertises every dal tool as an MCP definition in registration order.
@@ -564,9 +569,6 @@ impl Action {
                             env: None,
                             tools: tools.to_vec(),
                             file_contents: BTreeMap::new(),
-                            // The opening action declares the same opt-out the
-                            // request-context handshake answers with: hosted web
-                            // search stays off for the whole run.
                             web_search_enabled: Some(false),
                         }),
                     },
@@ -691,7 +693,8 @@ pub(crate) struct SegmentReplay {
 /// Finds every assistant entry whose stored records still stand for its
 /// segment: same family and model, same route, and a digest over the
 /// opening user entry plus the segment through the assistant that still
-/// matches.
+/// matches. A request-scoped [`WireIds`] table keeps normalized collisions
+/// distinct across every lowered representation.
 ///
 /// # Errors
 ///
@@ -701,6 +704,16 @@ pub(crate) fn match_replays(
     model: &str,
     route: &CursorRouteParts,
 ) -> Result<Vec<SegmentReplay>, CursorBodyError> {
+    let mut wire_ids = WireIds::new();
+    for item in history {
+        if let ContextItem::Assistant { parts, .. } = item {
+            for part in parts {
+                if let AssistantPart::ToolCall { call, .. } = part {
+                    wire_ids.wire(call.as_str());
+                }
+            }
+        }
+    }
     let mut out = Vec::new();
     let mut user: Option<usize> = None;
     let mut candidate: Option<SegmentReplay> = None;
@@ -730,7 +743,7 @@ pub(crate) fn match_replays(
                 let mut digest = TurnDigest::new();
                 digest.route(route);
                 digest.user_parts(parts)?;
-                digest_segment(&mut digest, &history[user_idx + 1..=index]);
+                digest_segment(&mut digest, &history[user_idx + 1..=index], &wire_ids);
                 if digest.hex() != stored.digest {
                     continue;
                 }
@@ -750,17 +763,19 @@ pub(crate) fn match_replays(
 }
 
 /// Mixes one segment slice into the digest in journal order.
-fn digest_segment(digest: &mut TurnDigest, items: &[ContextItem]) {
+fn digest_segment(digest: &mut TurnDigest, items: &[ContextItem], wire_ids: &WireIds) {
     for item in items {
         match item {
             ContextItem::User { .. } => {}
-            ContextItem::Assistant { parts, .. } => digest.assistant_parts(parts),
+            ContextItem::Assistant { parts, .. } => {
+                digest.assistant_parts_with_ids(parts, Some(wire_ids));
+            }
             ContextItem::ToolResult {
                 call,
                 is_error,
                 parts,
                 ..
-            } => digest.tool_result(call.as_str(), *is_error, parts),
+            } => digest.tool_result_wire(&wire_ids.lookup(call.as_str()), *is_error, parts),
         }
     }
 }
@@ -786,71 +801,41 @@ pub(crate) fn normalize_call_id(id: &str) -> String {
     }
 }
 
-/// Maps internal call ids to unique wire ids.
-///
-/// Two distinct internal ids can normalize to the same server id (`a.b` and
-/// `a_b` both become `a_b`); the server rejects a history that repeats a
-/// wire id. The table keeps the first-seen mapping and suffixes later
-/// collisions (`a_b`, `a_b_2`, ...) so every valid tool and its result still
-/// pairs. Exact repeats of one internal id reuse its wire id, so the
-/// existing issued-once dedup still drops them. Digests intentionally keep
-/// the normalized base; only emission uses these unique wires.
+/// Maps internal call ids to unique wire ids within one request.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WireIds {
-    /// Internal id to assigned wire id, first-seen wins.
     map: std::collections::HashMap<String, String>,
-    /// Wire ids already taken, for collision checks.
     used: std::collections::HashSet<String>,
 }
 
 impl WireIds {
-    /// An empty table.
+    /// Creates an empty per-request allocation table.
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the wire id for `internal`, allocating a suffixed variant on
-    /// normalized collisions. Exact repeats reuse their first wire id.
+    /// Returns the stable wire id, suffixing normalized collisions.
     pub(crate) fn wire(&mut self, internal: &str) -> String {
         if let Some(wire) = self.map.get(internal) {
             return wire.clone();
         }
         let base = normalize_call_id(internal);
-        if !self.used.contains(&base) {
-            self.used.insert(base.clone());
-            self.map.insert(internal.to_owned(), base.clone());
-            return base;
-        }
-        let mut counter: u32 = 2;
-        loop {
+        let mut candidate = base.clone();
+        let mut counter = 2_u32;
+        while self.used.contains(&candidate) {
             let suffix = format!("_{counter}");
-            let room = MAX_CALL_ID_LEN.saturating_sub(suffix.len());
             let mut stem = base.clone();
-            if stem.len() > room {
-                stem.truncate(room);
-                while !stem.is_char_boundary(stem.len()) {
-                    stem.pop();
-                }
-            }
-            if stem.is_empty() {
-                stem.push_str("call");
-                if stem.len() > room {
-                    stem.truncate(room);
-                }
-            }
-            let candidate = format!("{stem}{suffix}");
-            if !self.used.contains(&candidate) {
-                self.used.insert(candidate.clone());
-                self.map.insert(internal.to_owned(), candidate.clone());
-                return candidate;
-            }
+            stem.truncate(MAX_CALL_ID_LEN.saturating_sub(suffix.len()));
+            candidate = format!("{stem}{suffix}");
             counter += 1;
         }
+        self.used.insert(candidate.clone());
+        self.map.insert(internal.to_owned(), candidate.clone());
+        candidate
     }
 
-    /// Returns the assigned wire id, or the normalized base when `internal`
-    /// was never allocated (defensive; callers allocate upfront).
+    /// Looks up an assigned wire id, using normalized spelling if absent.
     #[must_use]
     pub(crate) fn lookup(&self, internal: &str) -> String {
         self.map
@@ -1017,12 +1002,7 @@ pub(crate) fn lower_root_entries(
             }
             ContextItem::Assistant { source, parts, .. } => {
                 if let Some(stored) = replay_at.get(&index) {
-                    // Stored calls are already wire spellings: the capture
-                    // normalizes before it stores, so they must not pass
-                    // through the internal-to-wire table again. A table
-                    // lookup of a stored wire would hit a colliding internal
-                    // of the same spelling and re-emit the covered result.
-                    emitted.extend(stored.calls.iter().map(|call| normalize_call_id(call)));
+                    emitted.extend(stored.calls.iter().cloned());
                     for record in &stored.records {
                         root.push(store.insert(record.as_bytes()));
                     }
@@ -1101,7 +1081,7 @@ struct Round<'a> {
 /// ends at a call followed by anything but another call; consecutive calls
 /// stay together. For entries this family and model wrote.
 fn split_rounds<'a>(parts: &'a [AssistantPart], wire_ids: &WireIds) -> Vec<Round<'a>> {
-    split_rounds_impl(parts, true, wire_ids)
+    split_rounds_impl(parts, ThinkingPolicy::Keep, wire_ids)
 }
 
 /// Splits assistant parts into model rounds without thinking: foreign
@@ -1110,14 +1090,22 @@ fn split_rounds_without_thinking<'a>(
     parts: &'a [AssistantPart],
     wire_ids: &WireIds,
 ) -> Vec<Round<'a>> {
-    split_rounds_impl(parts, false, wire_ids)
+    split_rounds_impl(parts, ThinkingPolicy::Drop, wire_ids)
 }
 
-/// The shared round splitter; `thinking` selects the thinking policy its
-/// two named entry points pin down.
+/// Whether reasoning parts are emitted during lowering.
+#[derive(Clone, Copy)]
+enum ThinkingPolicy {
+    /// Preserve this family's reasoning parts.
+    Keep,
+    /// Omit foreign reasoning parts.
+    Drop,
+}
+
+/// Shared round splitter with the policy named by its callers.
 fn split_rounds_impl<'a>(
     parts: &'a [AssistantPart],
-    thinking: bool,
+    thinking: ThinkingPolicy,
     wire_ids: &WireIds,
 ) -> Vec<Round<'a>> {
     let mut rounds = Vec::new();
@@ -1152,7 +1140,7 @@ fn split_rounds_impl<'a>(
                 }
             }
             AssistantPart::Thinking { text, .. } => {
-                if thinking && !text.is_empty() {
+                if matches!(thinking, ThinkingPolicy::Keep) && !text.is_empty() {
                     current.content.push(reasoning_part(text.as_ref()));
                 }
             }

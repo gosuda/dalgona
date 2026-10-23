@@ -805,7 +805,7 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
             (At::Done, StreamEvent::Stop { .. }) | (At::Replay, StreamEvent::Stop { .. }) => {
                 return Err("stop before usage");
             }
-            (At::Done, _) => return Err("a delta, replay, or capture after tool calls done"),
+            (At::Done, _) => return Err("a delta or replay after tool calls done"),
             (At::Replay, StreamEvent::MessageReplay { .. }) => {
                 return Err("a second message replay");
             }

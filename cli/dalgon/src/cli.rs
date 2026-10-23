@@ -27,11 +27,15 @@ pub fn command() -> Command {
 /// The first argument is the invoked program name. Help and version surface
 /// as [`clap::Error`] with kinds `DisplayHelp` and `DisplayVersion`, whose
 /// rendered text already carries the binary name and package version.
-pub(crate) fn parse_cli(binary: &'static str, args: Vec<OsString>) -> Result<Cli, clap::Error> {
-    let matches = command_for(binary).try_get_matches_from(args)?;
+pub(crate) fn parse_cli(
+    binary: &'static str,
+    version: &'static str,
+    args: Vec<OsString>,
+) -> Result<Cli, clap::Error> {
+    let matches = command_for(binary, version).try_get_matches_from(args)?;
     Cli::from_arg_matches(&matches)
 }
 
-pub(crate) fn command_for(binary: &'static str) -> Command {
-    command().name(binary).version(env!("CARGO_PKG_VERSION"))
+pub(crate) fn command_for(binary: &'static str, version: &'static str) -> Command {
+    command().name(binary).version(version)
 }

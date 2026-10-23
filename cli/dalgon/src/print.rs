@@ -193,6 +193,31 @@ pub(crate) enum PrintError {
     NotQuiet { busy: Box<str>, wait: Duration },
 }
 
+/// Picks the headless hint for a failed turn from its message.
+///
+/// Typed provider failures are stringified upstream (`session/driver.rs`
+/// owns that boundary), so this routes on the sentences they can carry:
+/// model resolution to the model list, a missing credential to the login
+/// that writes it, and everything else to the generic hint.
+fn turn_failed_hint(message: &str) -> String {
+    if message.contains("unknown model") {
+        "Run dalgon models to list the models.".to_owned()
+    } else if message.contains("matches several providers") {
+        "Use one of the listed provider/model pairs with --model PROVIDER/MODEL.".to_owned()
+    } else if let Some(provider) = no_credentials_provider(message) {
+        format!("Run dalgon login {provider}.")
+    } else {
+        "Check the provider response and try the prompt again.".to_owned()
+    }
+}
+
+/// Reads the provider id off a stringified missing-credential failure
+/// (`{provider} has no credentials: ...`), if present.
+fn no_credentials_provider(message: &str) -> Option<&str> {
+    let (head, _) = message.split_once("has no credentials")?;
+    head.split_whitespace().next_back()
+}
+
 impl PrintError {
     pub(crate) fn is_broken_pipe(&self) -> bool {
         matches!(self, Self::Io(error) if crate::exit::broken_pipe(error).is_some())
@@ -243,10 +268,7 @@ impl PrintError {
                 );
                 (what, hint)
             }
-            Self::TurnFailed(message) => (
-                message.to_string(),
-                "Check the provider response and try the prompt again.".to_owned(),
-            ),
+            Self::TurnFailed(message) => (message.to_string(), turn_failed_hint(message)),
             Self::NotQuiet { busy, wait } => {
                 let [what, hint] = dal_texts::status_not_quiet_timeout(busy, wait.as_secs());
                 (what, hint)
@@ -577,7 +599,47 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{PrintError, PrintOptions, PrintOutcome, run_print, write_failure};
+    use super::{
+        PrintError, PrintOptions, PrintOutcome, no_credentials_provider, run_print,
+        turn_failed_hint, write_failure,
+    };
+
+    #[test]
+    fn unknown_model_hint_lists_models() {
+        assert_eq!(
+            turn_failed_hint("model foo did not resolve: unknown model foo"),
+            "Run dalgon models to list the models."
+        );
+    }
+
+    #[test]
+    fn ambiguous_model_hint_uses_qualified_pair() {
+        assert_eq!(
+            turn_failed_hint("model id foo matches several providers: a/foo, b/foo"),
+            "Use one of the listed provider/model pairs with --model PROVIDER/MODEL."
+        );
+    }
+
+    #[test]
+    fn missing_credential_hint_names_login_provider() {
+        assert_eq!(
+            turn_failed_hint("openai has no credentials: auth.json has no entry for it"),
+            "Run dalgon login openai."
+        );
+        assert_eq!(
+            no_credentials_provider("openai has no credentials: x"),
+            Some("openai")
+        );
+        assert_eq!(no_credentials_provider("unrelated failure"), None);
+    }
+
+    #[test]
+    fn other_turn_failures_keep_generic_hint() {
+        assert_eq!(
+            turn_failed_hint("server overloaded."),
+            "Check the provider response and try the prompt again."
+        );
+    }
 
     const CONTROL_FIXTURE: &str = concat!(
         r#"{"kind":"events","events":[{"type":"text_delta","text":"Hello\n\u001b]52;c;SGV"},{"type":"text_delta","text":"sbG8=\u0007\u009b2J\u007f\u202e\rafter\n"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#,

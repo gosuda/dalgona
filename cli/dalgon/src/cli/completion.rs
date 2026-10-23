@@ -2,11 +2,15 @@
 
 use super::{command_for, tree::ShellArg};
 
-pub(crate) fn completion_script(shell: ShellArg, binary: &'static str) -> String {
+pub(crate) fn completion_script(
+    shell: ShellArg,
+    binary: &'static str,
+    version: &'static str,
+) -> String {
     use clap_complete::{generate, shells};
     use std::io::Cursor;
 
-    let mut command = command_for(binary);
+    let mut command = command_for(binary, version);
     let mut output = Cursor::new(Vec::new());
     match shell {
         ShellArg::Bash => generate(shells::Bash, &mut command, binary, &mut output),

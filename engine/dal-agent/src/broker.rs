@@ -330,7 +330,14 @@ impl Broker {
     }
 
     /// Resolves every still-unresolved request of one turn as a core `Cancel`,
-    /// oldest first, reported or not; resolved slots stay for late answers.
+    /// oldest first; resolved slots stay for late answers.
+    ///
+    /// One pass under one lock. Reported requests return for the caller to
+    /// queue; unreported ones keep their claim parked for
+    /// [`Self::report_opened`], so the terminal record always follows the
+    /// folded `RequestOpened` instead of dropping as an unknown question.
+    /// Either way each slot is resolved here once, so later answers,
+    /// withdrawals, deadlines, and turn resolutions find it taken.
     ///
     /// This is the actor's backstop after a turn's terminal record, so `cause`
     /// is `Cancelled` when the driver confirmed a cancel and `Withdrawn` for
@@ -360,7 +367,12 @@ impl Broker {
             if slot.turn != Some(turn) || slot.resolved_by.is_some() {
                 continue;
             }
-            resolved.push(slot.claim_cancel(cause));
+            let claim = slot.claim_cancel(cause);
+            if slot.reported {
+                resolved.push(claim);
+            } else {
+                slot.parked = Some(claim);
+            }
         }
         resolved
     }
@@ -482,6 +494,33 @@ impl Broker {
             resolution: Resolution::Cancelled,
             cause: None,
         });
+    }
+
+    /// Releases a durability-failed winner's claim so a retry can win the
+    /// slot and journal the one terminal record.
+    ///
+    /// Clears `resolved_by` only while it still names `by`: a slot another
+    /// winner holds, or one retention already pruned, is left alone, so a
+    /// release can never dislodge a live claim or resurrect a pruned slot.
+    /// The caller must restore the fold question only when this returns
+    /// true; otherwise a retry could journal a record the broker no longer
+    /// owns. Never call for a record that already landed — a landed claim
+    /// stays claimed, which is what keeps the journal to one outcome per
+    /// request.
+    #[must_use]
+    pub(crate) fn unclaim(&self, id: RequestId, by: &ClientId) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(slot) = state.slots.get_mut(&id) else {
+            return false;
+        };
+        if slot.resolved_by.as_ref() != Some(by) {
+            return false;
+        }
+        slot.resolved_by = None;
+        true
     }
 
     /// Lists unresolved requests, oldest first.

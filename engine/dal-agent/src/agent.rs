@@ -103,6 +103,13 @@ impl Agent {
         self.inner.shared.ext_statuses().into_values().collect()
     }
 
+    /// The session's committed model scope: `{provider}/{id}` strings the
+    /// next inference is limited to; empty when no scope is committed.
+    #[must_use]
+    pub fn scoped_models(&self) -> Vec<Box<str>> {
+        self.inner.shared.scoped_models()
+    }
+
     /// Polls every extension status kind now and returns the statuses that
     /// are busy or carry text, ordered by extension name.
     ///

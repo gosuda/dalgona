@@ -39,8 +39,11 @@ pub(crate) const MAX_REPORT_CHARS: usize = 50_000;
 /// Model-visible tool description.
 const AGENT_DESCRIPTION: &str =
     "Start and manage isolated child agent sessions. Use wait to read a child's final report.";
-/// Exact parameter schema: one tagged object with four action variants.
-const AGENT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"oneOf":[{"type":"object","additionalProperties":false,"required":["action","name","prompt"],"properties":{"action":{"const":"spawn"},"name":{"type":"string"},"prompt":{"type":"string"},"model":{"type":["string","null"]},"role":{"type":["string","null"]},"system":{"type":["string","null"]},"tools":{"type":["array","null"],"items":{"type":"string"}},"workspace":{"type":["string","null"]}}},{"type":"object","additionalProperties":false,"required":["action","id"],"properties":{"action":{"const":"wait"},"id":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["action","id"],"properties":{"action":{"const":"cancel"},"id":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"const":"list"}}}]}"#;
+/// Parameter schema: one object with an `action` enum and per-action optional
+/// fields. Kept flat because Anthropic's `input_schema` subset admits no root
+/// `oneOf`; per-action required fields stay enforced by `AgentAction`'s
+/// tagged decode.
+const AGENT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"type":"string","enum":["spawn","wait","cancel","list"],"description":"spawn: name and prompt required. wait, cancel: id required. list: no fields."},"name":{"type":"string","description":"spawn: display name for progress and notices."},"prompt":{"type":"string","description":"spawn: the child's task prompt."},"id":{"type":"string","description":"wait, cancel: child session id."},"model":{"type":["string","null"],"description":"spawn: model override; absent inherits the parent model."},"role":{"type":["string","null"],"description":"spawn: role section appended after the shared base prompt."},"system":{"type":["string","null"],"description":"spawn: full system prompt replacement."},"tools":{"type":["array","null"],"items":{"type":"string"},"description":"spawn: child tool allowlist; absent means read and search."},"workspace":{"type":["string","null"],"description":"spawn: child workspace; absent inherits the parent workspace."}}}"#;
 
 /// Strict `agent` action arguments.
 #[derive(Deserialize)]
@@ -232,6 +235,9 @@ impl AgentTool {
                             report_text(report).into_boxed_str(),
                         )))
                     }
+                    Ok(AgentsReply::Cancelled { id: cancelled }) => ToolOutcome::Err(
+                        ToolError::message(format!("child \"{cancelled}\" was cancelled.")),
+                    ),
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
                     )),

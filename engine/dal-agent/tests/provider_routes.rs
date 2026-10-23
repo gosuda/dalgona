@@ -21,9 +21,7 @@ use dal_agent::ext::{
     BoxFuture, Caller, Extension, ExtensionBuilder, HookCx, HookError, ModelCx, ModelError,
     ModelHandler, ModelRecord, ObserveHook, Services, SessionCx, SessionInstalls,
 };
-use dal_agent::{
-    Agent, DefaultAuthority, Delivery, Env, Host, HostError, Product, SessionRef, Subscription,
-};
+use dal_agent::{Agent, Delivery, Env, Host, HostError, Product, SessionRef, Subscription};
 use dal_core::{
     ApprovalMode, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, Entry, EntryId,
     EntryKind, Expect, Family, JournalPart, ModelId, ModelRequest, ModelRoute, PageReq, Part,
@@ -414,12 +412,7 @@ impl Rig {
             cwd: self.tmp.path().join("workspace"),
             sandbox_helper: None,
         };
-        let authority = DefaultAuthority::Local {
-            path: self.user_path(),
-        };
-        Host::start_with_defaults(product, config, env, authority)
-            .await
-            .expect("host")
+        Host::start(product, config, env).await.expect("host")
     }
 
     async fn open_new(&self, host: &Host) -> Agent {
@@ -639,7 +632,8 @@ async fn relay_refuses_a_request_that_names_another_provider_than_its_route() {
     let _ = host.shutdown(CLOSE).await;
 }
 
-/// The saved `[model_route]` default a fixture configuration carries.
+/// The saved default a fixture configuration carries, written as the merged
+/// `model` string the branch persists (no `[model_route]` table remains).
 #[derive(Clone, Copy)]
 enum Saved {
     /// No default at all.
@@ -651,17 +645,18 @@ enum Saved {
 }
 
 /// The `openrouter` provider (Chat wire, loopback) listing `SYNTHETIC_ID`,
-/// with the saved default `saved`.
+/// with the saved default `saved`: a provider-qualified reference keeps its
+/// provider, while the bare id resolves the synthetic first.
 fn openrouter_config(upstream: &Upstream, saved: Saved) -> String {
     let mut text = String::new();
-    if !matches!(saved, Saved::Nothing) {
-        text.push_str(
-            "model = \"openai-chat/openrouter/free\"\n\n[model_route]\nkind = \"api\"\nfamily = \"openai_chat\"\nmodel = \"openrouter/free\"\n",
-        );
-        if let Saved::Provider(provider) = saved {
-            let _ = writeln!(text, "provider = \"{provider}\"");
+    match saved {
+        Saved::Nothing => {}
+        Saved::Provider(provider) => {
+            let _ = writeln!(text, "model = \"{provider}/{SYNTHETIC_ID}\"\n");
         }
-        text.push('\n');
+        Saved::Providerless => {
+            let _ = writeln!(text, "model = \"{SYNTHETIC_ID}\"\n");
+        }
     }
     let _ = writeln!(
         text,
@@ -779,19 +774,25 @@ async fn a_providerless_saved_default_still_resolves_the_synthetic_first() {
     let _ = host.shutdown(CLOSE).await;
 }
 
-/// Host one: a session saves `beta`'s route as the product default and
-/// answers one prompt through it; the host then stops. Returns that session.
+/// Host one: the product default is seeded as the provider-qualified `model`
+/// string the merged config surface persists, then a session selects `beta`'s
+/// route for itself and answers one prompt through it; the host then stops.
+/// Returns that session.
 async fn save_beta_default(rig: &Rig, beta: &Upstream) -> SessionId {
+    rig.write_user(&format!(
+        "model = \"beta/{SHARED_ID}\"\n{}",
+        rig.user_text()
+    ));
     let host = rig.start(Vec::new()).await;
     let agent = rig.open_new(&host).await;
     let mut events = agent.subscribe(None).expect("subscribe");
     agent
         .submit(Command::SetModel {
             model: chat_route(Some("beta"), SHARED_ID),
-            save: Save::SessionAndDefault,
+            save: Save::SessionOnly,
         })
         .await
-        .expect("the provider default saves");
+        .expect("the session selects the provider route");
     let turn = prompt(&agent, &mut events, "saving").await;
     assert_eq!(turn.stop, Stop::EndTurn, "{:?}", turn.failure);
     assert_chats(beta, KEY_BETA, SHARED_ID, 1);
@@ -801,7 +802,7 @@ async fn save_beta_default(rig: &Rig, beta: &Upstream) -> SessionId {
 }
 
 #[tokio::test]
-async fn saving_a_provider_route_as_default_writes_the_table_and_a_providerless_mirror() {
+async fn saving_a_provider_route_as_default_writes_the_provider_qualified_model_string() {
     let rig = Rig::new();
     let (alpha, beta) = rig
         .pair("# kept user comment\n", &[SHARED_ID], &[SHARED_ID])
@@ -809,22 +810,21 @@ async fn saving_a_provider_route_as_default_writes_the_table_and_a_providerless_
     let session = save_beta_default(&rig, &beta).await;
     let saved = rig.user_text();
     assert!(saved.contains("# kept user comment"), "{saved}");
-    assert!(saved.contains("[model_route]"), "{saved}");
-    assert!(saved.contains("provider = \"beta\""), "{saved}");
     assert!(
-        saved.contains("model = \"openai-chat/gpt-4o\""),
-        "the legacy mirror keeps the family spelling: {saved}"
+        saved.contains("model = \"beta/gpt-4o\""),
+        "the merged default names the provider-qualified reference: {saved}"
     );
     assert!(
-        !saved.contains("beta/gpt-4o"),
-        "the legacy mirror never gains a provider segment: {saved}"
+        !saved.contains("model_route"),
+        "the merged default is a model string, not a table: {saved}"
+    );
+    assert!(
+        !saved.contains("openai-chat/gpt-4o"),
+        "the provider-qualified default never falls back to a family spelling: {saved}"
     );
     let reloaded = Config::load(ConfigProduct::Dalgon, &rig.data(), "", Some(saved.as_str()))
         .expect("the saved file loads");
-    assert_eq!(
-        reloaded.default_model_route(),
-        Some(chat_route(Some("beta"), SHARED_ID))
-    );
+    assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
     let journal = rig.journal_text(session);
     let record = journal
         .lines()
@@ -921,9 +921,7 @@ fn setup_capture_extension(slot: SetupCaptured) -> Extension {
 #[tokio::test]
 async fn a_reopened_session_without_a_model_record_sets_extensions_up_with_the_provider_route() {
     let rig = Rig::new();
-    let top = format!(
-        "model = \"openai-chat/{SHARED_ID}\"\n\n[model_route]\nkind = \"api\"\nfamily = \"openai_chat\"\nmodel = \"{SHARED_ID}\"\nprovider = \"beta\"\n\n"
-    );
+    let top = format!("model = \"beta/{SHARED_ID}\"\n\n");
     let (alpha, beta) = rig.pair(&top, &[SHARED_ID], &[SHARED_ID]).await;
     let saved = chat_route(Some("beta"), SHARED_ID);
 
@@ -1164,9 +1162,7 @@ async fn a_legacy_journal_model_record_replays_without_a_provider_and_runs_by_th
 /// A configuration whose default is `beta`'s route for `SHARED_ID`, with
 /// both providers listing that id.
 async fn beta_default(rig: &Rig) -> (Upstream, Upstream) {
-    let top = format!(
-        "model = \"openai-chat/{SHARED_ID}\"\n\n[model_route]\nkind = \"api\"\nfamily = \"openai_chat\"\nmodel = \"{SHARED_ID}\"\nprovider = \"beta\"\n\n"
-    );
+    let top = format!("model = \"beta/{SHARED_ID}\"\n\n");
     rig.pair(&top, &[SHARED_ID], &[SHARED_ID]).await
 }
 

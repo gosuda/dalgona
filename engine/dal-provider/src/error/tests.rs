@@ -614,6 +614,8 @@ fn retryable_by_loop_names_only_the_four_replayable_failures() {
         ProviderError::AuthRejected {
             provider: String::from("openai"),
         },
+        ProviderError::LoginCancelled,
+        ProviderError::Cancelled,
     ];
     for error in terminal {
         assert!(!error.retryable_by_loop(), "{error}");

@@ -1,5 +1,9 @@
 //! Binary-boundary tests for the model catalog command.
 
+#[expect(
+    dead_code,
+    reason = "fixture helpers are shared across binary test crates"
+)]
 mod support;
 
 use std::{
@@ -95,18 +99,21 @@ fn fetch_failure_keeps_builtin_rows_and_uses_catalog_diagnostic() -> Result<(), 
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.lines().any(|line| line.starts_with("openai ")));
     let mut lines = stderr.lines();
+    let diagnostic = lines.next().unwrap_or_default();
     assert!(
-        lines
-            .next()
-            .unwrap_or_default()
-            .starts_with("dalgon: could not fetch the model list: "),
-        "{stderr}"
+        diagnostic.starts_with("dalgon:")
+            && diagnostic.contains("model list")
+            && diagnostic.contains("openai"),
+        "catalog failure must identify the operation and provider: {stderr}"
     );
-    assert_eq!(
-        lines.next(),
-        Some("Check the network and sign in with dalgon login PROVIDER, then try again.")
+    let repair = lines.next().unwrap_or_default();
+    assert!(
+        repair.contains("network") && repair.contains("dalgon login"),
+        "catalog failure must explain how to repair connectivity or sign in: {stderr}"
     );
     assert_eq!(lines.next(), None);
+    assert!(!stdout.contains("secret-model-token"));
+    assert!(!stderr.contains("secret-model-token"));
     Ok(())
 }
 

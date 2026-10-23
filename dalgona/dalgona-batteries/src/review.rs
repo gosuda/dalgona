@@ -32,6 +32,7 @@ const REVIEW_COMMAND_SUMMARY: &str = "Review the current changes.";
 pub(crate) const REVIEW_SYSTEM: &str = "You are a code reviewer. You review the diff of one coding session. You report defects only: bugs, broken behavior, security problems, and missed requirements. You do not report style preferences. You answer with one JSON object and no other text.";
 pub(crate) const MAX_DIFF_BYTES: usize = 262_144;
 pub(crate) const MAX_FINDINGS: usize = 50;
+pub(crate) const MAX_RECORD_BYTES: usize = 262_144;
 pub(crate) const DIFF_TRUNCATION_MARKER: &str = "\n[... diff truncated at 262144 bytes ...]";
 pub(crate) const FOCUS_TRUNCATION_MARKER: &str = "[... focus truncated]";
 pub(crate) const MAX_ERROR_BYTES: usize = 200;
@@ -55,6 +56,10 @@ pub(crate) enum ReviewError {
     Parse { round: u8, reason: Box<str> },
     #[error("stored review record {index} did not decode: {reason}")]
     RecordDecode { index: usize, reason: Box<str> },
+    #[error("stored review record {index} exceeds {limit} bytes")]
+    RecordTooLarge { index: usize, limit: usize },
+    #[error("review record {index} exceeds {limit} bytes; nothing was appended")]
+    RecordNotStored { index: usize, limit: usize },
     #[error("reviewer returned {count} findings; the cap is 50; resolve the reported ones first")]
     TooManyFindings { count: usize },
     #[error(
@@ -488,7 +493,7 @@ async fn review_round(
         new_count: new,
         findings: rounds::stored_findings(&reviewer_reply),
     };
-    let record_body = match record_body(&record) {
+    let record_body = match record_body(&record, records.len() + 1) {
         Ok(record_body) => record_body,
         Err(outcome) => return *outcome,
     };
@@ -511,17 +516,52 @@ async fn review_round(
     }
 }
 
-/// Decodes every stored review record. One undecodable record fails the
-/// round before the reviewer runs; records are never dropped or rewritten.
+/// Decodes every stored review record. One undecodable or oversized record
+/// fails the round before the reviewer runs; records are never dropped or rewritten.
 fn decode_records(raw_records: &[Box<RawValue>]) -> Result<Vec<rounds::ReviewRecord>, ToolOutcome> {
     raw_records
         .iter()
         .enumerate()
-        .map(|(index, raw)| {
-            sonic_rs::from_str(raw.as_str())
-                .map_err(|error| record_decode_refusal(index + 1, &error))
-        })
+        .map(|(index, raw)| decode_record(index + 1, raw))
         .collect()
+}
+
+fn decode_record(index: usize, raw: &RawValue) -> Result<rounds::ReviewRecord, ToolOutcome> {
+    let raw_str = raw.as_str();
+    if raw_str.len() > MAX_RECORD_BYTES {
+        let refusal = ReviewError::RecordTooLarge {
+            index,
+            limit: MAX_RECORD_BYTES,
+        };
+        return Err(ToolOutcome::Err(dal_agent::ToolError::message(
+            refusal.to_string(),
+        )));
+    }
+    let record: rounds::ReviewRecord =
+        sonic_rs::from_str(raw_str).map_err(|error| record_decode_refusal(index, &error))?;
+    if record.round == 0 {
+        let refusal = ReviewError::RecordDecode {
+            index,
+            reason: "round must be at least 1".into(),
+        };
+        return Err(ToolOutcome::Err(dal_agent::ToolError::message(
+            refusal.to_string(),
+        )));
+    }
+    if record.findings.len() > MAX_FINDINGS {
+        let refusal = ReviewError::RecordDecode {
+            index,
+            reason: format!(
+                "findings count ({}) exceeds the cap of {MAX_FINDINGS}",
+                record.findings.len()
+            )
+            .into(),
+        };
+        return Err(ToolOutcome::Err(dal_agent::ToolError::message(
+            refusal.to_string(),
+        )));
+    }
+    Ok(record)
 }
 
 /// The refusal for the one-based stored record `index` that did not decode.
@@ -550,13 +590,31 @@ fn decode_failure_site(error: &sonic_rs::Error) -> Box<str> {
     format!("{class} (line {}, column {})", error.line(), error.column()).into()
 }
 
-fn record_body(record: &rounds::ReviewRecord) -> Result<RawJson, Box<ToolOutcome>> {
+/// Serializes `record` for the durable store without appending it. A body
+/// past [`MAX_RECORD_BYTES`] fails the round here, before anything is
+/// appended: JSON escaping can push a validated reply past the bound the
+/// reader enforces, so the writer never persists a record the next round
+/// would refuse. The round fails and the history stays usable; nothing is
+/// clamped or rewritten.
+fn record_body(
+    record: &rounds::ReviewRecord,
+    next_index: usize,
+) -> Result<RawJson, Box<ToolOutcome>> {
     let unserializable = || {
         Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
             "review: the record did not serialize.".to_owned(),
         )))
     };
     let body = sonic_rs::to_string(record).map_err(|_| unserializable())?;
+    if body.len() > MAX_RECORD_BYTES {
+        return Err(Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
+            ReviewError::RecordNotStored {
+                index: next_index,
+                limit: MAX_RECORD_BYTES,
+            }
+            .to_string(),
+        ))));
+    }
     RawJson::parse(&body).map_err(|_| unserializable())
 }
 

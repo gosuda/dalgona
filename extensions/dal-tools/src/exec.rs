@@ -540,9 +540,7 @@ impl ExecTool {
             waited = proc.wait(cx.cancel()) => waited,
             () = tokio::time::sleep(budget) => {
                 job.on(ExecEvent::BudgetFire);
-                return ToolOutcome::Detached(
-                    cx.detach_command(proc, Arc::from(validated.command.as_str())),
-                );
+                return ToolOutcome::Detached(cx.detach_labeled(proc, &validated.command));
             }
         };
         Self::settle(&mut job, &validated, waited, sandbox_on)

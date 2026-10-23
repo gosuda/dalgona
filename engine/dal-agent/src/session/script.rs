@@ -40,6 +40,7 @@ use crate::ext::script::{
 };
 use crate::ext::{BoxFuture, Caller, CallerKind};
 use crate::session::backend::Backend;
+use crate::session::continuation::ContinuationOwner;
 use crate::session::tasks::ScopeTable;
 
 mod service;
@@ -94,6 +95,12 @@ pub(crate) struct SessionScriptHost {
     catalog: Catalog,
     /// Per-invocation scope tables.
     tables: StdMutex<HashMap<InvocationId, ScopeTable>>,
+    /// The linear continuation owner of each live invocation: one owner per
+    /// root invocation with the session tasks, distinct moved owners for
+    /// child scopes, never the parent slot. Inserted in [`begin_inner`];
+    /// removed and explicitly released in [`finish_inner`]; the Drop
+    /// backstop covers invocations that never finish.
+    owners: StdMutex<HashMap<InvocationId, ContinuationOwner>>,
     /// Per-invocation scope executors.
     runners: Mutex<HashMap<InvocationId, Runner>>,
     /// Per-root recorded observer failures.
@@ -167,6 +174,7 @@ impl SessionScriptHost {
             captured: StdRwLock::new(captured),
             catalog,
             tables: StdMutex::new(HashMap::new()),
+            owners: StdMutex::new(HashMap::new()),
             runners: Mutex::new(HashMap::new()),
             observers: StdMutex::new(HashMap::new()),
             host_bytes: Arc::new(AtomicUsize::new(0)),
@@ -344,6 +352,7 @@ impl SessionScriptHost {
         entry: Entry,
     ) -> Result<Arc<Invocation>, HostTerminal> {
         let captured = self.snapshot();
+        let cont_owner = ContinuationOwner::new(self.backend.tasks().clone());
         let parts = match parent {
             Parent::Of(inv) => match entry {
                 Entry::Eval { .. } => return Err(HostTerminal::NestedEval),
@@ -360,7 +369,8 @@ impl SessionScriptHost {
                         parent: Some(Arc::clone(inv)),
                         session: self.session,
                         generation: captured.generation.id,
-                        caller: Self::export_caller(&captured.generation, &id, captured.turn),
+                        caller: Self::export_caller(&captured.generation, &id, captured.turn)
+                            .with_continuation(cont_owner.downgrade()),
                         export: Some(id),
                         phase,
                         consumer: None,
@@ -386,7 +396,8 @@ impl SessionScriptHost {
                     }
                 };
                 let caller = match &export {
-                    Some(id) => Self::export_caller(&captured.generation, id, captured.turn),
+                    Some(id) => Self::export_caller(&captured.generation, id, captured.turn)
+                        .with_continuation(cont_owner.downgrade()),
                     None => Caller::new(
                         Name::parse("eval")
                             .map_err(|_| HostTerminal::LimitExceeded { what: "identities" })?,
@@ -395,7 +406,8 @@ impl SessionScriptHost {
                         std::num::NonZeroU32::MIN,
                         CallerKind::Cell { approved: true },
                         captured.turn,
-                    ),
+                    )
+                    .with_continuation(cont_owner.downgrade()),
                 };
                 InvocationParts {
                     parent: None,
@@ -417,7 +429,24 @@ impl SessionScriptHost {
                 }
             }
         };
-        let inv = Invocation::mint(parts)?;
+        let inv = match Invocation::mint(parts) {
+            Ok(inv) => inv,
+            Err(error) => {
+                cont_owner.release_if_live();
+                return Err(error);
+            }
+        };
+        self.track_invocation(&inv, cont_owner);
+        Ok(inv)
+    }
+
+    /// Tracks a freshly minted invocation: parks the continuation owner and
+    /// installs the invocation-owned scope table keyed by invocation id.
+    fn track_invocation(&self, inv: &Arc<Invocation>, cont_owner: ContinuationOwner) {
+        self.owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(inv.id(), cont_owner);
         let mut tables = self
             .tables
             .lock()
@@ -429,7 +458,6 @@ impl SessionScriptHost {
             inv.id(),
             ScopeTable::new(Arc::clone(&self.host_bytes), price),
         );
-        Ok(inv)
     }
 
     /// Runs one synchronous operation through the checked dispatch path.
@@ -512,7 +540,16 @@ impl SessionScriptHost {
         // native ops, and the owning plugin for an export entry: the
         // plugin's own grant applies either way.
         let caller = match &op {
-            OpId::Export(id) => Self::export_caller(&generation, id, inv.caller().turn()),
+            // Same invocation as `inv` (the op runs under its gate,
+            // ceiling, and cancel): carry its slot. A fresh owner here
+            // would fork a second conversation beside the live run.
+            OpId::Export(id) => {
+                let caller = Self::export_caller(&generation, id, inv.caller().turn());
+                match inv.caller().continuation() {
+                    Some(slot) => caller.with_continuation(slot),
+                    None => caller,
+                }
+            }
             OpId::Native(_) => inv.caller().clone(),
         };
         let script = self.attach(Some(Arc::clone(inv)));
@@ -994,6 +1031,11 @@ impl SessionScriptHost {
             inv.gate().close();
         }
         inv.cancel().cancel();
+        let cont_owner = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&inv.id());
         let observer = {
             let mut observers = self
                 .observers
@@ -1025,6 +1067,9 @@ impl SessionScriptHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(mut table) = tables.remove(&inv.id()) else {
+            if let Some(owner) = cont_owner {
+                owner.release_if_live();
+            }
             return Cleanup {
                 complete: true,
                 outstanding: Box::new([]),
@@ -1036,6 +1081,9 @@ impl SessionScriptHost {
             .filter_map(|task| table.call_id(*task))
             .collect();
         let _ = table.cleanup();
+        if let Some(owner) = cont_owner {
+            owner.release_if_live();
+        }
         Cleanup {
             complete: outstanding.is_empty(),
             outstanding,

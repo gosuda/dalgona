@@ -476,6 +476,7 @@ pub(crate) fn parse_route_id(id: &str) -> Option<ModelRoute> {
     let Some(family) = Family::from_route_prefix(prefix) else {
         return ModelRoute::synthetic(id).ok();
     };
+
     (!name.is_empty()).then(|| ModelRoute::Api {
         family,
         model: name.into(),

@@ -4,7 +4,7 @@ use std::{
 };
 
 use dal_core::{InferFailure, RawJson, Usage};
-use futures::{FutureExt, channel::mpsc, executor::block_on};
+use futures::{FutureExt, channel::mpsc, executor::block_on, task::ArcWake};
 
 use super::*;
 use crate::stream::ToolArgs;
@@ -19,6 +19,8 @@ struct Wire {
     sent: Mutex<Vec<Vec<HostToolResult>>>,
     aborts: AtomicUsize,
     refuse: Mutex<Option<RunLostReason>>,
+    maintains: AtomicUsize,
+    fail_maintain: Mutex<Option<String>>,
 }
 
 /// A transport that keeps what the run sends and counts aborts. It honors the
@@ -38,6 +40,39 @@ impl RunTransport for Loopback {
 
     fn abort(&mut self) {
         self.0.aborts.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// An event source with observable upkeep: the channel carries decoded step
+/// events exactly as the production loopback does, while upkeep polls and an
+/// injected upkeep failure are counted on the shared wire.
+struct TestEvents {
+    inner: mpsc::Receiver<Item>,
+    wire: Arc<Wire>,
+}
+
+impl Stream for TestEvents {
+    type Item = Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl RunEvents for TestEvents {
+    fn poll_maintain(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ProviderError>> {
+        let this = self.get_mut();
+        this.wire.maintains.fetch_add(1, Ordering::SeqCst);
+        match this.wire.fail_maintain.lock().unwrap().take() {
+            Some(reason) => Poll::Ready(Err(ProviderError::Transport {
+                family: Family::Chat,
+                reason,
+            })),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -68,12 +103,21 @@ impl Server {
         *self.wire.refuse.lock().unwrap() = reason;
     }
 
+    /// Fails the next upkeep poll with a transport error.
+    fn fail_maintain(&self, reason: &str) {
+        *self.wire.fail_maintain.lock().unwrap() = Some(reason.to_owned());
+    }
+
     fn sent(&self) -> Vec<Vec<HostToolResult>> {
         self.wire.sent.lock().unwrap().clone()
     }
 
     fn aborts(&self) -> usize {
         self.wire.aborts.load(Ordering::SeqCst)
+    }
+
+    fn maintains(&self) -> usize {
+        self.wire.maintains.load(Ordering::SeqCst)
     }
 
     /// Whether the run still holds the event source: the peer of a released
@@ -83,28 +127,38 @@ impl Server {
     }
 }
 
-/// A channel-backed event source: upkeep stays parked, exactly as a source
-/// without maintenance behaves.
-struct TestEvents {
-    inner: mpsc::Receiver<Item>,
-}
-
-impl Stream for TestEvents {
-    type Item = Item;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
-
-impl RunEvents for TestEvents {}
-
 fn loopback() -> (ProviderRun, Server) {
     let (events, inbox) = mpsc::channel(SCRIPT_ROOM);
     let wire = Arc::new(Wire::default());
-    let source = TestEvents { inner: inbox };
+    let source = TestEvents {
+        inner: inbox,
+        wire: Arc::clone(&wire),
+    };
     let run = ProviderRun::new(Family::Chat, source, Loopback(Arc::clone(&wire)));
     (run, Server { events, wire })
+}
+
+/// A waker that counts wakes, so tests pin exactly when the run wakes its
+/// keeper.
+#[derive(Default)]
+struct WakeCount(AtomicUsize);
+
+impl ArcWake for WakeCount {
+    fn wake_by_ref(arc: &Arc<Self>) {
+        arc.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn keeper_waker(count: &Arc<WakeCount>) -> Waker {
+    futures::task::waker(Arc::clone(count))
+}
+
+fn wakes(count: &Arc<WakeCount>) -> usize {
+    count.0.load(Ordering::SeqCst)
+}
+
+fn poll_keeper(keeper: &mut KeepAlive, waker: &Waker) -> Poll<()> {
+    Pin::new(keeper).poll(&mut Context::from_waker(waker))
 }
 
 fn text(text: &str) -> StreamEvent {
@@ -461,6 +515,182 @@ fn respond_demands_exactly_the_pending_calls_and_sends_nothing_otherwise() {
 }
 
 #[test]
+fn results_with_swapped_names_are_not_exact() {
+    let mut script = vec![text("calling")];
+    for (id, name) in [("a", "read"), ("b", "write")] {
+        script.push(StreamEvent::ToolCallStarted {
+            id: id.into(),
+            name: name.into(),
+        });
+        script.push(StreamEvent::ToolArgsDelta {
+            id: id.into(),
+            fragment: b"{}".to_vec(),
+        });
+    }
+    script.extend([
+        StreamEvent::ToolCallsDone {
+            calls: vec![tool_call("a", "read"), tool_call("b", "write")],
+        },
+        zero_usage(),
+        stop(StopReason::ToolUse),
+    ]);
+    let result = |id: &str, name: &str| HostToolResult {
+        call: CallId::new(id),
+        name: name.into(),
+        is_error: false,
+        parts: vec![Part::Text {
+            text: format!("result {id}").into(),
+        }],
+    };
+    // Every id present but paired with the other call's name.
+    let (mut run, mut server) = loopback();
+    server.push(script);
+    read_step(&mut run.next_step().unwrap());
+    assert_eq!(run.state(), awaiting(&["a", "b"]));
+    let error = run
+        .respond(vec![result("a", "write"), result("b", "read")])
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ProviderError::RunLost {
+                reason: RunLostReason::ResultsMismatch,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(server.sent(), [] as [Vec<HostToolResult>; 0]);
+    assert_eq!(run.state(), RunState::Lost(RunLostReason::ResultsMismatch));
+}
+
+#[test]
+fn keepalive_parks_while_streaming_and_resolves_at_each_ending() {
+    // A closed run resolves its keeper and never ran upkeep.
+    let (mut run, mut server) = loopback();
+    let mut keeper = run.keepalive();
+    assert!((&mut keeper).now_or_never().is_none());
+    assert_eq!(server.maintains(), 0);
+    server.push(final_step(StopReason::EndTurn));
+    read_step(&mut run.next_step().unwrap());
+    assert_eq!(run.state(), RunState::Closed);
+    assert!((&mut keeper).now_or_never().is_some());
+    assert_eq!(server.maintains(), 0);
+
+    // A released run resolves its keeper the same way.
+    let (mut run, mut server) = loopback();
+    let mut keeper = run.keepalive();
+    assert!((&mut keeper).now_or_never().is_none());
+    server.push(tool_step(&["a"]));
+    drop(run.next_step().unwrap());
+    assert_eq!(run.state(), RunState::Released);
+    assert!((&mut keeper).now_or_never().is_some());
+    assert_eq!(server.maintains(), 0);
+
+    // A lost run resolves its keeper the same way.
+    let (mut run, mut server) = loopback();
+    let mut keeper = run.keepalive();
+    server.push(tool_step(&["a"]));
+    read_step(&mut run.next_step().unwrap());
+    run.respond(vec![]).unwrap_err();
+    assert!(matches!(run.state(), RunState::Lost(_)));
+    assert!((&mut keeper).now_or_never().is_some());
+    assert_eq!(server.maintains(), 0);
+    drop(server);
+}
+
+#[test]
+fn keepalive_drives_upkeep_only_while_awaiting() {
+    let (mut run, mut server) = loopback();
+    let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = keeper_waker(&count);
+    let mut keeper = run.keepalive();
+
+    // Streaming, before and after the step stream is taken: parked, and the
+    // source is never touched for upkeep.
+    assert_eq!(poll_keeper(&mut keeper, &waker), Poll::Pending);
+    let mut first = run.next_step().unwrap();
+    assert_eq!(poll_keeper(&mut keeper, &waker), Poll::Pending);
+    assert_eq!(server.maintains(), 0);
+
+    // The transport had already decoded the next step's first event.
+    let woken_before = wakes(&count);
+    server.push(tool_step(&["a"]));
+    server.push([text("queued")]);
+    assert_eq!(events_of(read_step(&mut first)), tool_step(&["a"]));
+    assert_eq!(run.state(), awaiting(&["a"]));
+    drop(first);
+
+    // Entering Awaiting woke the keeper; upkeep runs.
+    assert!(wakes(&count) > woken_before);
+    assert_eq!(poll_keeper(&mut keeper, &waker), Poll::Pending);
+    assert_eq!(server.maintains(), 1);
+
+    // Upkeep sends nothing and queues nothing on the run: the next step's
+    // event is still in the source for the next stream.
+    assert_eq!(server.sent(), [] as [Vec<HostToolResult>; 0]);
+    run.respond(vec![answer("a")]).unwrap();
+    let mut second = run.next_step().unwrap();
+    // Streaming again: parked, no upkeep ran.
+    assert_eq!(poll_keeper(&mut keeper, &waker), Poll::Pending);
+    assert_eq!(server.maintains(), 1);
+    server.push([calls_done(&[]), zero_usage(), stop(StopReason::EndTurn)]);
+    assert_eq!(
+        events_of(read_step(&mut second)),
+        vec![
+            text("queued"),
+            calls_done(&[]),
+            zero_usage(),
+            stop(StopReason::EndTurn)
+        ]
+    );
+    assert_eq!(run.state(), RunState::Closed);
+    // The keeper resolves at the ending.
+    assert_eq!(poll_keeper(&mut keeper, &waker), Poll::Ready(()));
+}
+
+#[test]
+fn upkeep_failure_after_handoff_loses_the_run_and_invents_nothing() {
+    let (mut run, mut server) = loopback();
+    server.push(tool_step(&["a"]));
+    read_step(&mut run.next_step().unwrap());
+    assert_eq!(run.state(), awaiting(&["a"]));
+
+    server.fail_maintain("connection reset");
+    let mut keeper = run.keepalive();
+    assert!((&mut keeper).now_or_never().is_some());
+    // Past the handoff every failure is fatal, with no Usage or Stop.
+    assert!(matches!(
+        run.state(),
+        RunState::Lost(RunLostReason::Transport(_))
+    ));
+    assert_eq!((server.aborts(), server.connected()), (1, false));
+    assert_eq!(server.sent(), [] as [Vec<HostToolResult>; 0]);
+    assert!(is_lost(&run.respond(vec![answer("a")])));
+    assert!(is_lost(&run.next_step()));
+}
+
+#[test]
+fn dropping_the_keeper_changes_nothing() {
+    let (mut run, mut server) = loopback();
+    drop(run.keepalive());
+
+    server.push(tool_step(&["a"]));
+    read_step(&mut run.next_step().unwrap());
+    assert_eq!(run.state(), awaiting(&["a"]));
+    drop(run.keepalive());
+    assert_eq!(run.state(), awaiting(&["a"]));
+    assert_eq!(server.aborts(), 0);
+
+    run.respond(vec![answer("a")]).unwrap();
+    assert_eq!(server.sent().len(), 1);
+    // Cancellation ownership stays with the run: dropping it still aborts
+    // exactly once.
+    drop(run);
+    assert_eq!((server.aborts(), server.connected()), (1, false));
+}
+
+#[test]
 fn a_failed_send_loses_the_run_and_nothing_replaces_it() {
     let reasons = [
         RunLostReason::Transport(String::from("connection reset")),
@@ -781,16 +1011,6 @@ fn upkeep_loopback() -> (ProviderRun, Server, Arc<Upkeep>) {
     };
     let run = ProviderRun::new(Family::Chat, source, Loopback(Arc::clone(&wire)));
     (run, Server { events, wire }, upkeep)
-}
-
-/// Counts how often the keeper's waker fires.
-#[derive(Default)]
-struct WakeCount(AtomicUsize);
-
-impl futures::task::ArcWake for WakeCount {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.0.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 #[test]

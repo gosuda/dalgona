@@ -6,13 +6,48 @@
 )]
 //! Bidirectional HTTP/2 loopback proof for the provider HTTP transport.
 //!
-//! Exercises bidirectional HTTP/2 and cancellation through [`send`] and a
-//! loopback hyper server. The request remains open while response frames
-//! arrive; cancellation resets the stream. Cleartext uses
-//! [`build_client_http2_prior_knowledge`]. The stock [`build_client`]
-//! control must fail before a handler runs. [`Family::Chat`] is only the
-//! transport carrier. These tests do not cover Cursor Connect framing,
-//! adapter mapping, or durable replay.
+//! Authority prerequisite: verify the bidirectional lifecycle with the
+//! existing transport in a loopback scenario before any Cursor adapter work.
+//! This file is that proof, at the transport layer, with real objects only:
+//! the existing [`send`] against a `hyper` HTTP/2 server
+//! (`hyper::server::conn::http2`, driven through `hyper-util`'s `TokioIo` and
+//! `TokioExecutor`) on an ephemeral `127.0.0.1` port. No mocks, no new
+//! transport stack, no adapter. Both directions of every exchange run over
+//! real HTTP/2 frames: the upload is a stream of `DATA` frames that stays
+//! open while response `DATA` frames flow, and cancel is a `RST_STREAM`.
+//!
+//! How HTTP/2 is negotiated, stated plainly:
+//! - Over `https`, reqwest's default client (what [`build_client`] returns)
+//!   offers ALPN `h2` then `http/1.1`, so a provider that speaks HTTP/2 is
+//!   reached over HTTP/2 without any flag.
+//! - This loopback is cleartext, where there is no ALPN. The client here is
+//!   [`build_client_http2_prior_knowledge`], the one `http.rs` constructor for
+//!   it. It is [`build_client`]'s exact policy (timeouts, redirect rule, no
+//!   retries; both constructors come from one private builder) plus HTTP/2
+//!   prior knowledge. It is handed to the same [`send`] every provider
+//!   request leaves through; the test builds no client of its own.
+//! - The server serves HTTP/2 only. Protocol evidence is checked at both
+//!   ends: the client reads `Response::version()` and the handler records the
+//!   `Request::version()` it saw. A control test sends the stock
+//!   [`build_client`] client (no prior knowledge, hence HTTP/1.1 on
+//!   cleartext) at the same server and requires the exchange to fail before
+//!   any handler runs, so the successful path cannot be an HTTP/1.1 fallback.
+//!
+//! Scope notes:
+//! - Cursor is a registered provider family with its own Connect-framed
+//!   `Run` codec. This test remains deliberately transport-level: it uses
+//!   [`Family::Chat`] as the request carrier to prove duplex HTTP/2 behavior
+//!   in [`send`], independently of Cursor's protobuf envelope and adapter.
+//!   Cursor wire behavior requires a separate Connect server harness.
+//! - Finding: the existing transport already streams duplex over HTTP/2.
+//!   [`send`] executes whatever reqwest client its request builder came from,
+//!   and a streaming [`reqwest::Body`] is never buffered. The one `http.rs`
+//!   change is the exposure above: [`build_client`] cannot express cleartext
+//!   HTTP/2 (a per-request `Version::HTTP_2` fails on an HTTP/1.1 pool), so
+//!   the shared builder gained one constructor and the crate root one
+//!   re-export. `build_client` and `build_client_no_redirect` behave as
+//!   before. The only manifest change is the `http2` feature on the `hyper`
+//!   dev-dependency, which the server side of this file needs.
 
 use std::{
     convert::Infallible,

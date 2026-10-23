@@ -17,7 +17,7 @@ use crate::mcp::{
     Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, TransportError,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
-    tools::{Key, decode_tool_page, fold_tool_name},
+    tools::{Key, decode_tool_page, fold_tool_name, sanitize_server_text},
 };
 #[cfg(unix)]
 use dal_agent::ext::{ArgError, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
@@ -275,6 +275,23 @@ impl HostedFixture {
         grant_answer: Answer,
         loopback_url: Option<Url>,
     ) -> Self {
+        Self::with_skill_transport_and_mcp_services(
+            skill,
+            steps,
+            grant_answer,
+            loopback_url,
+            ServiceSet::from_names(["mcp", "env", "ask"]).expect("MCP services"),
+        )
+        .await
+    }
+
+    async fn with_skill_transport_and_mcp_services(
+        skill: dal_agent::ext::Extension,
+        steps: Vec<String>,
+        grant_answer: Answer,
+        loopback_url: Option<Url>,
+        mcp_services: ServiceSet,
+    ) -> Self {
         let data = temp_path("host-data");
         let workspace = temp_path("host-workspace");
         fs::create_dir_all(&data).expect("host data directory");
@@ -299,29 +316,25 @@ impl HostedFixture {
         let (started, startup) = oneshot::channel();
         // The real MCP hooks own the session; the wrapper only acknowledges
         // completion so a prompt cannot race initial host tool publication.
-        let mcp = ExtensionBuilder::new(
-            "mcp",
-            env!("CARGO_PKG_VERSION"),
-            ServiceSet::from_names(["mcp", "env", "ask"]).expect("MCP services"),
-        )
-        .expect("MCP extension")
-        .with_origin(dal_core::Origin::Bundled, None)
-        .mcp_client(client.clone())
-        .on_session_start_lossless(StartedHook {
-            inner: SessionStartHook(Arc::clone(&client)),
-            done: std::sync::Mutex::new(Some(started)),
-        })
-        .on_session_end_lossless(SessionEndHook(Arc::clone(&client)))
-        .command(
-            dal_core::CommandSpec {
-                name: dal_core::CommandName::parse("mcp").expect("MCP command name"),
-                summary: "Show MCP servers in this session.".into(),
-                args_hint: None,
-            },
-            Arc::new(McpCommand(client)),
-        )
-        .build()
-        .expect("MCP registration");
+        let mcp = ExtensionBuilder::new("mcp", env!("CARGO_PKG_VERSION"), mcp_services)
+            .expect("MCP extension")
+            .with_origin(dal_core::Origin::Bundled, None)
+            .mcp_client(client.clone())
+            .on_session_start_lossless(StartedHook {
+                inner: SessionStartHook(Arc::clone(&client)),
+                done: std::sync::Mutex::new(Some(started)),
+            })
+            .on_session_end_lossless(SessionEndHook(Arc::clone(&client)))
+            .command(
+                dal_core::CommandSpec {
+                    name: dal_core::CommandName::parse("mcp").expect("MCP command name"),
+                    summary: "Show MCP servers in this session.".into(),
+                    args_hint: None,
+                },
+                Arc::new(McpCommand(client)),
+            )
+            .build()
+            .expect("MCP registration");
         let product = Product {
             name: "dalgona",
             data_root: data.clone(),
@@ -831,6 +844,14 @@ async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
 
 #[cfg(unix)]
 fn stderr_crash_stdio_decl(on_call: &str) -> McpServerDecl {
+    stderr_crash_stdio_decl_with_env(on_call, BTreeMap::new())
+}
+
+#[cfg(unix)]
+fn stderr_crash_stdio_decl_with_env(
+    on_call: &str,
+    env: BTreeMap<Box<str>, Box<str>>,
+) -> McpServerDecl {
     let script = r#"
 while IFS= read -r line; do
   id=${line#*\"id\":}
@@ -852,7 +873,754 @@ done
     McpServerDecl::Stdio {
         launch: McpLaunch::command(vec!["/bin/sh".into(), "-c".into(), script.into()])
             .expect("fixture launch"),
+        env,
+    }
+}
+
+/// A secret the server's own failure text echoes back.
+#[cfg(unix)]
+#[tokio::test]
+async fn crash_stderr_excerpt_hides_declared_environment_values() {
+    let secret = "sk-live-0123456789abcdef";
+    let result = crashed_echo_result(stderr_crash_stdio_decl_with_env(
+        r#"
+      printf 'fatal: rejected key %s (retry later)\n' "$MCP_API_TOKEN" >&2
+      exit 1
+"#,
+        // The empty value is declarable and must not join the secret set:
+        // replacing the empty pattern would shred the whole excerpt.
+        BTreeMap::from([
+            ("MCP_API_TOKEN".into(), secret.into()),
+            ("MCP_EMPTY".into(), "".into()),
+        ]),
+    ))
+    .await;
+    assert!(result.0);
+    assert!(result.1.contains("status 1"), "{result:?}");
+    assert!(
+        result
+            .1
+            .contains("fatal: rejected key <redacted> (retry later)"),
+        "the excerpt keeps its context and hides the value: {result:?}"
+    );
+    assert!(!result.1.contains(secret), "{result:?}");
+}
+
+/// The grant preview hides an opaque command's executable and operands, so a
+/// failed launch must not name them either.
+#[cfg(unix)]
+#[tokio::test]
+async fn missing_opaque_executable_is_not_named_in_the_start_failure() {
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let decl = McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "dalgona-secret-launcher".into(),
+            "--token".into(),
+            "tok-0123456789".into(),
+        ])
+        .expect("fixture launch"),
         env: BTreeMap::new(),
+    };
+    let mut fixture = HostedFixture::new(
+        decl,
+        vec![
+            scripted_tool_step("entry-missing", &entry, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let results = fixture.tool_results(&entry);
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (error, text) = &results[0];
+    assert!(*error, "{text}");
+    assert!(text.contains("was not found on PATH"), "{text}");
+    assert!(
+        text.contains("<redacted>"),
+        "the failure shows the public target identity: {text}"
+    );
+    assert!(
+        !text.contains("dalgona-secret-launcher") && !text.contains("tok-0123456789"),
+        "{text}"
+    );
+    fixture.shutdown().await;
+}
+
+#[cfg(unix)]
+fn env_stdio_decl(pid_file: &Path, env_file: &Path) -> McpServerDecl {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "MCP_PID_FILE".into(),
+        pid_file.to_string_lossy().into_owned().into_boxed_str(),
+    );
+    env.insert(
+        "MCP_ENV_FILE".into(),
+        env_file.to_string_lossy().into_owned().into_boxed_str(),
+    );
+    env.insert("MCP_DECLARED".into(), "declared-value".into());
+    let script = format!("env > \"$MCP_ENV_FILE\"\n{STDIO_SCRIPT}");
+    McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec!["/bin/sh".into(), "-c".into(), script.into()])
+            .expect("fixture launch"),
+        env,
+    }
+}
+
+/// The host process holds `OPENAI_API_KEY`; the child receives only the
+/// captured allowlist and what the declaration names.
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_child_receives_only_the_allowlist_and_declared_environment() {
+    let pid_file = temp_path("env.pid");
+    let env_file = temp_path("env.dump");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let mut fixture = HostedFixture::new(
+        env_stdio_decl(&pid_file, &env_file),
+        vec![
+            scripted_tool_step("entry-env", &entry, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let dump = fs::read_to_string(&env_file).expect("the child dumped its environment");
+    let names: std::collections::BTreeSet<&str> = dump
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect();
+    let granted = [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "MCP_PID_FILE",
+        "MCP_ENV_FILE",
+        "MCP_DECLARED",
+    ];
+    for expected in granted {
+        assert!(
+            names.contains(expected),
+            "the child lacks {expected}: {dump}"
+        );
+    }
+    assert!(dump.contains("PATH=/usr/bin:/bin"), "{dump}");
+    assert!(dump.contains("MCP_DECLARED=declared-value"), "{dump}");
+    assert!(
+        !dump.contains("OPENAI_API_KEY") && !dump.contains("sk-test"),
+        "the host's credentials reached the child: {dump}"
+    );
+    // The shell itself may export its own bookkeeping; nothing else may appear.
+    let shell = ["PWD", "OLDPWD", "SHLVL", "_"];
+    let extra: Vec<_> = names
+        .iter()
+        .filter(|name| !granted.contains(*name) && !shell.contains(*name))
+        .collect();
+    assert!(extra.is_empty(), "unexpected child environment: {extra:?}");
+    fixture.shutdown().await;
+    let _ = fs::remove_file(pid_file);
+    let _ = fs::remove_file(env_file);
+}
+
+#[cfg(unix)]
+const CANCEL_SCRIPT: &str = r#"
+printf '%s' "$$" > "$MCP_PID_FILE"
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"wait","inputSchema":{"type":"object","properties":{}}}],"ttlMs":10000}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s' "$id" > "$MCP_CALL_FILE"
+      printf 'w' >> "$MCP_PID_FILE"
+      ;;
+    *'"method":"notifications/cancelled"'*)
+      printf '%s' "$line" > "$MCP_CANCEL_FILE"
+      ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+fn cancel_stdio_decl(pid_file: &Path, call_file: &Path, cancel_file: &Path) -> McpServerDecl {
+    let mut env = BTreeMap::new();
+    for (name, path) in [
+        ("MCP_PID_FILE", pid_file),
+        ("MCP_CALL_FILE", call_file),
+        ("MCP_CANCEL_FILE", cancel_file),
+    ] {
+        env.insert(
+            name.into(),
+            path.to_string_lossy().into_owned().into_boxed_str(),
+        );
+    }
+    McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec!["/bin/sh".into(), "-c".into(), CANCEL_SCRIPT.into()])
+            .expect("fixture launch"),
+        env,
+    }
+}
+
+#[cfg(unix)]
+impl HostedFixture {
+    /// Submits the scripted prompt and returns the turn it started.
+    async fn prompt_turn(&mut self) -> dal_core::TurnId {
+        let reply = self
+            .agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "exercise the MCP server".into(),
+                }],
+            })
+            .await
+            .expect("scripted prompt");
+        let Reply::Accepted { turn, .. } = reply else {
+            panic!("prompt: {reply:?}");
+        };
+        turn
+    }
+}
+
+/// The server never answers the call. Cancelling the turn must end the turn
+/// at once instead of waiting out the call budget, and the server must be
+/// told which request to stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_turn_interrupts_an_in_flight_stdio_call_and_tells_the_server() {
+    let pid_file = temp_path("cancel.pid");
+    let call_file = temp_path("cancel.call");
+    let cancel_file = temp_path("cancel.note");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let wait = fold_tool_name(SKILL, SERVER, "wait");
+    let mut fixture = HostedFixture::new(
+        cancel_stdio_decl(&pid_file, &call_file, &cancel_file),
+        vec![
+            scripted_tool_step("entry-1", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("wait-1", &wait, "{}"),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert!(fixture.status().await.contains("ready"));
+
+    let turn = fixture.prompt_turn().await;
+    wait_for_wait_request(&pid_file, &fixture).await;
+    let started = std::time::Instant::now();
+    fixture
+        .agent
+        .submit(Command::Cancel {
+            scope: dal_core::CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the running turn");
+    fixture.turn_ended().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the cancelled turn waited on the call: {:?}",
+        started.elapsed()
+    );
+
+    let note = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(note) = fs::read_to_string(&cancel_file)
+                && !note.is_empty()
+            {
+                break note;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the server was told the request was cancelled");
+    let call_id = fs::read_to_string(&call_file).expect("the server recorded the call id");
+    assert!(note.contains("notifications/cancelled"), "{note}");
+    assert!(
+        note.contains(&format!("\"requestId\":{call_id}")),
+        "the notice names the cancelled request {call_id}: {note}"
+    );
+    assert!(
+        fixture.status().await.contains("ready"),
+        "a cancelled call is not a crash"
+    );
+    fixture.shutdown().await;
+    for path in [pid_file, call_file, cancel_file] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Whether `pid` names a process that still runs; a zombie is already dead.
+#[cfg(target_os = "linux")]
+fn process_is_live(pid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_process_gone(pid: u32) {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        while process_is_live(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the descendant of the stopped server was killed");
+}
+
+/// A server that exits when stdin closes, leaving a descendant that ignores
+/// polite signals behind.
+#[cfg(target_os = "linux")]
+const DESCENDANT_SCRIPT: &str = r#"
+trap '' TERM
+sleep 300 &
+printf '%s' "$!" > "$MCP_DESCENDANT_FILE"
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[],"ttlMs":10000}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+#[cfg(target_os = "linux")]
+async fn read_pid(path: &Path) -> u32 {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(text) = fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture recorded its descendant's process id")
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn session_end_kills_descendants_of_a_server_that_exits_on_stdin_close() {
+    let descendant_file = temp_path("descendant.pid");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let decl = McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            DESCENDANT_SCRIPT.into(),
+        ])
+        .expect("fixture launch"),
+        env: BTreeMap::from([(
+            "MCP_DESCENDANT_FILE".into(),
+            descendant_file
+                .to_string_lossy()
+                .into_owned()
+                .into_boxed_str(),
+        )]),
+    };
+    let mut fixture = HostedFixture::new(
+        decl,
+        vec![
+            scripted_tool_step("entry-descendant", &entry, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let pid = read_pid(&descendant_file).await;
+    assert!(
+        process_is_live(pid),
+        "the descendant runs before session end"
+    );
+    fixture.shutdown().await;
+    wait_for_process_gone(pid).await;
+    let _ = fs::remove_file(descendant_file);
+}
+
+/// An owner that is cancelled or replaced drops its transport without a
+/// shutdown; the whole tree must still go, not just the leader.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn dropping_a_started_transport_kills_the_whole_process_group() {
+    use crate::mcp::{
+        stdio::{ProcessEnvironment, StdioTransport},
+        tools::Key,
+    };
+
+    let descendant_file = temp_path("dropped.pid");
+    let decl = McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "sleep 300 & printf '%s' \"$!\" > \"$MCP_DESCENDANT_FILE\"; wait".into(),
+        ])
+        .expect("fixture launch"),
+        env: BTreeMap::from([(
+            "MCP_DESCENDANT_FILE".into(),
+            descendant_file
+                .to_string_lossy()
+                .into_owned()
+                .into_boxed_str(),
+        )]),
+    };
+    let key = Key {
+        session: SessionId::new_v7(),
+        skill: SKILL.to_owned(),
+        server: SERVER.to_owned(),
+    };
+    let environment = ProcessEnvironment {
+        path: Some("/usr/bin:/bin".into()),
+        home: None,
+        tmpdir: None,
+    };
+    let transport = StdioTransport::start(key, &decl, &environment, &Budgets::default())
+        .await
+        .expect("the fixture server starts");
+    let pid = read_pid(&descendant_file).await;
+    assert!(process_is_live(pid), "the descendant runs before the drop");
+    drop(transport);
+    wait_for_process_gone(pid).await;
+    let _ = fs::remove_file(descendant_file);
+}
+
+#[test]
+fn server_text_sanitizer_strips_controls_and_keeps_newlines_and_tabs() {
+    let cleaned = sanitize_server_text("working\x1b[2J\nline\tindented\x07done");
+    assert!(
+        !cleaned
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    );
+    assert!(cleaned.contains('\n') && cleaned.contains('\t'));
+    assert!(cleaned.contains("working") && cleaned.contains("done"));
+}
+
+#[cfg(unix)]
+const SERVER_REQUEST_SCRIPT: &str = r#"
+printf '%s' "$$" > "$MCP_PID_FILE"
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{}}}],"ttlMs":10000}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      printf '{"jsonrpc":"2.0","id":"srv-1","method":"sampling/createMessage","params":{}}\n'
+      IFS= read -r reply
+      printf '%s' "$reply" > "$MCP_REPLY_FILE"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"stdio-ok"}],"isError":false}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+fn server_request_stdio_decl(pid_file: &Path, reply_file: &Path) -> McpServerDecl {
+    let mut env = BTreeMap::new();
+    for (name, path) in [("MCP_PID_FILE", pid_file), ("MCP_REPLY_FILE", reply_file)] {
+        env.insert(
+            name.into(),
+            path.to_string_lossy().into_owned().into_boxed_str(),
+        );
+    }
+    McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            SERVER_REQUEST_SCRIPT.into(),
+        ])
+        .expect("fixture launch"),
+        env,
+    }
+}
+
+/// A server-initiated request is answered through the same guarded stdin
+/// path as every other line, and the call itself still succeeds.
+#[cfg(unix)]
+#[tokio::test]
+async fn reader_answers_unsupported_server_requests_through_the_shared_pipe() {
+    let pid_file = temp_path("srvreq.pid");
+    let reply_file = temp_path("srvreq.reply");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let mut fixture = HostedFixture::new(
+        server_request_stdio_decl(&pid_file, &reply_file),
+        vec![
+            scripted_tool_step("entry-1", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-1", &echo, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert_eq!(
+        fixture.tool_results(&echo),
+        vec![(false, "stdio-ok".to_owned())]
+    );
+    let reply = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(reply) = fs::read_to_string(&reply_file)
+                && !reply.is_empty()
+            {
+                break reply;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the server request was answered");
+    assert!(reply.contains("\"id\":\"srv-1\""), "{reply}");
+    assert!(reply.contains("-32601"), "{reply}");
+    assert!(
+        reply.contains("client does not support sampling"),
+        "{reply}"
+    );
+    fixture.shutdown().await;
+    for path in [pid_file, reply_file] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Cancelling a send mid-line tears stdin. The next write must fail as a
+/// crash so the instance restarts, never as a start failure.
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the canceller must fire while the test drives the send"
+)]
+#[tokio::test]
+async fn a_torn_stdin_line_fails_as_a_crash_not_a_start_failure() {
+    use crate::mcp::{
+        TransportError,
+        stdio::{ProcessEnvironment, StdioTransport},
+        tools::Key,
+    };
+
+    let decl = McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()])
+            .expect("fixture launch"),
+        env: BTreeMap::new(),
+    };
+    let key = Key {
+        session: SessionId::new_v7(),
+        skill: SKILL.to_owned(),
+        server: SERVER.to_owned(),
+    };
+    let environment = ProcessEnvironment {
+        path: Some("/usr/bin:/bin".into()),
+        home: None,
+        tmpdir: None,
+    };
+    let budgets = Budgets {
+        shutdown_grace: Duration::from_millis(200),
+        ..Budgets::default()
+    };
+    let transport = StdioTransport::start(key, &decl, &environment, &budgets)
+        .await
+        .expect("the fixture server starts");
+    // Far past the pipe buffer and under the line limit, against a child that
+    // never reads: the write blocks until the send is cancelled, which drops
+    // it mid-line and tears stdin.
+    let big = format!("\"{}\"", "x".repeat(1024 * 1024 - 16));
+    let body = RawJson::parse(&big).expect("large JSON string");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let canceller = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        canceller.cancel();
+    });
+    assert!(
+        matches!(
+            transport.send(7, &body, &cancel).await,
+            Err(TransportError::Cancelled)
+        ),
+        "the blocked send reports cancellation"
+    );
+    let small = RawJson::parse("{}").expect("small body");
+    assert!(
+        matches!(
+            transport
+                .send(8, &small, &tokio_util::sync::CancellationToken::new())
+                .await,
+            Err(TransportError::Mcp(McpError::Exited { .. }))
+        ),
+        "a torn stdin is a crash, never a start failure"
+    );
+}
+
+/// A server whose first launch hangs in the handshake until a gate file
+/// appears, and whose calls then crash.
+#[cfg(unix)]
+const GATED_CRASH_SCRIPT: &str = r#"
+printf x >> "$MCP_MARKER"
+while [ ! -f "$MCP_GO" ]; do sleep 0.05; done
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{}}}],"ttlMs":10000}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      exit 1
+      ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+fn gated_crash_stdio_decl(marker: &Path, go: &Path) -> McpServerDecl {
+    let mut env = BTreeMap::new();
+    for (name, path) in [("MCP_MARKER", marker), ("MCP_GO", go)] {
+        env.insert(
+            name.into(),
+            path.to_string_lossy().into_owned().into_boxed_str(),
+        );
+    }
+    McpServerDecl::Stdio {
+        launch: McpLaunch::command(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            GATED_CRASH_SCRIPT.into(),
+        ])
+        .expect("fixture launch"),
+        env,
+    }
+}
+
+/// Cancelling a first start withdraws it: the status recovers instead of
+/// wedging on "starting", and the retry stays free, so the session still gets
+/// its one restart before the second crash latches.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_first_start_recovers_and_stays_free() {
+    let marker = temp_path("gated-marker");
+    let go = temp_path("gated-go");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let decl = gated_crash_stdio_decl(&marker, &go);
+    let mut fixture = HostedFixture::new(
+        decl,
+        vec![
+            scripted_tool_step("entry-gated", &entry, "{}"),
+            scripted_tool_step("entry-open", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-open", &echo, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("entry-restart", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-restarted", &echo, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("entry-latched", &entry, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+
+    let turn = fixture.prompt_turn().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            fixture.answer_pending().await;
+            if fs::read(&marker).is_ok_and(|bytes| bytes.len() == 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first launch reached its handshake");
+    fixture
+        .agent
+        .submit(Command::Cancel {
+            scope: dal_core::CancelScope::Turn(turn),
+        })
+        .await
+        .expect("cancel the starting turn");
+    fixture.turn_ended().await;
+    assert!(
+        fixture.status().await.contains("declared"),
+        "a withdrawn first start returns to declared: {}",
+        fixture.status().await
+    );
+
+    fs::write(&go, b"go").expect("open the gate");
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let status = fixture.status().await;
+    assert!(status.contains("ready"), "retry status: {status}");
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert!(
+        fixture.status().await.contains("failed"),
+        "the first crash fails without latching: {}",
+        fixture.status().await
+    );
+
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let status = fixture.status().await;
+    assert!(
+        status.contains("ready"),
+        "restart status: {status}; entry results: {:?}",
+        fixture.tool_results(&entry)
+    );
+    assert_eq!(
+        fs::read(&marker).expect("launch count").len(),
+        3,
+        "the cancelled start never counted as the one restart; status: {status}; entry results: {:?}",
+        fixture.tool_results(&entry)
+    );
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert!(
+        fixture.status().await.contains("latched"),
+        "the second crash latches: {}",
+        fixture.status().await
+    );
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert_eq!(
+        fs::read(&marker).expect("launch count").len(),
+        3,
+        "a latched server never spawns again"
+    );
+    fixture.shutdown().await;
+    for path in [marker, go] {
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -1573,6 +2341,58 @@ async fn input_required_without_an_ask_answerer_declines_without_asking() {
     assert_declined_retry(&run, 0);
 }
 
+/// When elicitation fails (for example, the ask service is not injected or
+/// is denied by policy), the exchange must fail closed with the typed
+/// `NoAskFrontEnd` error, rather than synthesizing a decline or retrying.
+#[tokio::test]
+async fn input_required_fails_closed_when_ask_service_is_denied() {
+    let (declaration, url, server) = start_http_fixture(
+        3,
+        HttpScenario::InputRequired {
+            rounds: 1,
+            form: Form::Text,
+        },
+    )
+    .await;
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let lookup = fold_tool_name(SKILL, SERVER, "lookup");
+    let mut fixture = HostedFixture::with_skill_transport_and_mcp_services(
+        declared_skill(declaration),
+        vec![
+            scripted_tool_step("entry-input", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("lookup-input", &lookup, r#"{"query":"x"}"#),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+        Some(url),
+        ServiceSet::from_names(["mcp", "env"]).expect("MCP services without ask"),
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let mut results = fixture.tool_results(&lookup);
+    assert_eq!(results.len(), 1, "the mapped call ends in one result");
+    let result = results.remove(0);
+    assert!(result.0, "the call fails closed: {result:?}");
+    assert!(
+        result.1.contains(&McpError::NoAskFrontEnd.to_string()),
+        "failure is the typed NoAskFrontEnd error: {result:?}"
+    );
+    let asked = std::mem::take(&mut *fixture.asked.lock().expect("asked questions"));
+    assert_eq!(
+        asked.len(),
+        0,
+        "no questions are opened when ask is not injected"
+    );
+    let requests = finish_http_fixture(server).await;
+    let calls = tool_calls(&requests);
+    assert_eq!(calls.len(), 1, "no retry is sent after elicitation failure");
+    fixture.shutdown().await;
+}
+
 /// A server that never completes is cut at the retry cap: the first request
 /// plus `MRTR_MAX` retries, each retry carrying the state of the reply before
 /// it, then the typed limit error. The terminal reply is not asked, because
@@ -1609,6 +2429,140 @@ async fn input_required_stops_at_the_retry_cap_with_the_typed_error() {
         "only a reply that a retry can answer is asked"
     );
     assert_retry_envelope(&run, &calls);
+}
+
+/// Every public [`McpError`] variant renders its exact boundary string
+/// (part 39, REQ-39-14). The seventeen variants are the whole public error
+/// surface, so each display string is pinned here byte-for-byte, including
+/// both `Exited` renderings: with and without the stderr diagnostic suffix.
+#[test]
+fn every_public_mcp_error_renders_its_exact_boundary_string() {
+    let cases = mcp_error_boundary_cases("skill.server");
+    assert_error_census(&cases);
+}
+
+/// Every public [`McpError`] variant with its exact boundary string
+/// (part 39, REQ-39-14): seventeen variants, with both `Exited` renderings.
+fn mcp_error_boundary_cases(key: &str) -> Vec<(McpError, &'static str)> {
+    vec![
+        (
+            McpError::Declined {
+                plugin: "gate".to_owned(),
+            },
+            "mcp service declined by user for gate",
+        ),
+        (
+            McpError::NotGranted {
+                key: key.to_owned(),
+            },
+            "mcp server skill.server is not granted",
+        ),
+        (
+            McpError::Start {
+                key: key.to_owned(),
+                cause: "no such file".to_owned(),
+            },
+            "mcp server skill.server failed to start: no such file",
+        ),
+        (
+            McpError::Exited {
+                key: key.to_owned(),
+                code: 1,
+                diagnostic: "; stderr: boom".to_owned(),
+            },
+            "mcp server skill.server exited during the call with status 1; stderr: boom",
+        ),
+        (
+            McpError::Exited {
+                key: key.to_owned(),
+                code: 0,
+                diagnostic: String::new(),
+            },
+            "mcp server skill.server exited during the call with status 0",
+        ),
+        (
+            McpError::InvalidLine {
+                key: key.to_owned(),
+            },
+            "mcp server skill.server wrote an invalid protocol line; treated as a crash",
+        ),
+        (
+            McpError::Latched {
+                key: key.to_owned(),
+            },
+            "mcp server skill.server crashed twice in this session; it stays off until the session ends",
+        ),
+        (McpError::Timeout { n: 30 }, "mcp call timed out after 30 s"),
+        (
+            McpError::NotFound {
+                tool: "weather".to_owned(),
+                key: key.to_owned(),
+            },
+            "mcp tool weather not found on server skill.server",
+        ),
+        (
+            McpError::Protocol {
+                code: -32601,
+                message: "method not found".to_owned(),
+            },
+            "mcp protocol error -32601: method not found",
+        ),
+        (
+            McpError::ResultType {
+                value: "widget".to_owned(),
+            },
+            "unsupported mcp resultType widget",
+        ),
+        (McpError::ListPages, "mcp list exceeded 50 pages"),
+        (
+            McpError::NoAskFrontEnd,
+            "mcp elicitation needs an ask front end",
+        ),
+        (
+            McpError::IssuerMismatch,
+            "mcp authorization failed: issuer mismatch",
+        ),
+        (
+            McpError::StepUpLimit,
+            "mcp authorization failed: step-up limit reached",
+        ),
+        (
+            McpError::Auth {
+                cause: "consent denied".to_owned(),
+            },
+            "mcp authorization failed: consent denied",
+        ),
+        (
+            McpError::HttpAuth { code: 401, n: 2 },
+            "mcp http status 401 after 2 authorization attempts",
+        ),
+        (
+            McpError::InputRequiredLimit,
+            "mcp input-required limit reached",
+        ),
+    ]
+}
+
+/// Pins the whole public error surface byte-for-byte: the census names
+/// every variant and each display string matches exactly.
+fn assert_error_census(cases: &[(McpError, &str)]) {
+    let distinct: std::collections::HashSet<_> = cases
+        .iter()
+        .map(|(error, _)| std::mem::discriminant(error))
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        17,
+        "the census must name every public variant; rows cover both Exited renderings"
+    );
+    assert_eq!(
+        cases.len(),
+        18,
+        "eighteen rows: seventeen variants plus the second Exited rendering"
+    );
+    for (error, expected) in cases {
+        assert_eq!(&error.to_string(), expected, "{error:?} drifted");
+    }
 }
 
 /// This proves public HTTPS authority/port handoff and a TLS attempt only.
@@ -2868,10 +3822,9 @@ async fn cancelled_stdio_send_leaves_no_pending_slot() {
         .expect("request body");
     let fired = CancellationToken::new();
     fired.cancel();
-    let err = transport
-        .send(1, &body, &fired)
-        .await
-        .expect_err("a cancelled send fails");
+    let Err(err) = transport.send(1, &body, &fired).await else {
+        panic!("a cancelled send fails")
+    };
     assert!(
         matches!(err, TransportError::Cancelled),
         "a cancelled send reports cancellation"
@@ -2882,7 +3835,7 @@ async fn cancelled_stdio_send_leaves_no_pending_slot() {
         "a cancelled send leaves no pending slot"
     );
     let live = CancellationToken::new();
-    transport
+    let inflight = transport
         .send(2, &body, &live)
         .await
         .expect("a live send queues");
@@ -2891,7 +3844,7 @@ async fn cancelled_stdio_send_leaves_no_pending_slot() {
         1,
         "a queued send holds its pending slot"
     );
-    transport.finish(2).await;
+    inflight.settle().await;
     assert_eq!(
         transport.pending_len().await,
         0,

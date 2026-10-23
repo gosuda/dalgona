@@ -16,7 +16,7 @@ pub mod support;
 use std::sync::Arc;
 
 use dal_agent::ext::Extension;
-use dal_agent::ext::script::{FailureCode, HostTerminal, OpOutcome};
+use dal_agent::ext::script::{CancelTarget, FailureCode, HostTerminal, OpOutcome};
 use dal_agent::ext::tool::{Tool, ToolCall, ToolCx, ToolOutcome};
 use dal_core::ext::{NativeOp, OpId, OpSet, ReadView, SourceRow};
 use dal_core::{Part, RawJson};
@@ -854,6 +854,33 @@ async fn a_sealed_scope_is_not_cancelled_on_drop() {
             .iter()
             .any(|record| matches!(record, HostRecord::Cancel { .. })),
         "a sealed scope has nothing left to cancel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_task_cancel_reaches_the_host_as_a_task_cancel() {
+    let run =
+        eval("s = ctx.scope(limit = 1)\nt = s.tools.read(path = \"a\")\nt.cancel()\nNone").await;
+    assert_eq!(run.envelope().status, "completed");
+    assert_eq!(
+        run.count(|record| matches!(record, HostRecord::Submit { .. })),
+        1,
+        "cancel targets the submitted task; the submission stays recorded"
+    );
+    assert_eq!(
+        run.records()
+            .iter()
+            .filter(|record| matches!(
+                record,
+                HostRecord::Cancel {
+                    target: CancelTarget::Task(_),
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "explicit task.cancel must reach the host once: {:?}",
+        run.records()
     );
 }
 

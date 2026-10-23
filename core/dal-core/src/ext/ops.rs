@@ -502,6 +502,8 @@ pub enum ArtifactFile {
     DeltaPatch,
     /// `retained.json`: why the task's work was kept.
     RetainedJson,
+    /// `status.txt`: the task's pre-stage porcelain status of tracked work.
+    StatusTxt,
     /// `summary.txt`: the task's one-screen summary.
     SummaryTxt,
 }
@@ -513,6 +515,7 @@ impl ArtifactFile {
         match self {
             Self::DeltaPatch => "delta.patch",
             Self::RetainedJson => "retained.json",
+            Self::StatusTxt => "status.txt",
             Self::SummaryTxt => "summary.txt",
         }
     }

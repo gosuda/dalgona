@@ -196,8 +196,9 @@ async fn serve_canned(stream: tokio::net::TcpStream, captured: Arc<CapturedBodie
         .lock()
         .expect("bodies lock is not poisoned")
         .push(String::from_utf8_lossy(&body).into_owned());
+    let usage = r#"{"prompt_tokens":1,"completion_tokens":1}"#;
     let stream_body = format!(
-        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{DREAM_SUMMARY}\"}}}}]}}\n\ndata: {{\"choices\":[{{\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{DREAM_SUMMARY}\"}}}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{usage}}}\n\ndata: [DONE]\n\n"
     );
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{stream_body}",

@@ -382,6 +382,9 @@ pub fn spec(name: &str) -> Option<&'static BuiltinSpec> {
 
 /// Resolves one built-in command name to its typed identity.
 fn lookup(name: &str) -> Option<Builtin> {
+    if name == "exit" {
+        return Some(Builtin::Quit);
+    }
     ORDER
         .iter()
         .copied()
@@ -816,6 +819,17 @@ pub fn extension(
             }),
         );
     }
+    builder = builder.command(
+        dal_core::CommandSpec {
+            name: "exit".parse()?,
+            summary: SPEC_QUIT.summary.into(),
+            args_hint: None,
+        },
+        std::sync::Arc::new(BuiltinHandler {
+            builtin: Builtin::Quit,
+            reload: reload.clone(),
+        }),
+    );
     builder.build()
 }
 

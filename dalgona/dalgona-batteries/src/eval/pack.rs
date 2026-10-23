@@ -154,13 +154,19 @@ pub struct ScriptError {
 pub enum CheckError {
     /// The check raised; carries the Starlark failure.
     #[error(transparent)]
-    Script(#[from] ScriptError),
+    Script(ScriptError),
     /// An interrupt fired while the check ran.
     #[error("interrupted")]
     Interrupted,
     /// The run deadline passed while the check ran.
     #[error("the check exceeded the run time budget")]
     Timeout,
+}
+
+impl From<ScriptError> for CheckError {
+    fn from(error: ScriptError) -> Self {
+        Self::Script(error)
+    }
 }
 
 /// A pack that cannot be loaded. The `Display` text carries no pack prefix.

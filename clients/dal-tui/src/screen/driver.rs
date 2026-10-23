@@ -1293,7 +1293,7 @@ mod tests {
                     approval: dal_core::ApprovalMode::Ask,
                     mode: dal_core::Mode::Normal,
                     name: None,
-                    scoped_models: None,
+                    scoped_models: Vec::new(),
                 },
                 open: Vec::new(),
                 changes: Vec::new(),

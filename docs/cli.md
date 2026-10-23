@@ -82,7 +82,17 @@ printf %s "$KEY" | dalgon login anthropic --api-key
 dalgon login status
 ```
 
-Without PROVIDER, `dalgon login` shows a provider picker. `--api-key` reads an API key from standard input. `--device-auth` uses the provider device flow, where the provider supports it. Credentials live in `auth.json` under the data root, with mode `0600`.
+Without PROVIDER, `dalgon login` shows a provider picker. The interactive CLI prefers browser sign-in first, then device authorization, then an API key prompt. Terminal sign-in lists each sign-in method for providers that offer several, so device code stays selectable without flags. `--api-key` reads an API key from standard input. `--device-auth` uses the provider device flow, where the provider supports it.
+
+Providers with browser OAuth:
+- OpenAI Codex opens the sign-in page in your browser and completes via a local loopback callback or a pasted redirect URL, falling back to device authorization if the callback port is busy. Device code can also be chosen directly from the terminal sign-in methods or with `--device-auth`.
+- Anthropic and GitLab Duo open the sign-in page in your browser and complete either via local loopback callback or by pasting the authorization code or redirect URL. An empty line leaves the paste prompt open; the browser callback can still complete sign-in.
+
+Device-code sign-in binds no local callback port: dalgon requests a code, displays the server's verification URL and user code to complete in a browser on any device, and polls for approval. During CLI device polling, pressing Ctrl+C cancels authorization and restores the terminal.
+- Factory Droid (`factory-droid`) automatically uses this device-code flow without `--device-auth`, polling WorkOS and verifying the session through whoami.
+- GitHub Copilot (`github-copilot`) device sign-in prompts for an optional GitHub Enterprise domain; pressing Enter on a blank line chooses `github.com`.
+
+Credentials live in `auth.json` under the data root, with mode `0600` (owner read and write only; dal refuses symbolic links and group or other permission bits). Stored secrets and tokens are never echoed to standard output or error.
 
 Run `dalgon login status` to inspect stored credentials and configured API keys. The command exits 0 when at least one provider is ready. If all credentials are missing or expired, it exits 1. It prints a sign-in hint. OAuth rows show their expiry date. The output does not include tokens or API keys.
 
@@ -241,3 +251,5 @@ Every error names what happened and the fix.
 - [Quickstart](quickstart.md): sign in and run a first turn.
 - [Settings in dal.toml](config.md): set the defaults that these flags override.
 - [Tools, modes, and approval](tools.md): choose an approval policy and a mode.
+
+

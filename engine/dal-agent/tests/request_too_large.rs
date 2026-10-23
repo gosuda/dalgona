@@ -82,7 +82,9 @@ fn zero_usage_overflow_script() -> String {
 struct Run {
     /// Name the compactor was registered under.
     name: &'static str,
-    /// Sum of the covered entries' own estimates: what the driver subtracts.
+    /// Sum of the covered entries' own estimates. The driver subtracts the live
+    /// part of it and credits an earlier compaction's replacement; no seed here
+    /// holds an earlier compaction, so for these runs the whole sum comes off.
     covered_tokens: u64,
     /// Projected token total the driver measures against.
     total_tokens: u64,
@@ -270,6 +272,50 @@ fn user(id: u64, parent: Option<EntryId>, text: String) -> Record {
     })
 }
 
+/// Starts a host on `data` whose scripted provider reads `script` from
+/// `fixture_name` and whose `chain` extension registers `compactors`.
+async fn start_host(
+    data: &std::path::Path,
+    workspace_dir: &std::path::Path,
+    fixture_name: &str,
+    script: &str,
+    compactors: Vec<Registration>,
+) -> Host {
+    let fixture = data.join(fixture_name);
+    std::fs::write(&fixture, script).expect("write provider fixture");
+    let config_text = format!(
+        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        fixture.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config = Config::load(ConfigProduct::Dalgon, data, "", Some(&config_text)).expect("config");
+    let mut builder =
+        ExtensionBuilder::new("chain", "0.1.0", ServiceSet::EMPTY).expect("extension builder");
+    for (name, compactor, is_fallback) in compactors {
+        builder = if is_fallback {
+            builder.fallback_compactor(name, compactor)
+        } else {
+            builder.compactor(name, compactor)
+        };
+    }
+    let extension = builder.build().expect("chain extension");
+    let product = Product {
+        name: "dal",
+        data_root: data.to_path_buf(),
+        defaults: "",
+        extensions: vec![extension],
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: std::collections::BTreeMap::from([(
+            std::ffi::OsString::from("OPENAI_API_KEY"),
+            std::ffi::OsString::from("sk-test"),
+        )]),
+        cwd: workspace_dir.to_path_buf(),
+        sandbox_helper: None,
+    };
+    Host::start(product, config, env).await.expect("host")
+}
+
 /// Builds the host over a seeded session with the given compactors.
 ///
 /// The second entry alone outweighs the 20,000-token keep window, so the cut
@@ -298,40 +344,7 @@ async fn compact_chain_fixture(
         .expect("seed second user");
     journal.close().await.expect("close seeded session");
 
-    let fixture = data.join("script.jsonl");
-    std::fs::write(&fixture, script).expect("write provider fixture");
-    let config_text = format!(
-        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.to_string_lossy().replace('\\', "\\\\")
-    );
-    let config =
-        Config::load(ConfigProduct::Dalgon, &data, "", Some(&config_text)).expect("config");
-    let mut builder =
-        ExtensionBuilder::new("chain", "0.1.0", ServiceSet::EMPTY).expect("extension builder");
-    for (name, compactor, is_fallback) in compactors {
-        builder = if is_fallback {
-            builder.fallback_compactor(name, compactor)
-        } else {
-            builder.compactor(name, compactor)
-        };
-    }
-    let extension = builder.build().expect("chain extension");
-    let product = Product {
-        name: "dal",
-        data_root: data,
-        defaults: "",
-        extensions: vec![extension],
-        bundled: Vec::new(),
-    };
-    let env = Env {
-        vars: std::collections::BTreeMap::from([(
-            std::ffi::OsString::from("OPENAI_API_KEY"),
-            std::ffi::OsString::from("sk-test"),
-        )]),
-        cwd: workspace_dir,
-        sandbox_helper: None,
-    };
-    let host = Host::start(product, config, env).await.expect("host");
+    let host = start_host(&data, &workspace_dir, "script.jsonl", script, compactors).await;
     let agent = host
         .open(
             SessionRef::Resume {
@@ -343,6 +356,22 @@ async fn compact_chain_fixture(
         .await
         .expect("resume seeded session");
     (temp, agent, host, session)
+}
+
+/// The scripted compactors of `chain`, every one logging into `runs`.
+fn registrations(chain: &[Link], runs: &Runs) -> Vec<Registration> {
+    chain
+        .iter()
+        .map(|link| {
+            let compactor: Arc<dyn Compactor> = Arc::new(ScriptedCompactor {
+                name: link.name,
+                runs: Arc::clone(runs),
+                script: link.script,
+                hold: link.hold.clone(),
+            });
+            (link.name, compactor, link.fallback)
+        })
+        .collect()
 }
 
 /// A started host over the seeded session, with the scripted chain's run log.
@@ -358,18 +387,7 @@ impl Rig {
     /// Starts the host with `chain` registered in the given order.
     async fn start(script: &str, chain: &[Link]) -> Self {
         let runs: Runs = Arc::default();
-        let registrations = chain
-            .iter()
-            .map(|link| {
-                let compactor: Arc<dyn Compactor> = Arc::new(ScriptedCompactor {
-                    name: link.name,
-                    runs: Arc::clone(&runs),
-                    script: link.script,
-                    hold: link.hold.clone(),
-                });
-                (link.name, compactor, link.fallback)
-            })
-            .collect();
+        let registrations = registrations(chain, &runs);
         let (temp, agent, host, session) = compact_chain_fixture(script, registrations).await;
         Self {
             _temp: temp,
@@ -396,6 +414,16 @@ impl Rig {
             .into_iter()
             .filter_map(|entry| compaction_summary(entry.kind))
             .collect()
+    }
+
+    /// How many entries the journal view holds.
+    fn entry_count(&self) -> usize {
+        self.agent
+            .view(PageReq::default())
+            .expect("session view")
+            .entries
+            .items
+            .len()
     }
 
     async fn close(self) {
@@ -989,4 +1017,115 @@ async fn manual_compaction_with_only_nonshrinking_compactors_changes_nothing() {
         1,
         "one verdict precedes the manual failure"
     );
+}
+
+/// A host that goes down while a compaction is running leaves no durable
+/// trace of it: the restarted host replays the old projection, no compactor
+/// runs by itself, and the next compaction commits normally.
+#[tokio::test]
+async fn a_restart_during_a_compaction_replays_the_old_projection() {
+    let hold = Hold::default();
+    let rig = Rig::start(
+        &events_step("warm"),
+        &[primary("held", Script::Shrink).held(&hold)],
+    )
+    .await;
+    let mut subscription = rig.agent.subscribe(None).expect("subscribe");
+    submit_prompt(&rig.agent, "warm").await;
+    let warm = drain_turn(&mut subscription).await;
+    assert_eq!(warm.stop, Stop::EndTurn, "the warm turn ends cleanly");
+    let before = rig.entry_count();
+    rig.agent
+        .submit(Command::Compact { focus: None })
+        .await
+        .expect("manual compaction is accepted");
+    within(hold.entered.notified()).await;
+    assert_eq!(names(&rig.runs()), ["held"], "the compaction is running");
+
+    // The host goes down with the compactor parked mid-run: the shutdown
+    // cancels the compaction, nothing was appended, and the session lock is
+    // released for the next process.
+    let Rig {
+        _temp: temp,
+        agent,
+        host,
+        session,
+        ..
+    } = rig;
+    within(host.close(session))
+        .await
+        .expect("a host closes while a compaction runs");
+    drop(subscription);
+    drop(agent);
+    drop(host);
+
+    let data = temp.path().join("data");
+    let workspace_dir = temp.path().join("workspace");
+    let runs: Runs = Arc::default();
+    let restarted = start_host(
+        &data,
+        &workspace_dir,
+        "script-restart.jsonl",
+        &events_step("after the restart"),
+        registrations(&[primary("fresh", Script::Shrink)], &runs),
+    )
+    .await;
+    let agent = restarted
+        .open(
+            SessionRef::Resume {
+                workspace: Workspace::new(workspace_dir).expect("workspace"),
+                key: session.to_string().into(),
+            },
+            ClientId::new("compactor-chain-restart"),
+        )
+        .await
+        .expect("resume the interrupted session");
+    let view = agent.view(PageReq::default()).expect("session view");
+    assert_eq!(
+        view.entries.items.len(),
+        before,
+        "the replayed branch is the one before the interrupted compaction"
+    );
+    assert!(
+        !view
+            .entries
+            .items
+            .iter()
+            .any(|entry| matches!(entry.kind, EntryKind::Compaction { .. })),
+        "no phantom compaction entry survives the restart"
+    );
+    assert!(
+        runs.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty(),
+        "the restart runs no compactor by itself"
+    );
+
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    submit_prompt(&agent, "after the restart").await;
+    let turn = drain_turn(&mut subscription).await;
+    assert_eq!(turn.stop, Stop::EndTurn);
+    assert_eq!(
+        turn.text, "after the restart",
+        "the restarted session answers from the scripted provider's first reply"
+    );
+    agent
+        .submit(Command::Compact { focus: None })
+        .await
+        .expect("manual compaction is accepted");
+    let notices = notices_until(&mut subscription, "compaction_ended").await;
+    assert_eq!(count(&notices, "compaction_ended"), 1);
+    let view = agent.view(PageReq::default()).expect("session view");
+    let summaries: Vec<String> = view
+        .entries
+        .items
+        .into_iter()
+        .filter_map(|entry| compaction_summary(entry.kind))
+        .collect();
+    assert_eq!(
+        summaries,
+        [SHRUNK],
+        "the restarted session compacts normally: nothing was left wedged"
+    );
+    restarted.close(session).await.expect("close session");
 }

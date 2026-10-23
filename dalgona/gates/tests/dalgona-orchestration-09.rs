@@ -269,8 +269,8 @@ fn usage() -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
-        premium_requests: None,
         cost_usd: Some(0.001),
+        premium_requests: None,
     }
 }
 
@@ -582,6 +582,9 @@ fn verify_writers_merged(checkout: &Path, data: &Path) -> support::TestResult<()
         if content.trim_end() != format!("unit {unit:04}") {
             return Err(format!("{} holds {content:?}", writer_file(unit)).into());
         }
+    }
+    if !other.is_empty() {
+        return Err(format!("unexpected checkout changes: {other:?}").into());
     }
     eprintln!(
         "stress merge: {WRITER_ITEMS} writer files merged; other checkout changes: {other:?}"
@@ -942,7 +945,7 @@ fn v9_parent_calls() -> Vec<(String, String, String)> {
             format!("s{single}"),
             "agents".to_owned(),
             format!(
-                r#"{{"action":"run","name":"single-{single:02}","steps":[{{"name":"solo","prompt":{}}}]}}"#,
+                r#"{{"action":"run","name":"single-{single:02}","steps":[{{"name":"solo-{single:02}","prompt":{}}}]}}"#,
                 support::json_text(&prompt)
             ),
         ));

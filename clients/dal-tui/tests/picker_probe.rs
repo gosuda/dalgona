@@ -5,8 +5,6 @@
 //! keystroke can race the picker opening. Every transition is asserted on the
 //! captured frame writes (raw terminal bytes), never on picker internals.
 
-#![cfg(test)]
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,17 +38,23 @@ struct Log(Arc<Mutex<Vec<String>>>);
 
 impl Log {
     fn push(&self, event: impl Into<String>) {
-        self.0.lock().expect("probe log").push(event.into());
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event.into());
     }
 
     fn events(&self) -> Vec<String> {
-        self.0.lock().expect("probe log").clone()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn has_prefix(&self, prefix: &str) -> bool {
         self.0
             .lock()
-            .expect("probe log")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|event| event.starts_with(prefix))
     }
@@ -158,7 +162,7 @@ impl TermIo for ProbeIo {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         self.state
             .lock()
-            .expect("probe io state")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .frames
             .push(Frame {
                 at: self.start.elapsed(),
@@ -174,28 +178,39 @@ impl TermIo for ProbeIo {
             Wait,
         }
         let decision = {
-            let mut state = self.state.lock().expect("probe io state");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let elapsed = self.start.elapsed();
             assert!(
                 elapsed <= Duration::from_secs(60),
                 "picker probe watchdog: the terminal loop did not quit"
             );
-            match state.chunks.front() {
-                Some(front) if gate_open(front.gate, &state.frames, &self.log, state.esc_at) => {
-                    let chunk = state.chunks.pop_front().expect("peeked probe chunk");
+            match state.chunks.pop_front() {
+                Some(chunk) if gate_open(chunk.gate, &state.frames, &self.log, state.esc_at) => {
                     Decision::Emit(chunk.bytes, chunk.esc)
                 }
-                _ if elapsed > Duration::from_secs(25) && !state.forced_quit => {
-                    state.forced_quit = true;
-                    Decision::ForceQuit
+                popped => {
+                    if let Some(chunk) = popped {
+                        state.chunks.push_front(chunk);
+                    }
+                    if elapsed > Duration::from_secs(25) && !state.forced_quit {
+                        state.forced_quit = true;
+                        Decision::ForceQuit
+                    } else {
+                        Decision::Wait
+                    }
                 }
-                _ => Decision::Wait,
             }
         };
         match decision {
             Decision::Emit(bytes, esc) => {
                 if esc {
-                    self.state.lock().expect("probe io state").esc_at = Some(Instant::now());
+                    self.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .esc_at = Some(Instant::now());
                 }
                 Ok(bytes)
             }
@@ -218,7 +233,9 @@ struct Silent;
 
 impl TuiSubscription for Silent {
     async fn next(&mut self) -> Result<Option<TuiDelivery>, TuiError> {
-        async { Ok(None) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(None)
     }
 }
 
@@ -237,35 +254,40 @@ impl TuiAgent for ProbeAgent {
     }
 
     async fn view(&self, _page: PageReq) -> Result<View, TuiError> {
-        async { Ok(idle_view()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        idle_view()
     }
 
     async fn subscribe(&self, _after: Option<(Gen, Seq)>) -> Result<Silent, TuiError> {
-        async { Ok(Silent) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(Silent)
     }
 
     async fn submit(&self, command: Command) -> Result<Reply, TuiError> {
-        async {
-            match command {
-                Command::Run { name, .. } if name.as_ref() == "model" => {
-                    self.log.push("run:model");
-                    Ok(Reply::Choose {
-                        chooser: Chooser::Model,
-                        filter: "".into(),
-                    })
-                }
-                Command::SetModel { model, .. } => {
-                    self.log.push(format!("set-model:{}", model.id()));
-                    Ok(Reply::Done(Output::Nothing))
-                }
-                _ => Ok(Reply::Done(Output::Nothing)),
+        // Async trait method; this probe path never awaits.
+        std::future::ready(()).await;
+        match command {
+            Command::Run { name, .. } if name.as_ref() == "model" => {
+                self.log.push("run:model");
+                Ok(Reply::Choose {
+                    chooser: Chooser::Model,
+                    filter: "".into(),
+                })
             }
+            Command::SetModel { model, .. } => {
+                self.log.push(format!("set-model:{}", model.id()));
+                Ok(Reply::Done(Output::Nothing))
+            }
+            _ => Ok(Reply::Done(Output::Nothing)),
         }
-        .await
     }
 
     async fn answer(&self, _id: RequestId, _answer: Answer) -> Result<(), TuiError> {
-        async { Ok(()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(())
     }
 
     fn ext_status(&self) -> Vec<ExtStatus> {
@@ -282,15 +304,21 @@ impl TuiHost for ProbeHost {
     type Agent = ProbeAgent;
 
     async fn open(&self, _session: SessionRef, _client: ClientId) -> Result<ProbeAgent, TuiError> {
-        async { Ok(self.agent.clone()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(self.agent.clone())
     }
 
     async fn commands(&self) -> Result<Arc<[dal_core::CommandSpec]>, TuiError> {
-        async { Ok(Arc::from(Vec::new())) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(Arc::from(Vec::new()))
     }
 
     async fn close(&self, _id: SessionId) -> Result<(), TuiError> {
-        async { Ok(()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(())
     }
 
     async fn login(
@@ -299,28 +327,37 @@ impl TuiHost for ProbeHost {
         _method: Method,
         _io: LoginIo,
     ) -> Result<LoginOutcome, TuiError> {
-        async { Err(TuiError::Terminal("the probe host has no providers".into())) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Err(TuiError::Terminal("the probe host has no providers".into()))
     }
 
     async fn logout(&self, _provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError> {
-        async { Ok(Vec::new()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(Vec::new())
     }
 
     async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError> {
-        async { Ok(Vec::new()) }.await
+        // Async trait method; nothing to await.
+        std::future::ready(()).await;
+        Ok(Vec::new())
     }
 }
 
-fn idle_view() -> View {
-    View {
+fn idle_view() -> Result<View, TuiError> {
+    let failed = |error: &dyn std::fmt::Display| {
+        TuiError::Terminal(format!("picker probe fixture: {error}"))
+    };
+    Ok(View {
         r#gen: Gen::new(std::num::NonZeroU64::MIN),
         seq: Seq::new(std::num::NonZeroU64::MIN),
         session: SessionInfo {
             id: SessionId::parse("018f0f62-3b00-7000-8000-000000000001")
-                .expect("fixture session id is valid"),
+                .map_err(|error| failed(&error))?,
             name: None,
             preview: "".into(),
-            workspace: Workspace::new(std::env::temp_dir()).expect("absolute workspace"),
+            workspace: Workspace::new(std::env::temp_dir()).map_err(|error| failed(&error))?,
             updated_at: Timestamp::UNIX_EPOCH,
             created_at: Some(Timestamp::UNIX_EPOCH),
             archived: Some(false),
@@ -341,7 +378,7 @@ fn idle_view() -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
-            scoped_models: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),
@@ -365,13 +402,14 @@ fn idle_view() -> View {
             dropped_observations: 0,
             auto_compaction: AutoCompaction::Off,
         },
-    }
+    })
 }
 
-fn probe_options(rt: &tokio::runtime::Handle) -> TuiOptions {
-    TuiOptions {
+fn probe_options(rt: &tokio::runtime::Handle) -> Result<TuiOptions, TuiError> {
+    Ok(TuiOptions {
         session: SessionRef::Ephemeral {
-            workspace: Workspace::new(std::env::temp_dir()).expect("absolute workspace"),
+            workspace: Workspace::new(std::env::temp_dir())
+                .map_err(|error| TuiError::Terminal(format!("probe workspace: {error}")))?,
         },
         screen: Screen::Inline,
         theme_request: ThemeRequest::Palette,
@@ -389,7 +427,7 @@ fn probe_options(rt: &tokio::runtime::Handle) -> TuiOptions {
             ..EnvFacts::default()
         },
         rt: rt.clone(),
-    }
+    })
 }
 
 fn probe_models() -> Vec<ModelOption> {
@@ -447,28 +485,32 @@ fn cancel_script() -> Vec<Chunk> {
 
 /// Runs the terminal loop against the probe host and returns host-visible
 /// submits plus every captured frame write.
-fn drive(script: Vec<Chunk>) -> Report {
-    let _serial = SERIAL.lock().expect("probe serial");
+fn drive(script: Vec<Chunk>) -> Result<Report, TuiError> {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("probe runtime");
+        .map_err(|error| TuiError::Terminal(format!("probe runtime: {error}")))?;
     let log = Log::default();
     let host = ProbeHost {
         agent: ProbeAgent { log: log.clone() },
     };
-    let opts = probe_options(runtime.handle());
+    let opts = probe_options(runtime.handle())?;
     let io = ProbeIo::new(script, log);
-    dal_tui::run_backend(&host, &opts, &io, || Ok(probe_models()))
-        .expect("the picker probe loop exits cleanly");
-    let mut state = io.state.lock().expect("probe io state");
-    Report {
+    dal_tui::run_backend(&host, &opts, &io, || Ok(probe_models()))?;
+    let mut state = io
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(Report {
         events: io.log.events(),
         frames: std::mem::take(&mut state.frames),
         esc_at: state
             .esc_at
             .map(|at| at.saturating_duration_since(io.start)),
-    }
+    })
 }
 
 /// Index of the first frame satisfying `wanted`, if any.
@@ -478,7 +520,7 @@ fn first(frames: &[Frame], wanted: impl Fn(&[u8]) -> bool) -> Option<usize> {
 
 #[test]
 fn picker_navigate_filter_commit() {
-    let report = drive(commit_script());
+    let report = drive(commit_script()).expect("the picker probe loop exits cleanly");
     let frames = &report.frames;
     assert!(
         !frames.is_empty(),
@@ -537,7 +579,7 @@ fn picker_navigate_filter_commit() {
 
 #[test]
 fn picker_escape_cancels_without_commit() {
-    let report = drive(cancel_script());
+    let report = drive(cancel_script()).expect("the picker probe loop exits cleanly");
     let frames = &report.frames;
     assert!(
         !frames.is_empty(),

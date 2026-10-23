@@ -484,14 +484,14 @@ async fn runner_future_drop_sends_termination_only_and_releases_slot() {
         env,
         profile: "test-drop",
     };
-    let outcome = Box::pin(tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         Duration::from_millis(500),
-        run_credential_process(
+        Box::pin(run_credential_process(
             &req,
             &CancellationToken::new(),
             Instant::now() + Duration::from_secs(30),
-        ),
-    ))
+        )),
+    )
     .await;
     assert!(outcome.is_err(), "long fixture times out via drop");
     let mut gone = false;
@@ -534,11 +534,11 @@ async fn windows_direct_exe_runs_without_shell() {
         env,
         profile: "test-win-exe",
     };
-    let out = run_credential_process(
+    let out = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect("whoami.exe succeeds without shell");
     assert!(!out.is_empty(), "direct exe returns output");
@@ -558,11 +558,11 @@ async fn windows_batch_refusal_names_shell_prerequisite() {
         env,
         profile: "test-batch",
     };
-    let error = run_credential_process(
+    let error = Box::pin(run_credential_process(
         &req,
         &CancellationToken::new(),
         Instant::now() + Duration::from_secs(30),
-    )
+    ))
     .await
     .expect_err("batch must be refused");
     let text = transport_reason(&error);

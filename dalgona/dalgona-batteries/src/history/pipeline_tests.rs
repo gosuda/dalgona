@@ -1612,6 +1612,52 @@ async fn compactor_reuses_matching_images_without_fetching_unrelated_pngs() {
 }
 
 #[tokio::test]
+async fn compactor_without_an_image_profile_refuses_with_the_exact_notice() {
+    let entries = covered();
+    let (pieces, source) = pieces(&entries);
+    let services = Arc::new(CountingServices::default());
+    let service_arc = Arc::clone(&services) as Arc<dyn Services>;
+    let cx = ToolCx::for_test(Arc::clone(&service_arc));
+    let host = FixedHost {
+        pieces,
+        source: Arc::new(source),
+        blobs: Arc::new(ServiceBlobs {
+            services: Arc::clone(&service_arc),
+            caller: cx.caller().clone(),
+        }),
+    };
+    let compactor = HistoryCompactor::with_host(0.7, Arc::new(host), limits());
+    let input = CompactInput {
+        caller: cx.caller(),
+        model: ModelRoute::Api {
+            family: Family::Chat,
+            model: "test".into(),
+            provider: None,
+        },
+        session: SessionId::new_v7(),
+        instructions: "",
+        covered: &entries,
+        span: (entry(1), entry(2)),
+        first_kept: None,
+        context_window: Some(u64::MAX / 4),
+        image_profile: None,
+        images_elsewhere: 0,
+        image_bytes_elsewhere: 0,
+        carried: None,
+        total_tokens: 2_100_000,
+        params: RequestParams::default(),
+    };
+    let error = compactor
+        .compact(input, service_arc)
+        .await
+        .expect_err("a model without an image profile refuses");
+    assert_eq!(
+        error.to_string(),
+        "history: the model does not read images."
+    );
+}
+
+#[tokio::test]
 async fn corrupt_reused_blob_redraws_the_same_source() {
     let entries = covered();
     let first = drawn_unbounded(&entries).await;

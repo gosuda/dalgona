@@ -31,14 +31,6 @@ use crate::{
     ws::WsSessions,
 };
 
-/// The per-origin clients, per-provider slots, and per-provider usage
-/// checkers built from one provider list.
-type SlotTables = (
-    HashMap<Box<str>, http::LazyClient>,
-    HashMap<Box<str>, ProviderSlot>,
-    HashMap<Box<str>, Arc<UsageChecker>>,
-);
-
 /// All external identity needed to render the provider user-agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderIdentity {
@@ -122,6 +114,13 @@ pub(super) struct ProviderSlot {
     pub(super) client: http::LazyClient,
     pub(super) permits: Arc<Semaphore>,
 }
+
+/// The client, slot, and usage tables one provider set builds together.
+type ProviderSlotMaps = (
+    HashMap<Box<str>, http::LazyClient>,
+    HashMap<Box<str>, ProviderSlot>,
+    HashMap<Box<str>, Arc<UsageChecker>>,
+);
 /// Whether one configured provider currently holds a credential source.
 ///
 /// The row reports the effective configured family of the entry, never a
@@ -172,7 +171,7 @@ impl ProviderSet {
     fn build_provider_slots(
         providers_list: &[ProviderEntry],
         user_agent: &str,
-    ) -> Result<SlotTables, ProviderError> {
+    ) -> Result<ProviderSlotMaps, ProviderError> {
         let mut clients: HashMap<Box<str>, http::LazyClient> = HashMap::new();
         let mut providers = HashMap::with_capacity(providers_list.len());
         let mut usage = HashMap::new();

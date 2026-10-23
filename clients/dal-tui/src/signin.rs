@@ -137,6 +137,13 @@ enum Stage {
     Flow(Box<FlowView>),
     /// The remove-all confirmation.
     ConfirmAll,
+    /// The method choice for a multi-method provider.
+    MethodPick {
+        /// The offered methods, in table order.
+        methods: Box<[Method]>,
+        /// The highlighted row.
+        selected: usize,
+    },
 }
 
 /// The state change a key asks the loop to make.
@@ -148,6 +155,8 @@ pub(crate) enum KeyAction {
     Close,
     /// Start the key login with the typed key.
     StartKey(SecretString),
+    /// Start the picked sign-in method.
+    StartMethod(Method),
     /// Remove every stored credential.
     RemoveAll,
 }
@@ -176,14 +185,22 @@ impl std::fmt::Debug for SignIn {
     }
 }
 
-/// Selects browser sign-in, then device authorization, then a pasted key.
-pub(crate) fn preferred_method(provider: &str) -> Option<Method> {
-    let def = login_providers()
+/// The sign-in methods `provider` offers, in table order.
+pub(crate) fn offered_methods(provider: &str) -> Vec<Method> {
+    login_providers()
         .into_iter()
-        .find(|def| def.id == provider)?;
-    [Method::Browser, Method::Device, Method::ApiKey]
-        .into_iter()
-        .find(|method| def.offers(*method))
+        .find(|def| def.id == provider)
+        .map(|def| def.methods().collect())
+        .unwrap_or_default()
+}
+
+/// The picker and method-pick word for one sign-in method.
+fn method_word(method: Method) -> &'static str {
+    match method {
+        Method::ApiKey => "API key",
+        Method::Browser => "browser",
+        Method::Device => "device code",
+    }
 }
 
 impl SignIn {
@@ -203,6 +220,20 @@ impl SignIn {
         Self {
             provider: "".into(),
             stage: Stage::ConfirmAll,
+            run: None,
+        }
+    }
+
+    /// The method choice for `provider`: the runtime starts the picked
+    /// method, so device sign-in stays reachable from `/login <id>` as
+    /// well as from the `/login` picker.
+    pub(crate) fn method_pick(provider: &str, methods: Vec<Method>) -> Self {
+        Self {
+            provider: provider.into(),
+            stage: Stage::MethodPick {
+                methods: methods.into_boxed_slice(),
+                selected: 0,
+            },
             run: None,
         }
     }
@@ -238,7 +269,7 @@ impl SignIn {
         match &mut self.stage {
             Stage::Key { typed } => typed.push_str(&line),
             Stage::Flow(flow) if flow.paste_hint.is_some() => flow.pasted.push_str(&line),
-            Stage::Flow(_) | Stage::ConfirmAll => {}
+            Stage::Flow(_) | Stage::ConfirmAll | Stage::MethodPick { .. } => {}
         }
     }
 
@@ -251,6 +282,22 @@ impl SignIn {
             Stage::ConfirmAll => match key.code {
                 KeyCode::Char('y' | 'Y') if plain => KeyAction::RemoveAll,
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => KeyAction::Close,
+                _ => KeyAction::None,
+            },
+            Stage::MethodPick { methods, selected } => match key.code {
+                KeyCode::Esc => KeyAction::Close,
+                KeyCode::Up if *selected > 0 => {
+                    *selected -= 1;
+                    KeyAction::None
+                }
+                KeyCode::Down if *selected + 1 < methods.len() => {
+                    *selected += 1;
+                    KeyAction::None
+                }
+                KeyCode::Enter => match methods.get(*selected) {
+                    Some(method) => KeyAction::StartMethod(*method),
+                    None => KeyAction::None,
+                },
                 _ => KeyAction::None,
             },
             Stage::Key { typed } => match key.code {
@@ -410,6 +457,18 @@ impl SignIn {
                     RenderRow::plain(ids::LOGIN_KEY_HINT, Role::Dim),
                 ]
             }
+            Stage::MethodPick { methods, selected } => {
+                let mut rows = vec![RenderRow::new(
+                    render(ids::LOGIN_METHOD_TITLE, &[("provider", &provider)], 1),
+                    Role::Accent,
+                )];
+                rows.extend(methods.iter().enumerate().map(|(index, method)| {
+                    let marker = if index == *selected { ">" } else { " " };
+                    RenderRow::plain(format!("{marker} {}", method_word(*method)), Role::Text)
+                }));
+                rows.push(RenderRow::plain(ids::LOGIN_METHOD_KEYS, Role::Dim));
+                rows
+            }
             Stage::Flow(flow) => flow_rows(&provider, flow, width, mode, max_rows),
         }
     }
@@ -534,16 +593,36 @@ fn url_chunks(url: &str, width: usize, mode: WidthMode) -> Vec<String> {
 }
 
 /// The provider picker for `/login`, from the providers dal signs in to.
+///
+/// Single-method providers keep the one `/login <id>` row; multi-method
+/// providers list one row per method carrying that method, so device
+/// sign-in stays selectable without a typed method argument.
 pub(crate) fn login_picker(filter: &str) -> PickerUi {
     let options = login_providers()
         .iter()
-        .map(|def| PickerOption {
-            label: def.id.to_owned(),
-            action: PickerAction::Command(dal_core::Command::Run {
-                name: "login".into(),
-                args: def.id.into(),
-                expected: None,
-            }),
+        .flat_map(|def| {
+            let methods: Vec<Method> = def.methods().collect();
+            if methods.len() == 1 {
+                vec![PickerOption {
+                    label: def.id.to_owned(),
+                    action: PickerAction::Command(dal_core::Command::Run {
+                        name: "login".into(),
+                        args: def.id.into(),
+                        expected: None,
+                    }),
+                }]
+            } else {
+                methods
+                    .into_iter()
+                    .map(|method| PickerOption {
+                        label: format!("{} \u{2014} {}", def.id, method_word(method)),
+                        action: PickerAction::Login {
+                            provider: def.id.into(),
+                            method,
+                        },
+                    })
+                    .collect()
+            }
         })
         .collect();
     PickerUi::new(ids::LOGIN_PICKER_TITLE, filter, options)
@@ -983,5 +1062,104 @@ mod tests {
         assert!(flow.exchanging);
         assert_eq!(flow.pasted, "");
         assert!(sign_in.run.as_ref().is_some_and(|r| r.paste.is_none()));
+    }
+
+    #[test]
+    fn offered_methods_cover_single_and_multi_method_rows() {
+        assert_eq!(
+            offered_methods("openai-codex"),
+            [Method::Browser, Method::Device]
+        );
+        assert_eq!(
+            offered_methods("anthropic"),
+            [Method::ApiKey, Method::Browser]
+        );
+        assert_eq!(offered_methods("openai"), [Method::ApiKey]);
+        assert_eq!(offered_methods("nonexistent"), [] as [Method; 0]);
+    }
+
+    #[test]
+    fn login_picker_lists_one_row_per_method() {
+        let mut picker = login_picker("codex");
+        let first = picker.activate_selected();
+        assert!(
+            matches!(
+                &first,
+                Some(PickerAction::Login { provider, method })
+                if provider.as_ref() == "openai-codex" && *method == Method::Browser
+            ),
+            "first codex row must start the browser method, got {first:?}"
+        );
+        picker.move_selection(true);
+        let second = picker.activate_selected();
+        assert!(
+            matches!(
+                &second,
+                Some(PickerAction::Login { provider, method })
+                if provider.as_ref() == "openai-codex" && *method == Method::Device
+            ),
+            "second codex row must start the device method, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn single_method_provider_keeps_direct_login_row() {
+        let mut picker = login_picker("openai");
+        let first = picker.activate_selected();
+        assert!(
+            matches!(
+                &first,
+                Some(PickerAction::Command(dal_core::Command::Run { name, args, .. }))
+                if name.as_ref() == "login" && args.as_ref() == "openai"
+            ),
+            "single-method row must keep the direct login shape, got {first:?}"
+        );
+    }
+
+    #[test]
+    fn method_pick_starts_the_highlighted_method() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut sign_in =
+            SignIn::method_pick("openai-codex", vec![Method::Browser, Method::Device]);
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::StartMethod(Method::Browser));
+
+        let mut sign_in =
+            SignIn::method_pick("openai-codex", vec![Method::Browser, Method::Device]);
+        sign_in.key(Key::new(KeyCode::Down, KeyModifiers::NONE));
+        sign_in.key(Key::new(KeyCode::Down, KeyModifiers::NONE));
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::StartMethod(Method::Device));
+
+        let mut sign_in =
+            SignIn::method_pick("openai-codex", vec![Method::Browser, Method::Device]);
+        sign_in.key(Key::new(KeyCode::Up, KeyModifiers::NONE));
+        let action = sign_in.key(Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::StartMethod(Method::Browser));
+
+        let mut sign_in =
+            SignIn::method_pick("openai-codex", vec![Method::Browser, Method::Device]);
+        let action = sign_in.key(Key::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(action, KeyAction::Close);
+    }
+
+    #[test]
+    fn method_pick_rows_name_each_method() {
+        let sign_in = SignIn::method_pick("openai-codex", vec![Method::Browser, Method::Device]);
+        let rows = sign_in.rows(80, WidthMode::Narrow, 24);
+        let text: Vec<_> = rows.iter().map(|row| row.text.clone()).collect();
+        assert!(
+            text.iter().any(|row| row.contains("openai-codex")),
+            "title names the provider: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row == "> browser"),
+            "first method is highlighted: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row == "  device code"),
+            "device code stays reachable: {text:?}"
+        );
     }
 }

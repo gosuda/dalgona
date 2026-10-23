@@ -28,7 +28,11 @@ tokio-util = { workspace = true, features = ["rt"] }
 test-support = []
 
 [dev-dependencies]
+bytes.workspace = true
+dal-provider = { workspace = true, features = ["test-support"] }
 dal-store = { workspace = true, features = ["test-support"] }
+hyper = { workspace = true, features = ["server", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true

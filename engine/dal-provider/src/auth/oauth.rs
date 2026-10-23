@@ -461,21 +461,14 @@ impl<'a> LoginFlow<'a> {
         cache_dir: impl Into<PathBuf>,
         endpoints: LoginEndpoints,
     ) -> Result<Self, ProviderError> {
-        let Some((def, oauth)) = find(provider).and_then(|def| def.oauth.map(|oauth| (def, oauth)))
-        else {
+        let Some(def) = find(provider).filter(|def| def.oauth.is_some()) else {
             return Err(ProviderError::AuthWrite {
                 reason: format!("{provider} has no OAuth login flow"),
             });
         };
         endpoints.validate()?;
         let oauth_client = build_oauth_client(def.family)?;
-        let (paste_sender, paste_receiver) = match oauth.completion {
-            Completion::PasteCode => {
-                let (sender, receiver) = oneshot::channel();
-                (Some(sender), Some(receiver))
-            }
-            Completion::Callback => (None, None),
-        };
+        let (paste_sender, paste_receiver) = oneshot::channel();
         Ok(Self {
             def,
             store,
@@ -486,8 +479,8 @@ impl<'a> LoginFlow<'a> {
             endpoints,
             gitlab_grants: None,
             models_provider: None,
-            paste_sender,
-            paste_receiver,
+            paste_sender: Some(paste_sender),
+            paste_receiver: Some(paste_receiver),
             wait: LOGIN_WAIT,
             device_auth: false,
             started: false,
@@ -669,11 +662,11 @@ impl<'a> LoginFlow<'a> {
         }
     }
 
-    /// The callback-only browser flow: a busy port falls back to the device
-    /// flow, and a row that offers no browser sign-in runs only the device
-    /// flow.
+    /// The browser flow: the callback or a pasted redirect completes it; a
+    /// busy port falls back to the device flow, and a row that offers no
+    /// browser sign-in runs only the device flow.
     async fn authorize_callback(
-        &self,
+        &mut self,
         row: &RowEndpoints,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
@@ -704,8 +697,25 @@ impl<'a> LoginFlow<'a> {
                 },
                 cancel,
             )?;
-            let code =
-                callback_code(listener, row.oauth.redirect.path, &state, row.def.family).await?;
+            report_progress(
+                progress,
+                LoginProgress::AskPaste {
+                    hint: String::from(PASTE_HINT),
+                    default: None,
+                },
+                cancel,
+            )?;
+            let receiver = self.paste_receiver.take();
+            drop(self.paste_sender.take());
+            let code = Self::paste_callback_code(
+                row,
+                row.oauth.redirect.path,
+                listener,
+                receiver,
+                &state,
+                cancel,
+            )
+            .await?;
             report_progress(progress, LoginProgress::Exchanging, cancel)?;
             return self
                 .exchange(row, &code, verifier, &redirect, &[&state, &code, verifier])

@@ -202,7 +202,7 @@ fn settled_frame_carries_an_open_consent_request() {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
-            scoped_models: None,
+            scoped_models: Vec::new(),
         },
         open: vec![request],
         changes: Vec::new(),

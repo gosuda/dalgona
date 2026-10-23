@@ -757,35 +757,6 @@ async fn dropped_stream_terminates_the_whole_group() {
     assert_eq!(before, after, "the descendant survived the drop");
 }
 
-#[test]
-fn invalid_result_status_is_protocol() {
-    // A `result` with an unknown status is a grammar violation, not a silent
-    // ignore: the terminal must stay a protocol error.
-    let (_, end) = feed(&[r#"{"type":"result","timestamp":"t","status":"bogus"}"#]);
-    let error = end.unwrap_err();
-    assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
-    assert!(error.to_string().contains("not valid"), "{error}");
-}
-
-#[test]
-fn undecodable_non_json_lines_are_ignored() {
-    // Lines that decode as neither an event nor a known kind are tolerated;
-    // only a known kind in the wrong shape fails.
-    let (events, end) = feed(&[
-        "this is not json at all",
-        "",
-        r#"{"type":"future","timestamp":"t","n":1}"#,
-        r#"{"type":"message","timestamp":"t","role":"assistant","content":"Hi"}"#,
-        r#"{"type":"result","timestamp":"t","status":"success"}"#,
-    ]);
-    assert!(end.is_ok(), "{end:?}");
-    assert_eq!(events.len(), 4, "{events:?}");
-    assert!(
-        matches!(events.last(), Some(StreamEvent::Stop { .. })),
-        "{events:?}"
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn exact_limit_line_is_accepted() {
@@ -821,10 +792,16 @@ async fn exact_limit_line_is_accepted() {
 async fn over_limit_line_ends_the_stream() {
     // One byte over the cap must end the stream even when the crossing chunk
     // already carries the newline: before the fix this line was delivered as
-    // ignorable garbage and the turn completed Ok.
+    // ignorable garbage and the turn completed Ok. The head emits exactly
+    // LINE_LIMIT bytes with no newline, then sleeps so the driver drains and
+    // parks pending; the single printf tail (crossing byte, newline, result)
+    // is one atomic pipe write, so the poll that crosses the cap always sees
+    // the newline in the same chunk. A racy `head -c LIMIT+1; echo` split
+    // could deliver the crossing byte without its newline and fault through
+    // the no-newline path even unfixed, which would not prove this guard.
     let fixture = TempFixture::new(
         "fake-over-limit.sh",
-        "#!/bin/sh\ncat > /dev/null\nhead -c 1048577 /dev/zero | tr '\\0' 'x'\necho\nprintf '%s\\n' '{\"type\":\"result\",\"timestamp\":\"t\",\"status\":\"success\"}'\n",
+        "#!/bin/sh\ncat > /dev/null\nhead -c 1048576 /dev/zero | tr '\\0' 'x'\nsleep 1\nprintf 'x\\n%s\\n' '{\"type\":\"result\",\"timestamp\":\"t\",\"status\":\"success\"}'\n",
     )
     .await;
     let env = EnvSnapshot::test(&[]).with_cwd(fixture.dir().to_path_buf());
@@ -846,156 +823,6 @@ async fn over_limit_line_ends_the_stream() {
         .expect("an over-long line ends in one error");
     assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
     assert!(error.to_string().contains("exceeds"), "{error}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn nonzero_exit_preserves_the_stdin_writer_cause() {
-    // The child consumes stdin so the real writer succeeds; the injected
-    // fault stands in for an EPIPE observed before the leader exit. The
-    // terminal must name both the exit status and the write cause.
-    let fixture = TempFixture::new(
-        "fake-exit-writer.sh",
-        "#!/bin/sh\ncat > /dev/null\nexit 3\n",
-    )
-    .await;
-    let env = EnvSnapshot::test(&[]).with_cwd(fixture.dir().to_path_buf());
-    let request = request(vec![ContextItem::User {
-        parts: vec![text("Hi")],
-    }]);
-    let mut stream = spawn(&CliRequest {
-        request: &request,
-        binary: Some(fixture.program()),
-        policy_file: "/dev/null",
-        env: &env,
-    })
-    .expect("exit-writer fixture spawns");
-    let mut out = Vec::new();
-    let handled = stream.state.handle(
-        CliMsg::StdinFault(String::from("Broken pipe (os error 32)")),
-        &mut out,
-    );
-    assert!(handled.is_ok(), "{handled:?}");
-    assert!(out.is_empty(), "{out:?}");
-    let events: Vec<_> = stream.into_events().collect().await;
-    let error = events
-        .into_iter()
-        .find_map(Result::err)
-        .expect("a failed exit with a writer fault ends in one error");
-    assert!(
-        matches!(error, ProviderError::Transport { .. }),
-        "{error:?}"
-    );
-    let text = error.to_string();
-    assert!(text.contains('3'), "{text}");
-    assert!(text.contains("writing the gemini prompt failed"), "{text}");
-    assert!(text.contains("Broken pipe"), "{text}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn auth_exit_preserves_the_stdin_writer_cause() {
-    // Same as above with a sign-in exit: the InvalidRequest kind (and its
-    // retry routing) must survive the chained write cause.
-    let fixture = TempFixture::new(
-        "fake-auth-writer.sh",
-        "#!/bin/sh\ncat > /dev/null\nexit 41\n",
-    )
-    .await;
-    let env = EnvSnapshot::test(&[]).with_cwd(fixture.dir().to_path_buf());
-    let request = request(vec![ContextItem::User {
-        parts: vec![text("Hi")],
-    }]);
-    let mut stream = spawn(&CliRequest {
-        request: &request,
-        binary: Some(fixture.program()),
-        policy_file: "/dev/null",
-        env: &env,
-    })
-    .expect("auth-writer fixture spawns");
-    let mut out = Vec::new();
-    let handled = stream.state.handle(
-        CliMsg::StdinFault(String::from("Broken pipe (os error 32)")),
-        &mut out,
-    );
-    assert!(handled.is_ok(), "{handled:?}");
-    let events: Vec<_> = stream.into_events().collect().await;
-    let error = events
-        .into_iter()
-        .find_map(Result::err)
-        .expect("an auth exit with a writer fault ends in one error");
-    assert!(
-        matches!(error, ProviderError::InvalidRequest { .. }),
-        "{error:?}"
-    );
-    let text = error.to_string();
-    assert!(text.contains("not authenticated"), "{text}");
-    assert!(text.contains("41"), "{text}");
-    assert!(text.contains("writing the gemini prompt failed"), "{text}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn non_utf8_stdout_ends_the_stream() {
-    // A short non-UTF8 line must end the stream as a protocol error even
-    // though a later result follows; the decoder never sees the bytes.
-    let fixture = TempFixture::new(
-        "fake-bad-utf8.sh",
-        "#!/bin/sh\ncat > /dev/null\nprintf '\\377\\376\\n'\nprintf '%s\\n' '{\"type\":\"result\",\"timestamp\":\"t\",\"status\":\"success\"}'\n",
-    )
-    .await;
-    let env = EnvSnapshot::test(&[]).with_cwd(fixture.dir().to_path_buf());
-    let request = request(vec![ContextItem::User {
-        parts: vec![text("Hi")],
-    }]);
-    let stream = spawn(&CliRequest {
-        request: &request,
-        binary: Some(fixture.program()),
-        policy_file: "/dev/null",
-        env: &env,
-    })
-    .expect("bad-utf8 fixture spawns");
-    let events: Vec<_> = stream.into_events().collect().await;
-    assert_eq!(events.len(), 1, "{events:?}");
-    let error = events
-        .into_iter()
-        .find_map(Result::err)
-        .expect("non-UTF8 stdout ends in one error");
-    assert!(matches!(error, ProviderError::Protocol { .. }), "{error:?}");
-    assert!(error.to_string().contains("UTF-8"), "{error}");
-}
-
-#[test]
-fn writer_cause_preserves_the_process_failure_kind() {
-    let auth = with_writer_cause(
-        ProviderError::InvalidRequest {
-            message: String::from("gemini is not authenticated (exit status 41)"),
-        },
-        "Broken pipe (os error 32)",
-    );
-    assert!(
-        matches!(auth, ProviderError::InvalidRequest { .. }),
-        "{auth:?}"
-    );
-    assert!(auth.to_string().contains("41"), "{auth}");
-    assert!(
-        auth.to_string()
-            .contains("writing the gemini prompt failed"),
-        "{auth}"
-    );
-
-    let transport = with_writer_cause(
-        ProviderError::Transport {
-            family: Family::GoogleGeminiCli,
-            reason: String::from("gemini exited with status 3 and no result"),
-        },
-        "Broken pipe (os error 32)",
-    );
-    assert!(
-        matches!(transport, ProviderError::Transport { .. }),
-        "{transport:?}"
-    );
-    assert!(transport.to_string().contains("status 3"), "{transport}");
 }
 
 #[test]

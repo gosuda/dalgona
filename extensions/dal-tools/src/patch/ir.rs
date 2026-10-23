@@ -185,6 +185,19 @@ pub enum Edit {
     },
 }
 
+impl Edit {
+    /// Returns the zero-based payload position of this edit.
+    #[must_use]
+    pub fn index(&self) -> usize {
+        match self {
+            Self::Change { index, .. }
+            | Self::Create { index, .. }
+            | Self::Delete { index, .. }
+            | Self::Rename { index, .. } => *index,
+        }
+    }
+}
+
 /// The error category returned to the provider and serialized output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]

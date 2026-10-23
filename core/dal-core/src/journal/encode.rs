@@ -54,8 +54,7 @@ fn write_line(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeErro
     } else {
         b"{\"v\":1,".as_slice()
     };
-    out.write_all(prefix)
-        .map_err(|error| io_to_json_error(&error))?;
+    out.write_all(prefix).map_err(|e| io_to_json_error(&e))?;
     let dropped = {
         let mut adapter = BodyWithoutOpeningBrace::new(out);
         encode_body(record, &mut adapter)?;
@@ -66,8 +65,7 @@ fn write_line(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeErro
             message: "expected non-empty serialized JSON body".into(),
         });
     }
-    out.write_all(b"\n")
-        .map_err(|error| io_to_json_error(&error))?;
+    out.write_all(b"\n").map_err(|e| io_to_json_error(&e))?;
     Ok(())
 }
 
@@ -91,18 +89,6 @@ impl<'a> BodyWithoutOpeningBrace<'a> {
     }
 }
 
-/// Rejects a serialized body whose first byte is not the JSON opening
-/// brace the line writer strips.
-fn expect_opening_brace(buf: &[u8]) -> io::Result<()> {
-    if buf[0] != b'{' {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "expected opening brace in serialized JSON body",
-        ));
-    }
-    Ok(())
-}
-
 impl io::Write for BodyWithoutOpeningBrace<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
@@ -111,7 +97,12 @@ impl io::Write for BodyWithoutOpeningBrace<'_> {
         if self.dropped {
             self.inner.write(buf)
         } else {
-            expect_opening_brace(buf)?;
+            if buf[0] != b'{' {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected opening brace in serialized JSON body",
+                ));
+            }
             self.dropped = true;
             let rest = &buf[1..];
             if !rest.is_empty() {
@@ -128,7 +119,12 @@ impl io::Write for BodyWithoutOpeningBrace<'_> {
         if self.dropped {
             self.inner.write_all(buf)
         } else {
-            expect_opening_brace(buf)?;
+            if buf[0] != b'{' {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected opening brace in serialized JSON body",
+                ));
+            }
             self.dropped = true;
             self.inner.write_all(&buf[1..])
         }
@@ -208,73 +204,31 @@ fn encode_body(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeErr
 /// Entry records carrying turn content.
 fn encode_message_entries(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
-        Record::User(entry) => {
-            let EntryKind::User { parts } = &entry.kind else {
-                return Err(EncodeError::MismatchedKind);
-            };
-            encode_json(
-                &UserWire {
-                    r#type: "user",
-                    id: entry.id,
-                    parent: entry.parent,
-                    at: TsWire(&entry.at),
-                    parts: JournalPartsWire(parts),
-                },
-                out,
-            )
-        }
-        Record::Assistant(entry) => encode_assistant(entry, out),
-        Record::ToolResult(entry) => {
-            let EntryKind::ToolResult {
-                call,
-                name,
-                error,
-                parts,
-                changes,
-                elapsed_ms,
-            } = &entry.kind
-            else {
-                return Err(EncodeError::MismatchedKind);
-            };
-            encode_json(
-                &ToolResultWire {
-                    r#type: "tool_result",
-                    id: entry.id,
-                    parent: entry.parent,
-                    at: TsWire(&entry.at),
-                    call,
-                    name: name.as_ref(),
-                    error: *error,
-                    parts: JournalPartsWire(parts),
-                    changes,
-                    elapsed_ms: *elapsed_ms,
-                },
-                out,
-            )
-        }
-        Record::Reminder(entry) => {
-            let EntryKind::Reminder { source, text } = &entry.kind else {
-                return Err(EncodeError::MismatchedKind);
-            };
-            encode_json(
-                &ReminderWire {
-                    r#type: "reminder",
-                    id: entry.id,
-                    parent: entry.parent,
-                    at: TsWire(&entry.at),
-                    source: source.as_ref(),
-                    text: text.as_ref(),
-                },
-                out,
-            )
-        }
+        Record::User(entry) => encode_user_entry(entry, out),
+        Record::Assistant(entry) => encode_assistant_entry(entry, out),
+        Record::ToolResult(entry) => encode_tool_result_entry(entry, out),
+        Record::Reminder(entry) => encode_reminder_entry(entry, out),
         _ => unreachable!("the encode_body index routes only encode_message_entries kinds here"),
     }
 }
 
-/// Validates and writes one assistant record: model id, route grammar, and
-/// replay-null checks run before serialization.
-fn encode_assistant(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+fn encode_user_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let EntryKind::User { parts } = &entry.kind else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &UserWire {
+            r#type: "user",
+            id: entry.id,
+            parent: entry.parent,
+            at: TsWire(&entry.at),
+            parts: JournalPartsWire(parts),
+        },
+        out,
+    )
+}
+
+fn encode_assistant_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     let EntryKind::Assistant {
         api,
         model,
@@ -310,6 +264,52 @@ fn encode_assistant(entry: &Entry, out: &mut dyn io::Write) -> Result<(), Encode
             route: *route,
             replay: replay.as_ref(),
             premium_requests: checked_premium(usage)?,
+        },
+        out,
+    )
+}
+
+fn encode_tool_result_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let EntryKind::ToolResult {
+        call,
+        name,
+        error,
+        parts,
+        changes,
+        elapsed_ms,
+    } = &entry.kind
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &ToolResultWire {
+            r#type: "tool_result",
+            id: entry.id,
+            parent: entry.parent,
+            at: TsWire(&entry.at),
+            call,
+            name: name.as_ref(),
+            error: *error,
+            parts: JournalPartsWire(parts),
+            changes,
+            elapsed_ms: *elapsed_ms,
+        },
+        out,
+    )
+}
+
+fn encode_reminder_entry(entry: &Entry, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let EntryKind::Reminder { source, text } = &entry.kind else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &ReminderWire {
+            r#type: "reminder",
+            id: entry.id,
+            parent: entry.parent,
+            at: TsWire(&entry.at),
+            source: source.as_ref(),
+            text: text.as_ref(),
         },
         out,
     )
@@ -527,89 +527,6 @@ fn encode_turn_end(record: &Record, out: &mut dyn io::Write) -> Result<(), Encod
 /// Turn control records.
 fn encode_control(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
     match record {
-        Record::TurnReserved { .. } | Record::TurnStart { .. } | Record::ToolStart { .. } => {
-            encode_turn_boundary(record, out)
-        }
-        Record::TurnEnd { .. } => encode_turn_end(record, out),
-        Record::RuleFired {
-            at,
-            turn,
-            rule,
-            entry,
-        } => encode_json(
-            &RuleFiredWire {
-                r#type: "rule_fired",
-                at: TsWire(at),
-                turn: *turn,
-                rule: rule.as_ref(),
-                entry: *entry,
-            },
-            out,
-        ),
-        Record::Resolved {
-            at,
-            request,
-            answer,
-            by,
-            was_default,
-            cause,
-        } => encode_resolved(at, request, answer, by, *was_default, *cause, out),
-        Record::BeforeRequestMut {
-            at,
-            turn,
-            ext,
-            field,
-            old,
-            new,
-        } => encode_json(
-            &BeforeRequestMutWire {
-                r#type: "before_request_mut",
-                at: TsWire(at),
-                turn: *turn,
-                ext: ext.as_ref(),
-                field: field.as_ref(),
-                old: old.as_ref(),
-                new: new.as_ref(),
-            },
-            out,
-        ),
-        Record::ToolPromoted {
-            at,
-            tool,
-            turn,
-            leaf,
-        } => encode_json(
-            &ToolPromotedWire {
-                r#type: "tool_promoted",
-                at: TsWire(at),
-                tool: tool.as_ref(),
-                turn: *turn,
-                leaf: *leaf,
-            },
-            out,
-        ),
-        Record::WakeAttempt {
-            at,
-            turn,
-            count,
-            jobs,
-        } => encode_json(
-            &WakeAttemptWire {
-                r#type: "wake_attempt",
-                at: TsWire(at),
-                turn: *turn,
-                count: *count,
-                jobs,
-            },
-            out,
-        ),
-        _ => unreachable!("the encode_body index routes only encode_control kinds here"),
-    }
-}
-
-/// Turn-boundary control records that share one wire shape.
-fn encode_turn_boundary(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
-    match record {
         Record::TurnReserved { at, turn } => encode_json(
             &TurnStartWire {
                 r#type: "turn_reserved",
@@ -635,20 +552,42 @@ fn encode_turn_boundary(record: &Record, out: &mut dyn io::Write) -> Result<(), 
             },
             out,
         ),
-        _ => unreachable!("the encode_body index routes only turn-boundary kinds here"),
+        Record::TurnEnd { .. } => encode_turn_end(record, out),
+        Record::RuleFired {
+            at,
+            turn,
+            rule,
+            entry,
+        } => encode_json(
+            &RuleFiredWire {
+                r#type: "rule_fired",
+                at: TsWire(at),
+                turn: *turn,
+                rule: rule.as_ref(),
+                entry: *entry,
+            },
+            out,
+        ),
+        Record::Resolved { .. } => encode_resolved(record, out),
+        Record::BeforeRequestMut { .. } => encode_request_mut(record, out),
+        Record::ToolPromoted { .. } => encode_tool_promoted(record, out),
+        Record::WakeAttempt { .. } => encode_wake_attempt(record, out),
+        _ => unreachable!("the encode_body index routes only encode_control kinds here"),
     }
 }
 
-/// Writes one resolved-request record.
-fn encode_resolved(
-    at: &jiff::Timestamp,
-    request: &crate::id::RequestId,
-    answer: &crate::request::Answer,
-    by: &crate::id::ClientId,
-    was_default: bool,
-    cause: Option<crate::update::ResolutionCause>,
-    out: &mut dyn io::Write,
-) -> Result<(), EncodeError> {
+fn encode_resolved(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::Resolved {
+        at,
+        request,
+        answer,
+        by,
+        was_default,
+        cause,
+    } = record
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
     encode_json(
         &ResolvedWire {
             r#type: "resolved",
@@ -656,8 +595,78 @@ fn encode_resolved(
             request,
             answer: AnswerWire(answer),
             by,
-            was_default,
+            was_default: *was_default,
             cause: cause.map(ResolutionCauseWire),
+        },
+        out,
+    )
+}
+
+fn encode_request_mut(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::BeforeRequestMut {
+        at,
+        turn,
+        ext,
+        field,
+        old,
+        new,
+    } = record
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &BeforeRequestMutWire {
+            r#type: "before_request_mut",
+            at: TsWire(at),
+            turn: *turn,
+            ext: ext.as_ref(),
+            field: field.as_ref(),
+            old: old.as_ref(),
+            new: new.as_ref(),
+        },
+        out,
+    )
+}
+
+fn encode_tool_promoted(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::ToolPromoted {
+        at,
+        tool,
+        turn,
+        leaf,
+    } = record
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &ToolPromotedWire {
+            r#type: "tool_promoted",
+            at: TsWire(at),
+            tool: tool.as_ref(),
+            turn: *turn,
+            leaf: *leaf,
+        },
+        out,
+    )
+}
+
+fn encode_wake_attempt(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
+    let Record::WakeAttempt {
+        at,
+        turn,
+        count,
+        jobs,
+    } = record
+    else {
+        return Err(EncodeError::MismatchedKind);
+    };
+    encode_json(
+        &WakeAttemptWire {
+            r#type: "wake_attempt",
+            at: TsWire(at),
+            turn: *turn,
+            count: *count,
+            jobs,
         },
         out,
     )

@@ -11,7 +11,7 @@ A reopened session shows the model, thinking level, approval mode, execution mod
 
 For saved sessions, dal writes a turn-ID reservation to the journal before it acknowledges a prompt, follow-up, or wake allocation. A record counts as saved only after it is synced to disk. The first reservation creates the journal even if the turn never starts.
 
-Private tool effects also require saved receipts. In a saved session, the first private loop or effect receipt creates the journal even if no user turn has started. Ephemeral sessions keep these records in memory and do not create journal files.
+Private tool effects also require saved receipts. In a saved session, the first private loop or effect receipt creates the journal even if no user turn has started. dal saves the start receipt before running the effect. Ephemeral sessions keep these records in memory and do not create journal files.
 
 Cancelling queued work does not release its identity. Later turns keep their allocated IDs. When a session reopens, unused reservations remain consumed. dal does not restore queued text. Submit it again if you still want to run it. A reservation alone does not create a completed turn.
 

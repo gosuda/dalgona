@@ -287,7 +287,11 @@ fn admission_text(limit: AdmissionLimit) -> String {
     format!("admission wait expired: no free {limit} slot within limits.admission_wait.")
 }
 
-/// An `Agent` operation was rejected without changing session state.
+/// An `Agent` operation failed.
+///
+/// Rejection variants leave session state unchanged; [`AgentError::PersistenceFailed`]
+/// reports an operation that passed validation but whose journal record did
+/// not persist, so live state can run ahead of the journal.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AgentError {

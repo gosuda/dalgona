@@ -109,23 +109,23 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         }
     })
     .await;
-    // The host always closes, and the close always runs to completion: only
-    // the quiet poll is ever abandoned, so a durable provider credential write
-    // is never detached. A second signal already seen by `drive` skips the
-    // quiet wait; otherwise a later signal during it decides the exit status.
-    // The run's own failure is reported either way.
-    let ladder = exit::Ladder::begin();
-    let closed = if outcome.is_err() {
-        ladder.close_host_after_quiet_wait(host).await
-    } else {
-        ladder.close_host(host, &mut signals).await
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
-    let code = match outcome {
-        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
-        Ok(Err(error)) => wire_failure(wire, &error),
-        Err(code) => ExitCode::from(code),
-    };
-    closed.skipped_by.map_or(code, ExitCode::from)
+    let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(()) => exit::code(exit::ExitKind::Success),
+        Err(error) => wire_failure(wire, &error),
+    }
 }
 
 async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Product) -> ExitCode {
@@ -174,23 +174,23 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         }
     })
     .await;
-    // The host always closes, and the close always runs to completion: only
-    // the quiet poll is ever abandoned, so a durable provider credential write
-    // is never detached. A second signal already seen by `drive` skips the
-    // quiet wait; otherwise a later signal during it decides the exit status.
-    // The run's own failure is reported either way.
-    let ladder = exit::Ladder::begin();
-    let closed = if outcome.is_err() {
-        ladder.close_host_after_quiet_wait(host).await
-    } else {
-        ladder.close_host(host, &mut signals).await
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
-    let code = match outcome {
-        Ok(Ok(())) => exit::code(exit::ExitKind::Success),
-        Ok(Err(error)) => socket_failure(&path, &data_root, &error),
-        Err(code) => ExitCode::from(code),
-    };
-    closed.skipped_by.map_or(code, ExitCode::from)
+    let closed = exit::Ladder::begin().close_host(host, &mut signals).await;
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(()) => exit::code(exit::ExitKind::Success),
+        Err(error) => socket_failure(&path, &data_root, &error),
+    }
 }
 
 fn socket_failure(path: &Path, data_root: &Path, error: &LocalSocketError) -> ExitCode {

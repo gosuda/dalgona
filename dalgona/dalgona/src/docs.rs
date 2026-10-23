@@ -34,7 +34,7 @@ const PAGES: &[(&str, &str)] = &[
     ("search", include_str!("docs/search.md")),
     ("web", web::WEB_DOC),
     ("workflows", orchestration::docs::WORKFLOWS_DOC),
-    ("plan", include_str!("docs/plan.md")),
+    ("plan", work::PLAN_DOC),
     ("procs", procs::PROCS_DOC),
     ("todo", include_str!("docs/todo.md")),
     ("work", work::PLAN_DOC),

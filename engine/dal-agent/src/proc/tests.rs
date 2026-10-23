@@ -14,6 +14,21 @@ use super::{MAX_STDOUT_PREFIX_BYTES, ProcStatus, StopReason};
 use crate::error::{DenyReason, ToolError};
 use crate::ext::tool::Approved;
 
+#[cfg(unix)]
+use process_wrap::tokio::ChildWrapper;
+#[cfg(unix)]
+use std::{
+    future::Future,
+    io,
+    pin::Pin,
+    process::ExitStatus,
+    sync::{Arc, atomic::Ordering as AtomicOrdering},
+};
+#[cfg(unix)]
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+#[cfg(unix)]
+use tokio::{sync::Notify, task::JoinSet};
+
 async fn test_permit() -> tokio::sync::OwnedSemaphorePermit {
     static SEMAPHORE: std::sync::LazyLock<std::sync::Arc<Semaphore>> =
         std::sync::LazyLock::new(|| std::sync::Arc::new(Semaphore::new(256)));
@@ -240,6 +255,84 @@ async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
         .expect("wait settles despite surviving grandchild")
         .expect("wait test shell");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+}
+
+/// The post-exit sweep owns the leader identity: once the native leader is
+/// reaped, the group is swept synchronously and the outer wrapper wait reaps
+/// remaining group zombies before capture finalization. `Drop` must not signal
+/// the pid again, even when capture failure leaves `result` unset. This closes
+/// the new Drop suspension window, not every historical numeric-PID reuse risk.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_wait_consumes_leader_identity_after_reap_and_sweep() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(&temp, "test-call-drop-identity", &echo_argv("hi"), None, 0)
+        .await
+        .expect("spawn echo");
+    assert!(
+        proc.leader_pid.is_some(),
+        "a live child keeps its owned pid for the close-abort sweep"
+    );
+    let cancel = CancellationToken::new();
+    let result = proc.wait(&cancel).await.expect("wait echo");
+    assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+    assert!(
+        proc.leader_pid.is_none(),
+        "reap plus sweep consumes the owned pid so Drop cannot re-signal it"
+    );
+}
+
+/// The stop ladder ends in the same reap-plus-sweep transition, so a settled
+/// stop must also disarm the `Drop` sweep.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_stop_consumes_leader_identity_after_ladder() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-call-stop-identity",
+        &shell_argv("sleep 30"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn sleep");
+    assert!(
+        proc.leader_pid.is_some(),
+        "a live child keeps its owned pid for the close-abort sweep"
+    );
+    let result = proc.stop(StopReason::Cancelled).await.expect("stop sleep");
+    assert_eq!(result.status, ProcStatus::Cancelled);
+    assert!(
+        proc.leader_pid.is_none(),
+        "stop-ladder reap plus sweep consumes the owned pid"
+    );
+}
+
+/// A capture fault after native leader reap, synchronous group sweep, and
+/// retained outer reaping leaves `result` unset; `Drop` must not re-signal the
+/// consumed pid.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_capture_fault_after_reap_disarms_drop_sweep() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-call-capture-fault-identity",
+        &echo_argv("hi"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn echo");
+    drop(proc.capture.take());
+    let cancel = CancellationToken::new();
+    let result = proc.wait(&cancel).await;
+    assert!(result.is_err(), "missing capture fails the wait");
+    assert!(
+        proc.leader_pid.is_none(),
+        "reap plus sweep consumes the owned pid even when capture fails"
+    );
 }
 
 /// Polls the live tail until it holds `marker`, so a signal sent next finds
@@ -1253,4 +1346,644 @@ async fn windows_wait_terminates_grandchild_holding_pipe_before_capture_join() {
         .expect("wait settles despite surviving grandchild")
         .expect("wait for leader");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+}
+
+/// No-OS-resource placeholder used only synchronously inside
+/// `wrap_proc_for_ordering` to move the real child out without `unsafe`.
+///
+/// It never lives across an await, is never waited on, and reports no pid,
+/// so no fabricated identity can reach real signaling or cleanup.
+#[cfg(unix)]
+#[derive(Debug)]
+struct EmptyChild {
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+}
+
+#[cfg(unix)]
+impl EmptyChild {
+    fn new() -> Self {
+        Self {
+            stdin: None,
+            stdout: None,
+            stderr: None,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl ChildWrapper for EmptyChild {
+    fn inner(&self) -> &dyn ChildWrapper {
+        self
+    }
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self
+    }
+    fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self
+    }
+    fn id(&self) -> Option<u32> {
+        None
+    }
+    fn stdin(&mut self) -> &mut Option<ChildStdin> {
+        &mut self.stdin
+    }
+    fn stdout(&mut self) -> &mut Option<ChildStdout> {
+        &mut self.stdout
+    }
+    fn stderr(&mut self) -> &mut Option<ChildStderr> {
+        &mut self.stderr
+    }
+    fn start_kill(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Ok(None)
+    }
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+    fn signal(&self, _sig: i32) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Gated native-leader observer wrapping the real process-group child.
+///
+/// `wait` records entry, holds the test gate, then delegates to the real
+/// native child (`Real.inner_mut().wait()`), preserving the real pid, real
+/// exit status, and real pipes. `try_wait` and signals delegate straight
+/// through so stop fast paths and group kills keep production semantics.
+#[cfg(unix)]
+#[derive(Debug)]
+struct GatedInner {
+    inner: Box<dyn ChildWrapper>,
+    ordering: Arc<super::TestOrdering>,
+}
+
+#[cfg(unix)]
+impl ChildWrapper for GatedInner {
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.inner.as_ref()
+    }
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.inner.as_mut()
+    }
+    fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self.inner
+    }
+    fn id(&self) -> Option<u32> {
+        self.inner.id()
+    }
+    fn stdin(&mut self) -> &mut Option<ChildStdin> {
+        self.inner.stdin()
+    }
+    fn stdout(&mut self) -> &mut Option<ChildStdout> {
+        self.inner.stdout()
+    }
+    fn stderr(&mut self) -> &mut Option<ChildStderr> {
+        self.inner.stderr()
+    }
+    fn start_kill(&mut self) -> io::Result<()> {
+        self.inner.start_kill()
+    }
+    fn signal(&self, sig: i32) -> io::Result<()> {
+        self.inner.signal(sig)
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.inner.inner_mut().try_wait()
+    }
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+        let ordering = self.ordering.clone();
+        Box::pin(async move {
+            ordering.inner_entered.fetch_add(1, AtomicOrdering::SeqCst);
+            ordering.got_inner.notify_one();
+            ordering.allow_inner.notified().await;
+            self.inner.inner_mut().wait().await
+        })
+    }
+}
+
+/// Separately held outer group-reap wrapper.
+///
+/// `wait` records entry, holds its own gate, then delegates to the real outer
+/// group wait (`Real.wait()`), so group zombies are still really reaped once
+/// released. Signals are counted then delegated to the real group wrapper.
+#[cfg(unix)]
+#[derive(Debug)]
+struct GatedOuter {
+    inner: Box<dyn ChildWrapper>,
+    ordering: Arc<super::TestOrdering>,
+}
+
+#[cfg(unix)]
+impl ChildWrapper for GatedOuter {
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.inner.as_ref()
+    }
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.inner.as_mut()
+    }
+    fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self.inner
+    }
+    fn id(&self) -> Option<u32> {
+        self.inner.id()
+    }
+    fn stdin(&mut self) -> &mut Option<ChildStdin> {
+        self.inner.stdin()
+    }
+    fn stdout(&mut self) -> &mut Option<ChildStdout> {
+        self.inner.stdout()
+    }
+    fn stderr(&mut self) -> &mut Option<ChildStderr> {
+        self.inner.stderr()
+    }
+    fn start_kill(&mut self) -> io::Result<()> {
+        self.inner.start_kill()
+    }
+    fn signal(&self, sig: i32) -> io::Result<()> {
+        if sig == 15 {
+            self.ordering.sig_term.fetch_add(1, AtomicOrdering::SeqCst);
+        } else if sig == 9 {
+            self.ordering.sig_kill.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        self.ordering.did_signal.notify_one();
+        self.inner.signal(sig)
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.inner.inner_mut().try_wait()
+    }
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+        let ordering = self.ordering.clone();
+        Box::pin(async move {
+            ordering.outer_entered.fetch_add(1, AtomicOrdering::SeqCst);
+            ordering.got_outer.notify_one();
+            if ordering.fail_outer.load(AtomicOrdering::SeqCst) {
+                return Err(io::Error::other("gated outer reap failure"));
+            }
+            ordering.allow_outer.notified().await;
+            let status = self.inner.inner_mut().wait().await?;
+            ordering
+                .outer_completed
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(status)
+        })
+    }
+}
+
+/// Installs the gated pair around the real spawned child.
+///
+/// The real child, pid, pipes, and capture stay intact; only observation is
+/// gated. The transient placeholder never crosses an await and is never
+/// signaled, so all cleanup still targets the real spawned group.
+#[cfg(unix)]
+fn wrap_proc_for_ordering(proc: &mut super::Proc, ordering: Arc<super::TestOrdering>) {
+    let real = std::mem::replace(
+        &mut proc.child,
+        Box::new(EmptyChild::new()) as Box<dyn ChildWrapper>,
+    );
+    let inner = Box::new(GatedInner {
+        inner: real,
+        ordering: ordering.clone(),
+    }) as Box<dyn ChildWrapper>;
+    proc.child = Box::new(GatedOuter {
+        inner,
+        ordering: ordering.clone(),
+    }) as Box<dyn ChildWrapper>;
+    proc.test_ordering = Some(ordering);
+}
+
+#[cfg(unix)]
+async fn await_notify(notify: &Notify, what: &str) {
+    tokio::time::timeout(Duration::from_secs(10), notify.notified())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+/// Normal wait: native leader completion synchronously disarms `Drop`
+/// authority before the separately held outer group reap.
+///
+/// Holds the outer wait open to prove the sweep already ran while `result`
+/// is still unset, then releases it to prove the outer wait is really
+/// invoked exactly once for group-zombie reaping.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_wait_disarms_before_outer_reap() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(&temp, "test-call-wait-ordering", &echo_argv("hi"), None, 0)
+        .await
+        .expect("spawn echo");
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+    assert!(proc.leader_pid.is_some());
+    let cancel = CancellationToken::new();
+    let cancel_wait = cancel.clone();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let result = proc.wait(&cancel_wait).await;
+        (proc, result)
+    });
+    await_notify(&ordering.got_inner, "native leader wait entry").await;
+    assert_eq!(
+        ordering.sweep.load(AtomicOrdering::SeqCst),
+        0,
+        "no group sweep before native leader completion"
+    );
+    ordering.allow_inner.notify_one();
+    await_notify(&ordering.did_sweep, "synchronous group sweep").await;
+    assert_eq!(
+        ordering.sweep.load(AtomicOrdering::SeqCst),
+        1,
+        "exactly one disarming sweep after leader completion"
+    );
+    await_notify(&ordering.got_outer, "retained outer reap entry").await;
+    assert!(
+        tasks.try_join_next().is_none(),
+        "wait stays pending while the outer group reap is held"
+    );
+    ordering.allow_outer.notify_one();
+    let (proc, result) = tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+        .await
+        .expect("wait settles after outer release")
+        .expect("wait task remains owned")
+        .expect("wait task joins");
+    let result = result.expect("wait echo");
+    assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+    assert_eq!(
+        ordering.outer_entered.load(AtomicOrdering::SeqCst),
+        1,
+        "retained outer wait is entered exactly once"
+    );
+    assert_eq!(
+        ordering.outer_completed.load(AtomicOrdering::SeqCst),
+        1,
+        "retained outer wait really completes instead of being dropped"
+    );
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 1);
+    assert!(proc.leader_pid.is_none());
+    assert!(proc.result.is_some());
+}
+
+/// Stop grace path: soft group signal, native leader observation, synchronous
+/// disarm, then the separately held outer reap.
+///
+/// Asserts the soft signal goes through the outer wrapper, the hard kill is
+/// not needed, and the sweep precedes outer entry while the stop stays
+/// pending.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_stop_grace_disarms_before_outer_reap() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-call-stop-ordering",
+        &shell_argv("sleep 30"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn sleep");
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let result = proc.stop(StopReason::Cancelled).await;
+        (proc, result)
+    });
+    await_notify(&ordering.did_signal, "soft group signal").await;
+    await_notify(&ordering.got_inner, "grace native leader wait entry").await;
+    assert_eq!(
+        ordering.sig_term.load(AtomicOrdering::SeqCst),
+        1,
+        "grace sends one outer group SIGTERM"
+    );
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 0);
+    ordering.allow_inner.notify_one();
+    await_notify(&ordering.did_sweep, "stop-path synchronous sweep").await;
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 1);
+    await_notify(&ordering.got_outer, "stop-path outer reap entry").await;
+    assert!(
+        tasks.try_join_next().is_none(),
+        "stop stays pending while the outer group reap is held"
+    );
+    ordering.allow_outer.notify_one();
+    let (proc, result) = tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+        .await
+        .expect("stop settles after outer release")
+        .expect("stop task remains owned")
+        .expect("stop task joins");
+    let result = result.expect("stop sleep");
+    assert_eq!(result.status, ProcStatus::Cancelled);
+    assert_eq!(
+        ordering.sig_kill.load(AtomicOrdering::SeqCst),
+        0,
+        "grace observation avoids the hard kill"
+    );
+    assert_eq!(
+        ordering.outer_completed.load(AtomicOrdering::SeqCst),
+        1,
+        "stop retains the outer group reap"
+    );
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 1);
+    assert!(proc.leader_pid.is_none());
+}
+
+/// Initial pending wait keeps `Drop` armed: dropping before native leader
+/// completion must still run the close-abort group sweep exactly once.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_initial_pending_drop_stays_armed() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(&temp, "test-call-initial-drop", &echo_argv("hi"), None, 0)
+        .await
+        .expect("spawn echo");
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+    let cancel = CancellationToken::new();
+    let cancel_wait = cancel.clone();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let _ = proc.wait(&cancel_wait).await;
+    });
+    await_notify(&ordering.got_inner, "native leader wait entry").await;
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 0);
+    assert!(
+        tasks.try_join_next().is_none(),
+        "wait is pending before native leader completion"
+    );
+    tasks.abort_all();
+    assert!(
+        tasks
+            .join_next()
+            .await
+            .expect("aborted wait task remains owned")
+            .is_err(),
+        "pending wait task is aborted and joined before checking Drop"
+    );
+    assert_eq!(
+        ordering.sweep.load(AtomicOrdering::SeqCst),
+        1,
+        "armed Drop runs the close-abort sweep once"
+    );
+    assert_eq!(
+        ordering.outer_entered.load(AtomicOrdering::SeqCst),
+        0,
+        "no outer reap runs when the leader was never observed"
+    );
+}
+
+/// Held outer reap is already disarmed: dropping while suspended after the
+/// synchronous sweep must not run a second group cleanup.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_held_outer_drop_does_not_resweep() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(&temp, "test-call-held-drop", &echo_argv("hi"), None, 0)
+        .await
+        .expect("spawn echo");
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+    let cancel = CancellationToken::new();
+    let cancel_wait = cancel.clone();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let _ = proc.wait(&cancel_wait).await;
+    });
+    await_notify(&ordering.got_inner, "native leader wait entry").await;
+    ordering.allow_inner.notify_one();
+    await_notify(&ordering.did_sweep, "synchronous group sweep").await;
+    await_notify(&ordering.got_outer, "retained outer reap entry").await;
+    assert!(tasks.try_join_next().is_none());
+    tasks.abort_all();
+    assert!(
+        tasks
+            .join_next()
+            .await
+            .expect("held outer task remains owned")
+            .is_err(),
+        "held outer wait task is aborted and joined before checking Drop"
+    );
+    assert_eq!(
+        ordering.sweep.load(AtomicOrdering::SeqCst),
+        1,
+        "disarmed Drop does not re-signal after the sweep"
+    );
+    assert_eq!(
+        ordering.outer_completed.load(AtomicOrdering::SeqCst),
+        0,
+        "aborted outer reap never completes"
+    );
+}
+
+/// Capture fault after the retained reap stays disarmed.
+///
+/// The missing capture fails the wait, but the native observation, synchronous
+/// sweep, and outer reap already ran, so `Drop` must not re-signal.
+#[cfg(unix)]
+#[tokio::test]
+async fn proc_capture_fault_after_reap_still_reaps_outer() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let mut proc = spawn_approved(
+        &temp,
+        "test-call-capture-ordering",
+        &echo_argv("hi"),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn echo");
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+    drop(proc.capture.take());
+    let cancel = CancellationToken::new();
+    let cancel_wait = cancel.clone();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let result = proc.wait(&cancel_wait).await;
+        (proc, result)
+    });
+    await_notify(&ordering.got_inner, "native leader wait entry").await;
+    ordering.allow_inner.notify_one();
+    await_notify(&ordering.did_sweep, "synchronous group sweep").await;
+    await_notify(&ordering.got_outer, "retained outer reap entry").await;
+    ordering.allow_outer.notify_one();
+    let (proc, result) = tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+        .await
+        .expect("capture-fault wait settles")
+        .expect("capture-fault task remains owned")
+        .expect("wait task joins");
+    assert!(result.is_err(), "missing capture fails the wait");
+    assert_eq!(
+        ordering.outer_completed.load(AtomicOrdering::SeqCst),
+        1,
+        "outer reap runs even when capture later faults"
+    );
+    assert_eq!(ordering.sweep.load(AtomicOrdering::SeqCst), 1);
+    assert!(proc.leader_pid.is_none());
+    assert!(proc.result.is_none());
+}
+
+#[cfg(target_os = "linux")]
+struct EscapeeCleanup {
+    pid_file: PathBuf,
+    leader_pid: u32,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EscapeeCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_escapee_from_pid_file(&self.pid_file, self.leader_pid);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_escapee_from_pid_file(pid_file: &Path, leader_pid: u32) {
+    use rustix::process::{Pid, Signal, kill_process};
+
+    if let Ok(contents) = std::fs::read_to_string(pid_file)
+        && let Ok(pid) = contents.trim().parse::<u32>()
+        && pid > 1
+        && let Ok(raw) = i32::try_from(pid)
+        && let Some(target) = Pid::from_raw(raw)
+    {
+        let _ = kill_process(target, Signal::KILL);
+    }
+    let descendants = super::stop::proc_descendants(leader_pid);
+    super::stop::sweep_recorded(&descendants);
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct LinuxProcessStat {
+    state: char,
+    process_group: u32,
+    session: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(pid: u32) -> Option<LinuxProcessStat> {
+    let line = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = line.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    fields.next()?;
+    Some(LinuxProcessStat {
+        process_group: fields.next()?.parse().ok()?,
+        session: fields.next()?.parse().ok()?,
+        state,
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_escapee_ready(leader_pid: u32, pid_file: &Path) -> u32 {
+    let escapee_pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(pid_file)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+                && pid > 1
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("escapee writes its actual pid");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let (Some(leader), Some(escapee)) = (
+                linux_process_stat(leader_pid),
+                linux_process_stat(escapee_pid),
+            ) && leader.state != 'Z'
+                && escapee.state != 'Z'
+                && leader.process_group == leader_pid
+                && escapee.process_group != leader_pid
+                && escapee.session != leader.session
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("leader and live setsid escapee are verified distinct");
+    escapee_pid
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_escapee_death(pid: u32) -> bool {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if linux_process_stat(pid).is_none_or(|stat| stat.state == 'Z') {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+/// A controlled outer-reap failure must still sweep a recorded real escapee.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn proc_stop_outer_error_still_sweeps_recorded_descendants() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let pid_file = temp.path().join("escapee.pid");
+    let pid_file_arg = format!(
+        "'{}'",
+        pid_file.display().to_string().replace('\'', "'\\''")
+    );
+    let script = format!(
+        "setsid /bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 30' escapee {pid_file_arg} & /bin/sleep 30"
+    );
+    let mut proc = spawn_approved(
+        &temp,
+        "test-call-stop-outer-error",
+        &shell_argv(&script),
+        None,
+        0,
+    )
+    .await
+    .expect("spawn real leader and setsid escapee");
+    let leader_pid = proc.leader_pid.expect("real leader pid stays owned");
+    let mut cleanup = EscapeeCleanup {
+        pid_file: pid_file.clone(),
+        leader_pid,
+        armed: true,
+    };
+    let ordering = super::TestOrdering::new();
+    wrap_proc_for_ordering(&mut proc, ordering.clone());
+
+    let escapee_pid = wait_for_escapee_ready(leader_pid, &pid_file).await;
+
+    ordering.fail_outer.store(true, AtomicOrdering::SeqCst);
+    let stop = proc.stop(StopReason::Cancelled);
+    tokio::pin!(stop);
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::select! {
+            result = &mut stop => result,
+            () = ordering.got_inner.notified() => {
+                ordering.allow_inner.notify_one();
+                stop.await
+            }
+        }
+    })
+    .await
+    .expect("stop settles");
+    let error = result.expect_err("typed outer error propagates");
+    assert!(
+        error.to_string().contains("gated outer reap failure"),
+        "original outer error: {error}"
+    );
+
+    assert!(
+        wait_for_escapee_death(escapee_pid).await,
+        "recorded real escapee died before Proc was dropped"
+    );
+    cleanup.armed = false;
 }

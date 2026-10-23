@@ -18,8 +18,8 @@ use super::rounds::{
 };
 use super::{
     DIFF_TRUNCATION_MARKER, FOCUS_TRUNCATION_MARKER, GIT_STDOUT_PREFIX_LIMIT, MAX_DIFF_BYTES,
-    MAX_ERROR_BYTES, MAX_FINDINGS, MAX_FOCUS_BYTES, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT,
-    REVIEWER_DEADLINE, ReviewError, TRUNCATION_MARKER, cap_with_marker,
+    MAX_ERROR_BYTES, MAX_FINDINGS, MAX_FOCUS_BYTES, MAX_RECORD_BYTES, MAX_STORED_DETAIL_BYTES,
+    REVIEW_REPLY_FORMAT, REVIEWER_DEADLINE, ReviewError, TRUNCATION_MARKER, cap_with_marker,
 };
 use super::{ReviewStatus, ReviewTool};
 use crate::review::review_round;
@@ -1069,8 +1069,8 @@ fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEve
             output_tokens,
             reasoning_tokens: None,
             cache_write_tokens: 0,
-            premium_requests: None,
             cost_usd: None,
+            premium_requests: None,
         }));
     }
     events.push(dal_core::StreamEvent::Stop(dal_core::Stop::EndTurn));
@@ -1776,6 +1776,129 @@ async fn a_malformed_stored_record_keeps_history_and_runs_no_provider_or_append(
 }
 
 #[tokio::test]
+async fn an_oversized_stored_record_fails_closed_before_the_reviewer_runs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    let session = "019263a5-7c1a-7000-8000-000000000001";
+    let padding = "x".repeat(MAX_RECORD_BYTES);
+    let oversized = format!(
+        r#"{{"session":"{session}","round":2,"verdict":"clean","new_count":0,"findings":[],"pad":"{padding}"}}"#
+    );
+    assert!(oversized.len() > MAX_RECORD_BYTES);
+    seed_records(&fake, &oversized)?;
+    let before: Vec<String> = locked(&fake.records)
+        .get("review")
+        .map(|bodies| bodies.iter().map(|body| body.as_str().to_owned()).collect())
+        .unwrap_or_default();
+    assert_eq!(before.len(), 2);
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let cx = staged_cx(&fake);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    let expected = ReviewError::RecordTooLarge {
+        index: 2,
+        limit: MAX_RECORD_BYTES,
+    }
+    .to_string();
+    assert_eq!(refused, expected);
+    assert_round_stopped_at_decode(&fake);
+    assert!(
+        locked(&fake.notices).is_empty(),
+        "a refused round posts no notice"
+    );
+
+    let kept = locked(&fake.records);
+    let bodies = kept
+        .get("review")
+        .ok_or("a refused round must keep the stored history")?;
+    let after: Vec<String> = bodies.iter().map(|body| body.as_str().to_owned()).collect();
+    assert_eq!(after, before, "a refused round must not rewrite history");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_record_exceeding_findings_cap_fails_closed_before_the_reviewer_runs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    let session = "019263a5-7c1a-7000-8000-000000000001";
+    let finding = r#"{"path":"src/lib.rs","line":1,"severity":"major","title":"t","detail":"d"}"#;
+    let findings = vec![finding; MAX_FINDINGS + 1].join(",");
+    let body = format!(
+        r#"{{"session":"{session}","round":2,"verdict":"findings","new_count":1,"findings":[{findings}]}}"#
+    );
+    seed_records(&fake, &body)?;
+    let before: Vec<String> = locked(&fake.records)
+        .get("review")
+        .map(|bodies| bodies.iter().map(|body| body.as_str().to_owned()).collect())
+        .unwrap_or_default();
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let cx = staged_cx(&fake);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    assert!(
+        refused.starts_with("stored review record 2 did not decode: "),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("findings count (51) exceeds the cap of 50"),
+        "{refused}"
+    );
+    assert_round_stopped_at_decode(&fake);
+
+    let kept = locked(&fake.records);
+    let bodies = kept
+        .get("review")
+        .ok_or("a refused round must keep the stored history")?;
+    let after: Vec<String> = bodies.iter().map(|body| body.as_str().to_owned()).collect();
+    assert_eq!(after, before, "a refused round must not rewrite history");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_record_with_round_zero_fails_closed_before_the_reviewer_runs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    let session = "019263a5-7c1a-7000-8000-000000000001";
+    let body = format!(
+        r#"{{"session":"{session}","round":0,"verdict":"clean","new_count":0,"findings":[]}}"#
+    );
+    seed_records(&fake, &body)?;
+    let before: Vec<String> = locked(&fake.records)
+        .get("review")
+        .map(|bodies| bodies.iter().map(|body| body.as_str().to_owned()).collect())
+        .unwrap_or_default();
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let cx = staged_cx(&fake);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    assert!(
+        refused.starts_with("stored review record 2 did not decode: round must be at least 1"),
+        "{refused}"
+    );
+    assert_round_stopped_at_decode(&fake);
+
+    let kept = locked(&fake.records);
+    let bodies = kept
+        .get("review")
+        .ok_or("a refused round must keep the stored history")?;
+    let after: Vec<String> = bodies.iter().map(|body| body.as_str().to_owned()).collect();
+    assert_eq!(after, before, "a refused round must not rewrite history");
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_over_limit_real_git_status_refuses_before_the_reviewer_runs()
 -> Result<(), Box<dyn std::error::Error>> {
     let repo = real_git::TempRepo::new()?;
@@ -1843,6 +1966,68 @@ async fn an_over_limit_real_git_status_refuses_before_the_reviewer_runs()
         "the fitting adjacent status must run the reviewer"
     );
     assert_eq!(locked(&fake.requests).len(), 1);
+    let appended = locked(&fake.appended);
+    assert_eq!(appended.len(), 1);
+    let continued: ReviewRecord = sonic_rs::from_str(&appended[0])?;
+    assert_eq!(continued.round, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_escaping_reply_past_the_record_bound_appends_nothing_and_leaves_history_usable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    // Control characters pass every decoded-length reply cap yet serialize
+    // to six bytes each, so fifty maxed findings exceed MAX_RECORD_BYTES
+    // once escaped. The writer must refuse before appending; otherwise the
+    // next round would reject its own history and never recover.
+    let path = "\\u0001".repeat(1024);
+    let title = "\\u0001".repeat(200);
+    let detail = "\\u0001".repeat(2000);
+    let finding = format!(
+        r#"{{"path":"{path}","line":1,"severity":"major","title":"{title}","detail":"{detail}"}}"#
+    );
+    let findings = vec![finding.as_str(); MAX_FINDINGS].join(",");
+    let poison =
+        format!(r#"{{"verdict":"findings","summary":"needs work","findings":[{findings}]}}"#);
+    *locked(&fake.provider) = Provider::Replies(text_events(&poison, None));
+    let cx = staged_cx(&fake);
+
+    let outcome = review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await;
+    let refused = refusal_text(outcome)?;
+
+    let expected = ReviewError::RecordNotStored {
+        index: 1,
+        limit: MAX_RECORD_BYTES,
+    }
+    .to_string();
+    assert_eq!(refused, expected);
+    assert_eq!(
+        locked(&fake.requests).len(),
+        1,
+        "the reviewer ran before the write-side refusal"
+    );
+    assert!(
+        locked(&fake.appended).is_empty(),
+        "an oversized serialization appends no record"
+    );
+    assert!(
+        locked(&fake.records).get("review").is_none(),
+        "a refused serialization leaves no history entry"
+    );
+    assert!(
+        locked(&fake.notices).is_empty(),
+        "a refused round posts no notice"
+    );
+
+    // The history is unpoisoned, so the next valid round runs and appends.
+    *locked(&fake.provider) = Provider::Replies(text_events(CLEAN_REPLY, None));
+    let next = staged_cx(&fake);
+    let text = round(&cfg, &status, &next, None).await;
+
+    assert_eq!(text, "Review round 1 of 1: clean. No findings.");
     let appended = locked(&fake.appended);
     assert_eq!(appended.len(), 1);
     let continued: ReviewRecord = sonic_rs::from_str(&appended[0])?;

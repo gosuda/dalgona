@@ -1988,7 +1988,7 @@ mod tests {
             on_transcript
                 .row_data(0)
                 .is_some_and(|(_, spans)| !spans.is_empty()),
-            "a user card is not Ctrl+O-eligible, so no header pushes the art to the second row"
+            "a user card is not Ctrl+O-eligible, so no header shifts the art to the first terminal row"
         );
         assert_eq!(on_cache.renders(), 1);
     }
@@ -2443,7 +2443,7 @@ mod tests {
                 approval: dal_core::ApprovalMode::Ask,
                 mode: dal_core::Mode::Normal,
                 name: None,
-                scoped_models: None,
+                scoped_models: Vec::new(),
             },
             open: Vec::new(),
             changes: Vec::new(),
@@ -2616,6 +2616,23 @@ mod tests {
         )
     }
 
+    /// Twenty `provider/model-nn` rows for the shrunk-overlay tests.
+    fn twenty_model_picker() -> crate::picker::PickerUi {
+        use crate::picker::{PickerAction, PickerOption};
+
+        let options: Vec<PickerOption> = (0..20)
+            .map(|n| PickerOption {
+                label: format!("model-{n:02}"),
+                action: PickerAction::Command(dal_core::Command::Run {
+                    name: "model".into(),
+                    args: format!("provider/model-{n:02}").into(),
+                    expected: None,
+                }),
+            })
+            .collect();
+        crate::picker::PickerUi::new("Pick a model", "", options)
+    }
+
     #[test]
     fn picker_overlay_rows_stay_within_region_budget_at_shrunk_sizes() {
         use crate::frame::{RegionBudget, RegionRequest};
@@ -2685,6 +2702,74 @@ mod tests {
         assert_eq!(budget.cap, 6);
 
         let rows = picker_over_scroll_path_rows(&picker);
+        assert!(
+            rows.len() <= budget.cap,
+            "shrunk live block must not exceed its cap: {} > {}",
+            rows.len(),
+            budget.cap
+        );
+        assert!(
+            rows.iter().any(|row| row.text.contains("model-")),
+            "the picker stays painted at shrunk sizes: {:?}",
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shrunk_live_block_keeps_picker_within_region_cap() {
+        use crate::frame::{RegionBudget, RegionRequest};
+
+        let picker = twenty_model_picker();
+
+        let budget = RegionBudget::allocate(
+            80,
+            10,
+            RegionRequest {
+                overlay: Some(picker.visible_len().max(1) + 2),
+                ..RegionRequest::default()
+            },
+        );
+        assert_eq!(budget.overlay, 5);
+        assert_eq!(budget.cap, 6);
+
+        let tool_entry = scroll_path_tool_entry();
+        let reasoning_entry = scroll_path_reasoning_entry();
+        let view = scroll_path_view(tool_entry, reasoning_entry);
+        let (_runtime, opts) = scroll_path_opts();
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .unwrap();
+        let dialog = crate::dialog::DialogUi::default();
+        let transcript = Transcript::default();
+        let viewport = crate::screen::fullscreen::Viewport::following();
+        let cache = RenderCache::default();
+        let live = crate::live::Live::default();
+        let input = super::FrameInput {
+            view: &view,
+            screen: crate::Screen::Inline,
+            composer: "",
+            cursor: 0,
+            exit_draft: None,
+            branch: None,
+            popup: &[],
+            live: &live,
+            dialog: &dialog,
+            picker: Some(&picker),
+            help: None,
+            signin: None,
+            transcript: &transcript,
+            viewport: &viewport,
+            opts: &opts,
+            kitty_keyboard: false,
+            theme: &theme,
+            diagram_settings: DiagramSettings::default(),
+            diagram_cache: &cache,
+        };
+        let rows = super::frame_rows(input, 80, 10);
         assert!(
             rows.len() <= budget.cap,
             "shrunk live block must not exceed its cap: {} > {}",
@@ -3056,5 +3141,24 @@ mod tests {
             }
             dialog.key(crate::keys::Key::new(KeyCode::Down, KeyModifiers::NONE));
         }
+    }
+
+    #[test]
+    fn the_collapsed_thinking_row_reads_the_copy_deck() {
+        let rows = entry_rows(
+            &scroll_path_reasoning_entry(),
+            80,
+            WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+        let thinking = rows
+            .iter()
+            .find(|row| row.text.contains("Thinking"))
+            .expect("the reasoning block commits its collapsed row");
+        assert_eq!(
+            thinking.text, "  Thinking · ctrl+o to show reasoning",
+            "reasoning carries no duration, so the deck's duration slot collapses"
+        );
     }
 }

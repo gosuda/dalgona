@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API thought-signature
-# round trip (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API thought-signature round trip over the `google-generative-ai` family.
 #
 # Exchange one is the first turn: a thought part (carrying its own
 # `thoughtSignature`, which replays via the `parts` carrier entry), then a

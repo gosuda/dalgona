@@ -1,6 +1,7 @@
+use futures::{FutureExt, StreamExt, stream};
+use std::future::Future;
 use std::time::Duration;
 
-use futures::{FutureExt, StreamExt, stream};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::transport::{MAX_FRAME_BYTES, ReadFrameError, StdioTransport, Transport};
@@ -415,22 +416,29 @@ async fn close_ends_the_peer_stream_while_a_writer_handle_lives() {
 /// alive, and a stalled peer would otherwise hold the close forever.
 #[tokio::test(start_paused = true)]
 async fn close_does_not_wait_for_a_write_in_flight() {
-    // Nothing reads the peer, so the write fills the pipe and stalls.
     let (writer_side, _stalled_peer) = tokio::io::duplex(16);
     let mut transport = Transport::Stdio(StdioTransport::new(tokio::io::empty(), writer_side));
     let writer = transport.writer();
     let frame = "x".repeat(1024);
 
     let mut write = std::pin::pin!(writer.write_frame(&frame));
-    let close = async {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        tokio::time::timeout(Duration::from_secs(1), transport.close()).await
-    };
-    let closed = tokio::select! {
-        _ = &mut write => panic!("the write cannot finish while nothing reads"),
-        closed = close => closed,
-    };
+    let stalled = std::future::poll_fn(|cx| match write.as_mut().poll(cx) {
+        std::task::Poll::Ready(output) => std::task::Poll::Ready(Some(output)),
+        std::task::Poll::Pending => std::task::Poll::Ready(None),
+    })
+    .await
+    .is_none();
+    assert!(stalled, "the write stalls while nothing reads");
+    let closed = tokio::time::timeout(Duration::from_secs(1), transport.close()).await;
     assert!(closed.is_ok(), "close returns while a write is stalled");
+    let late = tokio::time::timeout(Duration::from_secs(1), writer.write_frame("late"))
+        .await
+        .expect("the late write resolves instead of stalling");
+    assert_eq!(
+        late.unwrap_err().to_string(),
+        "transport error: connection is closed",
+        "writes stay closed after a close that skipped a stalled write"
+    );
 }
 
 /// A `401`/`403` upgrade denial over real loopback maps to `Auth` and is

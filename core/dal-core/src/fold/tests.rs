@@ -5119,7 +5119,7 @@ fn declared_fold_mirrors_job_records_into_session_jobs() {
 }
 #[cfg(test)]
 mod threshold_estimate_fallback {
-    //! ENG-17 C-05: the automatic-threshold trigger must estimate from the
+    //! The automatic-threshold trigger must estimate from the
     //! projected branch whenever measured usage is absent, stale (pre-dating a
     //! compaction), or tied to another model, using the shared token-estimation
     //! owner in `crate::tokens`. A change in the turn outcome (a `Compact`
@@ -6322,7 +6322,7 @@ mod capture_policy {
             replay_of(kind).map(RawJson::as_str),
             Some(r#"{"records":["r1"]}"#)
         );
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
     }
 
     /// Debug half of GAP-3c: the protocol violations trip their assertions.
@@ -6360,7 +6360,7 @@ mod capture_policy {
         ));
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(closing(
             vec![captured(first), refused(ReplayRefusal::NoRecords)],
@@ -6368,7 +6368,7 @@ mod capture_policy {
         ));
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(first));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(closing(
             vec![refused(ReplayRefusal::NoRecords), captured(second)],
@@ -6391,7 +6391,7 @@ mod capture_policy {
         let (_, _, out) = run(late(captured(r#"{"records":["late"]}"#)));
         let (_, kind) = only_assistant(&out);
         assert!(replay_of(kind).is_none());
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
 
         let (_, _, out) = run(late(refused(ReplayRefusal::NoRecords)));
         let (_, kind) = only_assistant(&out);
@@ -6409,7 +6409,7 @@ mod capture_policy {
         let (_, _, out) = run(response);
         let (_, kind) = only_assistant(&out);
         assert_eq!(replay_of(kind).map(RawJson::as_str), Some(early));
-        assert_eq!(turn_ends(&out), &[] as &[&TurnEndStop]);
+        assert_eq!(turn_ends(&out), Vec::<&TurnEndStop>::new());
     }
 }
 

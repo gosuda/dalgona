@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "vt.rs"]
+pub(crate) mod vt;
+
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
@@ -30,6 +33,8 @@ pub struct PtyProcess {
     /// child exits, and masters reads return EIO before the drain.
     slave: File,
     output: Vec<u8>,
+    columns: u16,
+    rows: u16,
 }
 
 impl PtyProcess {
@@ -65,7 +70,55 @@ impl PtyProcess {
             master,
             slave,
             output: Vec::new(),
+            columns,
+            rows,
         })
+    }
+
+    /// Starts `command` on a PTY as a foreground session leader.
+    ///
+    /// Sets the test-only controlling-terminal flag, then uses the existing
+    /// spawn path unchanged; existing `spawn` callers keep their behavior.
+    /// The gate-launched child consumes the flag at its process edge and
+    /// attaches the slave as its controlling terminal, so a later `\x03`
+    /// write travels as a real keyboard SIGINT.
+    pub fn spawn_controlling(command: &mut Command, columns: u16, rows: u16) -> io::Result<Self> {
+        command.env("DAL_TEST_CONTROLLING_PTY", "1");
+        Self::spawn(command, columns, rows)
+    }
+
+    /// Waits until the child owns the slave foreground process group.
+    ///
+    /// Proves the gate child completed the session/controlling-terminal
+    /// bootstrap: `tcgetpgrp` on the master descriptor equals the child pid.
+    /// A child that exits first, or a deadline without ownership, fails
+    /// explicitly instead of passing a keyboard-interrupt gate on plain
+    /// PTY bytes.
+    pub fn wait_for_foreground(&mut self, timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let child_id = i32::try_from(self.child.id())
+            .map_err(|_| io::Error::other("PTY child id does not fit in a process id"))?;
+        loop {
+            let foreground = rustix::termios::tcgetpgrp(&self.master).map_err(io::Error::from)?;
+            if foreground.as_raw_pid() == child_id {
+                return Ok(());
+            }
+            if let Some(status) = self.child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "PTY child exited with {status} before owning the terminal foreground",
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "PTY child {child_id} did not own the terminal foreground within {timeout:?}",
+                    ),
+                ));
+            }
+            self.read_available()?;
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Writes key or paste bytes to the real terminal input stream.
@@ -107,6 +160,31 @@ impl PtyProcess {
             }
             if read == 0 {
                 thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// Waits until `needle` appears on a rendered terminal row.
+    pub fn wait_for_screen_text(&mut self, needle: &str, timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut recorder = vt::VtRecorder::new(self.columns, self.rows);
+        let mut consumed = 0;
+        loop {
+            self.collect_for(Duration::from_millis(10))?;
+            recorder.feed(&self.output[consumed..]);
+            consumed = self.output.len();
+            if recorder
+                .screen_rows()
+                .iter()
+                .any(|line| line.contains(needle))
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("rendered PTY screen did not contain {needle:?}"),
+                ));
             }
         }
     }
@@ -233,7 +311,10 @@ impl PtyProcess {
                 ws_ypixel: 0,
             },
         )
-        .map_err(io::Error::from)
+        .map_err(io::Error::from)?;
+        self.columns = columns;
+        self.rows = rows;
+        Ok(())
     }
 
     /// Reads the slave-side terminal attributes, so a test can prove the

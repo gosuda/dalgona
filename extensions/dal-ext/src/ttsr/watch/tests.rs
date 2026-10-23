@@ -120,6 +120,14 @@ fn watch_with_gate(fixture: &Fixture, gate: &Gate, turn_value: u64, budget: Watc
     )
 }
 
+/// The persisted counter subset of a `rule_fired` body, decoded with the
+/// same typed codecs the journal uses.
+#[derive(serde::Deserialize)]
+struct BodyShape {
+    turn: TurnId,
+    entry: Option<EntryId>,
+}
+
 #[test]
 fn finish_after_interrupt_is_idempotent() {
     let fixture = fixture(&[("r", "condition: MARK\n", "Body.")]);
@@ -146,6 +154,48 @@ fn finish_after_interrupt_is_idempotent() {
         watcher.finish(),
         dal_core::StreamVerdict::Continue,
         "finishing an already-stopped watcher is idempotent"
+    );
+}
+
+#[test]
+fn stale_request_start_keeps_the_live_turn_budget() {
+    let fixture = fixture(&[("r", "condition: MARK\n", "Body.")]);
+    let mut cfg = fixture.cfg.clone();
+    cfg.max_retries = 1;
+    let factory = super::factory::TtsrWatchFactory::new(
+        Arc::new(fixture.set.clone()),
+        Arc::new(Mutex::new(Gate::default())),
+        cfg,
+        fixture.data.clone(),
+        Arc::new(|_| EditStyle::Replace),
+        None,
+    );
+    let session = SessionId::new_v7();
+    // The live turn spends its single interrupt.
+    let mut live = factory
+        .start(&TurnInfo::new(session, turn(2)))
+        .expect("a rule starts a watcher");
+    assert!(matches!(
+        live.feed(Channel::Text, "MARK"),
+        dal_core::StreamVerdict::Interrupt { .. }
+    ));
+    // A stale creation for an older turn neither steals an interrupt for
+    // itself nor resurrects the live turn's exhausted budget.
+    let mut stale = factory
+        .start(&TurnInfo::new(session, turn(1)))
+        .expect("a rule starts a watcher");
+    assert_eq!(
+        stale.feed(Channel::Text, "MARK"),
+        dal_core::StreamVerdict::Continue,
+        "a stale turn never spends the live turn's budget"
+    );
+    let mut retry = factory
+        .start(&TurnInfo::new(session, turn(2)))
+        .expect("a rule starts a watcher");
+    assert_eq!(
+        retry.feed(Channel::Text, "MARK"),
+        dal_core::StreamVerdict::Continue,
+        "the exhausted live-turn budget stays exhausted"
     );
 }
 
@@ -428,6 +478,17 @@ fn record_body_shape_and_key_order() {
             "{\"v\":1,\"type\":\"rule_fired\",\"at\":\"2026-09-26T10:15:40.001Z\",\"turn\":1,\"rule\":\"no-sleep\",\"action\":\"interrupt\",\"subject\":\"reply\",\"pattern\":\"\\\\bsleep\\\\s+[0-9]\",\"excerpt\":\"make test && sleep 5\",\"entry\":7}"
         ),
     );
+    let decoded: BodyShape = dal_core::RawJson::parse(
+        watch
+            .record_body(0, at, Some(entry(7)))
+            .as_deref()
+            .expect("valid fire index"),
+    )
+    .expect("body parses")
+    .decode_as()
+    .expect("counters decode with the persisted numeric codec");
+    assert_eq!(decoded.turn.get(), 1);
+    assert_eq!(decoded.entry.map(dal_core::EntryId::get), Some(7));
 }
 
 #[test]
@@ -443,6 +504,12 @@ fn record_body_report_has_null_entry() {
     assert!(body.contains("\"action\":\"report\""), "{body}");
     assert!(body.contains("\"entry\":null"), "{body}");
     assert!(body.contains("\"turn\":2"), "{body}");
+    let decoded: BodyShape = dal_core::RawJson::parse(&body)
+        .expect("body parses")
+        .decode_as()
+        .expect("counters decode with the persisted numeric codec");
+    assert_eq!(decoded.turn.get(), 2);
+    assert!(decoded.entry.is_none());
 }
 
 #[test]

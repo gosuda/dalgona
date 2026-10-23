@@ -63,7 +63,9 @@ pub(crate) async fn reap_detached(
         table.push_output(id, &tail);
     }
     let _ = table.settle_once(id, outcome, completion_tail);
-    let _ = table.flush().await;
+    if let Err(error) = table.flush().await {
+        tracing::warn!(target: "dalgon.agent", job = %id, error = %error, "job ledger flush failed");
+    }
 }
 
 async fn read_new(path: &Path, offset: &mut u64) -> Result<Vec<u8>, io::Error> {

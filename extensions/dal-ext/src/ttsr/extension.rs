@@ -68,6 +68,96 @@ impl SessionSetup for TtsrSetup {
     }
 }
 
+/// Derives the J-10 session-open failure reason without catalog or
+/// credential work of its own (the judge performs none): an explicit
+/// `[judge].model` that fails readiness names an unknown model, while a
+/// failing session route means the role has no usable credentials.
+fn judge_unresolved_reason(judge_config: &crate::judge::JudgeConfig) -> String {
+    if judge_config.model.is_empty() {
+        crate::judge::REASON_NO_CREDENTIALS.to_owned()
+    } else {
+        format!(r#"unknown judge model "{}""#, judge_config.model)
+    }
+}
+
+async fn open_judge_for_session(
+    cx: &SessionCx,
+    config: crate::judge::JudgeConfig,
+    unresolved: &str,
+) -> Result<crate::judge::Judge, HookError> {
+    crate::judge::Judge::open(crate::judge::JudgeOpen {
+        session: cx.session,
+        config,
+        services: Arc::clone(&cx.services),
+        caller: cx.caller.clone(),
+        session_route: cx.model.clone(),
+        session_model_id: cx.model_id.clone(),
+    })
+    .await
+    .map_err(|error| {
+        // J-10: an explicitly enabled judge role that cannot resolve fails
+        // session open with `judge unavailable: <reason>`. Only the
+        // readiness-soft `Unavailable` carries the derived reason; backend
+        // failures keep their own message so the caller can retry.
+        let message = if matches!(error, crate::judge::JudgeError::Unavailable) {
+            format!("{}{unresolved}", crate::judge::STARTUP_UNAVAILABLE_PREFIX)
+        } else {
+            error.to_string()
+        };
+        HookError::Failed {
+            message: message.into(),
+        }
+    })
+}
+
+// J-10: `auto` resolving off on a requested model emits exactly one
+// notice naming the reason; judge-fed features stay off with it. An
+// unrequested model resolves off silently: nothing failed.
+fn auto_off_notice(
+    gate: crate::judge::GateSetting,
+    model_requested: bool,
+    judge: &crate::judge::Judge,
+    unresolved: &str,
+) -> Option<Notice> {
+    if gate == crate::judge::GateSetting::Auto
+        && model_requested
+        && matches!(judge.state(), crate::judge::Gate::Off)
+    {
+        Some(Notice {
+            turn: None,
+            kind: "judge".into(),
+            text: crate::judge::AUTO_OFF_NOTE
+                .replace("{reason}", unresolved)
+                .into(),
+        })
+    } else {
+        None
+    }
+}
+
+fn push_rule_notes(
+    mut notices: Vec<Notice>,
+    product: RulesProduct,
+    rules: &RuleSet,
+    gate: JudgeGate,
+) -> Vec<Notice> {
+    if let Some(text) = load_problems_note(product, rules.skipped_count()) {
+        notices.push(Notice {
+            turn: None,
+            kind: "rules".into(),
+            text: text.into(),
+        });
+    }
+    if let JudgeGate::Disabled { note: Some(note) } = gate {
+        notices.push(Notice {
+            turn: None,
+            kind: "rules".into(),
+            text: note.into(),
+        });
+    }
+    notices
+}
+
 async fn open_session(
     deps: TtsrDeps,
     lanes: Option<Arc<Lanes>>,
@@ -77,18 +167,16 @@ async fn open_session(
         crate::judge::JudgeConfig::from_config(&cx.config).map_err(|error| HookError::Failed {
             message: format!("dal.toml: {error}").into(),
         })?;
-    let judge = crate::judge::Judge::open(crate::judge::JudgeOpen {
-        session: cx.session,
-        config: judge_config,
-        services: Arc::clone(&cx.services),
-        caller: cx.caller.clone(),
-        session_route: cx.model.clone(),
-        session_model_id: cx.model_id.clone(),
-    })
-    .await
-    .map_err(|error| HookError::Failed {
-        message: error.to_string().into(),
-    })?;
+    let judge_gate = judge_config.gate;
+    let judge_model_requested = !judge_config.model.is_empty() || cx.model.is_some();
+    let judge_unresolved = judge_unresolved_reason(&judge_config);
+    let judge = open_judge_for_session(&cx, judge_config, &judge_unresolved).await?;
+    let mut session_notices = Vec::new();
+    if let Some(notice) =
+        auto_off_notice(judge_gate, judge_model_requested, &judge, &judge_unresolved)
+    {
+        session_notices.push(notice);
+    }
 
     let complete = rules_for_session(&cx);
     let judge_ready = matches!(judge.state(), crate::judge::Gate::Ready { .. });
@@ -96,6 +184,7 @@ async fn open_session(
         cx.config.rules().judge,
         judge_ready,
         complete.judged_count(),
+        &judge_unresolved,
     )
     .map_err(|error| HookError::Failed {
         message: error.to_string().into(),
@@ -118,26 +207,12 @@ async fn open_session(
         Some(lanes) => factory.with_lane(lanes),
         None => factory,
     };
-    let mut notices = Vec::new();
     let product = if cx.product == "dalgona" {
         RulesProduct::Dalgona
     } else {
         RulesProduct::Dalgon
     };
-    if let Some(text) = load_problems_note(product, rules.skipped_count()) {
-        notices.push(Notice {
-            turn: None,
-            kind: "rules".into(),
-            text: text.into(),
-        });
-    }
-    if let JudgeGate::Disabled { note: Some(note) } = gate {
-        notices.push(Notice {
-            turn: None,
-            kind: "rules".into(),
-            text: note.into(),
-        });
-    }
+    let notices = push_rule_notes(session_notices, product, &rules, gate);
     let state: Arc<dyn Any + Send + Sync> = Arc::new(TtsrSessionState {
         rules,
         gate: repeat_gate,
@@ -270,14 +345,17 @@ impl SchemeResolver for RuleResolver {
     }
 }
 
-/// Builds the session-owned TTSR extension.
+/// Builds the session-owned TTSR extension with an explicit lane store.
 ///
 /// # Errors
 ///
 /// Returns [`RegistrationError`] when the host rejects the extension or one of
 /// its owned prompt, setup, or scheme registrations.
-pub fn extension(deps: TtsrDeps) -> Result<Extension, RegistrationError> {
-    let lanes = deps.lane.then(|| Arc::new(Lanes::new()));
+pub fn extension_with_lanes(
+    deps: TtsrDeps,
+    lanes: Option<Arc<Lanes>>,
+) -> Result<Extension, RegistrationError> {
+    let lanes = lanes.or_else(|| deps.lane.then(|| Arc::new(Lanes::new())));
     let mut builder = ExtensionBuilder::new("ttsr", env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
         .session_setup(TtsrSetup {
             deps,
@@ -298,6 +376,16 @@ pub fn extension(deps: TtsrDeps) -> Result<Extension, RegistrationError> {
             });
     }
     builder.build()
+}
+
+/// Builds the session-owned TTSR extension.
+///
+/// # Errors
+///
+/// Returns [`RegistrationError`] when the host rejects the extension or one of
+/// its owned prompt, setup, or scheme registrations.
+pub fn extension(deps: TtsrDeps) -> Result<Extension, RegistrationError> {
+    extension_with_lanes(deps, None)
 }
 
 #[cfg(test)]

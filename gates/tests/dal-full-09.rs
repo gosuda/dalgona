@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-const INVENTORIES: [(&str, &[&str]); 7] = [
+const INVENTORIES: [(&str, &[&str]); 8] = [
     (
         "loop-headless",
         &[
@@ -85,6 +85,7 @@ const INVENTORIES: [(&str, &[&str]); 7] = [
         ],
     ),
     ("login", &["login-cli-pty-01", "login-tui-01"]),
+    ("guard-spill", &["guard-spill-01"]),
 ];
 
 const RELEASE_TARGETS: [&str; 4] = [
@@ -207,7 +208,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn has_row_number(bytes: &[u8]) -> bool {
     let prefix = *b"row ";
     for (index, window) in bytes.windows(prefix.len()).enumerate() {
-        if window != prefix {
+        if !window.eq_ignore_ascii_case(&prefix) {
             continue;
         }
         // A citation token cannot start inside a longer word: model names
@@ -220,9 +221,117 @@ fn has_row_number(bytes: &[u8]) -> bool {
         while bytes.get(end).is_some_and(u8::is_ascii_digit) {
             end += 1;
         }
-        if end > start && !matches!(bytes.get(end), Some(b'x' | b'X')) {
+        if end == start || matches!(bytes.get(end), Some(b'x' | b'X')) {
+            continue;
+        }
+        if cites_continuation(bytes, end) {
             return true;
         }
+        if cites_with_verb(bytes, index) {
+            return true;
+        }
+        if is_terminal_coordinate(bytes, index) {
+            continue;
+        }
+        return true;
     }
     false
+}
+
+fn cites_continuation(bytes: &[u8], end: usize) -> bool {
+    matches!(bytes.get(end), Some(b'/' | b'-' | b':'))
+}
+
+fn cites_with_verb(bytes: &[u8], index: usize) -> bool {
+    const VERBS: [&[u8]; 7] = [
+        b"refer",
+        b"refers",
+        b"reference",
+        b"references",
+        b"see",
+        b"specified",
+        b"defined",
+    ];
+    const WINDOW: usize = 32;
+    let from = index.saturating_sub(WINDOW);
+    VERBS
+        .iter()
+        .any(|verb| contains_word(&bytes[from..index], verb))
+}
+
+fn is_terminal_coordinate(bytes: &[u8], index: usize) -> bool {
+    const HINTS: [&[u8]; 10] = [
+        b"art",
+        b"screen",
+        b"caret",
+        b"block",
+        b"terminal",
+        b"frame",
+        b"cell",
+        b"cursor",
+        b"scroll",
+        b"column",
+    ];
+    const WINDOW: usize = 32;
+    if !preceded_by_locator(bytes, index) {
+        return false;
+    }
+    let from = index.saturating_sub(WINDOW);
+    HINTS
+        .iter()
+        .any(|hint| contains_word(&bytes[from..index], hint))
+}
+
+fn preceded_by_locator(bytes: &[u8], index: usize) -> bool {
+    const LOCATORS: [&[u8]; 2] = [b"at ", b"to "];
+    LOCATORS.iter().any(|locator| {
+        index >= locator.len()
+            && bytes[index - locator.len()..index].eq_ignore_ascii_case(locator)
+            && (index == locator.len() || !bytes[index - locator.len() - 1].is_ascii_alphanumeric())
+    })
+}
+
+fn contains_word(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .enumerate()
+        .any(|(at, window)| {
+            window.eq_ignore_ascii_case(needle)
+                && (at == 0 || !haystack[at - 1].is_ascii_alphanumeric())
+                && (at + needle.len() == haystack.len()
+                    || !haystack[at + needle.len()].is_ascii_alphanumeric())
+        })
+}
+
+#[test]
+fn row_citation_check_tells_citations_from_terminal_coordinates() {
+    let per = ["per row ", "128"].concat();
+    assert!(has_row_number(per.as_bytes()));
+    let capital = ["Row ", "131/132 and fork U-1"].concat();
+    assert!(has_row_number(capital.as_bytes()));
+    let by = ["closed by row ", "132"].concat();
+    assert!(has_row_number(by.as_bytes()));
+    let paren = ["planned (row ", "124)"].concat();
+    assert!(has_row_number(paren.as_bytes()));
+    let glued = ["that row ", "90 never lists"].concat();
+    assert!(has_row_number(glued.as_bytes()));
+    let refer_to = ["refer to row ", "128"].concat();
+    assert!(has_row_number(refer_to.as_bytes()));
+    let specified_at = ["specified at row ", "128"].concat();
+    assert!(has_row_number(specified_at.as_bytes()));
+    let see_form = ["see row ", "9 for the shape"].concat();
+    assert!(has_row_number(see_form.as_bytes()));
+    let colon_site = ["amend the sites to row ", "96: placeholders"].concat();
+    assert!(has_row_number(colon_site.as_bytes()));
+    let art = ["shifts the art to row ", "1"].concat();
+    assert!(!has_row_number(art.as_bytes()));
+    let screen = ["scrolled off the screen starts at row ", "1"].concat();
+    assert!(!has_row_number(screen.as_bytes()));
+    let model = ["Narrow ", "5 wide"].concat();
+    assert!(!has_row_number(model.as_bytes()));
+    let dims = ["a row ", "80x24 grid"].concat();
+    assert!(!has_row_number(dims.as_bytes()));
 }

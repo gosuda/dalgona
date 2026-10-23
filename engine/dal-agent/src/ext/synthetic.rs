@@ -9,13 +9,14 @@
 //! journaling target and no member sessions.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use dal_core::{
-    CallId, ContextItem, InferFailure, Inference, InferredPurpose, ModelId, ModelInfo, ModelPrice,
-    ModelRequest, ModelRoute, ModelToolSpec, Owner, Part, RawJson, ScopeSpec, ThinkingLevel, Usage,
-    Workspace, check_synthetic_chain,
+    CallId, ContextItem, InferFailure, Inference, InferredPurpose, JournalPart, ModelId, ModelInfo,
+    ModelPrice, ModelRequest, ModelRoute, ModelToolSpec, Owner, Part, PrivateEffectId,
+    PrivateLoopId, PrivateOutcome, RawJson, ScopeSpec, ThinkingLevel, TurnId, Usage, Workspace,
+    check_synthetic_chain,
 };
 use dal_provider::{
     CatalogEntry, EventStream, Listing, ProviderError, StreamEvent as ProviderEvent,
@@ -35,6 +36,7 @@ use crate::host::HostShared;
 use crate::host::ops::request_reference;
 use crate::session::SessionHandle;
 use crate::session::contain::{contained, crashed_tool};
+use crate::session::continuation::ContinuationSlot;
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 
 mod relay;
@@ -89,14 +91,17 @@ pub(crate) struct Found {
 
 /// Resolves `reference` (one alias expansion first) to a registered model.
 pub(crate) fn find(shared: &HostShared, reference: &str) -> Option<Found> {
-    let target = shared
+    let target: String = shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .get(reference)
-        .map_or(reference, AsRef::as_ref);
+        .map_or(reference, AsRef::as_ref)
+        .to_owned();
     let generation = shared.generation.borrow().clone();
     let (ext, record) = {
-        let (ext, record) = generation.model(target)?;
+        let (ext, record) = generation.model(&target)?;
         (ext, record.clone())
     };
     Some(Found {
@@ -239,15 +244,6 @@ fn failed(failure: InferFailure) -> EventStream {
     EventStream::new(stream::iter(items), || {})
 }
 
-fn origin_text(origin: dal_core::Origin) -> &'static str {
-    match origin {
-        dal_core::Origin::Builtin => "builtin",
-        dal_core::Origin::Bundled => "bundled",
-        dal_core::Origin::User => "user",
-        _ => "unknown",
-    }
-}
-
 /// Journals each usage an inner call reports while a session-backed
 /// synthetic run is on the stack; every other stream passes through.
 pub(crate) fn observe(inner: EventStream) -> EventStream {
@@ -311,9 +307,11 @@ pub(crate) async fn open(
     let shared = &deps.host.shared;
     let session = session_parts(deps);
     let extension = &found.generation.extensions[found.ext];
+    // Share the Origin renderer with the private-outcomes read filter, so
+    // owner equality cannot drift between write and read.
     let who = Owner::Extension {
         name: extension.name().into(),
-        origin: origin_text(extension.origin()).into(),
+        origin: crate::ext::services::origin_text_shared(extension.origin()).into(),
     };
     let next = Lineage {
         chain,
@@ -351,7 +349,7 @@ pub(crate) async fn open(
         .as_ref()
         .and_then(|script| script.captured_turn());
     let mint = |kind| {
-        Caller::new(
+        let caller = Caller::new(
             name.clone(),
             extension.origin(),
             extension.inject(),
@@ -359,7 +357,14 @@ pub(crate) async fn open(
             kind,
             turn,
         )
-        .with_extension(extension)
+        .with_extension(extension);
+        // Carry the invocation owner's Weak (turn or relay-stream holder)
+        // into every synthetic caller; minting here would fork an idle slot
+        // beside the live conversation.
+        match deps.continuation.clone() {
+            Some(slot) => caller.with_continuation(slot),
+            None => caller,
+        }
     };
     let token = cancel.child_token();
     let guard = token.clone().drop_guard();
@@ -367,6 +372,7 @@ pub(crate) async fn open(
         deps: deps.clone(),
         caller: mint(CallerKind::Tool),
         handler: mint(CallerKind::Handler),
+        turn,
         lineage: next.clone(),
         services,
         script_services: session.as_ref().and_then(|parts| parts.script.clone()),
@@ -419,6 +425,7 @@ struct Run {
     deps: RequestDeps,
     caller: Caller,
     handler: Caller,
+    turn: Option<TurnId>,
     lineage: Lineage,
     services: Arc<dyn Services>,
     script_services: Option<Arc<super::services::SessionServices>>,
@@ -430,31 +437,49 @@ struct Run {
     cancel: CancellationToken,
 }
 
-fn lookup_price(shared: &HostShared, key: &str) -> Option<ModelPrice> {
-    shared
-        .config
-        .price_for_model(key)
-        .cloned()
-        .or_else(|| dal_provider::compiled_price(key))
-}
-
 pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelPrice> {
     let reference = request_reference(route);
-    if let Some(price) = lookup_price(shared, &reference) {
+    if let Some(price) = shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .price_for_model(&reference)
+        .cloned()
+    {
         return Some(price);
     }
-    let catalog = shared.cached_catalog()?;
-    let aliases: Vec<(Box<str>, Box<str>)> = shared
-        .config
-        .aliases()
-        .iter()
-        .map(|(name, target)| (name.clone(), target.clone()))
-        .collect();
-    let resolved = dal_provider::resolve(&catalog, &aliases, &reference).ok()?;
-    lookup_price(
-        shared,
-        &format!("{}/{}", resolved.provider, resolved.entry.id),
-    )
+    let catalog = shared.cached_catalog();
+    let resolved = catalog.as_ref().and_then(|catalog| {
+        let aliases: Vec<(Box<str>, Box<str>)> = shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aliases()
+            .iter()
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect();
+        dal_provider::resolve(catalog, &aliases, &reference).ok()
+    });
+    let canonical = resolved
+        .as_ref()
+        .map(|r| format!("{}/{}", r.provider, r.entry.id));
+    if let Some(price) = canonical.as_deref().and_then(|key| {
+        shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .price_for_model(key)
+            .cloned()
+    }) {
+        return Some(price);
+    }
+    if let Some(price) = resolved.as_ref().and_then(|r| r.entry.price.as_ref()) {
+        return Some(price.clone());
+    }
+    if let Some(price) = dal_provider::compiled_price(&reference) {
+        return Some(price);
+    }
+    canonical.as_deref().and_then(dal_provider::compiled_price)
 }
 
 pub(crate) async fn collect(mut stream: EventStream) -> Result<Inference, InferFailure> {
@@ -557,10 +582,45 @@ impl ModelCxRuntime for Run {
                     .scope(forward, infer_stream(&deps, request, &cancel))
                     .await);
             }
-            Ok(private_loop(self, request, private, forward))
+            // Birth the private loop before its first round on the outer
+            // session journal (session-backed Cursor forwards only). The
+            // forward-scoped lineage above drops the journal for
+            // non-Synthetic inner models, so it cannot serve here. A failed
+            // birth ends the forward before any round opens or effect runs.
+            let ploop = PrivateLoopId::new_v7();
+            if is_cursor_request(&request.model)
+                && let (Some(handle), Some(who)) =
+                    (self.lineage.journal.clone(), self.lineage.who.clone())
+                && let Err(error) = handle.private_loop_born(ploop, who, self.turn).await
+            {
+                return Ok(failed(InferFailure::Fatal {
+                    message: error.to_string().into(),
+                    fix: None,
+                }));
+            }
+            Ok(private_loop(self, request, private, forward, ploop))
         })
     }
 }
+
+/// Whether a forward request addresses the Cursor family: the only family
+/// with a run conversation behind `open_step`. Every other family keeps the
+/// one-shot path byte-identical and journals no private records.
+fn is_cursor_request(route: &ModelRoute) -> bool {
+    matches!(route, ModelRoute::Api { family, .. } if *family == dal_core::Family::Cursor)
+}
+
+/// A terminal request failure naming a continuation misuse. The parked run
+/// is left for the owner to release; only this round ends here.
+fn invalid_request(message: &str) -> ProviderError {
+    ProviderError::InvalidRequest {
+        message: message.into(),
+    }
+}
+
+/// The in-memory error of a private call whose start never became durable.
+/// The effect never runs; nothing is stashed and nothing is responded.
+const CLOSED_PRIVATE_CALL: &str = "session closed before private call";
 
 struct Round {
     text: String,
@@ -568,6 +628,8 @@ struct Round {
     absorbed: HashSet<String>,
     private: Vec<dal_provider::ToolCall>,
     session: Vec<dal_provider::ToolCall>,
+    /// The step's full (id, name) cover in decoded order, parked verbatim.
+    cover: Vec<(CallId, Box<str>)>,
     done: bool,
 }
 
@@ -579,6 +641,7 @@ impl Round {
             absorbed: HashSet::new(),
             private: Vec::new(),
             session: Vec::new(),
+            cover: Vec::new(),
             done: false,
         }
     }
@@ -588,6 +651,16 @@ struct Loop {
     deps: RequestDeps,
     cancel: CancellationToken,
     lineage: Lineage,
+    /// The journal-stable loop identity, birthed in `forward` before the
+    /// first round. Distinct from every wire call id.
+    ploop: PrivateLoopId,
+    /// The owning turn for private records, when the loop runs inside one.
+    turn: Option<TurnId>,
+    /// The durability target for this round's private records: the outer
+    /// session journal with its owner, fixed at construction for Cursor
+    /// loops. `None` on memory-only legs (relay, non-Cursor families,
+    /// owner-less loops).
+    journal: Option<(SessionHandle, Owner)>,
     request: ModelRequest,
     tools: Vec<Arc<dyn Tool>>,
     private_cx: PrivateCx,
@@ -601,11 +674,20 @@ struct Loop {
     finished: bool,
 }
 
+/// The three sinks one private call writes to: the in-memory assistant
+/// parts, the in-memory tool results, and the parked slot stash.
+struct PrivateCallSinks<'a> {
+    parts: &'a mut Vec<dal_core::AssistantPart>,
+    results: &'a mut Vec<ContextItem>,
+    slot: Option<&'a ContinuationSlot>,
+}
+
 fn private_loop(
     run: &Run,
     mut request: ModelRequest,
     private: &[PrivateTool],
     lineage: Lineage,
+    ploop: PrivateLoopId,
 ) -> EventStream {
     let tools: Vec<Arc<dyn Tool>> = private.iter().map(|tool| Arc::clone(&tool.0)).collect();
     let declared: std::collections::HashSet<Box<str>> =
@@ -641,10 +723,26 @@ fn private_loop(
         }
     }));
     request.tools = specs.into();
+    // Durability target, fixed for the loop's lifetime: the outer session
+    // journal with its owner, Cursor-family only. Read from the run's
+    // lineage, never the forward-scoped one (which drops the journal for
+    // non-Synthetic inner models): a Cursor-directed forward still describes
+    // the session turn's loop.
+    let journal = if is_cursor_request(&request.model) {
+        match (&run.lineage.journal, &run.lineage.who) {
+            (Some(handle), Some(who)) => Some((handle.clone(), who.clone())),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let state = Loop {
         deps: run.deps.clone(),
         cancel: run.cancel.clone(),
         lineage,
+        ploop,
+        turn: run.turn,
+        journal,
         request,
         tools,
         private_cx: PrivateCx {
@@ -734,6 +832,12 @@ impl Loop {
             }
             ProviderEvent::Replay { payload } => self.round.replays.push(payload.item),
             ProviderEvent::ToolCallsDone { calls } => {
+                // Retain the decoded cover order for parking: the partition
+                // below must not reorder what the step announced.
+                self.round.cover = calls
+                    .iter()
+                    .map(|call| (CallId::new(call.id.as_str()), call.name.as_str().into()))
+                    .collect();
                 let (private, session) = calls
                     .into_iter()
                     .partition(|call| self.is_private(&call.name));
@@ -743,6 +847,14 @@ impl Loop {
             }
             ProviderEvent::Usage { usage } => self.add_usage(usage),
             ProviderEvent::Stop { reason } => self.stop(reason).await,
+            // An inner provider's `MessageReplay` capture belongs to the
+            // inner entry only. The relay has no single closing response to
+            // bind it to: forwarding it would emit the capture ahead of the
+            // relay's deferred `Replay`/`ToolCallsDone`/`Usage` and journal
+            // it on the synthetic route's entry, and a second round's
+            // capture would trip the outer stream's at-most-once guard. Drop
+            // it here; the relay's own `Replay` emission is unchanged.
+            ProviderEvent::MessageReplay { .. } => {}
             other => self.queue.push_back(Ok(other)),
         }
     }
@@ -776,11 +888,76 @@ impl Loop {
     }
 
     async fn stop(&mut self, reason: dal_provider::StopReason) {
+        #[cfg(test)]
+        let mut witness = decision_witness::Pending::new(self.private_cx.session);
+        // The slot that `open_step` installed this step's conversation into,
+        // when this round addresses the Cursor family through a live owner.
+        // `None` on every other path (other families, service-only
+        // inference, a released owner): the one-shot shape below, untouched.
+        let slot = if is_cursor_request(&self.request.model) {
+            self.deps.continuation.as_ref().and_then(Weak::upgrade)
+        } else {
+            None
+        };
         if self.round.private.is_empty() {
+            // Session-only (or call-free) round: park the session cover so a
+            // later respond finds exactly the set this round's emission
+            // dispatches. The driver responds before its next generation
+            // step; the loop never responds on this path.
+            if matches!(reason, dal_provider::StopReason::ToolUse)
+                && !self.round.session.is_empty()
+                && let Some(slot) = &slot
+                && let Err(error) = slot.park(std::mem::take(&mut self.round.cover))
+            {
+                self.queue
+                    .push_back(Err(invalid_request(&error.to_string())));
+                self.finished = true;
+                return;
+            }
             self.emit_final(reason);
             return;
         }
-        self.pending_session.append(&mut self.round.session);
+        // Private-carrying round below this point.
+        let parked: Option<Arc<ContinuationSlot>> =
+            if matches!(reason, dal_provider::StopReason::ToolUse) {
+                slot
+            } else {
+                None
+            };
+        let Some(slot) = parked else {
+            // One-shot shape: service-only Cursor, a dead owner, a foreign
+            // family, or a stop the run cannot park on. Durability still
+            // applies (journaled starts/ends, in-memory results); nothing is
+            // stashed or responded, and the next `open_step` rules on the
+            // run's honest state. Today's path, untouched.
+            self.pending_session.append(&mut self.round.session);
+            if self.rounds >= PRIVATE_ROUNDS {
+                self.finished = true;
+                self.queue
+                    .push_back(Err(ProviderError::Synthetic(failure_of(
+                        ModelError::PrivateRounds,
+                    ))));
+                return;
+            }
+            self.rounds += 1;
+            self.run_private(
+                None,
+                #[cfg(test)]
+                &mut witness,
+            )
+            .await;
+            self.current = None;
+            return;
+        };
+        // Slotted ToolUse round: park the full step cover in decoded order
+        // before any effect runs. Any failure below leaves the run for the
+        // owner; this round ends here.
+        if let Err(error) = slot.park(std::mem::take(&mut self.round.cover)) {
+            self.queue
+                .push_back(Err(invalid_request(&error.to_string())));
+            self.finished = true;
+            return;
+        }
         if self.rounds >= PRIVATE_ROUNDS {
             self.finished = true;
             self.queue
@@ -790,8 +967,42 @@ impl Loop {
             return;
         }
         self.rounds += 1;
-        self.run_private().await;
-        self.current = None;
+        self.run_private(
+            Some(slot.as_ref()),
+            #[cfg(test)]
+            &mut witness,
+        )
+        .await;
+        if self.finished {
+            // A stash desync failed the round inside `run_private`; its error
+            // is already queued. The parked cover stays for the owner.
+            return;
+        }
+        if self.round.session.is_empty() {
+            // All-private round: the stash holds the exact cover, so resume
+            // the same parked run instead of opening a second connection.
+            // The staged stream returns through the next `open_round`; only
+            // the error surfaces here. No retry: this round's inputs are
+            // deterministic, so a failed cover fails identically on
+            // re-supply, and a fired cancel refires; the driver's
+            // pre-next-step respond fails the turn closed on whatever cover
+            // remains.
+            if let Err(error) = slot.respond(Vec::new(), &self.cancel).await {
+                self.queue.push_back(Err(error));
+                self.finished = true;
+                return;
+            }
+            self.current = None;
+            return;
+        }
+        // Mixed round: the private stash stays in the slot and the session
+        // calls emit once for the outer actor, which dispatches, journals,
+        // and responds before its next generation step. This round ends
+        // here; nothing is responded in the loop and no result is donated to
+        // a new loop. `pending_session` is empty on this path (every
+        // session-carrying round finishes), so the emission below carries
+        // exactly the round's session set, once.
+        self.emit_final(reason);
     }
 
     fn emit_final(&mut self, reason: dal_provider::StopReason) {
@@ -815,7 +1026,122 @@ impl Loop {
         self.finished = true;
     }
 
-    async fn run_private(&mut self) {
+    /// Executes one round's private calls with durable-first ordering.
+    ///
+    /// `slot` is `Some` only on a parked slotted round: every settled end is
+    /// stashed before the loop responds. `None` keeps every result in memory
+    /// (one-shot shape, relay memory-only legs, or a stop the run cannot
+    /// park on). A stashing desync queues the error and finishes the loop;
+    /// the parked cover stays for the owner.
+    /// Runs one private call with durable-first ordering: journal the start,
+    /// run the effect unless the start was rejected, journal the end, then
+    /// stash into the slot.
+    ///
+    /// Returns true when a stash desync finished the loop; the error is
+    /// already queued and the parked cover stays for the owner.
+    async fn run_one_private_call(
+        &mut self,
+        call: dal_provider::ToolCall,
+        journal: Option<&(SessionHandle, Owner)>,
+        sinks: PrivateCallSinks<'_>,
+        #[cfg(test)] witness: &mut decision_witness::Pending,
+    ) -> bool {
+        let PrivateCallSinks {
+            parts,
+            results,
+            slot,
+        } = sinks;
+        let args = match &call.args {
+            ToolArgs::Parsed(raw) => raw.clone(),
+            _ => RawJson::null(),
+        };
+        let wire = CallId::new(call.id.as_str());
+        let name: Box<str> = call.name.as_str().into();
+        parts.push(dal_core::AssistantPart::ToolCall {
+            call: wire.clone(),
+            name: name.clone(),
+            args: args.clone(),
+            replay: None,
+        });
+        let token = PrivateEffectId::new_v7();
+        let started = match journal {
+            Some((handle, who)) => Some(
+                handle
+                    .private_start(
+                        self.ploop,
+                        token,
+                        who.clone(),
+                        self.turn,
+                        self.rounds,
+                        wire.clone(),
+                        name.clone(),
+                        args.clone(),
+                    )
+                    .await,
+            ),
+            None => None,
+        };
+        let started_ok = matches!(started, Some(Ok(())));
+        let (is_error, text) = match started {
+            // The start is not durable, so the effect never runs: an
+            // honest in-memory error, never stashed, never responded.
+            // The parked cover stays open for the owner to release.
+            Some(Err(_)) => (true, CLOSED_PRIVATE_CALL.to_owned()),
+            _ => call_private(&self.tools, &self.private_cx, &self.workspace, &call, &args).await,
+        };
+        // One shared text for the three sinks (in-memory result, durable
+        // end, slot stash): two small copies on slotted paths only, so
+        // no sink aliases another.
+        let text: Box<str> = text.into();
+        results.push(ContextItem::ToolResult {
+            call: wire.clone(),
+            name: name.clone(),
+            is_error,
+            parts: vec![Part::Text { text: text.clone() }],
+        });
+        // End-then-stash, in that order, and only on a durable start:
+        // the actor rejects an end without its start, so attempting one
+        // wastes a roundtrip. A failed end keeps the row Started
+        // (repaired Indeterminate at the next open) and the result out
+        // of the stash; the cover fails closed downstream.
+        if let Some((handle, _)) = journal {
+            if !started_ok {
+                #[cfg(test)]
+                witness.note(
+                    wire.as_str(),
+                    decision_witness::PrivateDecision::StartRejected,
+                );
+                return false;
+            }
+            let end = PrivateOutcome::Settled {
+                is_error,
+                parts: vec![JournalPart::Text { text: text.clone() }],
+            };
+            if handle.private_end(self.ploop, token, end).await.is_err() {
+                #[cfg(test)]
+                witness.note(
+                    wire.as_str(),
+                    decision_witness::PrivateDecision::EndRejected,
+                );
+                return false;
+            }
+        }
+        if let Some(slot) = slot
+            && let Err(error) = slot.stash(wire, name, is_error, vec![Part::Text { text }])
+        {
+            self.queue
+                .push_back(Err(invalid_request(&error.to_string())));
+            self.finished = true;
+            return true;
+        }
+        false
+    }
+
+    async fn run_private(
+        &mut self,
+        slot: Option<&ContinuationSlot>,
+        #[cfg(test)] witness: &mut decision_witness::Pending,
+    ) {
         let calls = std::mem::take(&mut self.round.private);
         let source = dal_core::ReplaySource {
             family: family_of(&self.request.model),
@@ -834,26 +1160,29 @@ impl Loop {
                 replay: Some(replay),
             });
         }
+        // Durability target fixed at construction (`None` on memory-only
+        // legs): cloned once per round, so no lineage borrow crosses the
+        // effect awaits below.
+        let journal = self.journal.clone();
         let mut results = Vec::new();
         for call in calls {
-            let args = match &call.args {
-                ToolArgs::Parsed(raw) => raw.clone(),
-                _ => RawJson::null(),
+            let sinks = PrivateCallSinks {
+                parts: &mut parts,
+                results: &mut results,
+                slot,
             };
-            parts.push(dal_core::AssistantPart::ToolCall {
-                call: CallId::new(call.id.as_str()),
-                name: call.name.as_str().into(),
-                args: args.clone(),
-                replay: None,
-            });
-            let (is_error, text) =
-                call_private(&self.tools, &self.private_cx, &self.workspace, &call, &args).await;
-            results.push(ContextItem::ToolResult {
-                call: CallId::new(call.id.as_str()),
-                name: call.name.as_str().into(),
-                is_error,
-                parts: vec![Part::Text { text: text.into() }],
-            });
+            if self
+                .run_one_private_call(
+                    call,
+                    journal.as_ref(),
+                    sinks,
+                    #[cfg(test)]
+                    &mut *witness,
+                )
+                .await
+            {
+                return;
+            }
         }
         let mut context: Vec<ContextItem> = self.request.context.iter().cloned().collect();
         context.push(ContextItem::Assistant {
@@ -879,12 +1208,14 @@ async fn call_private(
     if let Err(error) = tool.classify(args, workspace) {
         return (true, error.to_string());
     }
-    let cx = private_cx.mint(CallId::new(call.id.as_str()));
+    let (cx, owner) = private_cx.mint(CallId::new(call.id.as_str()));
     let tool_call = ToolCall {
         id: CallId::new(call.id.as_str()),
         args: args.clone(),
     };
-    match contained(async move { tool.run(tool_call, cx).await }).await {
+    let outcome = contained(async move { tool.run(tool_call, cx).await }).await;
+    owner.release_if_live();
+    match outcome {
         Ok(ToolOutcome::Ok(output)) => (false, output.to_string()),
         Ok(ToolOutcome::Err(error)) => (true, error.to_string()),
         Ok(ToolOutcome::Interrupted) => (true, "Tool call interrupted by user.".into()),
@@ -897,5 +1228,70 @@ fn family_of(route: &ModelRoute) -> dal_core::Family {
     match route {
         ModelRoute::Api { family, .. } => *family,
         ModelRoute::Synthetic { .. } | ModelRoute::Harness { .. } => dal_core::Family::Chat,
+    }
+}
+
+/// Test-only observation of the loop's branch decision for one private call.
+///
+/// The loop records a decision only when a receipt was rejected and the call
+/// leaves its branch without stash or respond. The record is keyed by session
+/// and call. It never touches the journal, the wire, or any effect.
+#[cfg(test)]
+pub(crate) mod decision_witness {
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex, MutexGuard, PoisonError},
+    };
+
+    use dal_core::SessionId;
+
+    /// Why a private call's branch ended without stash or respond.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum PrivateDecision {
+        /// The start receipt was rejected, so the effect never ran.
+        StartRejected,
+        /// The effect ran, but its settled end was rejected; nothing was stashed.
+        EndRejected,
+    }
+
+    static DECISIONS: LazyLock<Mutex<HashMap<(SessionId, String), PrivateDecision>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn decisions() -> MutexGuard<'static, HashMap<(SessionId, String), PrivateDecision>> {
+        DECISIONS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The decisions one round step reached, published when the step ends.
+    pub(crate) struct Pending {
+        session: SessionId,
+        decisions: Vec<(String, PrivateDecision)>,
+    }
+
+    impl Pending {
+        pub(crate) fn new(session: SessionId) -> Self {
+            Self {
+                session,
+                decisions: Vec::new(),
+            }
+        }
+
+        pub(crate) fn note(&mut self, call: &str, decision: PrivateDecision) {
+            self.decisions.push((call.to_owned(), decision));
+        }
+    }
+
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            let mut table = decisions();
+            for (call, decision) in self.decisions.drain(..) {
+                table.insert((self.session, call), decision);
+            }
+        }
+    }
+
+    /// Takes the decision recorded for `call` in `session`, if one was recorded.
+    #[cfg(test)]
+    pub(crate) fn take(session: SessionId, call: &str) -> Option<PrivateDecision> {
+        decisions().remove(&(session, call.to_owned()))
     }
 }

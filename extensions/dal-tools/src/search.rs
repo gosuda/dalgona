@@ -437,9 +437,13 @@ impl Search {
         call: &Call<'_>,
     ) -> Result<(String, Vec<SeenRow>, Page), SearchError> {
         match args.mode {
-            Mode::Symbol => symbol_mode(self, args, call)
-                .await
-                .map(|(text, seen, page)| (text, seen, Page::Symbols(page))),
+            Mode::Symbol => {
+                #[cfg(feature = "symbols")]
+                let outcome = symbol_mode(self, args, call).await;
+                #[cfg(not(feature = "symbols"))]
+                let outcome = symbol_mode(self, args, call);
+                outcome.map(|(text, seen, page)| (text, seen, Page::Symbols(page)))
+            }
             Mode::Find | Mode::Grep => {
                 if args.pattern.is_empty() {
                     return Err(SearchError::msg(EMPTY_PATTERN));
@@ -577,8 +581,8 @@ fn symbol_mode(
     _search: &Search,
     _args: &SearchArgs,
     _call: &Call<'_>,
-) -> std::future::Ready<Result<(String, Vec<SeenRow>, SymbolPage), SearchError>> {
-    std::future::ready(Err(SearchError::msg(SYMBOL_OFF)))
+) -> Result<(String, Vec<SeenRow>, SymbolPage), SearchError> {
+    Err(SearchError::msg(SYMBOL_OFF))
 }
 
 /// Applies a validated rerank order before the `limit` cut, renders, and

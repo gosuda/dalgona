@@ -87,3 +87,73 @@ fn updating_tui_diagrams_rejects_invalid_reloaded_documents() {
     ));
     assert!(!config.tui().diagrams);
 }
+
+#[test]
+fn updating_default_model_preserves_comments_and_reloads() {
+    let mut config = load(ConfigProduct::Dalgon, "").expect("config loads");
+    let updated = config
+        .update_default_model(
+            "beta/gpt-4o",
+            Some("# kept user comment\nmodel = \"alpha/gpt-4o\"\n\n[tui]\n# keep this note\ndiagrams = false\n"),
+        )
+        .expect("model default updates");
+    assert!(updated.contains("# kept user comment"));
+    assert!(updated.contains("model = \"beta/gpt-4o\""));
+    assert!(!updated.contains("model_route"));
+    assert!(!updated.contains("openai-chat/gpt-4o"));
+    assert!(updated.contains("# keep this note"));
+    let reloaded = load(ConfigProduct::Dalgon, &updated).expect("updated TOML parses");
+    assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+    assert_eq!(config.model(), Some("beta/gpt-4o"));
+}
+
+#[test]
+fn updating_default_model_creates_the_key_when_missing() {
+    let mut config = load(ConfigProduct::Dalgon, "").expect("config loads");
+    let updated = config
+        .update_default_model("beta/gpt-4o", None)
+        .expect("model default creates the key");
+    assert!(updated.contains("model = \"beta/gpt-4o\""));
+    assert!(!updated.contains("model_route"));
+    let reloaded = load(ConfigProduct::Dalgon, &updated).expect("updated TOML parses");
+    assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+}
+
+#[test]
+fn updating_default_model_rejects_empty_spellings() {
+    let mut config = load(ConfigProduct::Dalgon, "").expect("config loads");
+    assert!(config.update_default_model("", None).is_err());
+    assert!(
+        config
+            .update_default_model("beta/gpt-4o", Some("model = \"\"\n"))
+            .is_err()
+    );
+    assert_eq!(config.model(), None);
+}
+
+#[test]
+fn updating_default_thinking_mode_and_approval_stay_scoped_to_their_keys() {
+    let mut config = load(ConfigProduct::Dalgon, "").expect("config loads");
+    let base = "# kept\nmodel = \"beta/gpt-4o\"\n";
+    let updated = config
+        .update_default_thinking(crate::model::ThinkingLevel::High, Some(base))
+        .expect("thinking default updates");
+    assert!(updated.contains("thinking = \"high\""));
+    assert!(updated.contains("model = \"beta/gpt-4o\""));
+    let updated = config
+        .update_default_mode(crate::config::Mode::EvalFirst, Some(updated.as_str()))
+        .expect("mode default updates");
+    assert!(updated.contains("mode = \"eval-first\""));
+    assert!(updated.contains("thinking = \"high\""));
+    let updated = config
+        .update_default_approval(crate::config::ApprovalMode::All, Some(updated.as_str()))
+        .expect("approval default updates");
+    assert!(updated.contains("approval = \"all\""));
+    assert!(updated.contains("mode = \"eval-first\""));
+    assert!(!updated.contains("model_route"));
+    let reloaded = load(ConfigProduct::Dalgon, &updated).expect("updated TOML parses");
+    assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+    assert_eq!(reloaded.thinking(), crate::model::ThinkingLevel::High);
+    assert_eq!(reloaded.mode(), crate::config::Mode::EvalFirst);
+    assert_eq!(reloaded.approval(), crate::config::ApprovalMode::All);
+}

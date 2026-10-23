@@ -15,9 +15,11 @@ use crate::{
 };
 
 /// Names the session layout owns; a sidecar of the same name would replace live session state.
+/// The rollback marker is one of them: a forged marker makes the next open discard records.
 /// Compared ASCII case-insensitively because Windows and default macOS volumes fold case.
-const RESERVED: [&str; 7] = [
+const RESERVED: [&str; 8] = [
     "journal.jsonl",
+    "journal.jsonl.rollback",
     "lock",
     "lock.owner",
     "info.json",
@@ -25,6 +27,24 @@ const RESERVED: [&str; 7] = [
     "jobs",
     "sidecar",
 ];
+
+/// Whether `name` is a file the session itself owns: a layout name, or a
+/// `torn-<offset>.jsonl` side file holding a quarantined journal tail, which a
+/// sidecar write would replace and so destroy the only copy of those bytes.
+fn is_session_owned(name: &str) -> bool {
+    if RESERVED
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_prefix("torn-");
+    let Some(digits) = stem.and_then(|rest| rest.strip_suffix(".jsonl")) else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
 
 /// The most bytes one extension sidecar value may hold. Reads refuse larger
 /// files so an oversized sidecar cannot drive a large allocation.
@@ -64,15 +84,10 @@ impl<'session> Sidecar<'session> {
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let path = self.path(name)?;
         // A lazy journal owns its session paths before any record lands, so
-        // the session directory may not exist yet.
-        util::create_private_dir_all(self.paths.directory())
-            .map_err(|source| util::io_err(self.paths.directory(), source))?;
-        // write_atomic syncs the session directory after the rename; the
-        // entry linking that directory to its parent needs the parent
-        // synced too, or a power loss can drop the whole session dir.
-        if let Some(parent) = self.paths.directory().parent() {
-            util::sync_dir(parent)?;
-        }
+        // the session directory may not exist yet. The durable create syncs
+        // every entry from the data root down; write_atomic syncs the session
+        // directory itself after the rename.
+        util::create_private_dir_all_durable(self.paths.data_root(), self.paths.directory())?;
         util::write_atomic(&path, bytes, FileMode::Mode0600)
     }
 
@@ -110,10 +125,7 @@ impl<'session> Sidecar<'session> {
                 reason: "sidecar name must be 1 to 64 ASCII alphanumeric, '.', '_', or '-' characters and must not start with '.'".into(),
             });
         }
-        if RESERVED
-            .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(name))
-        {
+        if is_session_owned(name) {
             return Err(StoreError::Invalid {
                 reason: format!("sidecar name {name:?} is reserved for the session's own files")
                     .into(),
@@ -138,16 +150,11 @@ impl ExtensionSidecar<'_> {
             });
         }
         let directory = self.directory();
-        util::create_private_dir_all(&directory)
-            .map_err(|source| util::io_err(&directory, source))?;
-        util::sync_dir(self.paths.directory())?;
-        util::sync_dir(&self.paths.sidecar_dir())?;
-        // The recursive create may add the session directory itself while a
-        // lazy journal has not landed yet, so its entry under the workspace
-        // directory needs a parent sync like `Sidecar::write`.
-        if let Some(parent) = self.paths.directory().parent() {
-            util::sync_dir(parent)?;
-        }
+        // Like `Sidecar::write`, plus the extension directory itself: the
+        // durable create syncs every entry from the data root down to the
+        // sidecar directory, and write_atomic syncs the extension directory
+        // after the rename.
+        util::create_private_dir_all_durable(self.paths.data_root(), &directory)?;
         util::write_atomic(&self.path(name), bytes, FileMode::Mode0600)
     }
 
@@ -389,6 +396,57 @@ mod tests {
             b"4242\n",
             "the owner marker is untouched"
         );
+    }
+
+    #[test]
+    fn rollback_marker_and_quarantined_tails_are_not_sidecar_names() {
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
+        let marker = paths.directory().join("journal.jsonl.rollback");
+        let quarantine = paths.directory().join("torn-812.jsonl");
+        fs::write(&marker, b"96\n").expect("write a rollback marker");
+        fs::write(&quarantine, b"{\"v\":1,\"type\":\"us").expect("write a quarantined tail");
+        let before = listing(paths.directory());
+
+        for name in [
+            "journal.jsonl.rollback",
+            "JOURNAL.JSONL.ROLLBACK",
+            "torn-0.jsonl",
+            "torn-812.jsonl",
+            "Torn-812.JSONL",
+        ] {
+            assert!(
+                matches!(
+                    sidecar.write(name, b"forged"),
+                    Err(StoreError::Invalid { .. })
+                ),
+                "write of {name:?} must be rejected"
+            );
+            assert!(
+                matches!(sidecar.read(name), Err(StoreError::Invalid { .. })),
+                "read of {name:?} must be rejected"
+            );
+        }
+
+        assert_eq!(listing(paths.directory()), before);
+        assert_eq!(fs::read(&marker).expect("read marker"), b"96\n");
+        assert_eq!(
+            fs::read(&quarantine).expect("read quarantined tail"),
+            b"{\"v\":1,\"type\":\"us",
+            "the only copy of a quarantined tail is untouched"
+        );
+        for name in [
+            "torn",
+            "torn-",
+            "torn-.jsonl",
+            "torn-x.jsonl",
+            "torn-1.json",
+            "torn-1.jsonl.bak",
+        ] {
+            sidecar
+                .write(name, b"ordinary")
+                .expect("a name that only resembles a recovery file is writable");
+        }
     }
 
     fn listing(directory: &std::path::Path) -> Vec<(PathBuf, bool)> {

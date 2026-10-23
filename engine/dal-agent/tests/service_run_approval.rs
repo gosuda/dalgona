@@ -23,8 +23,8 @@ use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, T
 use dal_core::ext::{ExportId, ExportKind, OpSet};
 use dal_core::{
     Answer, CancelScope, ClientId, Command, EntryKind, Expect, ModelInfo, Name, Part, RawJson,
-    Record, Reply, RunRequest, SessionId, Stop, ToolClass, ToolSpec, TurnId, UpdateKind,
-    Visibility, Workspace,
+    Record, Reply, ResolutionCause, RunRequest, SessionId, Stop, ToolClass, ToolSpec, TurnId,
+    UpdateKind, Visibility, Workspace,
 };
 use dal_store::Store;
 
@@ -477,11 +477,17 @@ async fn journal_records(
     Ok(journal.records().to_vec())
 }
 
+/// One journaled `Resolved` record: its position and everything it states.
+struct Journaled {
+    at: usize,
+    answer: Answer,
+    by: ClientId,
+    was_default: bool,
+    cause: Option<ResolutionCause>,
+}
+
 /// The journaled resolution of `request` with its record position.
-fn journaled_resolution(
-    records: &[Record],
-    request: dal_core::RequestId,
-) -> Option<(usize, Answer, ClientId, bool)> {
+fn journaled_resolution(records: &[Record], request: dal_core::RequestId) -> Option<Journaled> {
     records
         .iter()
         .enumerate()
@@ -491,8 +497,15 @@ fn journaled_resolution(
                 answer,
                 by,
                 was_default,
+                cause,
                 ..
-            } if *answered == request => Some((index, answer.clone(), by.clone(), *was_default)),
+            } if *answered == request => Some(Journaled {
+                at: index,
+                answer: answer.clone(),
+                by: by.clone(),
+                was_default: *was_default,
+                cause: *cause,
+            }),
             _ => None,
         })
 }
@@ -538,7 +551,7 @@ async fn resumed_shows(
 async fn wait_for_resolved(
     subscription: &mut Option<Subscription>,
     request: dal_core::RequestId,
-) -> Result<Answer, Box<dyn std::error::Error>> {
+) -> Result<(Answer, Option<ResolutionCause>), Box<dyn std::error::Error>> {
     let Some(subscription) = subscription.as_mut() else {
         return Err("no answerer attached".into());
     };
@@ -548,10 +561,12 @@ async fn wait_for_resolved(
                 .await?
                 .ok_or("the session closed before the resolution broadcast")?;
             if let Delivery::Update(update) = &delivery
-                && let UpdateKind::RequestResolved { id, answer, .. } = &update.kind
+                && let UpdateKind::RequestResolved {
+                    id, answer, cause, ..
+                } = &update.kind
                 && *id == request
             {
-                return Ok(answer.clone());
+                return Ok((answer.clone(), *cause));
             }
         }
     })
@@ -571,18 +586,26 @@ async fn an_approved_run_journals_the_answer_before_the_process_runs() -> TestRe
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
-    else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the approved answer is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Approve), "{answer:?}");
-    assert_eq!(by.as_str(), "probe");
-    assert!(!was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Approve),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "probe");
+    assert!(!resolved.was_default);
+    assert_eq!(
+        resolved.cause,
+        Some(ResolutionCause::Answered),
+        "a client answer journals the Answered cause"
+    );
     let Some(effect_at) = probe_result(&records) else {
         return Err("the run result is not journaled".into());
     };
     assert!(
-        resolved_at < effect_at,
+        resolved.at < effect_at,
         "the answer must land in the journal before the run it allowed"
     );
     resumed_shows(&session, id, request).await?;
@@ -605,18 +628,26 @@ async fn a_declined_run_journals_the_answer_before_its_denial() -> TestResult {
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
-    else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the declined answer is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Decline), "{answer:?}");
-    assert_eq!(by.as_str(), "probe");
-    assert!(!was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Decline),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "probe");
+    assert!(!resolved.was_default);
+    assert_eq!(
+        resolved.cause,
+        Some(ResolutionCause::Answered),
+        "a client decline is still an Answered resolution, not a default"
+    );
     let Some(effect_at) = probe_result(&records) else {
         return Err("the denial result is not journaled".into());
     };
     assert!(
-        resolved_at < effect_at,
+        resolved.at < effect_at,
         "the decline must land in the journal before the denial it produced"
     );
     resumed_shows(&session, id, request).await?;
@@ -633,19 +664,33 @@ async fn a_run_nobody_answers_journals_the_default_it_broadcasts() -> TestResult
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(300)).await;
     tokio::time::resume();
-    let broadcast = wait_for_resolved(&mut session.subscription, request).await?;
+    let (broadcast, broadcast_cause) =
+        wait_for_resolved(&mut session.subscription, request).await?;
     assert!(matches!(broadcast, Answer::Decline), "{broadcast:?}");
+    assert_eq!(
+        broadcast_cause,
+        Some(ResolutionCause::TimedOut),
+        "the answerer stayed attached, so the deadline is a timeout"
+    );
     let dump = finish_turn(&mut session).await?;
     assert!(!dump.contains("hello"), "nothing ran: {dump}");
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let Some((_, answer, by, was_default)) = journaled_resolution(&records, request) else {
+    let Some(resolved) = journaled_resolution(&records, request) else {
         return Err("the broadcast default is not journaled".into());
     };
-    assert!(matches!(answer, Answer::Decline), "{answer:?}");
-    assert_eq!(by.as_str(), "core");
-    assert!(was_default);
+    assert!(
+        matches!(resolved.answer, Answer::Decline),
+        "{:?}",
+        resolved.answer
+    );
+    assert_eq!(resolved.by.as_str(), "core");
+    assert!(resolved.was_default);
+    assert_eq!(
+        resolved.cause, broadcast_cause,
+        "the journal holds the cause the broadcast carried"
+    );
     Ok(())
 }
 /// Opens a session running the sleep probe and submits its prompt,
@@ -745,7 +790,7 @@ async fn cancelling_a_turn_kills_its_held_run() -> TestResult {
         })
         .await?;
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        let mut resolved_count = 0;
+        let mut resolved_causes = Vec::new();
         let stop = loop {
             let delivery = session
                 .listener
@@ -756,21 +801,22 @@ async fn cancelling_a_turn_kills_its_held_run() -> TestResult {
                 continue;
             };
             match &update.kind {
-                UpdateKind::RequestResolved { id, .. } if *id == request => {
-                    resolved_count += 1;
+                UpdateKind::RequestResolved { id, cause, .. } if *id == request => {
+                    resolved_causes.push(*cause);
                 }
                 UpdateKind::TurnEnded { stop: ended, .. } => break Some(*ended),
                 _ => {}
             }
         };
-        Ok::<_, Box<dyn std::error::Error>>((resolved_count, stop))
+        Ok::<_, Box<dyn std::error::Error>>((resolved_causes, stop))
     })
     .await
     .map_err(|_| "the turn did not end within 30 s of its cancel")??;
-    let (resolved_count, stop) = outcome;
+    let (resolved_causes, stop) = outcome;
     assert_eq!(
-        resolved_count, 1,
-        "the approval waiter must settle exactly once"
+        resolved_causes,
+        vec![Some(ResolutionCause::Answered)],
+        "the approval waiter must settle exactly once, by its answer, never by the later cancel"
     );
     assert_eq!(stop, Some(Stop::Cancelled), "the turn must end cancelled");
     assert!(
@@ -782,13 +828,22 @@ async fn cancelling_a_turn_kills_its_held_run() -> TestResult {
     let id = session.agent.view(dal_core::PageReq::default())?.session.id;
     session.host.close(id).await?;
     let records = journal_records(&session.tmp, id).await?;
-    let resolved = records
+    let journaled: Vec<_> = records
         .iter()
-        .filter(|record| {
-            matches!(record, Record::Resolved { request: answered, .. } if *answered == request)
+        .filter_map(|record| match record {
+            Record::Resolved {
+                request: answered,
+                cause,
+                ..
+            } if *answered == request => Some(*cause),
+            _ => None,
         })
-        .count();
-    assert_eq!(resolved, 1, "the journal must hold one resolution");
+        .collect();
+    assert_eq!(
+        journaled,
+        vec![Some(ResolutionCause::Answered)],
+        "the journal must hold one resolution, the answer"
+    );
     Ok(())
 }
 
@@ -805,7 +860,7 @@ async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
             scope: CancelScope::Turn(turn),
         })
         .await?;
-    let mut resolutions = Vec::new();
+    let mut resolutions: Vec<(Answer, ClientId, Option<ResolutionCause>)> = Vec::new();
     let mut stop = None;
     let mut kinds = Vec::new();
     for _ in 0..15 {
@@ -818,8 +873,14 @@ async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
         };
         kinds.push(format!("{:?}", update.kind));
         match &update.kind {
-            UpdateKind::RequestResolved { id, answer, by, .. } if *id == request => {
-                resolutions.push((answer.clone(), by.clone()));
+            UpdateKind::RequestResolved {
+                id,
+                answer,
+                by,
+                cause,
+                ..
+            } if *id == request => {
+                resolutions.push((answer.clone(), by.clone(), *cause));
             }
             UpdateKind::TurnEnded { stop: ended, .. } => {
                 stop = Some(*ended);
@@ -849,6 +910,11 @@ async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
         resolutions[0].0
     );
     assert_eq!(resolutions[0].1.as_str(), "core");
+    assert_eq!(
+        resolutions[0].2,
+        Some(ResolutionCause::Cancelled),
+        "a turn cancel resolves its open approval as Cancelled"
+    );
     assert_eq!(stop, Some(Stop::Cancelled), "the turn must end cancelled");
     assert!(
         !workspace.join("sleep.pid").exists(),
@@ -863,14 +929,15 @@ async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
             Record::Resolved {
                 request: answered,
                 answer,
+                cause,
                 ..
-            } if *answered == request => Some(answer.clone()),
+            } if *answered == request => Some((answer.clone(), *cause)),
             _ => None,
         })
         .collect();
     assert_eq!(
         journaled,
-        vec![Answer::Cancel],
+        vec![(Answer::Cancel, Some(ResolutionCause::Cancelled))],
         "the journal must hold exactly the cancellation"
     );
     Ok(())

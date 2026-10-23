@@ -33,3 +33,6 @@ pub fn extension() -> Result<Extension, RegistrationError> {
         .fallback_compactor("summary", Arc::new(summary::Summary))
         .build()
 }
+
+#[cfg(test)]
+mod tests;

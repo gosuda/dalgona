@@ -162,7 +162,10 @@ impl fmt::Debug for EnvSnapshot {
         names.sort_unstable();
         f.debug_struct("EnvSnapshot")
             .field("names", &names)
-            .finish_non_exhaustive()
+            // The working directory can carry secrets in a segment, so Debug
+            // keeps the field name but never its value.
+            .field("cwd", &self.cwd.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 

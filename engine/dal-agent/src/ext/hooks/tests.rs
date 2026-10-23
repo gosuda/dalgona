@@ -1,5 +1,8 @@
 //! Hook composition, deadline, observer, and watcher tests.
 
+mod actor;
+mod cancel;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

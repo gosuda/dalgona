@@ -254,30 +254,33 @@ fn strict_action_decode_rejects_unknown_fields() {
 fn schema_property_names_match_the_decoder_allowlist() {
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
     let schema: sonic_rs::Value = sonic_rs::from_str(super::AGENT_SCHEMA).expect("schema parses");
-    let variants = schema
-        .get("oneOf")
-        .and_then(|one| one.as_array())
-        .expect("oneOf array");
-    assert_eq!(variants.len(), 4);
-    for variant in variants {
-        let tag = variant
-            .get("properties")
-            .and_then(|properties| properties.get("action"))
-            .and_then(|action| action.get("const"))
-            .and_then(|name| name.as_str())
-            .expect("action tag");
-        let properties = variant
-            .get("properties")
-            .and_then(|properties| properties.as_object())
-            .expect("properties");
-        let mut keys: Vec<&str> = properties.iter().map(|(key, _)| key).collect();
-        keys.sort_unstable();
-        let mut allowed: Vec<&str> = super::action::allowed_keys(tag)
-            .expect("known tag")
-            .to_vec();
-        allowed.sort_unstable();
-        assert_eq!(keys, allowed, "schema and decoder agree on {tag}");
-    }
+    let tags: Vec<&str> = schema
+        .get("properties")
+        .and_then(|properties| properties.get("action"))
+        .and_then(|action| action.get("enum"))
+        .and_then(|items| items.as_array())
+        .expect("action enum")
+        .iter()
+        .map(|tag| tag.as_str().expect("string tag"))
+        .collect();
+    let properties = schema
+        .get("properties")
+        .and_then(|properties| properties.as_object())
+        .expect("properties");
+    let mut keys: Vec<&str> = properties.iter().map(|(key, _)| key).collect();
+    keys.sort_unstable();
+    let mut allowed: Vec<&str> = tags
+        .iter()
+        .flat_map(|tag| {
+            super::action::allowed_keys(tag)
+                .expect("known tag")
+                .iter()
+                .copied()
+        })
+        .collect();
+    allowed.sort_unstable();
+    allowed.dedup();
+    assert_eq!(keys, allowed, "schema and decoder agree on the key union");
 }
 
 #[test]
@@ -665,6 +668,22 @@ async fn unknown_child_id_maps_to_the_named_error() {
     assert_eq!(
         outcome_text(outcome).expect_err("unknown child fails"),
         format!("agents: unknown child \"{missing}\".")
+    );
+}
+
+#[tokio::test]
+async fn wait_on_a_cancelled_child_reports_cancellation() {
+    let id = dal_core::SessionId::new_v7();
+    let services = FakeServices::with(vec![Ok(AgentsReply::Cancelled { id })]);
+    let outcome = agent()
+        .run(
+            call(&format!(r#"{{"action":"wait","id":"{id}"}}"#)),
+            ToolCx::for_test(share(&services)),
+        )
+        .await;
+    assert_eq!(
+        outcome_text(outcome).expect_err("cancelled wait fails"),
+        format!("child \"{id}\" was cancelled.")
     );
 }
 

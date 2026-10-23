@@ -22,9 +22,6 @@ mod pty;
     reason = "gate helpers are shared across integration targets"
 )]
 mod support;
-#[cfg(unix)]
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     collections::HashMap,
@@ -85,6 +82,16 @@ const NESTED_MODEL: &str = "gate-stress/nested";
 const LEAF_MODEL: &str = "gate-stress/leaf";
 const MEMBER_MODEL: &str = "gate-stress/member";
 const JOB_MODEL: &str = "gate-stress/job";
+/// One fast exec call that settles while its turn stays live, used only by
+/// the result-observer probe: the scripted command prints a deterministic
+/// marker and exits 0 at once, so the call never approaches a cancel.
+const PROBE_MODEL: &str = "gate-stress/probe";
+/// The deterministic probe command marker echoed by the probe session's
+/// completed call and readable in its journaled tool result.
+const PROBE_MARKER: &str = "gate-stress-probe-marker-7f3a";
+/// The probe session's tool call identity, matched exactly in the observer
+/// recording and in the probe session's journal.
+const PROBE_CALL: &str = "probe-call";
 const TERMINAL_MODEL: &str = "gate-stress/terminal";
 const IDLE_MODEL: &str = "gate-stress/idle";
 const SHUTTLE_ROOT_MODEL: &str = "gate-stress/shuttle-root";
@@ -103,6 +110,12 @@ struct HookCounts {
     before_requests: AtomicUsize,
     tool_calls: AtomicUsize,
     tool_results: AtomicUsize,
+    /// Delivered result observers, one `(session, call)` entry per delivery.
+    observed_result_calls: Mutex<Vec<(SessionId, CallId)>>,
+    /// Admitted tool calls, one `(session, call)` entry per dispatch, in
+    /// dispatch order. The admission hook runs before the tool body, so every
+    /// started call appears here even when its turn is cancelled later.
+    admitted_calls: Mutex<Vec<(SessionId, CallId)>>,
     turn_ends: AtomicUsize,
     turn_ends_by_session: Mutex<HashMap<SessionId, usize>>,
     settled: AtomicUsize,
@@ -171,10 +184,11 @@ impl Hook<BeforeRequest, Option<dal_core::RequestParams>> for CountingHooks {
 impl Hook<ToolCallEvent, ToolCallVerdict> for CountingHooks {
     fn call(
         &self,
-        _event: ToolCallEvent,
-        _cx: HookCx,
+        event: ToolCallEvent,
+        cx: HookCx,
     ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
         self.0.tool_calls.fetch_add(1, Ordering::Relaxed);
+        locked(&self.0.admitted_calls).push((cx.session, event.call));
         Box::pin(async { Ok(ToolCallVerdict::Allow) })
     }
 }
@@ -182,10 +196,11 @@ impl Hook<ToolCallEvent, ToolCallVerdict> for CountingHooks {
 impl ObserveHook<ToolResultEvent> for CountingHooks {
     fn call(
         &self,
-        _event: ToolResultEvent,
-        _cx: HookCx,
+        event: ToolResultEvent,
+        cx: HookCx,
     ) -> BoxFuture<'static, Result<(), HookError>> {
         self.0.tool_results.fetch_add(1, Ordering::Relaxed);
+        locked(&self.0.observed_result_calls).push((cx.session, event.call));
         Box::pin(async { Ok(()) })
     }
 }
@@ -389,6 +404,30 @@ impl ModelHandler for JobModel {
                 process_command(index)
             );
             Ok(tool_call_stream(&call, &args))
+        })
+    }
+}
+
+/// One fast exec call that settles while its turn stays live, used only by
+/// the result-observer probe: the command prints `PROBE_MARKER` and exits 0.
+struct ProbeModel;
+
+impl ModelHandler for ProbeModel {
+    fn run<'a>(
+        &'a self,
+        request: ModelRequest,
+        _cx: ModelCx<'a>,
+    ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        Box::pin(async move {
+            if request.context.iter().any(|item| {
+                matches!(item, ContextItem::ToolResult { name, .. } if name.as_ref() == "exec")
+            }) {
+                return Ok(text_stream("probe complete"));
+            }
+            let args = format!(
+                r#"{{"command":"printf '%s' {PROBE_MARKER}","timeout_seconds":60,"foreground_s":30}}"#
+            );
+            Ok(tool_call_stream("probe-call", &args))
         })
     }
 }
@@ -718,6 +757,12 @@ fn full_extension(
                 export: None,
             })
             .model(ModelRecord {
+                id: ModelId::parse(PROBE_MODEL)?,
+                caps: caps(true),
+                handler: Arc::new(ProbeModel),
+                export: None,
+            })
+            .model(ModelRecord {
                 id: ModelId::parse(TERMINAL_MODEL)?,
                 // One session runs every terminal turn, so give it a window
                 // that 100 turns cannot fill.
@@ -923,6 +968,183 @@ async fn start_process_jobs(
         });
     }
     Ok(jobs)
+}
+
+/// Probe proof: the live call delivered exactly one result observer, and its
+/// journal holds exactly one matching success result.
+fn assert_tool_result_delivery(hooks: &HookCounts, probe: &ProbeSession) -> Result<(), TestError> {
+    let observed = locked(&hooks.observed_result_calls);
+    let probe_calls = observed
+        .iter()
+        .filter(|(session, call)| *session == probe.session && call.as_str() == PROBE_CALL)
+        .count();
+    if probe_calls != 1 {
+        return Err(io::Error::other(format!(
+            "the live probe call delivered {probe_calls} result observers, expected exactly 1",
+        ))
+        .into());
+    }
+    drop(observed);
+    let probe_view = probe.agent.view(PageReq::default())?;
+    let mut probe_results = Vec::new();
+    for entry in &probe_view.entries.items {
+        if let EntryKind::ToolResult {
+            call,
+            name,
+            error,
+            parts,
+            ..
+        } = &entry.kind
+            && call.as_str() == PROBE_CALL
+        {
+            probe_results.push((name.clone(), *error, text_of_parts(parts)));
+        }
+    }
+    if probe_results.len() != 1 {
+        return Err(io::Error::other(format!(
+            "probe session {} holds {} results for {PROBE_CALL}, expected 1",
+            probe.session,
+            probe_results.len(),
+        ))
+        .into());
+    }
+    let (name, error, text) = &probe_results[0];
+    if name.as_ref() != "exec" || *error || !text.contains(PROBE_MARKER) {
+        return Err(io::Error::other(format!(
+            "probe session {} journaled the wrong result for {PROBE_CALL}: name={name} error={error} text={text:?}",
+            probe.session,
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Cancelled-call proof per `(session, call)`: the admitted id comes from the
+/// admission recording, never from the result being checked. Each cancelled
+/// session must admit exactly one call; its journal must hold exactly one
+/// matching interrupted result; the observer recording must hold zero
+/// entries for that pair.
+fn assert_cancelled_job_journals(jobs: &[ProcessJob], hooks: &HookCounts) -> Result<(), TestError> {
+    let observed = locked(&hooks.observed_result_calls).clone();
+    let admitted = locked(&hooks.admitted_calls).clone();
+    for job in jobs {
+        let view = job.agent.view(PageReq::default())?;
+        let session = view.session.id;
+        let admitted_calls: Vec<CallId> = admitted
+            .iter()
+            .filter(|(admitted_session, _)| *admitted_session == session)
+            .map(|(_, call)| call.clone())
+            .collect();
+        if admitted_calls.len() != 1 {
+            return Err(io::Error::other(format!(
+                "cancelled session {session} admitted {} calls, expected exactly 1",
+                admitted_calls.len(),
+            ))
+            .into());
+        }
+        let admitted_call = &admitted_calls[0];
+        let mut matches = Vec::new();
+        for entry in &view.entries.items {
+            if let EntryKind::ToolResult {
+                call,
+                name,
+                error,
+                parts,
+                ..
+            } = &entry.kind
+                && call == admitted_call
+            {
+                matches.push((name.clone(), *error, text_of_parts(parts)));
+            }
+        }
+        if matches.len() != 1 {
+            return Err(io::Error::other(format!(
+                "cancelled session {session} holds {} results for admitted call {admitted_call}, expected exactly 1",
+                matches.len(),
+            ))
+            .into());
+        }
+        let (name, error, text) = &matches[0];
+        if name.as_ref() != "exec" || !error || text.as_str() != "Tool call interrupted by user." {
+            return Err(io::Error::other(format!(
+                "cancelled session {session} journaled the wrong interrupted result for {admitted_call}: name={name} error={error} text={text:?}",
+            ))
+            .into());
+        }
+        let seen = observed
+            .iter()
+            .filter(|(observed_session, observed_call)| {
+                *observed_session == session && *observed_call == *admitted_call
+            })
+            .count();
+        if seen != 0 {
+            return Err(io::Error::other(format!(
+                "cancelled pair ({session}, {admitted_call}) delivered a result observer"
+            ))
+            .into());
+        }
+    }
+    drop(admitted);
+    drop(observed);
+    Ok(())
+}
+
+fn text_of_parts(parts: &[dal_core::JournalPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            dal_core::JournalPart::Text { text } => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<&str>>()
+        .join("")
+}
+
+/// The live result-observer probe session: one turn whose single exec call
+/// completes while the turn stays open, so the terminal result observer
+/// fires on a live token by contract. Cancel jobs never touch this session.
+struct ProbeSession {
+    agent: Agent,
+    session: SessionId,
+}
+
+async fn start_probe_session(
+    host: &Host,
+    workspace: &Workspace,
+) -> Result<ProbeSession, TestError> {
+    let agent = host
+        .open(
+            SessionRef::New {
+                workspace: workspace.clone(),
+                name: None,
+            },
+            ClientId::new("stress-probe"),
+        )
+        .await?;
+    let model = agent
+        .submit(Command::SetModel {
+            model: synthetic_route(PROBE_MODEL),
+            save: Save::SessionOnly,
+        })
+        .await?;
+    assert!(matches!(model, Reply::Done(_)));
+    let view = agent.view(PageReq::default())?;
+    let session = view.session.id;
+    let mut agent_updates = agent.subscribe(Some((view.r#gen, view.seq)))?;
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "run the completed observer probe".into(),
+            }],
+        })
+        .await?;
+    let Reply::Accepted { turn, .. } = reply else {
+        return Err(io::Error::other("probe prompt was not accepted").into());
+    };
+    wait_turn_end(&mut agent_updates, turn, Stop::EndTurn).await?;
+    drop(agent_updates);
+    Ok(ProbeSession { agent, session })
 }
 
 fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
@@ -1424,11 +1646,10 @@ mod loaded_tui {
 
     use crate::{
         PROCESS_JOBS, TERMINAL_MODEL, TestError,
-        pty::{self, PtyProcess},
+        pty::{self, PtyProcess, vt::VtRecorder},
         read_pid,
         support::TestDir,
         synthetic_route,
-        vt::VtRecorder,
     };
 
     /// Loaded keypress echo bound on the timing lane: P99 below 24 ms.
@@ -2036,6 +2257,10 @@ async fn full_load_scenario() -> Result<(), TestError> {
     if budgets {
         assert!(idle_p99 < CANCEL_P99, "idle cancel p99 was {idle_p99:?}");
     }
+    // The completed-call probe runs before the storm, when no load can
+    // wedge its live turn: one fast exec call settles while the turn stays
+    // open, so the result observer must fire exactly once by contract.
+    let probe = start_probe_session(&host, &workspace).await?;
     // Bind and attach the WebSocket clients before the process storm;
     // the assertions exercise live clients under load, and Windows
     // WSAStartup transiently fails when a spawn lands at peak procs.
@@ -2128,19 +2353,24 @@ async fn full_load_scenario() -> Result<(), TestError> {
     // session ending exactly once is asserted by `session_ends` below.
     assert!(report.sessions_closed > PROCESS_JOBS);
     assert_eq!(report.tasks_remaining, 0);
+    // The probe session opened one extra top-level session on the same
+    // hook counters, so lifecycle totals count it alongside the jobs.
     assert_eq!(
         hooks.session_starts.load(Ordering::Acquire),
-        CHILD_SESSIONS + PROCESS_JOBS + 1 + tui_sessions.count()
+        CHILD_SESSIONS + PROCESS_JOBS + 2 + tui_sessions.count()
     );
     assert_eq!(
         hooks.session_ends.load(Ordering::Acquire),
-        CHILD_SESSIONS + PROCESS_JOBS + 1 + tui_sessions.count()
+        CHILD_SESSIONS + PROCESS_JOBS + 2 + tui_sessions.count()
     );
     assert!(hooks.inputs.load(Ordering::Acquire) > 0);
     assert!(hooks.before_turns.load(Ordering::Acquire) > 0);
     assert!(hooks.before_requests.load(Ordering::Acquire) > 0);
-    assert!(hooks.tool_calls.load(Ordering::Acquire) >= CANCELLATIONS);
-    assert!(hooks.tool_results.load(Ordering::Acquire) >= CANCELLATIONS);
+    let tool_calls = hooks.tool_calls.load(Ordering::Acquire);
+    assert!(tool_calls >= CANCELLATIONS);
+    // Per-call result proof keyed by admitted (session, call) pairs.
+    assert_tool_result_delivery(&hooks, &probe)?;
+    assert_cancelled_job_journals(&process_jobs[..CANCELLATIONS], &hooks)?;
     assert!(hooks.turn_ends.load(Ordering::Acquire) >= CANCELLATIONS);
     assert!(hooks.settled.load(Ordering::Acquire) >= CANCELLATIONS);
     assert!(hooks.stream_starts.load(Ordering::Acquire) > 0);
@@ -2148,6 +2378,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     assert!(hooks.stream_finishes.load(Ordering::Acquire) > 0);
     let mut session_ids = expected_session_ids(root_id, &process_jobs, &reports, &hooks);
     assert_eq!(session_ids.len(), CHILD_SESSIONS + PROCESS_JOBS + 1);
+    session_ids.push(probe.session);
     session_ids.extend(tui_sessions.echo);
     session_ids.extend(tui_sessions.cancel.map(|(id, _)| id));
     {
@@ -2158,6 +2389,10 @@ async fn full_load_scenario() -> Result<(), TestError> {
                 .iter()
                 .all(|id| ends_by_session.get(id) == Some(&1))
         );
+        assert!(
+            ends_by_session.get(&probe.session) == Some(&1),
+            "probe session ended exactly once"
+        );
     }
     verify_journal_ends(
         data.path(),
@@ -2166,6 +2401,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         root_id,
         expected_root_turns,
         &tui_sessions,
+        Some(probe.session),
     )
     .await?;
     drop(process_jobs);
@@ -2264,6 +2500,7 @@ async fn verify_journal_ends(
     root_id: SessionId,
     root_turns: usize,
     tui: &TuiSessions,
+    probe_session: Option<SessionId>,
 ) -> Result<(), TestError> {
     let store = Store::new(
         data_root.to_path_buf(),
@@ -2292,6 +2529,8 @@ async fn verify_journal_ends(
             .map(|(_, turns)| turns);
         let expected = if *id == root_id {
             root_turns
+        } else if probe_session == Some(*id) {
+            1
         } else {
             terminal_turns.unwrap_or(1)
         };
@@ -2301,6 +2540,12 @@ async fn verify_journal_ends(
             "session {id} had {} turn-end records",
             cancelled.len()
         );
+        if probe_session == Some(*id) {
+            assert!(
+                cancelled.iter().all(|ended| !*ended),
+                "probe session {id} ended its single turn as cancelled"
+            );
+        }
         if terminal_turns.is_some() {
             assert!(
                 cancelled.iter().all(|ended| *ended),

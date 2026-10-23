@@ -1,0 +1,12 @@
+[[exchange]]
+kind = "http"
+
+[exchange.request]
+method = "POST"
+path = "/api/llm/o/v1/chat/completions"
+headers = { "content-type" = "application/json", "authorization" = "Bearer workos-test-token", "x-api-provider" = "fireworks", "user-agent" = "factory-cli/0.237.0" }
+
+[exchange.response]
+status = 200
+headers = { "content-type" = "text/event-stream" }
+body = "response.sse"

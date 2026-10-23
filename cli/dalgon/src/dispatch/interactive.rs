@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dal_agent::{DefaultAuthority, Env, Host, Product};
+use dal_agent::{Env, Host, Product};
 use dal_core::Screen as ConfigScreen;
 use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -189,13 +189,14 @@ async fn connect_remote(
             .map_err(|error| TuiError::Backend(Box::new(error)))?;
         Ok(remote_model_options(models))
     };
-    run_blocking(
+    let (code, _shutdown) = run_blocking(
         remote::RemoteBackend(host),
         opts,
         model_source,
         save_diagrams,
     )
-    .await
+    .await;
+    code
 }
 /// Starts the interactive client after the process edge has resolved all inputs.
 pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
@@ -216,6 +217,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         data_root,
         binary,
         helper,
+        ..
     } = startup;
     let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
     if vars.contains_key(OsStr::new("DAL_DEBUG")) {
@@ -230,10 +232,12 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
     }
-    // The local process edge owns the user configuration path, so the
-    // host it starts may persist `SessionAndDefault` outcomes there. Remote
-    // hosts never write: `connect_remote` above takes no host write path.
-    let host = match Host::start_with_defaults(
+    #[cfg(feature = "test-support")]
+    let login_endpoints = match super::login::test_login_endpoints(&vars) {
+        Ok(endpoints) => endpoints,
+        Err(error) => return host_exit(&dal_agent::HostError::Provider(error), &data_root),
+    };
+    let host = match Host::start(
         product,
         config,
         Env {
@@ -241,13 +245,20 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
             cwd,
             sandbox_helper: helper,
         },
-        DefaultAuthority::Local { path: config_path },
     )
     .await
     {
         Ok(host) => host,
         Err(error) => return host_exit(&error, &data_root),
     };
+    host.set_config_path(config_path);
+    #[cfg(feature = "test-support")]
+    if let Some(endpoints) = login_endpoints
+        && let Err(error) = host.set_login_endpoints(endpoints)
+    {
+        let _ = host.shutdown(std::time::Duration::from_secs(3)).await;
+        return host_exit(&error, &data_root);
+    }
     let shutdown = host.clone();
     let model_host = host.clone();
     let model_rt = opts.rt.clone();
@@ -258,9 +269,12 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
     }
-    let code = run_blocking(host, opts, model_source, save_diagrams).await;
-    let _ = shutdown.shutdown(std::time::Duration::from_secs(3)).await;
-    code
+    let (code, mut signals) = run_blocking(host, opts, model_source, save_diagrams).await;
+    // The terminal is already restored here; the ladder closes the host.
+    let closed = exit::Ladder::begin()
+        .close_host(shutdown, &mut signals)
+        .await;
+    closed.skipped_by.map_or(code, ExitCode::from)
 }
 
 async fn run_blocking<H, M, S>(
@@ -268,41 +282,43 @@ async fn run_blocking<H, M, S>(
     opts: TuiOptions,
     model_source: M,
     save_diagrams: S,
-) -> ExitCode
+) -> (ExitCode, edge::ShutdownSignals)
 where
     H: dal_tui::backend::TuiHost,
     M: FnMut() -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> + Send + 'static,
     S: FnMut(bool) -> Result<(), TuiError> + Send + 'static,
 {
-    let signals = match signal::Signals::start() {
-        Ok(signals) => signals,
-        Err(error) => {
-            return tui_error(TuiError::Terminal(format!(
-                "dalgon: cannot watch terminal signals: {error}\nRestart dalgon in a terminal."
-            )));
-        }
-    };
+    let mut signals = signal::Signals::start();
     #[expect(
         clippy::disallowed_methods,
         reason = "process edge: the process edge owns standard input"
     )]
     let io = signals.terminal(std::io::stdin());
-    let result = tokio::task::spawn_blocking(move || {
+    let mut task = tokio::task::spawn_blocking(move || {
         dal_tui::run_backend_with_settings_save(&host, &opts, &io, model_source, save_diagrams)
-    })
-    .await;
+    });
+    let polled = tokio::select! {
+        biased;
+        _ = signals.await_shutdown() => None,
+        result = &mut task => Some(result),
+    };
+    let result = match polled {
+        Some(result) => result,
+        None => (&mut task).await,
+    };
     let signal = signals.exit_status();
-    drop(signals);
+    let shutdown = signals.into_shutdown();
     if let Some(code) = signal {
-        return ExitCode::from(code);
+        return (ExitCode::from(code), shutdown);
     }
-    match result {
+    let code = match result {
         Ok(Ok(_)) => exit::code(exit::ExitKind::Success),
         Ok(Err(error)) => tui_error(error),
         Err(error) => tui_error(TuiError::Terminal(format!(
             "dalgon: interactive terminal stopped: {error}\nRestart dalgon in a terminal."
         ))),
-    }
+    };
+    (code, shutdown)
 }
 
 fn tui_error(error: TuiError) -> ExitCode {
@@ -681,597 +697,6 @@ mod tests {
                 .map(|option| option.scoped_id.as_deref())
                 .collect();
             assert_eq!(scoped, [Some("openrouter/free"), None, None, None]);
-        }
-
-        /// A real host whose catalog comes from loopback providers, listed by a
-        /// real `RemoteHost` over a real local socket.
-        #[cfg(unix)]
-        mod served {
-            use std::collections::{BTreeMap, BTreeSet};
-            use std::ffi::OsString;
-            use std::net::SocketAddr;
-            use std::path::{Path, PathBuf};
-            use std::sync::Arc;
-            use std::time::Duration;
-
-            use dal_agent::ext::{
-                BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
-                ModelRecord,
-            };
-            use dal_agent::{DefaultAuthority, Env, Host, Product, SessionRef};
-            use dal_core::command::Save;
-            use dal_core::{
-                Caps, Command, Config, ConfigProduct, Expect, Family, ModelId, ModelRequest,
-                ModelRoute, PageReq, Part, ServiceSet, ThinkingLevel, UpdateKind, Workspace,
-            };
-            use dal_tui::picker::ModelOption;
-            use dal_wire::{RemoteDelivery, RemoteEndpoint, RemoteHost};
-            use sonic_rs::{JsonValueTrait, Value};
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-            use tokio::net::{TcpListener, TcpStream};
-            use tokio::task::JoinSet;
-
-            use super::super::super::remote_model_options;
-
-            /// The model list each loopback provider serves.
-            fn listing(path: &str) -> Option<&'static str> {
-                match path {
-                    "/openai/v1/models" => {
-                        Some(r#"{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"}]}"#)
-                    }
-                    "/openrouter/api/v1/models" => Some(
-                        r#"{"data":[{"id":"gpt-4o"},{"id":"openai/gpt-4o"},{"id":"free"},{"id":"openrouter/free"},{"id":"anthropic/claude-3"}]}"#,
-                    ),
-                    "/acme/v1/models" => Some(r#"{"data":[{"id":"gpt-4o"}]}"#),
-                    _ => None,
-                }
-            }
-
-            /// A cleartext model-list server on `127.0.0.1`.
-            struct Loopback {
-                address: SocketAddr,
-                _server: JoinSet<()>,
-            }
-
-            impl Loopback {
-                async fn start() -> Self {
-                    let listener = TcpListener::bind(("127.0.0.1", 0))
-                        .await
-                        .expect("loopback listener");
-                    let address = listener.local_addr().expect("loopback address");
-                    let mut server = JoinSet::new();
-                    server.spawn(accept(listener));
-                    Self {
-                        address,
-                        _server: server,
-                    }
-                }
-            }
-
-            async fn accept(listener: TcpListener) {
-                let mut connections = JoinSet::new();
-                while let Ok((socket, _)) = listener.accept().await {
-                    connections.spawn(answer(socket));
-                }
-            }
-
-            async fn answer(socket: TcpStream) {
-                let mut reader = BufReader::new(socket);
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                    return;
-                }
-                let target = line.split_whitespace().nth(1).unwrap_or_default();
-                let path = target.split('?').next().unwrap_or_default().to_owned();
-                loop {
-                    line.clear();
-                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                        return;
-                    }
-                    if line == "\r\n" {
-                        break;
-                    }
-                }
-                let (status, body) = match listing(&path) {
-                    Some(body) => ("200 OK", body),
-                    None => ("404 Not Found", ""),
-                };
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = reader.get_mut().write_all(response.as_bytes()).await;
-                let _ = reader.get_mut().shutdown().await;
-            }
-
-            /// Fails a turn without touching the network; one test drives a
-            /// prompt so the journal exists before its records are asserted.
-            struct NeverInfer;
-
-            impl ModelHandler for NeverInfer {
-                fn run<'a>(
-                    &'a self,
-                    _request: ModelRequest,
-                    _cx: ModelCx<'a>,
-                ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
-                    Box::pin(async { Err(ModelError::PrivateRounds) })
-                }
-            }
-
-            fn synthetic(id: &str) -> ModelRecord {
-                ModelRecord {
-                    id: ModelId::parse(id).expect("synthetic model id"),
-                    caps: Caps {
-                        context_window: None,
-                        thinking: Box::new([ThinkingLevel::Off]),
-                        tool_use: false,
-                        image_input: false,
-                        custom_grammar: false,
-                    },
-                    handler: Arc::new(NeverInfer),
-                    export: None,
-                }
-            }
-
-            /// One started host that may save defaults into `config`.
-            struct Fixture {
-                _dir: tempfile::TempDir,
-                _loopback: Loopback,
-                host: Host,
-                config: PathBuf,
-                data: PathBuf,
-                workspace: PathBuf,
-                sockets: PathBuf,
-            }
-
-            impl Fixture {
-                async fn start() -> Self {
-                    Self::start_with(true).await
-                }
-
-                /// Starts a host the way `dalgon serve` does: it refuses every
-                /// default write.
-                async fn start_gated() -> Self {
-                    Self::start_with(false).await
-                }
-
-                async fn start_with(may_save: bool) -> Self {
-                    let loopback = Loopback::start().await;
-                    let dir = tempfile::tempdir().expect("temporary root");
-                    let data = dir.path().join("data");
-                    let workspace = dir.path().join("w");
-                    let config = dir.path().join("config").join("dal.toml");
-                    let sockets = dir.path().join("sock");
-                    for directory in [
-                        data.as_path(),
-                        workspace.as_path(),
-                        config.parent().expect("config parent"),
-                    ] {
-                        std::fs::create_dir_all(directory).expect("fixture directory");
-                    }
-                    {
-                        use std::os::unix::fs::DirBuilderExt as _;
-                        std::fs::DirBuilder::new()
-                            .mode(0o700)
-                            .create(&sockets)
-                            .expect("private socket directory");
-                    }
-                    let address = loopback.address;
-                    let user = format!(
-                        r#"model = "openai/gpt-4o"
-
-[retry]
-request_max_retries = 0
-stream_max_retries = 0
-
-[providers.openai]
-base_url = "http://{address}/openai/v1"
-
-[providers.openrouter]
-base_url = "http://{address}/openrouter/api/v1"
-key_env = "OPENAI_API_KEY"
-
-[providers.acme-proxy]
-api = "openai_chat"
-base_url = "http://{address}/acme/v1"
-key_env = "OPENAI_API_KEY"
-"#
-                    );
-                    std::fs::write(&config, &user).expect("user config");
-                    let loaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(&user))
-                        .expect("test config loads");
-                    let models = ExtensionBuilder::new("fixture", "0.1.0", ServiceSet::EMPTY)
-                        .expect("extension name")
-                        .model(synthetic("acme/fast"))
-                        .model(synthetic("openrouter/free"))
-                        .build()
-                        .expect("fixture extension builds");
-                    let product = Product {
-                        name: "dal",
-                        data_root: data.clone(),
-                        defaults: "",
-                        extensions: vec![models],
-                        bundled: Vec::new(),
-                    };
-                    let mut vars = BTreeMap::new();
-                    vars.insert(OsString::from("OPENAI_API_KEY"), OsString::from("sk-test"));
-                    vars.insert(OsString::from("HOME"), dir.path().join("home").into());
-                    vars.insert(
-                        OsString::from("XDG_CACHE_HOME"),
-                        dir.path().join("cache").into(),
-                    );
-                    let env = Env {
-                        vars,
-                        cwd: workspace.clone(),
-                        sandbox_helper: None,
-                    };
-                    let authority = if may_save {
-                        DefaultAuthority::Local {
-                            path: config.clone(),
-                        }
-                    } else {
-                        DefaultAuthority::Disabled
-                    };
-                    let host = Host::start_with_defaults(product, loaded, env, authority)
-                        .await
-                        .expect("host starts");
-                    Self {
-                        _dir: dir,
-                        _loopback: loopback,
-                        host,
-                        config,
-                        data,
-                        workspace,
-                        sockets,
-                    }
-                }
-
-                /// Serves the host on a private local socket and runs `client`
-                /// against a connected [`RemoteHost`] until it finishes.
-                async fn served<F>(&self, client: impl FnOnce(RemoteHost) -> F)
-                where
-                    F: Future<Output = ()>,
-                {
-                    let socket = self.sockets.join("rpc.sock");
-                    let serve_host = self.host.clone();
-                    let listening = dal_wire::serve_local(&socket, None, None, move |transport| {
-                        let host = serve_host.clone();
-                        Box::pin(dal_wire::serve_rpc(host, transport))
-                    });
-                    let connected = async {
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                        while !socket.exists() {
-                            assert!(tokio::time::Instant::now() < deadline, "socket appears");
-                            tokio::time::sleep(Duration::from_millis(20)).await;
-                        }
-                        let host = RemoteHost::connect(RemoteEndpoint::LocalSocket(socket.clone()))
-                            .await
-                            .expect("connect");
-                        client(host).await;
-                    };
-                    tokio::select! {
-                        outcome = listening => panic!("the local server ended: {outcome:?}"),
-                        outcome = tokio::time::timeout(Duration::from_secs(120), connected) => {
-                            outcome.expect("the remote client finishes in time");
-                        }
-                    }
-                }
-            }
-
-            fn api(family: Family, model: &str, provider: &str) -> ModelRoute {
-                ModelRoute::Api {
-                    family,
-                    model: model.into(),
-                    provider: Some(provider.into()),
-                }
-            }
-
-            fn synthetic_route(id: &str) -> ModelRoute {
-                ModelRoute::Synthetic { id: id.into() }
-            }
-
-            fn option_for<'a>(options: &'a [ModelOption], route: &ModelRoute) -> &'a ModelOption {
-                options
-                    .iter()
-                    .find(|option| match &option.command {
-                        Command::SetModel { model, .. } => model == route,
-                        _ => false,
-                    })
-                    .unwrap_or_else(|| panic!("no picker option selects {route:?}"))
-            }
-
-            fn find_dir(root: &Path, name: &str) -> Option<PathBuf> {
-                let mut stack = vec![root.to_path_buf()];
-                while let Some(dir) = stack.pop() {
-                    let Ok(entries) = std::fs::read_dir(&dir) else {
-                        continue;
-                    };
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if !path.is_dir() {
-                            continue;
-                        }
-                        if entry.file_name().to_string_lossy() == name {
-                            return Some(path);
-                        }
-                        stack.push(path);
-                    }
-                }
-                None
-            }
-
-            /// One `model` journal record as `(API family or "synthetic", native
-            /// or synthetic id, provider)`.
-            type Journaled = (String, String, Option<String>);
-
-            fn journal_models(data: &Path, session: &str) -> Vec<Journaled> {
-                // The journal is created with the first record; until then
-                // there is nothing to read.
-                let Some(dir) = find_dir(data, session) else {
-                    return Vec::new();
-                };
-                let text = std::fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default();
-                text.lines()
-                    .filter_map(|line| sonic_rs::from_str::<Value>(line).ok())
-                    .filter(|record| record["type"].as_str() == Some("model"))
-                    .map(|record| match record["route"]["synthetic"]["id"].as_str() {
-                        Some(id) => ("synthetic".to_owned(), id.to_owned(), None),
-                        None => (
-                            record["api"].as_str().expect("api family").to_owned(),
-                            record["model"].as_str().expect("native id").to_owned(),
-                            record["provider"].as_str().map(str::to_owned),
-                        ),
-                    })
-                    .collect()
-            }
-
-            fn journaled(family: &str, model: &str, provider: Option<&str>) -> Journaled {
-                (
-                    family.to_owned(),
-                    model.to_owned(),
-                    provider.map(str::to_owned),
-                )
-            }
-
-            async fn assert_options_select_exact_routes(host: &RemoteHost) -> Vec<ModelOption> {
-                let models = host.models().await.expect("the model list decodes");
-                let options = remote_model_options(models.clone());
-                assert_eq!(options.len(), 10, "one option per listed model");
-                // The label is the row's name and its reference; every
-                // label of this list is distinct, so none takes a kind
-                // suffix.
-                for (model, option) in models.iter().zip(&options) {
-                    let reference = model.reference.as_deref().expect("a named row");
-                    assert_eq!(option.label, format!("{} · {reference}", model.name));
-                }
-                let labels: BTreeSet<&str> =
-                    options.iter().map(|option| option.label.as_str()).collect();
-                assert_eq!(labels.len(), options.len(), "{labels:?}");
-                // Each option selects its typed route, provider
-                // included, and scopes API rows by `provider/native`.
-                let wanted = [
-                    (
-                        api(Family::Responses, "gpt-4o", "openai"),
-                        "openai/gpt-4o",
-                        Some("openai/gpt-4o"),
-                    ),
-                    (
-                        api(Family::Responses, "gpt-4o", "openrouter"),
-                        "openrouter/gpt-4o",
-                        Some("openrouter/gpt-4o"),
-                    ),
-                    (
-                        api(Family::Chat, "gpt-4o", "acme-proxy"),
-                        "acme-proxy/gpt-4o",
-                        Some("acme-proxy/gpt-4o"),
-                    ),
-                    (
-                        api(Family::Responses, "openrouter/free", "openrouter"),
-                        "openrouter/openrouter/free",
-                        Some("openrouter/openrouter/free"),
-                    ),
-                    (
-                        api(Family::Responses, "free", "openrouter"),
-                        "openrouter/free",
-                        Some("openrouter/free"),
-                    ),
-                    (synthetic_route("acme/fast"), "acme/fast", None),
-                    (synthetic_route("openrouter/free"), "openrouter/free", None),
-                ];
-                for (route, reference, scoped) in wanted {
-                    let option = option_for(&options, &route);
-                    assert!(
-                        option.label.ends_with(&format!(" · {reference}")),
-                        "{} names {reference}",
-                        option.label
-                    );
-                    assert_eq!(option.scoped_id.as_deref(), scoped, "{route:?}");
-                    assert_eq!(
-                        option.command,
-                        Command::SetModel {
-                            model: route.clone(),
-                            save: Save::SessionOnly,
-                        }
-                    );
-                }
-                options
-            }
-
-            #[tokio::test]
-            async fn every_remote_selection_succeeds_on_a_serve_host_that_refuses_defaults() {
-                // A `dalgon serve` host never writes defaults. A picker option
-                // that asked to save one would change the model and still
-                // fail, so each option must apply and report success.
-                let fixture = Fixture::start_gated().await;
-                let workspace = Workspace::new(fixture.workspace.clone()).expect("workspace");
-                fixture
-                    .served(|host| async move {
-                        let models = host.models().await.expect("the model list decodes");
-                        let options = remote_model_options(models);
-                        let agent = host
-                            .open(SessionRef::New {
-                                workspace,
-                                name: None,
-                            })
-                            .await
-                            .expect("open a session");
-                        let picks = [
-                            api(Family::Responses, "gpt-4o", "openrouter"),
-                            api(Family::Chat, "gpt-4o", "acme-proxy"),
-                            synthetic_route("acme/fast"),
-                        ];
-                        for route in &picks {
-                            let option = option_for(&options, route);
-                            agent
-                                .submit(option.command.clone())
-                                .await
-                                .unwrap_or_else(|error| {
-                                    panic!("selecting {route:?} on a serve host: {error}")
-                                });
-                            let view = agent.view(PageReq::default()).await.expect("view");
-                            assert_eq!(view.settings.model.as_ref(), Some(route));
-                        }
-                    })
-                    .await;
-            }
-
-            #[tokio::test]
-            async fn first_settings_update_reaches_a_fresh_remote_subscriber_exactly_once() {
-                let fixture = Fixture::start_gated().await;
-                let workspace = Workspace::new(fixture.workspace.clone()).expect("workspace");
-                fixture
-                    .served(|host| async move {
-                        let models = host.models().await.expect("the model list decodes");
-                        let options = remote_model_options(models);
-                        let agent = host
-                            .open(SessionRef::New {
-                                workspace,
-                                name: None,
-                            })
-                            .await
-                            .expect("open a session");
-                        let view = agent.view(PageReq::default()).await.expect("view");
-                        let mut subscription = agent
-                            .subscribe(Some((view.r#gen, view.seq)))
-                            .await
-                            .expect("subscribe");
-                        let first = api(Family::Chat, "gpt-4o", "acme-proxy");
-                        let second = api(Family::Responses, "gpt-4o", "openai");
-                        for route in [&first, &second] {
-                            let option = option_for(&options, route);
-                            agent
-                                .submit(option.command.clone())
-                                .await
-                                .unwrap_or_else(|error| panic!("selecting {route:?}: {error}"));
-                        }
-                        let barrier = agent.view(PageReq::default()).await.expect("view");
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                        let mut settings = Vec::new();
-                        loop {
-                            let delivery = tokio::time::timeout_at(deadline, subscription.next())
-                                .await
-                                .expect("the subscription reaches the observed head")
-                                .expect("subscribe");
-                            let RemoteDelivery::Update(update) = delivery else {
-                                panic!("a fresh live subscription does not resync");
-                            };
-                            if let UpdateKind::Settings(seen) = &update.kind {
-                                settings.push(seen.model.clone());
-                            }
-                            if (update.r#gen, update.seq) == (barrier.r#gen, barrier.seq) {
-                                break;
-                            }
-                        }
-                        assert_eq!(
-                            settings.as_slice(),
-                            [Some(first.clone()), Some(second.clone())],
-                            "both selections arrive as settings, in order"
-                        );
-                    })
-                    .await;
-            }
-
-            #[tokio::test]
-            async fn every_option_of_a_real_list_selects_its_exact_route_and_provider() {
-                let fixture = Fixture::start().await;
-                let workspace = Workspace::new(fixture.workspace.clone()).expect("workspace");
-                let data = fixture.data.clone();
-                let config = fixture.config.clone();
-                let initial = std::fs::read_to_string(&config).expect("initial config");
-                fixture
-                    .served(|host| async move {
-                        let options = assert_options_select_exact_routes(&host).await;
-                        // Submitting the options of both same-family rows, and
-                        // returning to the first, sets the session model to
-                        // each exact route: nothing rebinds to a twin.
-                        let agent = host
-                            .open(SessionRef::New {
-                                workspace,
-                                name: None,
-                            })
-                            .await
-                            .expect("open a session");
-                        let picks = [
-                            api(Family::Chat, "gpt-4o", "acme-proxy"),
-                            api(Family::Responses, "gpt-4o", "openai"),
-                            api(Family::Responses, "gpt-4o", "openrouter"),
-                            api(Family::Responses, "openrouter/free", "openrouter"),
-                            synthetic_route("acme/fast"),
-                            api(Family::Responses, "gpt-4o", "openai"),
-                        ];
-                        for route in &picks {
-                            let option = option_for(&options, route);
-                            agent
-                                .submit(option.command.clone())
-                                .await
-                                .unwrap_or_else(|error| panic!("selecting {route:?}: {error}"));
-                            let view = agent.view(PageReq::default()).await.expect("view");
-                            assert_eq!(view.settings.model.as_ref(), Some(route));
-                        }
-                        // The server journaled each selection with its provider.
-                        let session = agent.session().to_string();
-                        // Selections alone stay lazy: one prompt creates the
-                        // journal (its model fails closed above).
-                        agent
-                            .submit(Command::Prompt {
-                                expect: Expect::Idle,
-                                content: vec![Part::Text {
-                                    text: "create the journal".into(),
-                                }],
-                            })
-                            .await
-                            .unwrap_or_else(|error| panic!("the journal-creating prompt: {error}"));
-                        let wanted = [
-                            journaled("openai_chat", "gpt-4o", Some("acme-proxy")),
-                            journaled("openai_responses", "gpt-4o", Some("openai")),
-                            journaled("openai_responses", "gpt-4o", Some("openrouter")),
-                            journaled("openai_responses", "openrouter/free", Some("openrouter")),
-                            journaled("synthetic", "acme/fast", None),
-                            journaled("openai_responses", "gpt-4o", Some("openai")),
-                        ];
-                        let mut records = journal_models(&data, &session);
-                        for _ in 0..50 {
-                            if records.len() >= wanted.len() {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            records = journal_models(&data, &session);
-                        }
-                        assert!(
-                            records.ends_with(&wanted),
-                            "journal model records {records:?} do not end with {wanted:?}"
-                        );
-                        // A remote selection is session-only: the server's
-                        // saved default is untouched even on a host that may
-                        // write one.
-                        assert_eq!(
-                            std::fs::read_to_string(&config).expect("saved config"),
-                            initial,
-                            "a remote picker selection never rewrites the server file"
-                        );
-                    })
-                    .await;
-            }
         }
     }
 }

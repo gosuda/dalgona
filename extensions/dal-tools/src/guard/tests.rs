@@ -2338,6 +2338,27 @@ async fn failed_spill_read_keeps_preview_warnings_and_keeps_reading() {
     rig.assert_no_stray_service_use();
 }
 
+#[tokio::test]
+async fn exhaustion_reason_is_frozen_at_the_first_stop() {
+    let rig = Rig::open(test_config()).await;
+    rig.begin(1, "edit").await;
+    // A different edit goes out first and stays in flight past the stop.
+    assert_eq!(
+        rig.call(1, &patch("b1", r#"{"path":"b.rs"}"#)).await,
+        ToolCallVerdict::Allow
+    );
+    let stopped = exhaust(&rig, 1, SAME).await;
+    assert_eq!(stopped, exhausted("patch", SAME, "none", "none"));
+    // After the stop the in-flight edit fails and its file lands, but later
+    // blocked calls still carry the reason rendered at the stop.
+    rig.result(1, "b1", "patch", false, "late failure").await;
+    rig.touch(1, "b.rs");
+    assert_eq!(rig.call(1, &patch("e4", SAME)).await, stopped);
+    assert_eq!(rig.host.turn_ops(), vec![TurnOp::Cancel]);
+    assert_eq!(rig.host.notices(), [] as [Notice; 0]);
+    rig.assert_no_stray_service_use();
+}
+
 type ParkedHook = tokio::task::JoinSet<Result<(), HookError>>;
 
 /// Parks the result hook of exec call `c1` inside the host's `fs.read`, then

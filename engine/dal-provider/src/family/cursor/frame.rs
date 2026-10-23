@@ -333,15 +333,17 @@ fn decode_error_details(details: &[ConnectDetail]) -> Option<(i32, String, Optio
         }
         // A Cursor detail without a decodable payload says nothing; a later
         // entry may still carry the structured verdict, as in the reference.
-        // The reference decodes with Node `Buffer.from(value, "base64")`
-        // (cursor.ts `decodeCursorStructuredError`), which accepts the
-        // standard and URL-safe alphabets, padded or not, ignoring
-        // whitespace. Mirror that leniency with the two engines; anything
-        // else stays undecodable and falls through to the next entry.
-        let Some(encoded) = entry.value.as_deref().filter(|value| !value.is_empty()) else {
+        let Some(encoded) = entry
+            .value
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
             continue;
         };
-        let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned: String = encoded
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
         let trimmed = cleaned.trim_end_matches('=');
         let raw =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, trimmed)
@@ -350,9 +352,8 @@ fn decode_error_details(details: &[ConnectDetail]) -> Option<(i32, String, Optio
                         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
                         trimmed,
                     )
-                })
-                .ok();
-        let Some(raw) = raw else {
+                });
+        let Ok(raw) = raw else {
             continue;
         };
         let Ok(detail) = ErrorDetails::decode(raw.as_slice()) else {
@@ -413,6 +414,108 @@ pub(crate) fn map_connect_error(provider: &str, error: &ConnectError) -> Provide
     )
 }
 
+/// Maps authentication codes to their rejection; `None` when unclassified.
+fn auth_error(provider: &str, code: i32) -> Option<ProviderError> {
+    use super::proto::CursorError as Code;
+
+    matches!(
+        code,
+        Code::BAD_API_KEY
+            | Code::NOT_LOGGED_IN
+            | Code::INVALID_AUTH_ID
+            | Code::AUTH_TOKEN_NOT_FOUND
+            | Code::AUTH_TOKEN_EXPIRED
+            | Code::AGENT_REQUIRES_LOGIN
+            | Code::UNAUTHORIZED
+            | Code::BAD_USER_API_KEY
+            | Code::ACCOUNT_CLOSED
+    )
+    .then(|| ProviderError::AuthRejected {
+        provider: provider.to_owned(),
+    })
+}
+
+/// Maps quota and rate-limit codes to their errors; `None` when unclassified.
+fn quota_or_rate_error(code: i32, full: &str) -> Option<ProviderError> {
+    use super::proto::CursorError as Code;
+
+    if matches!(
+        code,
+        Code::FREE_USER_USAGE_LIMIT
+            | Code::PRO_USER_USAGE_LIMIT
+            | Code::USAGE_PRICING_REQUIRED
+            | Code::USAGE_PRICING_REQUIRED_CHANGEABLE
+    ) {
+        return Some(ProviderError::Quota {
+            message: full.to_owned(),
+        });
+    }
+    matches!(
+        code,
+        Code::FREE_USER_RATE_LIMIT_EXCEEDED
+            | Code::PRO_USER_RATE_LIMIT_EXCEEDED
+            | Code::OPENAI_RATE_LIMIT_EXCEEDED
+            | Code::GENERIC_RATE_LIMIT_EXCEEDED
+            | Code::GPT_4_VISION_PREVIEW_RATE_LIMIT
+            | Code::API_KEY_RATE_LIMIT
+            | Code::DEBOUNCED
+            | Code::RESOURCE_EXHAUSTED
+            | Code::RATE_LIMITED
+            | Code::RATE_LIMITED_CHANGEABLE
+    )
+    .then(|| ProviderError::RateLimited {
+        message: full.to_owned(),
+        retry_after: None,
+    })
+}
+
+/// Maps permission and lookup codes to their status errors; `None` when
+/// unclassified.
+fn status_error(code: i32, full: &str) -> Option<ProviderError> {
+    use super::proto::CursorError as Code;
+
+    if matches!(
+        code,
+        Code::NOT_HIGH_ENOUGH_PERMISSIONS
+            | Code::PRO_USER_ONLY
+            | Code::GITHUB_NO_USER_CREDENTIALS
+            | Code::GITHUB_USER_NO_ACCESS
+            | Code::GITHUB_APP_NO_ACCESS
+            | Code::GITHUB_MULTIPLE_OWNERS
+            | Code::SUSPICIOUS_USAGE_BLOCKED
+            | Code::UNSUPPORTED_REGION
+            | Code::MODEL_BLOCKED
+    ) {
+        return Some(ProviderError::Status {
+            family: Family::Cursor,
+            status: 403,
+            message: full.to_owned(),
+        });
+    }
+    if matches!(
+        code,
+        Code::BAD_MODEL_NAME
+            | Code::USER_NOT_FOUND
+            | Code::FILE_NOT_FOUND
+            | Code::NOT_FOUND
+            | Code::MODEL_NO_LONGER_SUPPORTED
+    ) {
+        return Some(ProviderError::Status {
+            family: Family::Cursor,
+            status: 404,
+            message: full.to_owned(),
+        });
+    }
+    if code == Code::MAX_TOKENS {
+        return Some(ProviderError::Status {
+            family: Family::Cursor,
+            status: 413,
+            message: full.to_owned(),
+        });
+    }
+    None
+}
+
 /// Maps one structured Cursor failure to its [`ProviderError`], following
 /// the reference status table: 401 is authentication, usage-limit 429s are
 /// quota, other 429s are rate limits, 413 on a too-long conversation is
@@ -440,48 +543,11 @@ pub(crate) fn map_structured_error(
             reason: String::from("the server recorded the request as aborted"),
         };
     }
-    if matches!(
-        code,
-        Code::BAD_API_KEY
-            | Code::NOT_LOGGED_IN
-            | Code::INVALID_AUTH_ID
-            | Code::AUTH_TOKEN_NOT_FOUND
-            | Code::AUTH_TOKEN_EXPIRED
-            | Code::AGENT_REQUIRES_LOGIN
-            | Code::UNAUTHORIZED
-            | Code::BAD_USER_API_KEY
-            | Code::ACCOUNT_CLOSED
-    ) {
-        return ProviderError::AuthRejected {
-            provider: provider.to_owned(),
-        };
+    if let Some(error) = auth_error(provider, code) {
+        return error;
     }
-    if matches!(
-        code,
-        Code::FREE_USER_USAGE_LIMIT
-            | Code::PRO_USER_USAGE_LIMIT
-            | Code::USAGE_PRICING_REQUIRED
-            | Code::USAGE_PRICING_REQUIRED_CHANGEABLE
-    ) {
-        return ProviderError::Quota { message: full };
-    }
-    if matches!(
-        code,
-        Code::FREE_USER_RATE_LIMIT_EXCEEDED
-            | Code::PRO_USER_RATE_LIMIT_EXCEEDED
-            | Code::OPENAI_RATE_LIMIT_EXCEEDED
-            | Code::GENERIC_RATE_LIMIT_EXCEEDED
-            | Code::GPT_4_VISION_PREVIEW_RATE_LIMIT
-            | Code::API_KEY_RATE_LIMIT
-            | Code::DEBOUNCED
-            | Code::RESOURCE_EXHAUSTED
-            | Code::RATE_LIMITED
-            | Code::RATE_LIMITED_CHANGEABLE
-    ) {
-        return ProviderError::RateLimited {
-            message: full,
-            retry_after: None,
-        };
+    if let Some(error) = quota_or_rate_error(code, &full) {
+        return error;
     }
     if code == Code::CONVERSATION_TOO_LONG {
         return ProviderError::ContextOverflow {
@@ -490,57 +556,13 @@ pub(crate) fn map_structured_error(
             message: full,
         };
     }
-    if let Some(status) = map_structured_status(code, &name, &text) {
-        return status;
-    }
-    if code == Code::MAX_TOKENS {
-        return ProviderError::Status {
-            family: Family::Cursor,
-            status: 413,
-            message: full,
-        };
+    if let Some(error) = status_error(code, &full) {
+        return error;
     }
     if retryable == Some(true) || (retryable.is_none() && Code::RETRYABLE.contains(&code)) {
         return ProviderError::Overloaded;
     }
     ProviderError::InvalidRequest { message: full }
-}
-
-/// Maps the permission- and existence-shaped structured codes to their
-/// HTTP-status [`ProviderError`].
-fn map_structured_status(code: i32, name: &str, text: &str) -> Option<ProviderError> {
-    use super::proto::CursorError as Code;
-
-    let status = if matches!(
-        code,
-        Code::NOT_HIGH_ENOUGH_PERMISSIONS
-            | Code::PRO_USER_ONLY
-            | Code::GITHUB_NO_USER_CREDENTIALS
-            | Code::GITHUB_USER_NO_ACCESS
-            | Code::GITHUB_APP_NO_ACCESS
-            | Code::GITHUB_MULTIPLE_OWNERS
-            | Code::SUSPICIOUS_USAGE_BLOCKED
-            | Code::UNSUPPORTED_REGION
-            | Code::MODEL_BLOCKED
-    ) {
-        403
-    } else if matches!(
-        code,
-        Code::BAD_MODEL_NAME
-            | Code::USER_NOT_FOUND
-            | Code::FILE_NOT_FOUND
-            | Code::NOT_FOUND
-            | Code::MODEL_NO_LONGER_SUPPORTED
-    ) {
-        404
-    } else {
-        return None;
-    };
-    Some(ProviderError::Status {
-        family: Family::Cursor,
-        status,
-        message: format!("Cursor {name}: {text}"),
-    })
 }
 
 /// Maps one unstructured Connect code to its [`ProviderError`]. Unknown

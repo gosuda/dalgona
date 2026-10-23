@@ -18,10 +18,9 @@
 //! selected model, not the configured default, decides; a stored set that no
 //! longer matches the loaded skills stays frozen and never grows duplicate
 //! ids; a stored set draws its fallback diagnostics only once; a failed
-//! letter hook publishes its cause; a well-formed row with an unsupported
-//! version fails the hook without a duplicate id; a record prefix left by a
-//! crash is completed without a duplicate or conflicting id; and a skill
-//! shows by name only while its image is in the request.
+//! letter hook publishes its cause; a record prefix left by a crash is
+//! completed without a duplicate or conflicting id; and a skill shows by name
+//! only while its image is in the request.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -1244,8 +1243,8 @@ async fn letter_unsupported_version_row_fails_closed_without_a_duplicate() -> Ou
 }
 
 /// F3: the stored set is a delivered strict prefix and the registry gains a
-/// marked skill. The hook freezes the delivered set: it persists no tail and
-/// attaches no letter images, so the delivered letter is never sent twice.
+/// marked skill. The hook persists the new tail but attaches the whole
+/// assembly, so the first letter reaches the model twice.
 #[tokio::test]
 async fn letter_red_f3_registry_growth_does_not_redeliver_a_delivered_letter() -> Outcome<()> {
     let rig = Rig::new("red-f3-growth")?;

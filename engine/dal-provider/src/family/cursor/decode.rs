@@ -43,14 +43,34 @@ use dal_core::{Family, ModelRequest, Part, ReplayCapture, ReplayRefusal, Usage};
 use futures::{Stream, channel::mpsc};
 use prost::Message as _;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::wildcard_imports,
-        reason = "Cursor protobuf types are namespaced under proto and imported wholesale"
-    )
-)]
-use super::proto::*;
+use super::proto::{
+    AgentClientMessage, AgentServerMessage, AskQuestionInteractionResponse, AskQuestionRejected,
+    AskQuestionResult, ClientHeartbeat, ConversationStateStructure, CreatePlanError,
+    CreatePlanRequestResponse, CreatePlanResult, CursorRule, DeleteRejected, DeleteResult,
+    DiagnosticsRejected, DiagnosticsResult, ExaFetchRequestResponse, ExaSearchRequestResponse,
+    ExecClientControlMessage, ExecClientMessage, ExecClientStreamClose, ExecClientThrow,
+    ExecServerMessage, FetchError, FetchResult, GetBlobResult, GrepError, GrepResult,
+    InteractionQuery, InteractionResponse, InteractionUpdate, KvClientMessage, KvServerMessage,
+    ListMcpResourcesExecResult, ListMcpResourcesSuccess, LsRejected, LsResult,
+    McpAllowlistPrecheckResult, McpArgs, McpContentItem, McpError, McpImageContent, McpRejected,
+    McpResult, McpStateExecResult, McpStateSuccess, McpSuccess, McpTextContent, McpToolDefinition,
+    McpToolNotFound, PartialToolCallUpdate, PbValue, QueryRejected, ReadMcpResourceExecResult,
+    ReadMcpResourceNotFound, ReadRejected, ReadResult, RequestContext, RequestContextResult,
+    RequestContextSuccess, SetBlobResult, ShellAllowlistPrecheckResult, ShellRejected, ShellResult,
+    ShellStream, ShellStreamExit, SwitchModeRequestResponse, ToolCallCompletedUpdate,
+    ToolCallDeltaUpdate, ToolCallStartedUpdate, TurnEndedUpdate, WebFetchAllowlistPrecheckResult,
+    WebFetchRequestResponse, WebSearchRequestResponse, WriteRejected, WriteResult,
+    ask_question_result, client_message, create_plan_result, delete_result, diagnostics_result,
+    exa_fetch_response, exa_search_response, exec_client_control, exec_client_message,
+    exec_server_control, exec_server_message, fetch_result, grep_result, interaction_query,
+    interaction_response, interaction_update, kv_client_message, kv_server_message,
+    list_mcp_resources_result, ls_result, mcp_content_item, mcp_result, mcp_state_result,
+    read_mcp_resource_result, read_result, request_context_result, server_message, shell_result,
+    shell_stream, switch_mode_response, tool_call, web_fetch_response, web_search_response,
+    write_result,
+};
+#[cfg(test)]
+use super::proto::{CancelAction, ConversationAction, conversation_action};
 use super::{
     frame::{
         END_STREAM_FLAG, Frame, FrameDecoder, FrameError, MAX_FRAME_BYTES, decode_message,
@@ -593,10 +613,7 @@ impl Session {
             return Self::classify_native_streamed(call);
         };
         let args = mcp.args.as_ref()?;
-        // A streamed announcement for a foreign provider is not ours: leave
-        // it invisible like any other server-resolved call. Its exec frame,
-        // if any, answers `ToolNotFound` there.
-        if !self.is_ours_provider(args.provider_identifier.as_str()) {
+        if !self.is_ours_provider(&args.provider_identifier) {
             return None;
         }
         Some(StreamedCall::Mcp {
@@ -615,24 +632,14 @@ impl Session {
         }
     }
 
-    /// Whether an inbound MCP frame names this client.
-    ///
-    /// The request advertises every dal tool with provider
-    /// [`PROVIDER_IDENTIFIER`](super::lower::PROVIDER_IDENTIFIER); history
-    /// calls carry that identifier so they pair with those tools. An empty
-    /// identifier is the server's legacy omission (every current test and
-    /// history playback sends it) and stays dispatched. Only a non-empty
-    /// foreign identifier is rejected. The `server_identifier` carries no
-    /// declaration at all: history emits it empty and the advertised
-    /// definition has no such field, so it is ignored pending live capture
-    /// of what the server actually sends for dal tools.
+    /// Whether an inbound MCP frame names a provider advertised by this request.
     fn is_ours_provider(&self, identifier: &str) -> bool {
-        if identifier.is_empty() || identifier == PROVIDER_IDENTIFIER {
-            return true;
-        }
-        self.tools
-            .iter()
-            .any(|tool| tool.provider_identifier == identifier)
+        identifier.is_empty()
+            || identifier == PROVIDER_IDENTIFIER
+            || self
+                .tools
+                .iter()
+                .any(|tool| tool.provider_identifier == identifier)
     }
 
     /// Restores a wire tool name to its internal name, passing through
@@ -962,8 +969,7 @@ impl Session {
         );
     }
 
-    /// Answers one exec frame with `ToolNotFound` for `name` and the
-    /// session's advertised wire names.
+    /// Replies `ToolNotFound` for a foreign provider or an unknown tool name.
     fn reply_tool_not_found(&mut self, id: u32, exec_id: &str, name: String, out: &mut PumpOut) {
         self.reply(
             id,
@@ -977,19 +983,19 @@ impl Session {
             out,
         );
     }
+
     /// Routes one MCP exec frame: approval probes and unknown tools are
     /// answered at once, and anything else becomes one pending tool event
     /// carrying the internal name. A redispatch for a call the session
     /// already holds only gains a route; the first frame's name wins, so
     /// the announcement, the pending call, and the flushed step agree.
     fn on_mcp_exec(&mut self, id: u32, exec_id: &str, args: &McpArgs, out: &mut PumpOut) {
-        // Fail closed only where the declared contract gives authority: a
-        // non-empty foreign provider never advertised here answers
-        // `ToolNotFound` in band. Empty stays dispatched (legacy omission);
-        // `server_identifier` is ignored (no declaration; see
-        // `is_ours_provider`).
-        if !self.is_ours_provider(args.provider_identifier.as_str()) {
-            let name = wire_tool_name(args);
+        if !self.is_ours_provider(&args.provider_identifier) {
+            let name = if args.tool_name.is_empty() {
+                args.name.clone()
+            } else {
+                args.tool_name.clone()
+            };
             self.reply_tool_not_found(id, exec_id, name, out);
             return;
         }
@@ -1006,7 +1012,11 @@ impl Session {
             );
             return;
         }
-        let name = wire_tool_name(args);
+        let name = if args.tool_name.is_empty() {
+            args.name.clone()
+        } else {
+            args.tool_name.clone()
+        };
         let internal = if let Some(mapped) = self.restore.get(name.as_str()) {
             mapped.to_string()
         } else if self.wire_names.contains(&name) {
@@ -1546,8 +1556,7 @@ impl Session {
 
     /// Emits the final step terminal: the empty tool-call close (pending
     /// calls already ended the run as a protocol error), the capture when
-    /// the turn earned one (captured or refused), the usage, and exactly
-    /// one stop.
+    /// the turn earned one, the usage, and exactly one stop.
     fn finalize(&mut self, out: &mut PumpOut) {
         if self.done {
             return;
@@ -1677,16 +1686,8 @@ fn map_turn_usage(ended: &TurnEndedUpdate) -> Usage {
 }
 
 impl Session {
-    /// Assembles the turn capture: the checkpoint's records after the
-    /// stamped user record, bound to the route and digest.
-    ///
-    /// Truly absent replay yields no event and the turn rebuilds from
-    /// content: no active user, an uncovered checkpoint, no checkpoint at
-    /// all, or a payload that cannot be journaled. Malformed present replay
-    /// yields a refused capture so the fold fails the turn instead of
-    /// silently rebuilding: non-UTF8 bytes, non-JSON records, a checkpoint
-    /// referencing unknown blobs, no user record for this request, or no
-    /// answer records after it.
+    /// Assembles the turn capture: absent or stale replay falls back to
+    /// content lowering; malformed present replay is refused explicitly.
     fn capture_turn_records(&self) -> Option<ReplayCapture> {
         if !self.has_active_user || !self.checkpoint_covers {
             return None;
@@ -1694,11 +1695,7 @@ impl Session {
         let roots = self.checkpoint.as_ref()?;
         let mut records: Vec<String> = Vec::new();
         for id in roots.iter().rev() {
-            let Some(bytes) = self.blobs.get(id) else {
-                return Some(ReplayCapture::Refused {
-                    reason: ReplayRefusal::UserRecordNotFound,
-                });
-            };
+            let bytes = self.blobs.get(id)?;
             let Ok(text) = std::str::from_utf8(bytes) else {
                 return Some(ReplayCapture::Refused {
                     reason: ReplayRefusal::RecordNotUtf8,
@@ -1719,8 +1716,11 @@ impl Session {
                     self.turn_calls.clone(),
                     records,
                 );
-                // Unreachable for constructed values; drop instead of failing.
-                let payload = history.to_payload()?;
+                let Some(payload) = history.to_payload() else {
+                    return Some(ReplayCapture::Refused {
+                        reason: ReplayRefusal::RecordNotJson,
+                    });
+                };
                 return Some(ReplayCapture::Captured { payload });
             }
             if super::proto::parse_json(text).is_err() {
@@ -1884,16 +1884,6 @@ fn host_content(parts: &[Part]) -> Vec<McpContentItem> {
         }
     }
     content
-}
-
-/// The tool name one exec frame carries: the declared tool name unless it
-/// is empty, which falls back to the frame's bare name.
-fn wire_tool_name(args: &McpArgs) -> String {
-    if args.tool_name.is_empty() {
-        args.name.clone()
-    } else {
-        args.tool_name.clone()
-    }
 }
 
 /// Locks a session mutex, recovering from poisoning with the surviving

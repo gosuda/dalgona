@@ -54,3 +54,15 @@ protocol subset; there is no HTTP+SSE-only transport.
 Limits: discovery 5 s, start 10 s, list 15 s, call 60 s (600 s with
 progress), one restart per session and isolation key, 50 list pages,
 result text capped at 524288 bytes. Token files are stored at mode 0600.
+
+## Cancellation and diagnostics
+
+Cancelling a turn stops its in-flight MCP call. A stdio server then
+receives `notifications/cancelled` for that request and keeps running; an
+HTTP call closes its response stream. Session end, plugin reload, and a
+server crash stop the stdio server's process group. A launch failure for
+a missing program names the redacted target, not an opaque command's
+executable. The stderr excerpt in a crash report replaces every declared
+environment value with `<redacted>`; launch arguments are not replaced, so
+keep secrets out of arguments. Server progress and elicitation text
+reaches notices and prompts with control characters stripped.

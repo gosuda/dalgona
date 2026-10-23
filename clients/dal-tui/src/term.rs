@@ -157,7 +157,7 @@ impl TermState {
         self.grapheme = enabled;
     }
 
-    /// Reports whether grapheme-width mode is active.
+    /// Reports whether grapheme-width terminal mode is active.
     #[must_use]
     pub const fn grapheme(&self) -> bool {
         self.grapheme

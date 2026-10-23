@@ -69,6 +69,41 @@ pub(crate) fn arm_fault_for_path(path: &Path, faults: Faults) {
         .insert(path.to_path_buf(), faults);
 }
 
+/// Exact bytes of every batch whose write or staged sync actually failed,
+/// keyed by journal path. Test support: the shard worker owns the `Journal`
+/// while the polling `Store` is a different handle, so a process-global cell
+/// is the one place both reach. Only real failures record; arming never does.
+#[cfg(any(test, feature = "test-support"))]
+static REJECTED_BATCHES: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Vec<Vec<u8>>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Records one rejected batch for `path`. Call only after a write or staged
+/// sync actually failed; empty batches never carry records and never record.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn record_rejected_batch(path: &Path, batch: &[u8]) {
+    if batch.is_empty() {
+        return;
+    }
+    REJECTED_BATCHES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(path.to_path_buf())
+        .or_default()
+        .push(batch.to_vec());
+}
+
+/// Drains every rejected batch recorded for `path` in attempt order,
+/// clearing that path's list. Empty when no batch has actually been rejected
+/// since the previous drain; successful appends never record.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn take_rejected_batches(path: &Path) -> Vec<Vec<u8>> {
+    REJECTED_BATCHES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(path)
+        .unwrap_or_default()
+}
+
 /// A durability fault, injected by tests at a named point.
 ///
 /// Production code passes [`Faults::default`]; every field `None` or `false`.
@@ -136,6 +171,11 @@ pub(crate) struct Journal {
     end: u64,
     health: Health,
     faults: Faults,
+    /// Last successfully written but not yet staged batch, test support only.
+    /// `stage_sync` takes `&self` and owns no batch bytes, so the bytes it
+    /// must record on an injected sync failure wait here from `append_unsynced`.
+    #[cfg(any(test, feature = "test-support"))]
+    last_unsynced: Option<Vec<u8>>,
 }
 
 impl Journal {
@@ -153,6 +193,8 @@ impl Journal {
             end: 0,
             health: Health::Healthy,
             faults: faults.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            last_unsynced: None,
         };
         let result = journal
             .write_bytes(lines)
@@ -181,6 +223,8 @@ impl Journal {
             end: 0,
             health: Health::Healthy,
             faults: faults.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            last_unsynced: None,
         };
         let file_len = journal
             .file
@@ -262,7 +306,9 @@ impl Journal {
     #[cfg(test)]
     pub(crate) fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
         let receipt = self.append_unsynced(lines)?;
-        self.sync().map(|()| receipt)
+        self.sync().map(|()| receipt).inspect_err(|_| {
+            record_rejected_batch(&self.path, lines);
+        })
     }
 
     /// Writes the batch without syncing it. Pair the returned receipt with
@@ -290,12 +336,25 @@ impl Journal {
         match self.write_bytes(lines) {
             Ok(()) => {
                 self.end = offset.saturating_add(lines.len() as u64);
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    if self.faults.sync_error && !lines.is_empty() {
+                        self.last_unsynced = Some(lines.to_vec());
+                    } else {
+                        self.last_unsynced = None;
+                    }
+                }
                 Ok(Receipt {
                     offset,
                     len: lines.len() as u64,
                 })
             }
             Err(error) => {
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    record_rejected_batch(&self.path, lines);
+                    self.last_unsynced = None;
+                }
                 if self.faults.truncate_error || self.truncate_back(offset).is_err() {
                     self.health = Health::Damaged;
                     let cause = match write_rollback_marker(&self.path, offset) {
@@ -330,6 +389,10 @@ impl Journal {
         receipt: Receipt,
     ) -> Result<(File, PathBuf, Receipt), JournalError> {
         if self.faults.sync_error {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(batch) = self.last_unsynced.as_deref() {
+                record_rejected_batch(&self.path, batch);
+            }
             return Err(jio(
                 "sync",
                 &self.path,
@@ -1200,30 +1263,9 @@ pub(crate) fn scan_entry(
     path: &Path,
     wanted: EntryId,
 ) -> Result<Option<dal_core::EntryView>, OpenFailure> {
-    let mut file = crate::private::open_private_file(path)
-        .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
-    let file_len = file
-        .metadata()
-        .map_err(|source| OpenFailure::Journal(jio("read", path, source)))?
-        .len();
-    let buffer_len = usize::try_from(file_len)
-        .unwrap_or(usize::MAX)
-        .min(SCAN_BUFFER);
-    let mut buffer = vec![0_u8; buffer_len];
-    let rollback = rollback_offset(path, file_len)?;
-    let scan_end = rollback.unwrap_or(file_len);
     let mut scan = EntryScan::new(wanted);
-    let (complete_end, validator) =
-        scan_complete_prefix(&mut file, path, scan_end, &mut buffer, |_, record| {
-            scan.visit(&record);
-        })?;
-    if rollback.is_some() && complete_end != scan_end {
-        return Err(OpenFailure::Damaged {
-            offset: scan_end,
-            reason: "the rollback marker does not point to a record boundary".into(),
-        });
-    }
-    Ok(scan.found(validator.leaf()))
+    let summary = scan_prefix(path, |_, record| scan.visit(&record))?;
+    Ok(scan.found(summary.leaf))
 }
 
 /// The validated rollback marker offset for a journal of `file_len` bytes.
@@ -1295,7 +1337,8 @@ impl EntryScan {
 pub(crate) struct PrefixSummary {
     /// The current journal file length, including any torn tail.
     pub(crate) file_len: u64,
-    /// The offset after the last complete record.
+    /// The offset after the last complete record the scan may trust: the
+    /// rollback marker's offset when one exists.
     pub(crate) complete_end: u64,
     /// The leaf after the complete prefix.
     pub(crate) leaf: Option<EntryId>,
@@ -1305,9 +1348,15 @@ pub(crate) struct PrefixSummary {
 
 /// Visits each validated complete record without repairing or writing the file.
 ///
+/// The scan is bounded by the rollback marker when one exists, exactly as
+/// [`Journal::open`] bounds its preflight, so the complete lines of a failed
+/// batch never replay into a reader; the marker itself stays on disk for the
+/// writer. A marker not at a record boundary is damage, never ignored.
+///
 /// # Errors
-/// Returns [`OpenFailure`] for a damaged prefix, unsupported version, or I/O
-/// failure. Valid records before an error have already been passed to `visit`.
+/// Returns [`OpenFailure`] for a damaged prefix, unsupported version,
+/// unreadable rollback marker, or I/O failure. Valid records before an error
+/// have already been passed to `visit`.
 pub(crate) fn scan_prefix(
     path: &Path,
     visit: impl FnMut(u64, Record),
@@ -1322,8 +1371,16 @@ pub(crate) fn scan_prefix(
         .unwrap_or(usize::MAX)
         .min(SCAN_BUFFER);
     let mut buffer = vec![0_u8; buffer_len];
+    let rollback = rollback_offset(path, file_len)?;
+    let scan_end = rollback.unwrap_or(file_len);
     let (complete_end, validator) =
-        scan_complete_prefix(&mut file, path, file_len, &mut buffer, visit)?;
+        scan_complete_prefix(&mut file, path, scan_end, &mut buffer, visit)?;
+    if rollback.is_some() && complete_end != scan_end {
+        return Err(OpenFailure::Damaged {
+            offset: scan_end,
+            reason: "the rollback marker does not point to a record boundary".into(),
+        });
+    }
     Ok(PrefixSummary {
         file_len,
         complete_end,
@@ -1515,7 +1572,7 @@ fn aborted_turn(
 pub(crate) fn turn_totals(
     records: &[(u64, Record)],
 ) -> Result<(Option<Usage>, Vec<dal_core::FileChange>), OpenFailure> {
-    let mut usage = UsageTotal::new();
+    let mut usage = UsageTotal::default();
     let mut changes: Vec<dal_core::FileChange> = Vec::new();
     let mut change_indexes = HashMap::<&str, usize>::new();
     for (offset, record) in records {
@@ -1573,110 +1630,104 @@ pub(crate) fn turn_totals(
     Ok((usage.finish(), changes))
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag independently tracks whether one usage member was ever reported"
-)]
+#[derive(Default)]
 struct UsageTotal {
+    known: Option<KnownUsage>,
+}
+
+#[derive(Default)]
+struct KnownUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
     output_tokens: u64,
-    reasoning_tokens: u64,
-    reasoning_known: bool,
+    reasoning_tokens: Option<u64>,
     cache_write_tokens: u64,
-    premium_requests: f64,
-    premium_known: bool,
-    cost_usd: f64,
-    cost_known: bool,
-    seen: bool,
+    premium_requests: Option<f64>,
+    cost_usd: Option<f64>,
 }
 
 impl UsageTotal {
-    fn new() -> Self {
-        Self {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            reasoning_known: true,
-            cache_write_tokens: 0,
-            premium_requests: 0.0,
-            premium_known: true,
-            cost_usd: 0.0,
-            cost_known: true,
-            seen: false,
-        }
-    }
-
     fn add(&mut self, usage: Usage, offset: u64) -> Result<(), OpenFailure> {
-        self.seen = true;
-        self.input_tokens = checked_total(
-            self.input_tokens,
+        let total = self.known.get_or_insert_with(|| KnownUsage {
+            reasoning_tokens: Some(0),
+            premium_requests: Some(0.0),
+            cost_usd: Some(0.0),
+            ..KnownUsage::default()
+        });
+        total.input_tokens = checked_total(
+            total.input_tokens,
             usage.input_tokens,
             offset,
             "turn usage total overflows",
         )?;
-        self.cached_input_tokens = checked_total(
-            self.cached_input_tokens,
+        total.cached_input_tokens = checked_total(
+            total.cached_input_tokens,
             usage.cached_input_tokens,
             offset,
             "turn usage total overflows",
         )?;
-        self.output_tokens = checked_total(
-            self.output_tokens,
+        total.output_tokens = checked_total(
+            total.output_tokens,
             usage.output_tokens,
             offset,
             "turn usage total overflows",
         )?;
-        match usage.reasoning_tokens {
-            Some(reasoning) => {
-                self.reasoning_tokens = checked_total(
-                    self.reasoning_tokens,
-                    reasoning,
-                    offset,
-                    "turn usage total overflows",
-                )?;
-            }
-            None => self.reasoning_known = false,
+        if let (Some(current), Some(reasoning)) = (total.reasoning_tokens, usage.reasoning_tokens) {
+            total.reasoning_tokens = Some(checked_total(
+                current,
+                reasoning,
+                offset,
+                "turn usage total overflows",
+            )?);
+        } else {
+            total.reasoning_tokens = None;
         }
-        self.cache_write_tokens = checked_total(
-            self.cache_write_tokens,
+        total.cache_write_tokens = checked_total(
+            total.cache_write_tokens,
             usage.cache_write_tokens,
             offset,
             "turn usage total overflows",
         )?;
-        match usage.premium_requests {
-            Some(premium) => {
-                let total = self.premium_requests + premium;
-                if !total.is_finite() {
+        if let Some(premium) = usage.premium_requests {
+            if !premium.is_finite() || premium < 0.0 {
+                return Err(damaged(offset, "turn usage premium is invalid"));
+            }
+            if let Some(current) = total.premium_requests {
+                let premium_total = current + premium;
+                if !premium_total.is_finite() {
                     return Err(damaged(offset, "turn usage premium total overflows"));
                 }
-                self.premium_requests = total;
+                total.premium_requests = Some(premium_total);
             }
-            None => self.premium_known = false,
+        } else {
+            total.premium_requests = None;
         }
-        match usage.cost_usd {
-            Some(cost) => {
-                let total = self.cost_usd + cost;
-                if !total.is_finite() {
+        if let Some(cost) = usage.cost_usd {
+            if !cost.is_finite() {
+                return Err(damaged(offset, "turn usage cost total overflows"));
+            }
+            if let Some(current) = total.cost_usd {
+                let cost_total = current + cost;
+                if !cost_total.is_finite() {
                     return Err(damaged(offset, "turn usage cost total overflows"));
                 }
-                self.cost_usd = total;
+                total.cost_usd = Some(cost_total);
             }
-            None => self.cost_known = false,
+        } else {
+            total.cost_usd = None;
         }
         Ok(())
     }
 
     fn finish(self) -> Option<Usage> {
-        self.seen.then_some(Usage {
-            input_tokens: self.input_tokens,
-            cached_input_tokens: self.cached_input_tokens,
-            output_tokens: self.output_tokens,
-            reasoning_tokens: self.reasoning_known.then_some(self.reasoning_tokens),
-            cache_write_tokens: self.cache_write_tokens,
-            premium_requests: self.premium_known.then_some(self.premium_requests),
-            cost_usd: self.cost_known.then_some(self.cost_usd),
+        self.known.map(|known| Usage {
+            input_tokens: known.input_tokens,
+            cached_input_tokens: known.cached_input_tokens,
+            output_tokens: known.output_tokens,
+            reasoning_tokens: known.reasoning_tokens,
+            cache_write_tokens: known.cache_write_tokens,
+            premium_requests: known.premium_requests,
+            cost_usd: known.cost_usd,
         })
     }
 }
@@ -1805,34 +1856,19 @@ mod tests {
     }
 
     fn usage(input_tokens: u64) -> Usage {
+        usage_premium(input_tokens, None)
+    }
+
+    fn usage_premium(input_tokens: u64, premium_requests: Option<f64>) -> Usage {
         Usage {
             input_tokens,
             cached_input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: None,
             cache_write_tokens: 0,
-            premium_requests: None,
+            premium_requests,
             cost_usd: None,
         }
-    }
-
-    #[test]
-    fn usage_total_premium_sums_known_and_stays_unknown_after_an_unmetered_record() {
-        let totalled = |premiums: &[Option<f64>]| {
-            let mut total = UsageTotal::new();
-            for (offset, premium_requests) in (0_u64..).zip(premiums) {
-                let usage = Usage {
-                    premium_requests: *premium_requests,
-                    ..usage(1)
-                };
-                total.add(usage, offset).expect("finite premium totals");
-            }
-            total.finish().expect("usage seen").premium_requests
-        };
-        assert_eq!(totalled(&[Some(1.5), Some(0.5)]), Some(2.0));
-        assert_eq!(totalled(&[Some(0.0)]), Some(0.0));
-        assert_eq!(totalled(&[Some(1.5), None]), None);
-        assert_eq!(totalled(&[None, Some(1.5)]), None);
     }
 
     fn assistant_record(
@@ -1840,6 +1876,16 @@ mod tests {
         parent: Option<EntryId>,
         calls: &[(&str, &str)],
         input_tokens: u64,
+    ) -> Record {
+        assistant_record_with_premium(id, parent, calls, input_tokens, None)
+    }
+
+    fn assistant_record_with_premium(
+        id: u64,
+        parent: Option<EntryId>,
+        calls: &[(&str, &str)],
+        input_tokens: u64,
+        premium_requests: Option<f64>,
     ) -> Record {
         let content = calls
             .iter()
@@ -1859,7 +1905,7 @@ mod tests {
                 model: "test-model".into(),
                 route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
                 content,
-                usage: usage(input_tokens),
+                usage: usage_premium(input_tokens, premium_requests),
                 stop: AssistantStop::ToolUse,
                 replay: None,
             },
@@ -2568,6 +2614,282 @@ mod tests {
             &reopened.repair[0],
             Record::Boot { r#gen, .. } if r#gen.get() == 3
         ));
+    }
+
+    #[test]
+    fn turn_totals_sums_known_premium_requests() {
+        let records = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(1.5)),
+            ),
+            (
+                1,
+                assistant_record_with_premium(
+                    2,
+                    Some(entry_id(1)),
+                    &[("two", "echo")],
+                    4,
+                    Some(2.25),
+                ),
+            ),
+        ];
+        let (usage, _) = turn_totals(&records).expect("known premiums sum");
+        let total = usage.expect("usage-bearing records total");
+        assert_eq!(total.input_tokens, 14, "token totals still sum");
+        assert_eq!(
+            total.premium_requests,
+            Some(3.75),
+            "all-known premiums sum exactly"
+        );
+    }
+
+    #[test]
+    fn turn_totals_preserves_measured_zero_premium() {
+        let records = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(0.0)),
+            ),
+            (
+                1,
+                assistant_record_with_premium(
+                    2,
+                    Some(entry_id(1)),
+                    &[("two", "echo")],
+                    4,
+                    Some(0.0),
+                ),
+            ),
+        ];
+        let (usage, _) = turn_totals(&records).expect("measured zeros sum");
+        assert_eq!(
+            usage.expect("usage-bearing records total").premium_requests,
+            Some(0.0),
+            "measured zero stays a measurement, never unknown"
+        );
+    }
+
+    #[test]
+    fn turn_totals_mixed_unknown_premium_yields_none() {
+        let records = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(1.5)),
+            ),
+            (
+                1,
+                assistant_record_with_premium(2, Some(entry_id(1)), &[("two", "echo")], 4, None),
+            ),
+        ];
+        let (usage, _) = turn_totals(&records).expect("mixed premiums total");
+        assert_eq!(
+            usage.expect("usage-bearing records total").premium_requests,
+            None,
+            "one unmeasured contributor leaves the turn unknown, never a partial sum"
+        );
+    }
+
+    #[test]
+    fn turn_totals_unknown_first_premium_stays_none() {
+        let records = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, None),
+            ),
+            (
+                1,
+                assistant_record_with_premium(
+                    2,
+                    Some(entry_id(1)),
+                    &[("two", "echo")],
+                    4,
+                    Some(2.0),
+                ),
+            ),
+        ];
+        let (usage, _) = turn_totals(&records).expect("mixed premiums total");
+        assert_eq!(
+            usage.expect("usage-bearing records total").premium_requests,
+            None,
+            "an unmeasured first contributor leaves the turn unknown, never a later partial sum"
+        );
+    }
+
+    fn usage_with(reasoning: Option<u64>, premium: Option<f64>, cost: Option<f64>) -> Usage {
+        Usage {
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: reasoning,
+            cache_write_tokens: 0,
+            premium_requests: premium,
+            cost_usd: cost,
+        }
+    }
+
+    fn total_for(usages: &[Usage]) -> Usage {
+        let mut total = UsageTotal::default();
+        for (offset, usage) in usages.iter().copied().enumerate() {
+            let line = u64::try_from(offset).expect("test offset fits");
+            total.add(usage, line).expect("valid test usage");
+        }
+        total.finish().expect("usage-bearing totals")
+    }
+
+    #[test]
+    fn turn_totals_resurrected_optionals_stay_none() {
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(2.0)),
+            ])
+            .premium_requests,
+            Some(3.0)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), None, Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), None, Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(1.0), Some(1.0)),
+                usage_with(Some(1), None, Some(1.0)),
+                usage_with(Some(1), Some(2.0), Some(1.0)),
+            ])
+            .premium_requests,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            Some(3)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(None, Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(None, Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(None, Some(0.0), Some(1.0)),
+                usage_with(Some(2), Some(0.0), Some(1.0)),
+            ])
+            .reasoning_tokens,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            Some(3.0)
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), None),
+            ])
+            .cost_usd,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), None),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            None
+        );
+        assert_eq!(
+            total_for(&[
+                usage_with(Some(1), Some(0.0), Some(1.0)),
+                usage_with(Some(1), Some(0.0), None),
+                usage_with(Some(1), Some(0.0), Some(2.0)),
+            ])
+            .cost_usd,
+            None
+        );
+    }
+
+    #[test]
+    fn turn_totals_rejects_invalid_premium() {
+        let overflow = [
+            (
+                0,
+                assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(f64::MAX)),
+            ),
+            (
+                1,
+                assistant_record_with_premium(
+                    2,
+                    Some(entry_id(1)),
+                    &[("two", "echo")],
+                    4,
+                    Some(f64::MAX),
+                ),
+            ),
+        ];
+        assert!(
+            matches!(
+                turn_totals(&overflow),
+                Err(OpenFailure::Damaged { reason, .. })
+                    if reason.as_ref() == "turn usage premium total overflows"
+            ),
+            "an overflowing premium total is damaged"
+        );
+        let not_a_number = [(
+            0,
+            assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(f64::NAN)),
+        )];
+        assert!(
+            matches!(
+                turn_totals(&not_a_number),
+                Err(OpenFailure::Damaged { reason, .. })
+                    if reason.as_ref() == "turn usage premium is invalid"
+            ),
+            "a NaN premium contributor is damaged"
+        );
+        let negative = [(
+            0,
+            assistant_record_with_premium(1, None, &[("one", "echo")], 10, Some(-0.5)),
+        )];
+        assert!(
+            matches!(
+                turn_totals(&negative),
+                Err(OpenFailure::Damaged { reason, .. })
+                    if reason.as_ref() == "turn usage premium is invalid"
+            ),
+            "a negative premium contributor is damaged, never a known total"
+        );
     }
 
     proptest::proptest! {

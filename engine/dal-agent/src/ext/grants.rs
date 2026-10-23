@@ -7,6 +7,12 @@
 //!
 //! `list` returns an owned snapshot so its rows stay valid after the
 //! store lock is released.
+//!
+//! The future that opens a question owns its reservation: dropping it settles
+//! the key as cancelled, so a later caller asks again instead of waiting on a
+//! question nobody awaits. Persistent writes rebase on the file, never on the
+//! memory copy, so an approval cannot restore a row that was revoked while it
+//! was pending.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,8 +30,8 @@ use crate::Broker;
 use crate::broker::Settled;
 use crate::error::ServiceError;
 
+use super::Caller;
 use super::services::ServiceFuture;
-use super::{Caller, CallerKind};
 
 mod persist;
 use persist::{load, persist as persist_rows};
@@ -196,7 +202,6 @@ struct Inner {
     pending: BTreeMap<GrantKey, Pending>,
     mcp_session: BTreeMap<McpGrantKey, GrantRow>,
     mcp_pending: BTreeMap<McpGrantKey, Pending>,
-    revoked: BTreeMap<Name, u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -248,7 +253,8 @@ pub enum GrantStoreError {
     /// The grants file cannot be read.
     #[error("cannot read grants file: {0}")]
     Read(#[from] std::io::Error),
-    /// The grants file is malformed; nothing was written.
+    /// The grants file, or a grant key bound for it, is malformed; nothing
+    /// was written.
     #[error("grants file is malformed: {detail}")]
     Malformed {
         /// What failed to parse.
@@ -374,7 +380,6 @@ impl GrantStore {
                 pending: BTreeMap::new(),
                 mcp_session: BTreeMap::new(),
                 mcp_pending: BTreeMap::new(),
-                revoked: BTreeMap::new(),
             }),
         }
     }
@@ -479,6 +484,13 @@ impl GrantStore {
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
         };
+        // Abandoning this future settles the reservation as cancelled: a later
+        // caller asks again instead of waiting on a question nobody awaits.
+        let _abandon = McpCommitGuard {
+            store: self,
+            key: key.clone(),
+            reservation: Arc::clone(&notify),
+        };
         if !self.answerer_attached() {
             return self.deny_mcp(&key, &notify).await;
         }
@@ -542,7 +554,8 @@ impl GrantStore {
                 persistent: false,
             });
         }
-        if service == Service::Ask || matches!(who.kind, CallerKind::Cell { .. }) {
+        // A cell's approval is its grant; a cell that was never approved has none.
+        if service == Service::Ask || who.cell_approved() {
             return Ok(Grant {
                 key,
                 persistent: false,
@@ -571,6 +584,13 @@ impl GrantStore {
             }
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
+        };
+        // Abandoning this future settles the reservation as cancelled: a later
+        // caller asks again instead of waiting on a question nobody awaits.
+        let _abandon = CommitGuard {
+            store: self,
+            key: key.clone(),
+            reservation: Arc::clone(&notify),
         };
         // A question needs a front end that can answer it. With none
         // attached (print mode, listen-only clients) nobody can approve, so
@@ -666,19 +686,26 @@ impl GrantStore {
         notify: Arc<Notify>,
         cancel: &CancellationToken,
     ) -> GrantOutcome {
+        let mut waiter = WaiterGuard {
+            store: self,
+            waiting: Waiting::Mcp(key),
+            armed: true,
+        };
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         if let Some(outcome) = self.mcp_take_if_done(key) {
+            waiter.armed = false;
             return outcome;
         }
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.mcp_abandon(key);
-                Err(ServiceError::Denied(DenyReason::NotGranted))
+            // The armed guard releases the registration.
+            () = cancel.cancelled() => Err(ServiceError::Denied(DenyReason::NotGranted)),
+            () = &mut notified => {
+                waiter.armed = false;
+                self.take_mcp(key)
             }
-            () = &mut notified => self.take_mcp(key),
         }
     }
 
@@ -763,19 +790,26 @@ impl GrantStore {
         notify: Arc<Notify>,
         cancel: &CancellationToken,
     ) -> GrantOutcome {
+        let mut waiter = WaiterGuard {
+            store: self,
+            waiting: Waiting::Plain(key),
+            armed: true,
+        };
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         if let Some(outcome) = self.take_if_done(key) {
+            waiter.armed = false;
             return outcome;
         }
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.abandon(key);
-                Err(ServiceError::Denied(DenyReason::NotGranted))
+            // The armed guard releases the registration.
+            () = cancel.cancelled() => Err(ServiceError::Denied(DenyReason::NotGranted)),
+            () = &mut notified => {
+                waiter.armed = false;
+                self.take(key)
             }
-            () = &mut notified => self.take(key),
         }
     }
 
@@ -875,7 +909,7 @@ impl GrantStore {
             reservation: Arc::clone(reservation),
         };
         let mut outcome = outcome;
-        let write: Option<Vec<GrantRow>> = {
+        let persistent_row = {
             let mut inner = self.lock();
             let valid = match inner.pending.get_mut(key) {
                 Some(pending) => !pending.done && Arc::ptr_eq(&pending.notify, reservation),
@@ -884,24 +918,19 @@ impl GrantStore {
             if !valid {
                 return Err(ServiceError::Cancelled);
             }
-            let mut write = None;
-            if let (Some(row), Ok(grant)) = (row, &outcome) {
-                if grant.persistent() {
-                    inner.persistent.push(row);
-                    write = Some(inner.persistent.clone());
-                } else {
+            match (row, &outcome) {
+                (Some(row), Ok(grant)) if grant.persistent() => Some(row),
+                (Some(row), Ok(_)) => {
                     inner.session.insert(key.clone(), row);
+                    None
                 }
+                _ => None,
             }
-            write
         };
-        if let Some(rows) = write
-            && let Err(e) = persist_rows(&self.data_dir, &rows)
+        if let Some(row) = persistent_row
+            && let Err(error) = self.append_persistent(row)
         {
-            outcome = Err(ServiceError::failed(
-                Some(service),
-                format!("cannot persist grants file: {e}"),
-            ));
+            outcome = Err(ServiceError::failed(Some(service), error.to_string()));
         }
         let mut inner = self.lock();
         let matched = match inner.pending.get_mut(key) {
@@ -909,21 +938,18 @@ impl GrantStore {
             None => false,
         };
         if !matched {
-            inner.persistent.retain(|row| row_key(row) != *key);
-            let rows = inner.persistent.clone();
             drop(inner);
-            // The row was already persisted above; rewrite without it so a
-            // later refresh cannot resurrect a cancelled grant.
-            let _resurrected = persist_rows(&self.data_dir, &rows);
+            // The row was already persisted above; remove it so a later
+            // refresh cannot resurrect a cancelled grant.
+            if let Err(error) = self.withdraw_persistent(key, None) {
+                return Err(ServiceError::failed(Some(service), error.to_string()));
+            }
             return Err(ServiceError::Cancelled);
         }
-        if outcome.is_err() {
-            inner.persistent.retain(|row| row_key(row) != *key);
-            if let Err(e) = &outcome
-                && let Some(pending) = inner.pending.get_mut(key)
-            {
-                pending.terminal = Some(e.clone());
-            }
+        if let Err(error) = &outcome
+            && let Some(pending) = inner.pending.get_mut(key)
+        {
+            pending.terminal = Some(error.clone());
         }
         if let Some(pending) = inner.pending.get_mut(key) {
             pending.done = true;
@@ -948,7 +974,7 @@ impl GrantStore {
             key: key.clone(),
             reservation: Arc::clone(reservation),
         };
-        let write = {
+        let persistent_row = {
             let mut inner = self.lock();
             let valid = match inner.mcp_pending.get(key) {
                 Some(pending) => !pending.done && Arc::ptr_eq(&pending.notify, reservation),
@@ -957,24 +983,19 @@ impl GrantStore {
             if !valid {
                 return Err(ServiceError::Cancelled);
             }
-            let mut write = None;
-            if let (Some(row), Ok(grant)) = (row, &outcome) {
-                if grant.persistent() {
-                    inner.persistent.push(row);
-                    write = Some(inner.persistent.clone());
-                } else {
+            match (row, &outcome) {
+                (Some(row), Ok(grant)) if grant.persistent() => Some(row),
+                (Some(row), Ok(_)) => {
                     inner.mcp_session.insert(key.clone(), row);
+                    None
                 }
+                _ => None,
             }
-            write
         };
-        if let Some(rows) = write
-            && let Err(error) = persist_rows(&self.data_dir, &rows)
+        if let Some(row) = persistent_row
+            && let Err(error) = self.append_persistent(row)
         {
-            outcome = Err(ServiceError::failed(
-                Some(Service::Mcp),
-                format!("cannot persist grants file: {error}"),
-            ));
+            outcome = Err(ServiceError::failed(Some(Service::Mcp), error.to_string()));
         }
         let mut inner = self.lock();
         let matched = match inner.mcp_pending.get_mut(key) {
@@ -982,20 +1003,18 @@ impl GrantStore {
             None => false,
         };
         if !matched {
-            inner.persistent.retain(|row| !mcp_row_matches(row, key));
-            let rows = inner.persistent.clone();
             drop(inner);
-            let _rollback = persist_rows(&self.data_dir, &rows);
+            // The row was already persisted above; remove it so a later
+            // refresh cannot resurrect a cancelled grant.
+            if let Err(error) = self.withdraw_persistent(&key.key, Some(key.set.as_ref())) {
+                return Err(ServiceError::failed(Some(Service::Mcp), error.to_string()));
+            }
             return Err(ServiceError::Cancelled);
         }
-        if outcome.is_err() {
-            inner.persistent.retain(|row| !mcp_row_matches(row, key));
-            inner.mcp_session.remove(key);
-            if let Some(error) = outcome.as_ref().err()
-                && let Some(pending) = inner.mcp_pending.get_mut(key)
-            {
-                pending.terminal = Some(error.clone());
-            }
+        if let Err(error) = &outcome
+            && let Some(pending) = inner.mcp_pending.get_mut(key)
+        {
+            pending.terminal = Some(error.clone());
         }
         if let Some(pending) = inner.mcp_pending.get_mut(key) {
             pending.done = true;
@@ -1005,6 +1024,42 @@ impl GrantStore {
             }
         }
         outcome
+    }
+
+    /// Adds `row` to the approvals stored on disk. Callers hold
+    /// `persist_lock`.
+    ///
+    /// The file is the base, never the memory copy: that copy can predate a
+    /// revocation made elsewhere while this approval was pending, and writing
+    /// it back would resurrect the revoked rows. An identical active row is
+    /// kept once.
+    fn append_persistent(&self, row: GrantRow) -> Result<(), GrantStoreError> {
+        let mut rows = load(&self.data_dir)?;
+        let wanted = row_key(&row);
+        let stored = rows
+            .iter()
+            .any(|held| held.mcp_set == row.mcp_set && row_active(held) && row_key(held) == wanted);
+        if !stored {
+            rows.push(row);
+        }
+        persist_rows(&self.data_dir, &rows)?;
+        self.lock().persistent = rows;
+        Ok(())
+    }
+
+    /// Removes the rows an approval stored for `key` and `mcp_set`. Callers
+    /// hold `persist_lock`; the file is the base, as in
+    /// [`Self::append_persistent`].
+    fn withdraw_persistent(
+        &self,
+        key: &GrantKey,
+        mcp_set: Option<&str>,
+    ) -> Result<(), GrantStoreError> {
+        let mut rows = load(&self.data_dir)?;
+        rows.retain(|held| held.mcp_set.as_deref() != mcp_set || row_key(held) != *key);
+        persist_rows(&self.data_dir, &rows)?;
+        self.lock().persistent = rows;
+        Ok(())
     }
 
     /// Reloads persistent rows from disk, replacing memory. Fails closed
@@ -1052,27 +1107,18 @@ impl GrantStore {
     /// granting is idempotent. A changed service set is a new key.
     ///
     /// # Errors
-    /// Returns [`GrantStoreError`] for an empty service set or when the
-    /// grants file cannot be read or written.
+    /// Returns [`GrantStoreError::Malformed`] naming the cause for a key
+    /// that could not authorize a call or load back, and other
+    /// [`GrantStoreError`]s when the grants file cannot be read or written.
     pub async fn grant(
         &self,
         key: GrantKey,
         by: ClientId,
         at: Timestamp,
     ) -> Result<bool, GrantStoreError> {
-        // An empty set grants nothing yet writes a row no later load
-        // accepts; reject it here so one bad call cannot brick the file.
-        if key.services.is_empty()
-            || !matches!(key.origin, Origin::User | Origin::Bundled)
-            || key.digest.len() != 64
-            || !key.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || !key.workspace.is_absolute()
-            || key.workspace.to_str().is_none()
-        {
-            return Err(GrantStoreError::Malformed {
-                detail: "grant needs at least one service".into(),
-            });
-        }
+        // A key that cannot authorize a call, or whose row no later load
+        // accepts, is rejected here so one bad call cannot brick the file.
+        check_storable(&key)?;
         let _writer = self.persist_lock.lock().await;
         let mut rows = load(&self.data_dir)?;
         if rows
@@ -1118,25 +1164,65 @@ impl GrantStore {
         if removed > 0 {
             persist_rows(&self.data_dir, &kept)?;
         }
-        {
+        let woken = {
             let mut inner = self.lock();
             inner.persistent = kept;
-            *inner.revoked.entry(extension.clone()).or_insert(0) += 1;
-            let mut woken = Vec::new();
-            inner.pending.retain(|key, pending| {
-                if key.extension == *extension {
-                    woken.push(pending.notify.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            for notify in woken {
-                notify.notify_waiters();
-            }
+            Self::drop_pending(&mut inner, extension)
+        };
+        for notify in woken {
+            notify.notify_waiters();
         }
         Ok(removed)
     }
+
+    /// Removes every in-flight question of `extension`, plain and MCP alike,
+    /// and returns the waiters' wakers. A removed entry can never settle, so a
+    /// late answer cannot restore a revoked approval; each woken waiter finds
+    /// no entry and resolves cancelled.
+    fn drop_pending(inner: &mut Inner, extension: &Name) -> Vec<Arc<Notify>> {
+        let mut woken = Vec::new();
+        inner.pending.retain(|key, pending| {
+            let revoked = key.extension == *extension;
+            if revoked {
+                woken.push(Arc::clone(&pending.notify));
+            }
+            !revoked
+        });
+        inner.mcp_pending.retain(|key, pending| {
+            let revoked = key.key.extension == *extension;
+            if revoked {
+                woken.push(Arc::clone(&pending.notify));
+            }
+            !revoked
+        });
+        woken
+    }
+}
+
+/// Checks that `key` could authorize a call and that its row loads back.
+fn check_storable(key: &GrantKey) -> Result<(), GrantStoreError> {
+    let reject = |detail: &str| GrantStoreError::Malformed {
+        detail: format!("grant key rejected, nothing was written: {detail}").into(),
+    };
+    if key.services.is_empty() {
+        return Err(reject(
+            "it grants no service; add at least one service other than ask",
+        ));
+    }
+    if !matches!(key.origin, Origin::User | Origin::Bundled) {
+        return Err(reject(
+            "only user and bundled extensions hold grants; builtin extensions need none",
+        ));
+    }
+    if key.digest.len() != 64 || !key.digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(reject(
+            "the code digest must be 64 hexadecimal characters; build the key from a loaded extension",
+        ));
+    }
+    if !key.workspace.is_absolute() || key.workspace.to_str().is_none() {
+        return Err(reject("the workspace must be an absolute UTF-8 path"));
+    }
+    Ok(())
 }
 
 fn mcp_row_matches(row: &GrantRow, key: &McpGrantKey) -> bool {
@@ -1171,22 +1257,55 @@ fn row_key(row: &GrantRow) -> GrantKey {
     }
 }
 
-/// Fail-closed commit for an abandoned `finalize`: if the opener future is
-/// dropped mid-commit, waiters must not hang on a `Notify` that never fires.
-/// The guard resolves the entry as cancelled and releases it; the normal
-/// path sets `done` first, which neutralizes the guard without disarming.
-/// Rows stay memory-only on this path and converge on the next persist; a
-/// crash loses them, which fails closed toward re-approval.
+/// Fail-closed owner of one reservation. The opener arms it the moment it
+/// reserves the key and `finalize` arms a second one around the commit: if
+/// the opener future is dropped at any point before a terminal outcome,
+/// waiters must not hang on a `Notify` that never fires and later callers
+/// must not queue behind a question nobody awaits. The guard resolves the
+/// entry as cancelled and releases it; the normal path sets `done` first,
+/// which neutralizes the guard without disarming. Rows stay memory-only on
+/// this path and converge on the next persist; a crash loses them, which
+/// fails closed toward re-approval.
 struct CommitGuard<'a> {
     store: &'a GrantStore,
     key: GrantKey,
     reservation: Arc<Notify>,
 }
 
+/// The [`CommitGuard`] of a declared-MCP reservation.
 struct McpCommitGuard<'a> {
     store: &'a GrantStore,
     key: McpGrantKey,
     reservation: Arc<Notify>,
+}
+
+/// The pending entry one waiter registered on.
+#[derive(Clone, Copy)]
+enum Waiting<'a> {
+    Plain(&'a GrantKey),
+    Mcp(&'a McpGrantKey),
+}
+
+/// Releases a waiter's registration when its future is dropped before a
+/// terminal outcome released it. A stranded count would keep a settled entry
+/// alive and replay its stale terminal to every later caller instead of
+/// asking again.
+struct WaiterGuard<'a> {
+    store: &'a GrantStore,
+    waiting: Waiting<'a>,
+    armed: bool,
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match self.waiting {
+            Waiting::Plain(key) => self.store.abandon(key),
+            Waiting::Mcp(key) => self.store.mcp_abandon(key),
+        }
+    }
 }
 
 impl Drop for McpCommitGuard<'_> {

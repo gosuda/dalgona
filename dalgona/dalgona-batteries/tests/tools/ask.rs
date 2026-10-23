@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 
 use super::common::{Host, Reply, TestResult, locked, run_tool};
+use dal_agent::ext::{PromptOrder, PromptSection, Services, ToolCall, ToolCx, ToolOutcome};
 use dal_core::Question;
 
 const NO_ANSWER: &str = "No answer (dismissed, timed out, or no user attached). Continue on best judgment; do not ask again this turn.";
@@ -824,6 +825,169 @@ async fn the_battery_decides_exactly_what_the_oracle_decides() -> TestResult {
                 assert_eq!(controller.asked().len(), 1, "{question}");
             }
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Registration literals, the cancel-token arm, drifted inputs, and doc
+// invariants.
+
+const EXPECTED_DESCRIPTION: &str = "Ask the user one to four short questions and wait for the answers. Each question is\nsingle-select, multi-select, or free text; add a preview only when seeing a plan or a\ndiff would change the choice. Apply two filters before asking: if the evidence already\ncollected can answer the question, explore instead; if the ideal state settles it,\nresolve to that instead. An owner decision always survives as a question: irreversible,\ndestructive, safety-critical, or cross-cutting product choices. If the call returns no\nanswer, continue on best judgment and do not ask again this turn. Never use it for\npermission requests; permission goes through approval.";
+
+const EXPECTED_SECTION: &str = "When you consider asking the user a question, apply two filters. First: could the\nevidence already collected answer it? Then explore instead of asking. Second: does the\nideal state settle it? Then resolve to that state instead of asking. An owner decision\nalways survives as a question: irreversible or destructive actions, safety-critical\nchoices, and cross-cutting product choices. Explore to sufficiency, then stop.";
+
+const EXPECTED_PARAMETERS: &str = r#"{"type":"object","additionalProperties":false,"required":["questions"],"properties":{"explicit":{"type":"boolean","default":false,"description":"true when the user asked for this question directly"},"questions":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["id","header","question","kind"],"properties":{"id":{"type":"string","pattern":"^[a-z][a-z0-9]*(_[a-z0-9]+)*$"},"header":{"type":"string","minLength":1,"maxLength":12},"question":{"type":"string","minLength":1},"kind":{"type":"string","enum":["single","multi","text"]},"options":{"type":"array","minItems":2,"maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["label"],"properties":{"label":{"type":"string","minLength":1},"description":{"type":"string","minLength":1}}}},"preview":{"type":"string","minLength":1,"maxLength":8192}}}}}}"#;
+
+fn test_model() -> dal_core::ModelInfo {
+    dal_core::ModelInfo {
+        route: dal_core::ModelRoute::Synthetic {
+            id: "test/model".into(),
+        },
+        name: "test".into(),
+        provider: "".into(),
+        caps: dal_core::Caps {
+            context_window: None,
+            thinking: Box::<[dal_core::ThinkingLevel]>::default(),
+            tool_use: true,
+            image_input: false,
+            custom_grammar: false,
+        },
+    }
+}
+
+/// Spec test `registration_literals` (36-REQ-01, 36-REQ-02): the extension
+/// record pins the tool name, the description bytes, the parameter schema,
+/// the single prompt section, `inject = ["ask"]`, and origin `Bundled`.
+/// Every literal is typed again here, never read from the battery.
+#[tokio::test]
+async fn registration_pins_the_tool_record_schema_and_policy_strings() -> TestResult {
+    let extension = dalgona_batteries::ask::ask()?;
+    assert_eq!(extension.name(), "ask");
+    let inject = extension.inject();
+    assert_eq!(inject.iter().count(), 1);
+    assert!(inject.contains(dal_core::Service::Ask));
+    assert_eq!(extension.origin(), dal_core::Origin::Bundled);
+
+    let [(tool, visibility)] = extension.tools() else {
+        return Err("the ask extension publishes exactly one tool".into());
+    };
+    assert_eq!(tool.name().as_str(), "ask");
+    assert_eq!(*visibility, dal_core::Visibility::Model);
+    let spec = tool.spec(&test_model());
+    assert_eq!(&*spec.description, EXPECTED_DESCRIPTION);
+    let parameters: sonic_rs::Value = sonic_rs::from_str(spec.parameters.as_str())
+        .map_err(|error| format!("registered parameters parse: {error}"))?;
+    let expected: sonic_rs::Value = sonic_rs::from_str(EXPECTED_PARAMETERS)
+        .map_err(|error| format!("expected schema parses: {error}"))?;
+    assert_eq!(parameters, expected);
+
+    let [section] = extension.prompt_sections() else {
+        return Err("the ask extension carries exactly one prompt section".into());
+    };
+    let PromptSection::Static {
+        order,
+        visibility,
+        text,
+    } = section
+    else {
+        return Err("the ask prompt section is static text".into());
+    };
+    assert_eq!(*order, PromptOrder::Plugins);
+    assert_eq!(*visibility, dal_core::Visibility::Model);
+    assert_eq!(&**text, EXPECTED_SECTION);
+    Ok(())
+}
+
+/// Battery half of spec test `turn-cancel-mid-questionnaire` (36-REQ-10): a
+/// `Cancelled` reply with the turn token cancelled is the documented
+/// `tool.interrupted` outcome; the same reply with no cancel requested fails
+/// closed to the literal. The broker broadcast half is loop-owned.
+#[tokio::test]
+async fn a_cancelled_turn_maps_a_cancelled_reply_to_interrupted() -> TestResult {
+    let extension = dalgona_batteries::ask::ask()?;
+    let Some((tool, _)) = extension
+        .tools()
+        .iter()
+        .find(|(tool, _)| tool.name().as_str() == "ask")
+    else {
+        return Err("the ask tool is not registered".into());
+    };
+    let tool = std::sync::Arc::clone(tool);
+    let args = one("single", TWO_OPTIONS);
+
+    let cancelled = Host::answering([Reply::Cancelled]);
+    let services: std::sync::Arc<dyn Services> = cancelled.clone();
+    let cx = ToolCx::for_test(services);
+    cx.cancel().cancel();
+    let call = ToolCall::new("call", dal_core::RawJson::parse(&args)?);
+    match tool.run(call, cx).await {
+        ToolOutcome::Interrupted => {}
+        ToolOutcome::Ok(output) => {
+            return Err(format!("a cancelled turn answered: {output}").into());
+        }
+        ToolOutcome::Err(error) => {
+            return Err(format!("a cancelled turn errored: {error}").into());
+        }
+        ToolOutcome::Detached(_) => return Err("a cancelled turn detached".into()),
+    }
+    assert_eq!(cancelled.asked().len(), 1);
+
+    let plain = Host::answering([Reply::Cancelled]);
+    assert_eq!(ask_tool(&plain, &args).await?, NO_ANSWER);
+    assert!(locked(&plain.notices).is_empty());
+    Ok(())
+}
+
+/// Inputs the contract never issued fail closed with the documented
+/// `ask: <reason>` error before any question is raised (36-REQ-04): a
+/// Starlark-era spelling, a non-object root, and the two `snake_case` edges
+/// the table never named. An empty body is not valid JSON and never becomes
+/// a tool call, so the battery cannot see it; it is excluded here.
+#[tokio::test]
+async fn drifted_and_non_object_inputs_fail_closed_before_any_raise() -> TestResult {
+    let snake_case = "ask: id must be snake_case (a-z, 0-9, underscores, starting with a letter)";
+    let waited = one("single", TWO_OPTIONS).replace(
+        "\"kind\":\"single\"",
+        "\"kind\":\"single\",\"wait_for_answer\":true",
+    );
+    let trailing = one("single", TWO_OPTIONS).replace("\"pick\"", "\"pick_\"");
+    let empty_id = one("single", TWO_OPTIONS).replace("\"pick\"", "\"\"");
+    let cases: Vec<(String, &str)> = vec![
+        (waited, "ask: unknown field `wait_for_answer`"),
+        (trailing, snake_case),
+        (empty_id, snake_case),
+        (String::from("[]"), "ask: "),
+        (String::from(r#"{"questions":null}"#), "ask: "),
+    ];
+    for (args, prefix) in cases {
+        let controller = Host::answering([Reply::Value(r#"{"selected":["Alpha"]}"#)]);
+        let outcome = ask_tool(&controller, &args).await?;
+        assert!(
+            outcome.starts_with(prefix),
+            "{args}: {outcome} names {prefix}"
+        );
+        assert!(controller.asked().is_empty(), "{args}");
+    }
+    Ok(())
+}
+
+/// The `dalgona://ask` page documents the timeout, clamp, answer-object,
+/// and never-answerer contract it owns in this surface (36-REQ-13). The
+/// heading stays the reconciled Rust-carrier text, not the Starlark page.
+#[tokio::test]
+async fn ask_doc_documents_the_timeout_and_no_answer_contract() -> TestResult {
+    let doc = dalgona_batteries::ask::ASK_DOC;
+    for phrase in [
+        "[ask] timeout",
+        "30 minutes",
+        "1 to 120 minutes",
+        "{\"selected\"",
+        "{\"text\"",
+        "Print, JSON, and child sessions are never answerers",
+        "continue on best judgment and do not ask again",
+    ] {
+        assert!(doc.contains(phrase), "ASK_DOC documents {phrase}");
     }
     Ok(())
 }

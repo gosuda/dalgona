@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the direct Gemini API bare rate limit
-# (ENG-03: the `google-generative-ai` family).
+# Synthetic replay fixture for the direct Gemini API bare rate limit over the `google-generative-ai` family.
 #
 # One exchange: HTTP 429 with a `google.rpc.Status` body carrying
 # `RESOURCE_EXHAUSTED` but no account-exhaustion detail (no `ErrorInfo`

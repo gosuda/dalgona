@@ -270,6 +270,8 @@ fn login_openai_codex_completes_on_the_browser_callback_then_logout_removes_it()
     let mark = session.wait_for("Ask dal to change code", 0)?;
 
     session.type_text("/login openai-codex\r");
+    let mark = session.wait_for("Sign in to openai-codex", mark)?;
+    session.type_text("\r");
     let mark = session.wait_for("Signing in to openai-codex", mark)?;
     let mark = session.wait_for("Open this URL in a browser:", mark)?;
     let mark = session.wait_for("Pick a model", mark)?;
@@ -308,6 +310,9 @@ fn login_anthropic_accepts_a_pasted_code() -> Fallible<()> {
     let mark = session.wait_for("Ask dal to change code", 0)?;
 
     session.type_text("/login anthropic\r");
+    let mark = session.wait_for("Sign in to anthropic", mark)?;
+    session.type_text("\u{1b}[B");
+    session.type_text("\r");
     let mark = session.wait_for(
         "Paste the redirect URL or the code shown in the browser.",
         mark,
@@ -330,7 +335,9 @@ fn escape_cancels_a_pending_login_and_stores_nothing() -> Fallible<()> {
     let mark = session.wait_for("Ask dal to change code", 0)?;
 
     session.type_text("/login openai-codex\r");
-    let mark = session.wait_for("Waiting for sign-in...", mark)?;
+    let mark = session.wait_for("Sign in to openai-codex", mark)?;
+    session.type_text("\r");
+    let mark = session.wait_for("Open this URL in a browser:", mark)?;
     session.type_text("\u{1b}");
     session.wait_for("sign-in cancelled.", mark)?;
     assert!(!rig.data.path().join("auth.json").exists());

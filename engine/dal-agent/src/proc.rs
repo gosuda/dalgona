@@ -1,8 +1,11 @@
 use std::{
     collections::VecDeque,
     ffi::OsString,
-    fs, io,
+    fs,
+    future::Future,
+    io,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -187,6 +190,71 @@ type Permit = tokio::sync::OwnedSemaphorePermit;
 
 type CaptureSet = JoinSet<Result<CaptureResult, io::Error>>;
 
+/// Test-only ordering observer for the Unix wait-ownership repair.
+///
+/// Shares one allocation between `Proc` group-sweep sites and the private
+/// test wrapper pair in `proc::tests`, so ordering assertions observe the
+/// production paths rather than a disconnected model. Never installed outside
+/// `#[cfg(test)]`; production signaling still targets the real spawned group.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct TestOrdering {
+    /// Released by the test to let the native leader wait complete.
+    pub allow_inner: tokio::sync::Notify,
+    /// Released by the test to let the retained outer group-reap wait complete.
+    pub allow_outer: tokio::sync::Notify,
+    /// Notified when the native leader wait is entered.
+    pub got_inner: tokio::sync::Notify,
+    /// Notified when the retained outer wait is entered.
+    pub got_outer: tokio::sync::Notify,
+    /// Notified synchronously with group-sweep disarm, before the outer wait.
+    pub did_sweep: tokio::sync::Notify,
+    /// Notified when a group signal is sent through the outer wrapper.
+    pub did_signal: tokio::sync::Notify,
+    /// Native leader wait entries.
+    pub inner_entered: std::sync::atomic::AtomicUsize,
+    /// Retained outer wait entries.
+    pub outer_entered: std::sync::atomic::AtomicUsize,
+    /// Retained outer wait completions.
+    pub outer_completed: std::sync::atomic::AtomicUsize,
+    /// Group-sweep disarms (`sweep_after_exit` plus `Drop::abort_group`).
+    pub sweep: std::sync::atomic::AtomicUsize,
+    /// Outer wrapper `SIGTERM` observations.
+    pub sig_term: std::sync::atomic::AtomicUsize,
+    /// Outer wrapper `SIGKILL` observations.
+    pub sig_kill: std::sync::atomic::AtomicUsize,
+    /// When set, the retained outer wait fails with a controlled real error
+    /// after recording entry, exercising the error path with production
+    /// cleanup intact.
+    pub fail_outer: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl TestOrdering {
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            allow_inner: tokio::sync::Notify::new(),
+            allow_outer: tokio::sync::Notify::new(),
+            got_inner: tokio::sync::Notify::new(),
+            got_outer: tokio::sync::Notify::new(),
+            did_sweep: tokio::sync::Notify::new(),
+            did_signal: tokio::sync::Notify::new(),
+            inner_entered: std::sync::atomic::AtomicUsize::new(0),
+            outer_entered: std::sync::atomic::AtomicUsize::new(0),
+            outer_completed: std::sync::atomic::AtomicUsize::new(0),
+            sweep: std::sync::atomic::AtomicUsize::new(0),
+            sig_term: std::sync::atomic::AtomicUsize::new(0),
+            sig_kill: std::sync::atomic::AtomicUsize::new(0),
+            fail_outer: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn note_sweep(&self) {
+        self.sweep.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.did_sweep.notify_one();
+    }
+}
+
 /// One launched child and its bounded capture task.
 pub struct Proc {
     child: Box<dyn ChildWrapper>,
@@ -204,6 +272,8 @@ pub struct Proc {
     timeout: Option<Duration>,
     started_at: Instant,
     result: Option<ProcResult>,
+    #[cfg(test)]
+    test_ordering: Option<std::sync::Arc<TestOrdering>>,
 }
 
 impl std::fmt::Debug for Proc {
@@ -235,6 +305,34 @@ impl Proc {
     pub(crate) fn without_progress(mut self) -> Self {
         self.progress = None;
         self
+    }
+
+    /// Kills the whole process group when an unsettled child is dropped.
+    ///
+    /// A settled child is already reaped and swept. A live one at drop time
+    /// is the close-abort path: the wait future died before the stop ladder
+    /// ran, and the `KillOnDrop` wrapper below signals the leader only. The
+    /// group dies here so no sibling outlives the session close; the census
+    /// treats zombies as dead, and the leader is reaped by whoever still
+    /// owns its handle, if anyone does. The post-exit sweep consumes
+    /// `leader_pid`, so even an unset `result` (a capture fault after a
+    /// successful reap) cannot re-signal a recycled pid here; only a
+    /// never-reaped child keeps its pid.
+    #[cfg(unix)]
+    fn abort_group(&self) {
+        if self.result.is_some() {
+            return;
+        }
+        let Some(pid) = self.leader_pid else {
+            return;
+        };
+        #[cfg(test)]
+        if let Some(ordering) = &self.test_ordering {
+            ordering.note_sweep();
+        }
+        sweep_process_group(pid);
+        #[cfg(target_os = "linux")]
+        stop::sweep_proc_descendants(pid);
     }
 
     /// Waits for the child or applies its timeout/cancellation stop ladder.
@@ -298,7 +396,7 @@ impl Proc {
             Step::Exited(status) => {
                 // A surviving descendant holding a pipe write end would stall
                 // capture at EOF below; stop what the command left running first.
-                self.sweep_after_exit().await;
+                self.sweep_after_exit().await?;
                 self.finish(process_exit_status(status)).await
             }
             Step::Stop(reason) => self.stop(reason).await,
@@ -347,12 +445,10 @@ impl Proc {
             return Ok(result.clone());
         }
 
-        if let Some(status) = self
-            .child
-            .try_wait()
-            .map_err(|error| process_failure(&error))?
+        if let Some(status) =
+            leader_try_wait(&mut self.child).map_err(|error| process_failure(&error))?
         {
-            self.sweep_after_exit().await;
+            self.sweep_after_exit().await?;
             return self.finish(process_exit_status(status)).await;
         }
 
@@ -362,21 +458,23 @@ impl Proc {
         // so the only reachable point for detached descendants is now.
         let doomed = self.recorded_descendants().await;
         soft_kill(&mut self.child)?;
-        let status = if let Ok(waited) = time::timeout(KILL_GRACE, self.child.wait()).await {
-            let _ = waited.map_err(|error| process_failure(&error))?;
-            self.sweep_after_exit().await;
-            status_for(reason)
-        } else {
-            hard_kill(&mut self.child)?;
-            let _ = self
-                .child
-                .wait()
-                .await
-                .map_err(|error| process_failure(&error))?;
-            self.sweep_after_exit().await;
-            status_for(reason)
-        };
-        sweep_recorded(&doomed);
+        let status =
+            if let Ok(waited) = time::timeout(KILL_GRACE, leader_wait(&mut self.child)).await {
+                let _ = waited.map_err(|error| process_failure(&error))?;
+                let outcome = self.sweep_after_exit().await;
+                sweep_recorded(&doomed);
+                outcome?;
+                status_for(reason)
+            } else {
+                hard_kill(&mut self.child)?;
+                let _ = leader_wait(&mut self.child)
+                    .await
+                    .map_err(|error| process_failure(&error))?;
+                let outcome = self.sweep_after_exit().await;
+                sweep_recorded(&doomed);
+                outcome?;
+                status_for(reason)
+            };
         self.finish(status).await
     }
 
@@ -469,26 +567,55 @@ impl Proc {
     }
 
     /// Reaps descendants the exited leader may have left running.
+    ///
+    /// Consumes the owned leader pid: every caller has already reaped the
+    /// leader, so the pid value must not survive to `Drop`, where a capture
+    /// fault with `result` still unset would re-signal a possibly recycled
+    /// pid (or its group). A `Proc` dropped before any reap keeps its pid,
+    /// so the close-abort sweep in `abort_group` still runs.
     #[cfg(target_os = "linux")]
-    async fn sweep_after_exit(&mut self) {
-        let Some(pid) = self.leader_pid else {
-            return;
+    async fn sweep_after_exit(&mut self) -> Result<(), ToolError> {
+        let Some(pid) = self.leader_pid.take() else {
+            return Ok(());
         };
+        #[cfg(test)]
+        if let Some(ordering) = &self.test_ordering {
+            ordering.note_sweep();
+        }
         sweep_process_group(pid);
+        let outer = self
+            .child
+            .wait()
+            .await
+            .map_err(|error| process_failure(&error));
         let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+        outer.map(|_| ())
     }
 
     /// Reaps descendants the exited leader may have left running.
+    ///
+    /// Consumes the owned leader pid for the same reason as the Linux arm:
+    /// the leader is already reaped at every call site, and only a
+    /// never-reaped child may keep its pid for the `Drop` sweep.
     #[cfg(not(target_os = "linux"))]
-    fn sweep_after_exit(&mut self) -> std::future::Ready<()> {
+    async fn sweep_after_exit(&mut self) -> Result<(), ToolError> {
         #[cfg(windows)]
         // TerminateJobObject at once: the leader already exited, so this
         // only reaps descendants still holding pipes open.
         let _ = self.child.start_kill();
-        if let Some(pid) = self.leader_pid {
+        if let Some(pid) = self.leader_pid.take() {
+            #[cfg(test)]
+            if let Some(ordering) = &self.test_ordering {
+                ordering.note_sweep();
+            }
             sweep_process_group(pid);
+            #[cfg(unix)]
+            self.child
+                .wait()
+                .await
+                .map_err(|error| process_failure(&error))?;
         }
-        std::future::ready(())
+        Ok(())
     }
 }
 
@@ -496,6 +623,8 @@ impl Drop for Proc {
     fn drop(&mut self) {
         #[cfg(windows)]
         super::LIVE_PROCS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(unix)]
+        self.abort_group();
         // JoinSet aborts its tasks on drop; no detached capture survives the session.
         self.capture.take();
         if let Some(profile) = self.launcher_profile.take() {
@@ -658,6 +787,8 @@ pub(crate) fn spawn_process(
         timeout,
         started_at: Instant::now(),
         result: None,
+        #[cfg(test)]
+        test_ordering: None,
     })
 }
 
@@ -752,10 +883,11 @@ pub(crate) fn tail_preview(log_path: &Path, max_bytes: usize) -> Result<Box<[u8]
 
 /// Waits for the leader exit without hanging on surviving descendants.
 ///
-/// Unix `child.wait` returns when the leader is reaped; the group sweep
-/// after it stops pipe-holding descendants. On Windows the job-object wait
-/// blocks until the whole job empties, so the leader is detected with
-/// `try_wait` and the job is terminated at once instead.
+/// Unix observes the native leader directly. Once it exits, the caller
+/// synchronously consumes Drop signal authority and sweeps the group before
+/// the retained outer wrapper wait for group-zombie reaping. On Windows,
+/// job-object wait blocks until the whole job empties, so the leader
+/// is detected with `try_wait` and the job is terminated at once instead.
 async fn await_leader(
     child: &mut Box<dyn ChildWrapper>,
 ) -> Result<std::process::ExitStatus, ToolError> {
@@ -763,8 +895,51 @@ async fn await_leader(
     {
         stop::wait_leader_exit(child).await
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        child
+            .inner_mut()
+            .wait()
+            .await
+            .map_err(|error| process_failure(&error))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         child.wait().await.map_err(|error| process_failure(&error))
+    }
+}
+
+/// Unix native-leader wait used for grace and hard-kill observation.
+///
+/// Signals stay on the outer group wrapper; only observation moves inward so
+/// `Drop` authority is consumed before the retained outer reaping wait.
+fn leader_wait(
+    child: &mut Box<dyn ChildWrapper>,
+) -> Pin<Box<dyn Future<Output = io::Result<std::process::ExitStatus>> + Send + '_>> {
+    #[cfg(unix)]
+    {
+        child.inner_mut().wait()
+    }
+    #[cfg(not(unix))]
+    {
+        child.wait()
+    }
+}
+
+/// Unix native-leader poll used for the stop fast path.
+///
+/// Observes only the leader so an already-exited leader still sweeps and
+/// reaps through the retained outer wait instead of reusing the outer
+/// wrapper's cached group status across its suspension window.
+fn leader_try_wait(
+    child: &mut Box<dyn ChildWrapper>,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(unix)]
+    {
+        child.inner_mut().try_wait()
+    }
+    #[cfg(not(unix))]
+    {
+        child.try_wait()
     }
 }

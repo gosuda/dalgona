@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     path::PathBuf,
-    sync::Arc,
 };
 
 use dal_core::{
@@ -21,7 +20,7 @@ pub(crate) use ledger::LedgerError;
 pub(crate) use ops::{JobsCtx, run_jobs_op};
 pub(crate) use reap::reap_detached;
 
-use ledger::{Ended, Ledger, Line};
+use ledger::{Ledger, Line};
 use lines::LineRing;
 
 use crate::error::{AgentError, ToolError, ValidationError};
@@ -55,9 +54,6 @@ pub(crate) struct JobRecord {
     pub(crate) id: JobId,
     /// The human-readable job label.
     pub(crate) label: Box<str>,
-    /// The command text the starter supplied, shared with every later read;
-    /// `None` when the starter supplied none.
-    pub(crate) command: Option<Arc<str>>,
     /// The durable output file for the job.
     pub(crate) log_path: PathBuf,
     state: JobState,
@@ -82,7 +78,6 @@ impl JobRecord {
         Self {
             id,
             label: label.into(),
-            command: None,
             log_path,
             state: JobState::Queued,
             started: false,
@@ -93,14 +88,6 @@ impl JobRecord {
             lines: LineRing::default(),
             cancel,
         }
-    }
-
-    /// Attaches the command text the starter supplied, sharing one copy
-    /// across every later list and status read.
-    #[must_use]
-    pub(crate) fn with_command(mut self, command: Arc<str>) -> Self {
-        self.command = Some(command);
-        self
     }
 
     /// Runs the job under `parent`: its cancel cascades and its end raises no
@@ -126,9 +113,6 @@ pub(crate) struct FinishedJob {
     pub(crate) id: JobId,
     /// The human-readable job label.
     pub(crate) label: Box<str>,
-    /// The command text the starter supplied, kept through settlement;
-    /// `None` when it supplied none.
-    pub(crate) command: Option<Arc<str>>,
     /// The durable output file for the job.
     pub(crate) log_path: PathBuf,
     /// The terminal outcome.
@@ -161,7 +145,7 @@ struct PendingReport {
 pub(crate) struct JobTable {
     jobs: HashMap<JobId, JobRecord>,
     queued: VecDeque<JobId>,
-    /// Running and detached jobs in start order.
+    /// Running and detached jobs in start order, including owned logical jobs.
     running: Vec<JobId>,
     finished: Vec<FinishedJob>,
     ends: VecDeque<JobEndEvent>,
@@ -217,7 +201,7 @@ impl JobTable {
             held: recovered.held,
             ..Self::default()
         };
-        for Ended { report, command } in recovered.ended {
+        for report in recovered.ended {
             let activity = Timestamp::now();
             let tail: Box<[u8]> = report.text.as_bytes().into();
             let mut record = JobRecord::new(
@@ -226,7 +210,6 @@ impl JobTable {
                 job_log(&report.id),
                 CancellationToken::new(),
             );
-            record.command.clone_from(&command);
             record.state = JobState::Done;
             record.started = true;
             record.tail.clone_from(&tail);
@@ -237,7 +220,6 @@ impl JobTable {
             table.finished.push(FinishedJob {
                 id: report.id,
                 label: report.label.clone(),
-                command,
                 log_path: job_log(&report.id),
                 outcome: report.outcome.clone(),
                 tail,
@@ -291,17 +273,19 @@ impl JobTable {
     /// Settles one job exactly once and writes the pending ledger lines
     /// before returning: owners that settle outside `jobs.*` ops and the
     /// reaper (the command-job task) must not leave the report buffered,
-    /// or a session that ends here loses it on reopen. A failed write
-    /// keeps the lines in the outbox for the next flush.
+    /// or a session that ends here loses it on reopen.
+    ///
+    /// # Errors
+    /// Returns the ledger error; the settlement stays recorded and the
+    /// lines stay buffered for the next flush.
     pub(crate) async fn settle_durably(
         &mut self,
         id: JobId,
         outcome: JobOutcome,
         tail: Box<[u8]>,
-    ) -> Option<FinishedJob> {
+    ) -> Result<Option<FinishedJob>, LedgerError> {
         let finished = self.settle_once(id, outcome, tail);
-        let _ = self.flush().await;
-        finished
+        self.flush().await.map(|()| finished)
     }
 
     /// Reserves one queued row behind the bounded FIFO.
@@ -331,7 +315,9 @@ impl JobTable {
         }
         record.state = JobState::Running;
         record.started = true;
-        self.jobs.insert(record.id, record);
+        let id = record.id;
+        self.jobs.insert(id, record);
+        self.running.push(id);
         Ok(())
     }
 
@@ -370,17 +356,23 @@ impl JobTable {
         self.queued.len()
     }
 
-    /// Returns the number of running or detached jobs holding a slot.
-    #[cfg(test)]
+    /// Returns the number of process-backed running or detached jobs holding a slot.
     #[must_use]
     pub(crate) fn active_count(&self) -> usize {
-        self.running.len()
+        self.running
+            .iter()
+            .filter(|id| {
+                self.jobs
+                    .get(id)
+                    .is_some_and(|record| record.owner.is_none() && record.state != JobState::Done)
+            })
+            .count()
     }
 
     /// Returns the next queued job that may start without exceeding the cap.
     #[cfg(test)]
     pub(crate) fn next_queued(&mut self) -> Option<JobId> {
-        if self.running.len() >= SESSION_CHILD_LIMIT {
+        if self.active_count() >= SESSION_CHILD_LIMIT {
             return None;
         }
         loop {
@@ -398,7 +390,7 @@ impl JobTable {
 
     /// Marks the head queued job running after a successful child start.
     pub(crate) fn mark_running(&mut self, id: JobId) -> Result<(), ToolError> {
-        if self.running.len() >= SESSION_CHILD_LIMIT || self.queued.front() != Some(&id) {
+        if self.active_count() >= SESSION_CHILD_LIMIT || self.queued.front() != Some(&id) {
             return Err(invalid_transition());
         }
         let Some(record) = self.jobs.get_mut(&id) else {
@@ -446,7 +438,7 @@ impl JobTable {
         outcome: JobOutcome,
         tail: Box<[u8]>,
     ) -> Option<FinishedJob> {
-        let (was_active, top_level, label, command, log_path, activity) = {
+        let (was_active, top_level, label, log_path, activity) = {
             let record = self.jobs.get_mut(&id)?;
             if record.state == JobState::Done {
                 return None;
@@ -459,7 +451,6 @@ impl JobTable {
                 was_active,
                 record.parent.is_none(),
                 record.label.clone(),
-                record.command.clone(),
                 record.log_path.clone(),
                 record.activity,
             )
@@ -474,7 +465,6 @@ impl JobTable {
         let finished = FinishedJob {
             id,
             label,
-            command,
             log_path,
             outcome,
             tail,
@@ -508,8 +498,7 @@ impl JobTable {
                     .into_owned()
                     .into_boxed_str(),
             };
-            self.outbox
-                .push(Ledger::end(&report, finished.command.clone()));
+            self.outbox.push(Ledger::end(&report));
             self.reports.push_back(PendingReport {
                 report,
                 taken: false,
@@ -563,6 +552,34 @@ impl JobTable {
         Ok(())
     }
 
+    /// Fires every live job's token, settles every live row as cancelled,
+    /// and flushes the terminal ledger ends before returning.
+    ///
+    /// Session close calls this before draining tasks: detached
+    /// reapers dropped by the drain would otherwise abandon their rows with
+    /// no terminal ledger end. Firing first still lets a live reaper stop its
+    /// child through the group ladder; settling here guarantees the end even
+    /// when the reaper never wakes, since `settle_once` keeps the first end.
+    ///
+    /// # Errors
+    /// Returns the ledger error; the cancellations stay recorded and the
+    /// lines stay buffered for the next flush.
+    pub(crate) async fn cancel_all(&mut self) -> Result<(), LedgerError> {
+        let live: Vec<JobId> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, record)| (record.state != JobState::Done).then_some(*id))
+            .collect();
+        for id in live {
+            let Some(record) = self.jobs.get(&id) else {
+                continue;
+            };
+            record.cancel.cancel();
+            let _ = self.settle_once(id, JobOutcome::Cancelled, Box::new([]));
+        }
+        self.flush().await
+    }
+
     /// Ends `id` for the extension that spawned it, through `settle_once`.
     ///
     /// # Errors
@@ -598,7 +615,19 @@ impl JobTable {
     /// Looks up one live or recently completed job.
     #[must_use]
     pub(crate) fn find(&self, id: JobId) -> Option<JobStatus> {
-        self.list().into_iter().find(|status| status.id == id)
+        let record = self.jobs.get(&id)?;
+        let state = match record.state {
+            JobState::Queued | JobState::Running => JobStateView::Running,
+            JobState::Detached => JobStateView::Detached,
+            JobState::Done => JobStateView::Done(self.wait(id)?),
+        };
+        Some(JobStatus {
+            id,
+            label: record.label.clone(),
+            state,
+            log: Some(record.log_path.clone()),
+            last_activity_at: record.activity,
+        })
     }
 
     /// Reads job-end events after `after`.
@@ -762,7 +791,6 @@ impl JobTable {
                     label: record.label.clone(),
                     state: JobStateView::Running,
                     log: Some(record.log_path.clone()),
-                    command: record.command.clone(),
                     last_activity_at: record.activity,
                 });
             }
@@ -779,7 +807,6 @@ impl JobTable {
                     label: record.label.clone(),
                     state,
                     log: Some(record.log_path.clone()),
-                    command: record.command.clone(),
                     last_activity_at: record.activity,
                 });
             }
@@ -790,7 +817,6 @@ impl JobTable {
                 label: job.label.clone(),
                 state: JobStateView::Done(job.outcome.clone()),
                 log: Some(job.log_path.clone()),
-                command: job.command.clone(),
                 last_activity_at: job.activity,
             });
         }
@@ -899,6 +925,172 @@ mod tests {
     }
 
     #[test]
+    fn owned_rows_are_observable_live_and_settle_exactly_once() -> Result<(), ToolError> {
+        let mut jobs = JobTable::new();
+        let owner = Name::test();
+        let row = record(CancellationToken::new()).owned_by(owner.clone());
+        let id = row.id;
+        jobs.spawn_owned(row)?;
+        assert_eq!(
+            jobs.find(id).expect("live owned row").state,
+            JobStateView::Running
+        );
+        assert_eq!(
+            jobs.list().iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert_eq!(
+            jobs.counts(),
+            JobCounts {
+                running: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(jobs.active_count(), 0);
+        assert!(
+            jobs.spawn_owned(record(CancellationToken::new()).owned_by(owner.clone()))
+                .is_ok()
+        );
+        assert!(
+            jobs.spawn_owned(
+                JobRecord::new(id, "duplicate", PathBuf::new(), CancellationToken::new())
+                    .owned_by(owner.clone())
+            )
+            .is_err()
+        );
+        jobs.settle_owned(&owner, id, JobOutcome::Exited { code: 7 }, "report")
+            .expect("settle owned row");
+        assert!(matches!(
+            jobs.settle_owned(&owner, id, JobOutcome::Cancelled, "duplicate"),
+            Err(JobsError::AlreadyEnded { id: ended }) if ended == id
+        ));
+        assert_eq!(
+            jobs.find(id).expect("settled owned row").state,
+            JobStateView::Done(JobOutcome::Exited { code: 7 })
+        );
+        assert_eq!(jobs.list().iter().filter(|row| row.id == id).count(), 1);
+        assert_eq!(
+            jobs.counts(),
+            JobCounts {
+                running: 1,
+                done: 1,
+                ..JobCounts::default()
+            }
+        );
+        assert_eq!(jobs.ends_after(None).events.len(), 1);
+        assert_eq!(jobs.take(10).len(), 1);
+        jobs.drain_finished();
+        assert_eq!(jobs.find(id), None);
+        Ok(())
+    }
+
+    #[test]
+    fn owned_rows_do_not_consume_or_release_process_capacity() -> Result<(), ToolError> {
+        let mut jobs = JobTable::new();
+        let owner = Name::test();
+        let mut logical_jobs = Vec::new();
+        for _ in 0..=SESSION_CHILD_LIMIT {
+            let row = record(CancellationToken::new()).owned_by(owner.clone());
+            logical_jobs.push(row.id);
+            jobs.spawn_owned(row)?;
+        }
+        assert_eq!(jobs.counts().running, SESSION_CHILD_LIMIT + 1);
+        assert_eq!(jobs.active_count(), 0);
+        let mut process = Vec::new();
+        for _ in 0..SESSION_CHILD_LIMIT {
+            let row = record(CancellationToken::new());
+            process.push(row.id);
+            jobs.reserve(row)?;
+        }
+        for id in &process {
+            assert_eq!(jobs.next_queued(), Some(*id));
+            jobs.mark_running(*id)?;
+        }
+        jobs.detach(process[0])?;
+        let row = record(CancellationToken::new());
+        let waiting = row.id;
+        jobs.reserve(row)?;
+        assert_eq!(jobs.active_count(), SESSION_CHILD_LIMIT);
+        assert_eq!(jobs.next_queued(), None);
+        assert!(jobs.mark_running(waiting).is_err());
+        jobs.settle_owned(&owner, logical_jobs[0], JobOutcome::Cancelled, "cancelled")
+            .expect("settle logical row at process capacity");
+        assert_eq!(jobs.active_count(), SESSION_CHILD_LIMIT);
+        assert_eq!(jobs.next_queued(), None);
+        assert!(jobs.mark_running(waiting).is_err());
+        jobs.settle_once(process[0], JobOutcome::Exited { code: 0 }, Box::new([]));
+        assert_eq!(jobs.next_queued(), Some(waiting));
+        jobs.mark_running(waiting)?;
+        assert_eq!(jobs.active_count(), SESSION_CHILD_LIMIT);
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_owned_and_process_rows_preserve_all_three_orders() -> Result<(), ToolError> {
+        let mut jobs = JobTable::new();
+        let owner = Name::test();
+        let first = record(CancellationToken::new());
+        let first_id = first.id;
+        let second = record(CancellationToken::new());
+        let second_id = second.id;
+        jobs.reserve(first)?;
+        jobs.reserve(second)?;
+        let logical_job = record(CancellationToken::new()).owned_by(owner.clone());
+        let owned_id = logical_job.id;
+        jobs.spawn_owned(logical_job)?;
+        jobs.mark_running(first_id)?;
+        jobs.detach(first_id)?;
+        let queued = record(CancellationToken::new());
+        let queued_id = queued.id;
+        jobs.reserve(queued)?;
+        let last = record(CancellationToken::new()).owned_by(owner.clone());
+        let last_id = last.id;
+        jobs.spawn_owned(last)?;
+        let listed = jobs.list();
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second_id, queued_id, owned_id, first_id, last_id]
+        );
+        assert_eq!(
+            jobs.counts(),
+            JobCounts {
+                queued: 2,
+                running: 2,
+                detached: 1,
+                ..JobCounts::default()
+            }
+        );
+        for row in listed {
+            assert_eq!(jobs.find(row.id), Some(row));
+        }
+        jobs.settle_owned(&owner, last_id, JobOutcome::Cancelled, "last")
+            .expect("settle last starter first");
+        jobs.settle_once(first_id, JobOutcome::Exited { code: 2 }, Box::new([]));
+        jobs.settle_owned(&owner, owned_id, JobOutcome::Exited { code: 0 }, "first")
+            .expect("settle first starter last");
+        let listed = jobs.list();
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second_id, queued_id, last_id, first_id, owned_id]
+        );
+        assert_eq!(
+            jobs.counts(),
+            JobCounts {
+                queued: 2,
+                done: 3,
+                ..JobCounts::default()
+            }
+        );
+        for row in listed {
+            assert_eq!(jobs.find(row.id), Some(row));
+        }
+        assert_eq!(jobs.next_queued(), Some(second_id));
+        jobs.mark_running(second_id)?;
+        assert_eq!(jobs.next_queued(), Some(queued_id));
+        Ok(())
+    }
+
+    #[test]
     fn session_queue_is_fifo_and_never_starts_over_the_cap() -> Result<(), ToolError> {
         let mut jobs = JobTable::new();
         let mut ids = Vec::with_capacity(SESSION_CHILD_LIMIT + 1);
@@ -970,104 +1162,6 @@ mod tests {
         assert_eq!(jobs.wait(id), Some(JobOutcome::Exited { code: 0 }));
         jobs.drain_finished();
         assert_eq!(jobs.wait(id), None);
-        Ok(())
-    }
-
-    #[test]
-    fn list_carries_the_command_through_the_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
-        let mut jobs = JobTable::new();
-        let command: Arc<str> = Arc::from("cargo build --release");
-        let record = record(CancellationToken::new()).with_command(Arc::clone(&command));
-        let id = record.id;
-        jobs.reserve(record)
-            .map_err(|error| Box::<dyn std::error::Error>::from(format!("{error:?}")))?;
-        // The same shared allocation backs the running and the finished row.
-        jobs.mark_running(id)?;
-        let listed = jobs.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].label.as_ref(), "command");
-        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
-        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::new([]));
-        let listed = jobs.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(
-            listed[0].state,
-            JobStateView::Done(JobOutcome::Exited { code: 0 })
-        );
-        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
-        Ok(())
-    }
-
-    #[test]
-    fn commandless_jobs_list_with_no_command() -> Result<(), Box<dyn std::error::Error>> {
-        let mut jobs = JobTable::new();
-        let record = record(CancellationToken::new());
-        let id = record.id;
-        jobs.reserve(record)
-            .map_err(|error| Box::<dyn std::error::Error>::from(format!("{error:?}")))?;
-        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::new([]));
-        let listed = jobs.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].command, None, "no starter command means None");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn the_ledger_keeps_the_command_for_reopened_rows()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir().expect("temporary job report ledger");
-        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("open ledger");
-        let id = JobId::new_v7();
-        let command: Arc<str> = Arc::from("sleep 2");
-        jobs.reserve(
-            JobRecord::new(
-                id,
-                "exec",
-                root.path().join("exec.log"),
-                CancellationToken::new(),
-            )
-            .with_command(Arc::clone(&command)),
-        )
-        .expect("reserve exec job");
-        jobs.mark_running(id)?;
-        jobs.settle_once(id, JobOutcome::Exited { code: 0 }, Box::from(&b"out"[..]));
-        jobs.flush().await.expect("persist ended report");
-        drop(jobs);
-
-        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("reopen ledger");
-        let listed = jobs.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, id);
-        assert_eq!(listed[0].command, Some(Arc::clone(&command)));
-        // The written line carries the command only when set.
-        let text = std::fs::read_to_string(root.path().join("reports.jsonl")).expect("ledger text");
-        assert!(text.contains("\"command\""), "{text}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn an_old_ledger_line_without_a_command_restores_none()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir().expect("temporary job report ledger");
-        // A hand-written pre-command End line: the same shape the service
-        // wrote before the field existed.
-        let line = concat!(
-            r#"{"e":"end","id":"01980000-0000-7000-8000-00000000000a","#,
-            r#""label":"legacy","outcome":{"state":"exited","code":0},"text":"out"}"#,
-        );
-        std::fs::write(root.path().join("reports.jsonl"), format!("{line}\n"))
-            .expect("write legacy ledger");
-        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
-            .await
-            .expect("reopen legacy ledger");
-        let listed = jobs.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].label.as_ref(), "legacy");
-        assert_eq!(listed[0].command, None);
         Ok(())
     }
 
@@ -1180,7 +1274,8 @@ mod tests {
             JobOutcome::Exited { code: 0 },
             Box::from(&b"report"[..]),
         )
-        .await;
+        .await
+        .expect("settle_durably persists the report");
         drop(jobs);
 
         // No caller flushed after the settle: if the End line had stayed

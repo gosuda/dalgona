@@ -122,6 +122,97 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates private directories like [`create_private_dir_all`], then syncs
+/// every directory entry this path depends on, whether this call created it
+/// or a previous failed call left it behind.
+///
+/// Syncing a file does not make the directory entries above it durable: a power
+/// loss can drop a freshly created session directory together with the records
+/// already acknowledged beneath it. Syncing only what this call created leaves
+/// a retry hole: after a failed parent sync the directories already exist, so
+/// a retry would owe them no sync and report success for entries that were
+/// never made durable — including a floor left behind by a crashed process,
+/// which no in-process cleanup can remove. Durability therefore comes from
+/// re-syncing, never from removing.
+///
+/// `floor` bounds that re-sync. On success every directory from the floor's
+/// parent down to the parent of `path` has been synced after the entry it
+/// holds existed, so each entry at or below the floor is durable. The floor
+/// itself is synced through its parent on every call, which is also how the
+/// floor's own entry becomes durable when this call (or a crashed predecessor)
+/// created it. Nothing above the floor's parent is created or synced: that
+/// chain is the embedder's provisioned path (it must already exist), so an
+/// arbitrary floor can never hide an unsynced ancestor the helper created.
+/// Callers pass the store's data root; session, sidecar, fork-destination, and
+/// blob/job subdirectories all hang below it.
+///
+/// # Errors
+/// Returns [`StoreError::Invalid`] when `path` is not at or below `floor`, or
+/// when `floor` has no parent to sync. Returns [`StoreError::Io`] naming the
+/// path that could not be created (including a missing floor parent), or the
+/// directory that could not be synced.
+pub(crate) fn create_private_dir_all_durable(floor: &Path, path: &Path) -> Result<(), StoreError> {
+    if path != floor && !path.starts_with(floor) {
+        return Err(StoreError::Invalid {
+            reason: format!(
+                "durable directory {} is not at or below its floor {}",
+                path.display(),
+                floor.display()
+            )
+            .into(),
+        });
+    }
+    let floor_parent = floor
+        .parent()
+        .map(|parent| {
+            if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            }
+        })
+        .ok_or_else(|| StoreError::Invalid {
+            reason: format!(
+                "durable directory floor {} has no parent to sync",
+                floor.display()
+            )
+            .into(),
+        })?;
+    if let Err(source) = fs::symlink_metadata(floor_parent) {
+        return Err(io_err(floor_parent, source));
+    }
+    create_private_dir_all(path).map_err(|source| io_err(path, source))?;
+    let mut chain = Vec::new();
+    let mut cursor = containing_dir(path);
+    loop {
+        chain.push(cursor.to_path_buf());
+        if cursor == floor_parent {
+            break;
+        }
+        cursor = cursor
+            .parent()
+            .map(|parent| {
+                if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                }
+            })
+            .ok_or_else(|| StoreError::Invalid {
+                reason: format!(
+                    "durable directory {} escaped its floor {}",
+                    path.display(),
+                    floor.display()
+                )
+                .into(),
+            })?;
+    }
+    for directory in chain.iter().rev() {
+        sync_dir(directory)?;
+    }
+    Ok(())
+}
+
 /// Writes `bytes` to a temp file, syncs it, renames it over `path`, and syncs the directory.
 ///
 /// # Errors
@@ -296,7 +387,11 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
+            Self::in_root(&std::env::temp_dir())
+        }
+
+        fn in_root(base: &Path) -> Self {
+            let path = base.join(format!(
                 "dal-store-util-{}-{}",
                 std::process::id(),
                 random_hex()
@@ -342,6 +437,115 @@ mod tests {
                 & 0o777,
             0o700
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_creation_resyncs_existing_entries_a_retry_did_not_create() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new();
+        let floor = temp.0.join("root");
+        fs::create_dir(&floor).expect("create the floor");
+        let sessions = floor.join("sessions");
+        fs::create_dir(&sessions).expect("create the sessions directory");
+        // Write and search without read: entries can be created beneath the
+        // sessions directory, but the directory cannot be opened to sync them.
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o300))
+            .expect("drop directory read permission");
+        let enforced = fs::read_dir(&sessions).is_err();
+        let target = sessions.join("workspace").join("session");
+
+        let first = create_private_dir_all_durable(&floor, &target);
+        // The failed call leaves its directories behind for the retry; the
+        // retry must still owe the sync instead of trusting them.
+        assert!(
+            target.is_dir(),
+            "a failed sync leaves the tree in place; durability comes from re-syncing, not removing"
+        );
+        let retried = create_private_dir_all_durable(&floor, &target);
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700))
+            .expect("restore directory permissions");
+
+        assert!(
+            enforced,
+            "chmod is not enforced for this user (root or an ACL bypass), so the directory-sync failure is unreachable; run this test unprivileged"
+        );
+        assert!(
+            matches!(&first, Err(StoreError::Io { path, .. }) if *path == sessions),
+            "the workspace entry cannot be synced in its parent, got {first:?}"
+        );
+        assert!(
+            matches!(&retried, Err(StoreError::Io { path, .. }) if *path == sessions),
+            "the retry finds every directory present and must still fail on the same sync, got {retried:?}"
+        );
+        assert!(
+            create_private_dir_all_durable(&floor, &target).is_ok(),
+            "with the sessions directory readable again the retry syncs and succeeds"
+        );
+    }
+
+    #[test]
+    fn durable_creation_refuses_paths_outside_their_floor() {
+        let temp = TempDir::new();
+        let floor = temp.0.join("root");
+        let outside = temp.0.join("elsewhere").join("session");
+
+        let error = create_private_dir_all_durable(&floor, &outside)
+            .expect_err("a path outside its floor must be refused");
+
+        assert!(
+            matches!(error, StoreError::Invalid { .. }),
+            "escaping the floor is a caller bug, got {error:?}"
+        );
+        assert!(
+            !outside.exists(),
+            "a refused path creates nothing above or below the floor"
+        );
+    }
+
+    #[test]
+    fn durable_creation_requires_the_floor_parent_to_exist() {
+        let temp = TempDir::new();
+        let floor = temp.0.join("missing-parent").join("root");
+        let floor_parent = floor
+            .parent()
+            .expect("the test floor has a parent")
+            .to_path_buf();
+        let target = floor.join("sessions").join("session");
+
+        let error = create_private_dir_all_durable(&floor, &target)
+            .expect_err("nothing above the floor parent may be created");
+
+        assert!(
+            matches!(&error, StoreError::Io { path, .. } if *path == floor_parent),
+            "the missing floor parent is named, got {error:?}"
+        );
+        assert!(
+            !target.exists(),
+            "no directory is created when the floor parent is missing"
+        );
+    }
+
+    #[test]
+    fn durable_creation_syncs_single_component_relative_floor_through_cwd() {
+        let floor = PathBuf::from(format!(
+            "dal-store-util-relative-{}-{}",
+            std::process::id(),
+            random_hex()
+        ));
+        let target = floor.join("sessions").join("session");
+        let result = create_private_dir_all_durable(&floor, &target);
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&floor);
+            panic!(
+                "single-component relative floor syncs through the current directory, got {error:?}"
+            );
+        }
+        let durable = target.is_dir();
+        let _ = fs::remove_dir_all(&floor);
+        assert!(durable);
+        assert!(!floor.exists());
     }
 
     #[test]
@@ -429,13 +633,16 @@ mod tests {
     }
 
     /// APFS rejects non-UTF-8 filenames at create/open (EILSEQ), so the
-    /// preservation claim is only exercisable on byte-name filesystems.
+    /// preservation claim is only exercisable on byte-name filesystems. The
+    /// harness TMPDIR may sit on such a filesystem, so this fixture takes
+    /// POSIX /tmp scratch; temp and target stay in the same directory, so
+    /// the publish rename stays atomic, and every assertion below still runs.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn atomic_write_preserves_non_utf8_target_name() {
         use std::os::unix::ffi::OsStrExt;
 
-        let dir = TempDir::new();
+        let dir = TempDir::in_root(Path::new("/tmp"));
         let target = dir.0.join(std::ffi::OsStr::from_bytes(b"cache-\xff"));
         write_atomic(&target, b"opaque path", FileMode::Mode0600)
             .expect("write through non-UTF-8 target");

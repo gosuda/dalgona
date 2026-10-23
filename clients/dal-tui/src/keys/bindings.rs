@@ -224,6 +224,10 @@ pub const BINDINGS: &[Binding] = &[
         owner: Owner::Picker,
         action: Action::PickerToggle,
         label: "Toggle row",
+        // Spec contract: Space on an empty filter and Ctrl+Space (0x00)
+        // otherwise toggle a multi picker row. The dispatch does not route
+        // this yet — unmodified Space stays filter text and no picker is
+        // multi — so the row is contract-only until a multi picker wires it.
         default: key(KeyCode::Char(' '), NONE),
         legacy: Some(key(KeyCode::Char(' '), CTRL)),
     },

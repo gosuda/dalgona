@@ -811,6 +811,21 @@ impl Extension {
     pub fn docs(&self) -> &[DocRecord] {
         &self.docs
     }
+    /// Borrows the registered `session_end` hooks.
+    #[must_use]
+    pub fn session_ends(&self) -> &[Arc<dyn ObserveHook<SessionEnd>>] {
+        &self.session_ends
+    }
+    /// Borrows the registered `settled` hooks.
+    #[must_use]
+    pub fn settleds(&self) -> &[Arc<dyn ObserveHook<Settled>>] {
+        &self.settleds
+    }
+    /// Borrows the registered stream watch factories.
+    #[must_use]
+    pub fn watches(&self) -> &[Arc<dyn WatchFactory>] {
+        &self.watches
+    }
     /// Borrows the evidence owners this extension installs.
     #[must_use]
     pub fn evidence(&self) -> &[Arc<dyn Evidence>] {

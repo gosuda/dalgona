@@ -1,10 +1,16 @@
 //! Maps core requests to Codex server requests and client results to answers.
 //!
 //! Approvals of `patch` become `item/fileChange/requestApproval`; every other
-//! tool approval becomes `item/commandExecution/requestApproval`. Extension
+//! tool approval becomes `item/commandExecution/requestApproval`, and each
+//! reply is parsed with the decision table of the method that asked. Extension
 //! capability grants become `item/permissions/requestApproval`. Select,
 //! confirm, and text questions become `item/tool/requestUserInput`. Any
 //! unknown, malformed, or missing client value never approves.
+//!
+//! A user-input result decodes through the rich-ask contract the local ask
+//! path enforces: each question takes the shape its kind fixes, and a result
+//! outside it fails with [`AnswerError`] instead of being trimmed down to a
+//! shape that fits. The adapter then resolves the question as dismissed.
 
 use std::path::Path;
 
@@ -110,39 +116,106 @@ pub(crate) fn server_request(
     Some((method, params))
 }
 
+/// A user-input result that is not a valid answer to its rich-ask question.
+///
+/// The rules are the ones the local ask path enforces: a single select takes
+/// exactly one offered label, a multi select takes distinct offered labels, a
+/// text question takes exactly one string, and a confirmation takes `yes` or
+/// `no`. An empty answer list is a dismissal, not an error.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum AnswerError {
+    /// The result has no `answers` object.
+    #[error("the result has no `answers` object")]
+    MissingAnswers,
+    /// The entry for the question has no `answers` array.
+    #[error("the entry for question {question} has no `answers` array")]
+    NotAList { question: String },
+    /// One answer is not a string.
+    #[error("answer {index} is not a string")]
+    NotString { index: usize },
+    /// A single-answer question got several answers.
+    #[error("the question takes exactly one answer, got {count}")]
+    Arity { count: usize },
+    /// An answer names a choice the question did not offer.
+    #[error("`{label}` is not an offered choice")]
+    UnknownLabel { label: String },
+    /// A multi select names one choice twice.
+    #[error("`{label}` is selected more than once")]
+    DuplicateLabel { label: String },
+    /// The accepted answer did not encode as JSON.
+    #[error("the answer does not encode as JSON")]
+    Encode,
+}
+
 /// Maps one client result to its core answer; `None` means the client
-/// returned an error or no result.
+/// returned an error or no result. A malformed result fails closed like a
+/// dismissal and is logged with its [`AnswerError`].
 pub(crate) fn client_answer(request: &Request, result: Option<&Value>) -> Answer {
-    let fallback = match &request.question {
-        Question::Approval { .. } | Question::Grant { .. } | Question::Confirm { .. } => {
-            Answer::Decline
-        }
-        _ => Answer::Cancel,
-    };
+    let fallback = dismissal(&request.question);
     let Some(result) = result else {
         return fallback;
     };
     match &request.question {
-        Question::Approval { .. } => decision_answer(result.get("decision")),
+        Question::Approval { tool, .. } => approval_answer(tool, result.get("decision")),
         Question::Grant { capabilities, .. } => permissions_answer(capabilities, result),
-        Question::Select { options, multi, .. } => {
-            let answers = user_answers(result, &request.id.to_string());
-            select_answer(options, *multi, &answers).unwrap_or(fallback)
-        }
-        Question::Confirm { .. } => match user_answers(result, &request.id.to_string()).first() {
-            Some(answer) if answer == "yes" => Answer::Approve,
-            _ => Answer::Decline,
-        },
-        Question::Text { .. } => user_answers(result, &request.id.to_string())
-            .first()
-            .and_then(|text| raw_value(&text.as_str()))
-            .map_or(fallback, Answer::Value),
-        _ => fallback,
+        _ => ask_answer(request, result).unwrap_or_else(|error| {
+            tracing::warn!(%error, request = %request.id, "codex answer is malformed; failing closed");
+            fallback
+        }),
     }
 }
 
-/// Maps a command or file-change approval decision; unknown values decline.
-pub(crate) fn decision_answer(decision: Option<&Value>) -> Answer {
+/// Returns the answer a dismissed or malformed result resolves to: approvals,
+/// grants, and confirmations decline; every other question cancels.
+fn dismissal(question: &Question) -> Answer {
+    match question {
+        Question::Approval { .. } | Question::Grant { .. } | Question::Confirm { .. } => {
+            Answer::Decline
+        }
+        _ => Answer::Cancel,
+    }
+}
+
+/// Decodes one `item/tool/requestUserInput` result into the answer to the
+/// request's select, confirm, or text question.
+///
+/// # Errors
+/// Returns [`AnswerError`] when the result is not a valid answer to the
+/// question.
+pub(crate) fn ask_answer(request: &Request, result: &Value) -> Result<Answer, AnswerError> {
+    let Some(labels) = user_answers(result, &request.id.to_string())? else {
+        return Ok(dismissal(&request.question));
+    };
+    match &request.question {
+        Question::Select { options, multi, .. } => select_answer(options, *multi, &labels),
+        Question::Confirm { .. } => match exactly_one(&labels)? {
+            "yes" => Ok(Answer::Approve),
+            "no" => Ok(Answer::Decline),
+            other => Err(AnswerError::UnknownLabel {
+                label: other.to_owned(),
+            }),
+        },
+        Question::Text { .. } => raw_value(&exactly_one(&labels)?).map(Answer::Value),
+        _ => Ok(dismissal(&request.question)),
+    }
+}
+
+/// Routes an approval reply to the decision table of the method that asked:
+/// `server_request` sends patch approvals as file-change requests and every
+/// other tool approval as command requests.
+fn approval_answer(tool: &str, decision: Option<&Value>) -> Answer {
+    if tool == "patch" {
+        return file_change_decision(decision);
+    }
+    command_decision(decision)
+}
+
+/// Maps a command-execution approval decision; unknown or malformed values decline.
+///
+/// Dal has no command-prefix- or host-scoped allowance, so an accepted
+/// amendment approves only this call (with its call-scoped grant): the
+/// session persistence the client agreed to is not invented here.
+pub(crate) fn command_decision(decision: Option<&Value>) -> Answer {
     let Some(decision) = decision else {
         return Answer::Decline;
     };
@@ -156,9 +229,11 @@ pub(crate) fn decision_answer(decision: Option<&Value>) -> Answer {
     }
     if decision
         .get("acceptWithExecpolicyAmendment")
-        .is_some_and(sonic_rs::JsonValueTrait::is_object)
+        .and_then(|amendment| amendment.get("execpolicy_amendment"))
+        .and_then(|value| value.as_array())
+        .is_some_and(|items| !items.is_empty() && items.iter().all(|item| item.as_str().is_some()))
     {
-        return Answer::ApproveForSession;
+        return Answer::Approve;
     }
     let action = decision
         .get("applyNetworkPolicyAmendment")
@@ -166,7 +241,20 @@ pub(crate) fn decision_answer(decision: Option<&Value>) -> Answer {
         .and_then(|amendment| amendment.get("action"))
         .and_then(|value| value.as_str());
     match action {
-        Some("allow") => Answer::ApproveForSession,
+        Some("allow") => Answer::Approve,
+        _ => Answer::Decline,
+    }
+}
+
+/// Maps a file-change approval decision; only the four pinned strings apply.
+///
+/// The amendment objects belong to command-execution approvals, so any
+/// object declines here.
+pub(crate) fn file_change_decision(decision: Option<&Value>) -> Answer {
+    match decision.and_then(|value| value.as_str()) {
+        Some("accept") => Answer::Approve,
+        Some("acceptForSession") => Answer::ApproveForSession,
+        Some("cancel") => Answer::Cancel,
         _ => Answer::Decline,
     }
 }
@@ -203,42 +291,76 @@ fn permissions_answer(capabilities: &[Box<str>], result: &Value) -> Answer {
     }
 }
 
-/// Maps selected labels; any unknown label or an empty answer yields `None`.
-fn select_answer(options: &[Choice], multi: bool, answers: &[String]) -> Option<Answer> {
-    if answers.is_empty() || (!multi && answers.len() > 1) {
-        return None;
+/// Maps selected labels: a single select takes exactly one offered label and
+/// answers with a JSON string; a multi select takes distinct offered labels
+/// and answers with a JSON array of strings.
+fn select_answer(options: &[Choice], multi: bool, labels: &[&str]) -> Result<Answer, AnswerError> {
+    if !multi {
+        exactly_one(labels)?;
     }
-    let known = |answer: &String| options.iter().any(|choice| *choice.label == **answer);
-    if !answers.iter().all(known) {
-        return None;
+    for (index, label) in labels.iter().enumerate() {
+        if !options.iter().any(|choice| choice.label.as_ref() == *label) {
+            return Err(AnswerError::UnknownLabel {
+                label: (*label).to_owned(),
+            });
+        }
+        if labels.iter().take(index).any(|earlier| earlier == label) {
+            return Err(AnswerError::DuplicateLabel {
+                label: (*label).to_owned(),
+            });
+        }
     }
     let value = if multi {
-        raw_value(&answers)?
+        raw_value(labels)?
     } else {
-        raw_value(&answers[0].as_str())?
+        raw_value(&exactly_one(labels)?)?
     };
-    Some(Answer::Value(value))
+    Ok(Answer::Value(value))
+}
+
+/// Returns the one answer a single-answer question takes.
+fn exactly_one<'a>(labels: &[&'a str]) -> Result<&'a str, AnswerError> {
+    match labels {
+        [one] => Ok(*one),
+        _ => Err(AnswerError::Arity {
+            count: labels.len(),
+        }),
+    }
 }
 
 /// Reads the answer list for one question id from a user-input result.
-fn user_answers(result: &Value, question: &str) -> Vec<String> {
-    result
+///
+/// `Ok(None)` is a dismissal: the client sent no entry for the question or an
+/// empty list. Anything else must be a list of strings.
+fn user_answers<'a>(
+    result: &'a Value,
+    question: &str,
+) -> Result<Option<Vec<&'a str>>, AnswerError> {
+    let answers = match result.get("answers") {
+        Some(answers) if answers.is_object() => answers,
+        _ => return Err(AnswerError::MissingAnswers),
+    };
+    let Some(entry) = answers.get(question) else {
+        return Ok(None);
+    };
+    let list = entry
         .get("answers")
-        .and_then(|answers| answers.get(question))
-        .and_then(|answer| answer.get("answers"))
-        .and_then(|value| value.as_array())
-        .map(|list| {
-            list.iter()
-                .filter_map(|value| value.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
+        .and_then(|list| list.as_array())
+        .ok_or_else(|| AnswerError::NotAList {
+            question: question.to_owned(),
+        })?;
+    let labels = list
+        .iter()
+        .enumerate()
+        .map(|(index, item)| item.as_str().ok_or(AnswerError::NotString { index }))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((!labels.is_empty()).then_some(labels))
 }
 
 /// Encodes one serializable value as a raw JSON answer.
-fn raw_value<T: serde::Serialize + ?Sized>(value: &T) -> Option<RawJson> {
-    let text = sonic_rs::to_string(value).ok()?;
-    RawJson::parse(&text).ok()
+fn raw_value<T: serde::Serialize + ?Sized>(value: &T) -> Result<RawJson, AnswerError> {
+    let text = sonic_rs::to_string(value).map_err(|_| AnswerError::Encode)?;
+    RawJson::parse(&text).map_err(|_| AnswerError::Encode)
 }
 
 /// Builds one `ToolRequestUserInputQuestion`.

@@ -69,7 +69,7 @@ pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a failed publish.
 #[cfg(test)]
-pub(crate) fn put_prepared(dir: &Path, pending: PendingBlob) -> Result<(), BlobError> {
+pub(crate) fn put_prepared(dir: &Path, pending: &PendingBlob) -> Result<(), BlobError> {
     let staged = stage_prepared(dir, pending)?;
     let mut dirs = Vec::new();
     finish_staged(staged, &mut dirs)?;
@@ -182,11 +182,17 @@ pub(crate) enum StagedPublish {
 /// returns the staged publish. An existing digest stages only the owed
 /// directory sync.
 ///
+/// The blob is borrowed, so a caller whose publication can fail keeps the
+/// bytes for a retry instead of losing them with the failed attempt.
+///
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a
 /// failed write.
-pub(crate) fn stage_prepared(dir: &Path, pending: PendingBlob) -> Result<StagedPublish, BlobError> {
-    let (id, bytes) = pending.into_parts();
+pub(crate) fn stage_prepared(
+    dir: &Path,
+    pending: &PendingBlob,
+) -> Result<StagedPublish, BlobError> {
+    let (id, bytes) = (pending.id(), pending.bytes());
     check_blob_size(bytes.len())?;
     let dest = dir.join(id.to_string());
     if existing_blob(&dest)? {
@@ -472,19 +478,24 @@ fn decode_base64_inner(text: &str, validation: Base64Validation) -> Option<Vec<u
 /// Collects blob digests named by a record's parts.
 #[must_use]
 pub(crate) fn named_blobs(record: &dal_core::Record) -> Vec<BlobId> {
-    let mut ids = Vec::new();
     let Some(entry) = record.entry() else {
-        return ids;
+        return Vec::new();
     };
     match &entry.kind {
         dal_core::EntryKind::User { parts }
         | dal_core::EntryKind::ToolResult { parts, .. }
-        | dal_core::EntryKind::Compaction { parts, .. } => {
-            for part in parts {
-                push_part(part, &mut ids);
-            }
-        }
-        _ => {}
+        | dal_core::EntryKind::Compaction { parts, .. } => named_part_blobs(parts),
+        _ => Vec::new(),
+    }
+}
+
+/// Collects blob digests named by bare journal parts, including fork anchor
+/// restart parts that never appear in a copied record.
+#[must_use]
+pub(crate) fn named_part_blobs(parts: &[dal_core::JournalPart]) -> Vec<BlobId> {
+    let mut ids = Vec::new();
+    for part in parts {
+        push_part(part, &mut ids);
     }
     ids
 }
@@ -1012,8 +1023,8 @@ mod tests {
             )
         ));
 
-        put_prepared(&blobs, text_blob).expect("publish prepared text");
-        put_prepared(&blobs, image_blob).expect("publish prepared image");
+        put_prepared(&blobs, &text_blob).expect("publish prepared text");
+        put_prepared(&blobs, &image_blob).expect("publish prepared image");
 
         assert_eq!(
             fs::read(blobs.join(text_id.to_string()))

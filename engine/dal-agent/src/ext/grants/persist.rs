@@ -84,17 +84,7 @@ pub(crate) fn parse_rows(text: &str) -> Result<Vec<GrantRow>, GrantStoreError> {
                     detail: format!("line {no}: services must be [\"a\", \"b\"]").into(),
                 });
             };
-            services = inner
-                .split(',')
-                .map(|s| {
-                    let unquoted = unquote(s.trim()).ok_or_else(|| GrantStoreError::Malformed {
-                        detail: format!("line {no}: bad service name").into(),
-                    })?;
-                    Service::parse(&unquoted).map_err(|_| GrantStoreError::Malformed {
-                        detail: format!("line {no}: unknown service").into(),
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            services = parse_services(inner, no)?;
         } else if matches!(
             k.trim(),
             "ext" | "origin" | "by" | "approved_at" | "mcp_set" | "digest" | "workspace"
@@ -115,6 +105,25 @@ pub(crate) fn parse_rows(text: &str) -> Result<Vec<GrantRow>, GrantStoreError> {
     Ok(rows)
 }
 
+/// Parses the body of one `services = [...]` list. An empty body is an empty
+/// list: `[]` is the shape a capability-free declared-MCP row writes, and
+/// `build_row` refuses it for every other row.
+fn parse_services(body: &str, no: usize) -> Result<Vec<Service>, GrantStoreError> {
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    body.split(',')
+        .map(|name| {
+            let unquoted = unquote(name.trim()).ok_or_else(|| GrantStoreError::Malformed {
+                detail: format!("line {no}: bad service name").into(),
+            })?;
+            Service::parse(&unquoted).map_err(|_| GrantStoreError::Malformed {
+                detail: format!("line {no}: unknown service").into(),
+            })
+        })
+        .collect()
+}
+
 fn build_row(
     fields: &BTreeMap<Box<str>, Box<str>>,
     services: &[Service],
@@ -132,7 +141,10 @@ fn build_row(
         Some("bundled") => Origin::Bundled,
         _ => return Err(malformed("origin")),
     };
-    if services.is_empty() {
+    // A declared-MCP approval binds the set, not a capability, so an
+    // extension that injects nothing writes `services = []` for it. Any other
+    // row with no service authorizes nothing and fails closed.
+    if services.is_empty() && !fields.contains_key("mcp_set") {
         return Err(malformed("services"));
     }
     let services = ServiceSet::from_names(services.iter().map(|service| service.as_str()))

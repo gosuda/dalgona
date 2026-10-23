@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_core::{
-    ClientId, Command, EntryKind, EntryView, JobId, JobOutcome, JournalPart, ListQuery, ModelRoute,
-    Page, PageReq, SessionId, SessionSummary, ThinkingLevel, TurnId, View, Workspace,
+    ApprovalMode, ClientId, Command, EntryKind, EntryView, JobId, JobOutcome, JournalPart,
+    ListQuery, Mode, ModelRoute, Page, PageReq, Save, SessionId, SessionSummary, ThinkingLevel,
+    TurnId, View, Workspace,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -234,6 +235,138 @@ fn command_label(cmd: &Command) -> String {
     }
 }
 
+enum PersistDefault {
+    Model(ModelRoute),
+    Thinking(ThinkingLevel),
+    Approval(ApprovalMode),
+    Mode(Mode),
+}
+
+fn default_model_text(route: &ModelRoute) -> String {
+    match route {
+        ModelRoute::Api {
+            provider: Some(provider),
+            model,
+            ..
+        } => format!("{provider}/{model}"),
+        other => other.family_qualified_reference(),
+    }
+}
+
+async fn persist_default(
+    host: &Arc<crate::host::HostState>,
+    persist: PersistDefault,
+) -> Result<(), SaveError> {
+    let _guard = host.shared.config_write.lock().await;
+    let path = host
+        .shared
+        .config_path
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(path) = path else {
+        return Err(SaveError::Failed {
+            message: "cannot save dal.toml: no config path".into(),
+        });
+    };
+    let user_toml = match tokio::fs::read_to_string(&path).await {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(SaveError::Failed {
+                message: format!("cannot read dal.toml: {error}").into(),
+            });
+        }
+    };
+    let mut config = host
+        .shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let updated = match persist {
+        PersistDefault::Model(route) => {
+            let text = default_model_text(&route);
+            if text.is_empty() {
+                return Err(SaveError::Failed {
+                    message: "cannot update dal.toml: empty model reference".into(),
+                });
+            }
+            config
+                .update_default_model(&text, user_toml.as_deref())
+                .map_err(|error| SaveError::Failed {
+                    message: format!("cannot update dal.toml: {error}").into(),
+                })?
+        }
+        PersistDefault::Thinking(level) => config
+            .update_default_thinking(level, user_toml.as_deref())
+            .map_err(|error| SaveError::Failed {
+                message: format!("cannot update dal.toml: {error}").into(),
+            })?,
+        PersistDefault::Approval(mode) => config
+            .update_default_approval(mode, user_toml.as_deref())
+            .map_err(|error| SaveError::Failed {
+                message: format!("cannot update dal.toml: {error}").into(),
+            })?,
+        PersistDefault::Mode(mode) => config
+            .update_default_mode(mode, user_toml.as_deref())
+            .map_err(|error| SaveError::Failed {
+                message: format!("cannot update dal.toml: {error}").into(),
+            })?,
+    };
+    let bytes = updated.into_bytes();
+    let parent = path.parent().map(std::path::Path::to_path_buf);
+    let write_path = path.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        if let Some(parent) = parent
+            && let Err(error) = dal_store::create_private_dir_all(&parent)
+        {
+            return Err(format!("cannot create {}: {error}", parent.display()));
+        }
+        dal_store::write_atomic(&write_path, &bytes, dal_store::FileMode::Mode0600)
+            .map_err(|error| format!("cannot save {}: {error}", write_path.display()))
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => {
+            *host
+                .shared
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+            Ok(())
+        }
+        Ok(Err(reason)) => Err(SaveError::Failed {
+            message: reason.into(),
+        }),
+        Err(error) => Err(SaveError::Failed {
+            message: format!("cannot save {}: {error}", path.display()).into(),
+        }),
+    }
+}
+
+fn persist_for(command: &Command) -> Option<PersistDefault> {
+    match command {
+        Command::SetModel {
+            model,
+            save: Save::SessionAndDefault,
+        } => Some(PersistDefault::Model(model.clone())),
+        Command::SetThinking {
+            level,
+            save: Save::SessionAndDefault,
+        } => Some(PersistDefault::Thinking(*level)),
+        Command::SetApproval {
+            mode,
+            save: Save::SessionAndDefault,
+        } => Some(PersistDefault::Approval(*mode)),
+        Command::SetMode {
+            mode,
+            save: Save::SessionAndDefault,
+        } => Some(PersistDefault::Mode(*mode)),
+        _ => None,
+    }
+}
+
 impl CommandHost for DriverHost {
     fn view(&self, _caller: &Caller, _session: SessionId, _turn: Option<TurnId>) -> View {
         self.view.clone()
@@ -270,14 +403,20 @@ impl CommandHost for DriverHost {
                 })
             });
         }
+        let persist = persist_for(&command);
         let handle = self.handle.clone();
+        let host = Arc::clone(&self.host);
         let by = ClientId::new(caller.ext().as_str());
         Box::pin(async move {
             handle
                 .submit(command, by)
                 .await
                 .map(|_| ())
-                .map_err(save_error)
+                .map_err(save_error)?;
+            if let Some(persist) = persist {
+                persist_default(&host, persist).await?;
+            }
+            Ok(())
         })
     }
 
@@ -331,7 +470,9 @@ impl CommandHost for DriverHost {
                 .await
                 .unwrap_or_default()
                 .into_boxed_slice();
-            jobs.lock().await.settle_durably(id, outcome, tail).await;
+            if let Err(error) = jobs.lock().await.settle_durably(id, outcome, tail).await {
+                tracing::warn!(target: "dalgon.agent", job = %id, error = %error, "job ledger flush failed");
+            }
         });
         id
     }
@@ -507,19 +648,20 @@ impl CommandHost for DriverHost {
         let route = if let Some(route) = &self.route {
             route.clone()
         } else {
-            match self.host.shared.default_model() {
-                // A structured table resolves by route below, so families the
-                // legacy string cannot encode keep their levels.
-                Some(crate::host::DefaultModel::Route(route)) => route,
-                // No structured table: the legacy string keeps its existing
-                // alias-aware resolution path unchanged.
-                Some(crate::host::DefaultModel::Reference(reference)) => {
-                    match self.resolve_model_inner(&reference) {
-                        Ok(resolved) => resolved.route,
-                        Err(_) => return Vec::new(),
-                    }
-                }
-                None => return Vec::new(),
+            let Some(default) = self
+                .host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model()
+                .map(str::to_owned)
+            else {
+                return Vec::new();
+            };
+            match self.resolve_model_inner(&default) {
+                Ok(resolved) => resolved.route,
+                Err(_) => return Vec::new(),
             }
         };
         if let Some(found) = crate::ext::synthetic::find_route(&self.host.shared, &route) {
@@ -598,7 +740,14 @@ impl CommandHost for DriverHost {
         _turn: Option<TurnId>,
         route: &ModelRoute,
     ) -> Box<str> {
-        match self.host.shared.config.edit_style() {
+        match self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .edit_style()
+        {
             dal_core::EditStyleInput::Scalar(style) => style.clone(),
             dal_core::EditStyleInput::Table(rows) => {
                 let reference = crate::host::ops::request_reference(route);
@@ -790,6 +939,8 @@ impl DriverHost {
             .host
             .shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -918,5 +1069,387 @@ mod tests {
             }),
             SaveError::Failed { message } if message.as_ref() == text
         ));
+    }
+
+    #[test]
+    fn session_and_default_intent_reaches_the_default_writer() {
+        use dal_core::{ApprovalMode, Command, Family, Mode, ModelRoute, Save, ThinkingLevel};
+
+        let route = || ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("beta".into()),
+        };
+        assert!(
+            super::persist_for(&Command::SetModel {
+                model: route(),
+                save: Save::SessionAndDefault,
+            })
+            .is_some()
+        );
+        assert!(
+            super::persist_for(&Command::SetModel {
+                model: route(),
+                save: Save::SessionOnly,
+            })
+            .is_none()
+        );
+        assert!(
+            super::persist_for(&Command::SetThinking {
+                level: ThinkingLevel::High,
+                save: Save::SessionAndDefault,
+            })
+            .is_some()
+        );
+        assert!(
+            super::persist_for(&Command::SetThinking {
+                level: ThinkingLevel::High,
+                save: Save::SessionOnly,
+            })
+            .is_none()
+        );
+        assert!(
+            super::persist_for(&Command::SetApproval {
+                mode: ApprovalMode::All,
+                save: Save::SessionAndDefault,
+            })
+            .is_some()
+        );
+        assert!(
+            super::persist_for(&Command::SetApproval {
+                mode: ApprovalMode::All,
+                save: Save::SessionOnly,
+            })
+            .is_none()
+        );
+        assert!(
+            super::persist_for(&Command::SetMode {
+                mode: Mode::EvalFirst,
+                save: Save::SessionAndDefault,
+            })
+            .is_some()
+        );
+        assert!(
+            super::persist_for(&Command::SetMode {
+                mode: Mode::EvalFirst,
+                save: Save::SessionOnly,
+            })
+            .is_none()
+        );
+        assert!(super::persist_for(&Command::SetScopedModels(vec!["a/b".into()])).is_none());
+    }
+
+    #[test]
+    fn default_model_text_names_the_provider_never_the_family() {
+        use dal_core::{Family, ModelRoute};
+
+        let provider = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("beta".into()),
+        };
+        assert_eq!(super::default_model_text(&provider), "beta/gpt-4o");
+        let legacy = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: None,
+        };
+        assert_eq!(
+            super::default_model_text(&legacy),
+            legacy.family_qualified_reference()
+        );
+        let synthetic = ModelRoute::Synthetic {
+            id: "fixture/end".into(),
+        };
+        assert_eq!(super::default_model_text(&synthetic), "fixture/end");
+    }
+
+    #[tokio::test]
+    async fn session_and_default_model_writes_the_provider_qualified_key() {
+        use dal_core::{Config, ConfigProduct, Family, ModelRoute};
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        let config_path = tmp.path().join("dal.toml");
+        let initial = "# kept user comment\nmodel = \"alpha/gpt-4o\"\n";
+        std::fs::write(&config_path, initial).expect("seed config");
+        let config =
+            Config::load(ConfigProduct::Dalgon, &data, "", Some(initial)).expect("config loads");
+        let product = crate::host::Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: Vec::new(),
+            bundled: Vec::new(),
+        };
+        let env = crate::host::Env {
+            vars: BTreeMap::new(),
+            cwd: tmp.path().to_path_buf(),
+            sandbox_helper: None,
+        };
+        let host = crate::host::Host::start(product, config, env)
+            .await
+            .expect("host");
+        host.set_config_path(config_path.clone());
+        let route = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("beta".into()),
+        };
+        super::persist_default(&host.state, super::PersistDefault::Model(route))
+            .await
+            .expect("default persists");
+        let saved = std::fs::read_to_string(&config_path).expect("config file reads");
+        assert!(saved.contains("# kept user comment"), "{saved}");
+        assert!(saved.contains("model = \"beta/gpt-4o\""), "{saved}");
+        assert!(!saved.contains("model_route"), "{saved}");
+        assert!(!saved.contains("openai-chat/gpt-4o"), "{saved}");
+        let reloaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(saved.as_str()))
+            .expect("saved file loads");
+        assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+        let live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(live.as_deref(), Some("beta/gpt-4o"));
+        let _ = host.shutdown(std::time::Duration::from_secs(5)).await;
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end persistence proof through the real host"
+    )]
+    #[tokio::test]
+    async fn command_host_submit_wait_persists_session_and_default_model() {
+        use crate::ext::command::CommandCx;
+        use crate::ext::{Caller, CallerKind};
+        use crate::session::driver::DriverDeps;
+        use dal_core::{
+            ApprovalMode, ClientId, Command, Config, ConfigProduct, Family, ModelRoute, Name,
+            Origin, PageReq, Save, ServiceSet, Workspace,
+        };
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU32;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let workspace_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+        let config_path = tmp.path().join("dal.toml");
+        let initial = "# kept user comment\nmodel = \"alpha/gpt-4o\"\n";
+        std::fs::write(&config_path, initial).expect("seed config");
+        let config =
+            Config::load(ConfigProduct::Dalgon, &data, "", Some(initial)).expect("config loads");
+        let product = crate::host::Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: Vec::new(),
+            bundled: Vec::new(),
+        };
+        let env = crate::host::Env {
+            vars: BTreeMap::new(),
+            cwd: workspace_dir.clone(),
+            sandbox_helper: None,
+        };
+        let host = crate::host::Host::start(product, config, env)
+            .await
+            .expect("host");
+        host.set_config_path(config_path.clone());
+        let workspace = Workspace::new(workspace_dir).expect("workspace");
+        let agent = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("default-persist"),
+            )
+            .await
+            .expect("open");
+        let id = agent.session();
+        let deps = {
+            let sessions = host
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = sessions.get(&id).expect("session entry");
+            let services: Arc<dyn crate::ext::Services> = entry.services.clone();
+            DriverDeps {
+                session: id,
+                parent: None,
+                workspace: entry.workspace.clone(),
+                host: Arc::clone(&host.state),
+                backend: entry.backend.clone(),
+                services,
+                broker: entry.broker.clone(),
+                jobs: Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new())),
+                shared: entry.shared.clone(),
+                overlay: entry.overlay.clone(),
+                generation: entry.generation,
+                handle: entry.handle.clone(),
+                tasks: entry.tasks.clone(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                ephemeral: false,
+            }
+        };
+        let driver = super::driver_host(&deps, None, None).await;
+        let caller = Caller::new(
+            Name::parse("test").expect("literal name parses"),
+            Origin::Builtin,
+            ServiceSet::EMPTY,
+            NonZeroU32::MIN,
+            CallerKind::Handler,
+            None,
+        );
+        let cx = CommandCx::new(caller, id, None, deps.services.clone(), Arc::new(driver));
+        let route = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("beta".into()),
+        };
+        cx.submit_wait(Command::SetModel {
+            model: route,
+            save: Save::SessionAndDefault,
+        })
+        .await
+        .expect("default persists");
+        let saved = std::fs::read_to_string(&config_path).expect("config file reads");
+        assert!(saved.contains("# kept user comment"), "{saved}");
+        assert!(saved.contains("model = \"beta/gpt-4o\""), "{saved}");
+        assert!(!saved.contains("model_route"), "{saved}");
+        assert!(!saved.contains("openai-chat/gpt-4o"), "{saved}");
+        let reloaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(saved.as_str()))
+            .expect("saved file loads");
+        assert_eq!(reloaded.model(), Some("beta/gpt-4o"));
+        let live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(live.as_deref(), Some("beta/gpt-4o"));
+        let _fresh = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("default-persist-fresh"),
+            )
+            .await
+            .expect("fresh session opens");
+        let other = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("alpha".into()),
+        };
+        cx.submit_wait(Command::SetModel {
+            model: other,
+            save: Save::SessionOnly,
+        })
+        .await
+        .expect("session only applies");
+        let again = std::fs::read_to_string(&config_path).expect("config file rereads");
+        assert_eq!(
+            again, saved,
+            "a session-only save must leave the file bytes unchanged"
+        );
+        let still_live = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .map(str::to_owned);
+        assert_eq!(still_live.as_deref(), Some("beta/gpt-4o"));
+        cx.submit_wait(Command::SetApproval {
+            mode: ApprovalMode::All,
+            save: Save::SessionAndDefault,
+        })
+        .await
+        .expect("default approval persists");
+        let saved_approval = std::fs::read_to_string(&config_path).expect("config file reads");
+        assert!(
+            saved_approval.contains("approval = \"all\""),
+            "{saved_approval}"
+        );
+        let live_approval = host
+            .state
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .approval();
+        assert_eq!(live_approval, ApprovalMode::All);
+        let fresh_after = host
+            .open(
+                crate::SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("default-persist-fresh-approval"),
+            )
+            .await
+            .expect("fresh session opens after approval persist");
+        let fresh_view = fresh_after
+            .view(PageReq::default())
+            .expect("fresh session view snapshots");
+        assert_eq!(fresh_view.settings.approval, ApprovalMode::All);
+        let _ = host.shutdown(std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn default_write_without_a_config_path_reports_failure() {
+        use dal_core::{Config, ConfigProduct, Family, ModelRoute};
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        let config = Config::load(
+            ConfigProduct::Dalgon,
+            &data,
+            "",
+            Some("model = \"alpha/gpt-4o\"\n"),
+        )
+        .expect("config loads");
+        let product = crate::host::Product {
+            name: "dal",
+            data_root: data,
+            defaults: "",
+            extensions: Vec::new(),
+            bundled: Vec::new(),
+        };
+        let env = crate::host::Env {
+            vars: BTreeMap::new(),
+            cwd: tmp.path().to_path_buf(),
+            sandbox_helper: None,
+        };
+        let host = crate::host::Host::start(product, config, env)
+            .await
+            .expect("host");
+        let route = ModelRoute::Api {
+            family: Family::Chat,
+            model: "gpt-4o".into(),
+            provider: Some("beta".into()),
+        };
+        let error = super::persist_default(&host.state, super::PersistDefault::Model(route))
+            .await
+            .expect_err("no target must fail");
+        assert!(error.to_string().contains("no config path"), "{error}");
+        let _ = host.shutdown(std::time::Duration::from_secs(5)).await;
     }
 }

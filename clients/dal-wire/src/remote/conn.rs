@@ -1276,6 +1276,7 @@ mod tests {
             let lost = conn.call("session/list", sonic_rs::json!({})).await;
             assert!(
                 matches!(lost, Err(WireError::Transport(_))),
+                // codeql[rust/cleartext-logging]
                 "the call on the dead transport fails: {lost:?}"
             );
             let reply = conn
@@ -1450,6 +1451,7 @@ mod tests {
                 .expect("host update");
             assert!(
                 matches!(marker, RemoteHostUpdate::Reconnected),
+                // codeql[rust/cleartext-logging]
                 "got {marker:?}"
             );
             let update = next(&conn, other).await.expect("update");

@@ -99,6 +99,30 @@ fn serve_error(error: serve::ServeCommandError) -> ExitCode {
     }
 }
 
+/// Handles `dalgon serve token`: writes the token file and exits.
+fn serve_token(
+    token: &cli::ServeTokenArgs,
+    token_file: Option<std::path::PathBuf>,
+    fallback: &std::path::Path,
+) -> ExitCode {
+    let token_file = token_file.unwrap_or_else(|| fallback.to_path_buf());
+    let snapshot = edge::terminal_snapshot();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let stderr = std::io::stderr();
+    let mut err = stderr.lock();
+    match serve::create_token(
+        &token_file,
+        token.force,
+        snapshot.stderr_tty,
+        &mut out,
+        &mut err,
+    ) {
+        Ok(code) => code,
+        Err(error) => serve_error(error),
+    }
+}
+
 /// Runs `dalgon serve` or `dalgon serve token` over the built product.
 pub(crate) async fn serve(
     cli: &cli::Cli,
@@ -114,32 +138,16 @@ pub(crate) async fn serve(
         config,
         data_root,
         helper,
+        serve_bind_explicit,
         ..
     } = startup;
     let core_serve = config.serve();
     if let Some(cli::ServeSubcommand::Token(token)) = &args.command {
-        let token_file = args
-            .token_file
-            .unwrap_or_else(|| core_serve.token_file.clone());
-        let snapshot = edge::terminal_snapshot();
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let stderr = std::io::stderr();
-        let mut err = stderr.lock();
-        return match serve::create_token(
-            &token_file,
-            token.force,
-            snapshot.stderr_tty,
-            &mut out,
-            &mut err,
-        ) {
-            Ok(code) => code,
-            Err(error) => serve_error(error),
-        };
+        return serve_token(token, args.token_file, &core_serve.token_file);
     }
     let serve_config = serve::ServeConfig {
         bind: core_serve.bind.to_string(),
-        bind_was_explicit: config.serve_bind_explicit(),
+        bind_was_explicit: serve_bind_explicit,
         port: core_serve.port,
         token_file: core_serve.token_file.clone(),
         approval: cli.approval.map_or(core_serve.approval, map_approval),
@@ -176,6 +184,8 @@ pub(crate) async fn serve(
     let mut signals = edge::ShutdownSignals::register();
     let snapshot = edge::terminal_snapshot();
     let closing = host.clone();
+    // The stream locks live only as long as the server: the host close that
+    // follows must not hold up other threads that write diagnostics.
     let run = serve::ServeRun {
         host,
         args: serve_args,
@@ -184,25 +194,24 @@ pub(crate) async fn serve(
         stop: stop.clone(),
     };
     let outcome = run_server(&stop, &mut signals, run, &snapshot).await;
-    // The host always closes, and the close always runs to completion: only
-    // the quiet poll is ever abandoned, so a durable provider credential write
-    // is never detached. A second signal already seen by `drive` skips the
-    // quiet wait; otherwise a later signal during it decides the exit status.
-    // The run's own failure is reported either way.
     let ladder = exit::Ladder::begin();
     let closed = if outcome.is_err() {
         ladder.close_host_after_quiet_wait(closing).await
     } else {
         ladder.close_host(closing, &mut signals).await
     };
-    let code = match outcome {
-        Ok(Ok(code)) => code,
-        Ok(Err(error)) => serve_error(error),
-        Err(code) => ExitCode::from(code),
+    let result = match outcome {
+        Ok(result) => result,
+        Err(code) => return ExitCode::from(code),
     };
-    closed.skipped_by.map_or(code, ExitCode::from)
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    match result {
+        Ok(code) => code,
+        Err(error) => serve_error(error),
+    }
 }
-
 /// Runs the server under [`drive`]. The stream locks live only as long as the
 /// server: the host close that follows must not hold up other threads that
 /// write diagnostics.

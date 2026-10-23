@@ -362,6 +362,9 @@ fn route_origin(route: &ModelRoute) -> (String, String) {
                 Family::Codex => "openai-codex",
                 Family::Responses => "openai",
                 Family::Chat => "openai-chat",
+                // No provider adapter exists for these families yet
+                // (Provider::from_family refuses them); each leaves this
+                // arm for its display name when its adapter lands.
                 Family::Bedrock => "bedrock",
                 Family::Cursor => "cursor",
                 Family::Devin => "devin",

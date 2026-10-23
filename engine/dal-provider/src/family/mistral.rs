@@ -13,8 +13,8 @@
 //! re-encoded.
 //!
 //! Wire sources: with the pinned senpi tree implementing its
-//! `mistral-conversations` api on top of `v1/chat/completions` (a shape the
-//! ENG-05 contract forbids reusing), everything here derives from Mistral's
+//! `mistral-conversations` api on top of `v1/chat/completions` (a shape
+//! never reused here), everything here derives from Mistral's
 //! public API instead and is marked [INFERENCE]: the official generated
 //! `client-ts` (`models/components/conversationevents.ts` and siblings,
 //! read from a scratch clone) fixes the SSE event names, the entry shapes,
@@ -648,6 +648,9 @@ struct OutputDelta {
 enum DeltaContent {
     Text(String),
     Chunks(Vec<DeltaChunk>),
+    /// The official Conversations event shape: one chunk object in
+    /// `content` rather than an array.
+    Single(DeltaChunk),
 }
 
 #[derive(Deserialize)]
@@ -860,7 +863,6 @@ impl MistralDecoder {
         delta: OutputDelta,
         out: &mut Vec<StreamEvent>,
     ) -> Result<(), ProviderError> {
-        let non_empty = |text: &String| !text.is_empty();
         match delta.content {
             Some(DeltaContent::Text(text)) => {
                 if !text.is_empty() {
@@ -888,34 +890,55 @@ impl MistralDecoder {
                 let mut raws = raws.into_iter();
                 for chunk in chunks {
                     let raw = raws.next();
-                    match chunk.kind.as_deref() {
-                        Some("text") => {
-                            if let Some(text) = chunk.text.filter(non_empty) {
-                                self.close_run(out)?;
-                                out.push(StreamEvent::TextDelta { text });
-                            }
-                        }
-                        Some("thinking") => {
-                            if let Some(raw) = raw {
-                                self.run_signed |= is_signed(&raw);
-                                self.run.push(raw);
-                            }
-                            let joined = chunk
-                                .thinking
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|part| part.text)
-                                .filter(|text| !text.is_empty())
-                                .collect::<String>();
-                            if !joined.is_empty() {
-                                out.push(StreamEvent::ReasoningDelta { text: joined });
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.one_chunk(chunk, raw, out)?;
                 }
             }
+            Some(DeltaContent::Single(chunk)) => {
+                // The official Conversations event shape carries one chunk
+                // object in `content` rather than an array; its verbatim
+                // text is the `content` member itself.
+                let raw = raw_content(data)?;
+                self.one_chunk(chunk, Some(raw), out)?;
+            }
             None => {}
+        }
+        Ok(())
+    }
+
+    /// Decodes one content chunk of a `message.output.delta` event. `raw`
+    /// is the chunk's verbatim wire text when one was captured, kept for
+    /// the replay item of its run.
+    fn one_chunk(
+        &mut self,
+        chunk: DeltaChunk,
+        raw: Option<String>,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let non_empty = |text: &String| !text.is_empty();
+        match chunk.kind.as_deref() {
+            Some("text") => {
+                if let Some(text) = chunk.text.filter(non_empty) {
+                    self.close_run(out)?;
+                    out.push(StreamEvent::TextDelta { text });
+                }
+            }
+            Some("thinking") => {
+                if let Some(raw) = raw {
+                    self.run_signed |= is_signed(&raw);
+                    self.run.push(raw);
+                }
+                let joined = chunk
+                    .thinking
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.text)
+                    .filter(|text| !text.is_empty())
+                    .collect::<String>();
+                if !joined.is_empty() {
+                    out.push(StreamEvent::ReasoningDelta { text: joined });
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1097,6 +1120,16 @@ fn chunk_texts(data: &str) -> Result<Vec<String>, ProviderError> {
     sonic_rs::to_array_iter(content.as_raw_str())
         .map(|chunk| chunk.map(|chunk| chunk.as_raw_str().to_owned()))
         .collect::<Result<Vec<_>, _>>()
+        .map_err(malformed)
+}
+
+/// The verbatim text of the `content` member of one `message.output.delta`
+/// event: the single chunk object on the official Conversations wire shape.
+fn raw_content(data: &str) -> Result<String, ProviderError> {
+    let malformed =
+        |error: sonic_rs::Error| protocol(format!("malformed message.output.delta event: {error}"));
+    sonic_rs::get_from_str(data, ["content"])
+        .map(|content| content.as_raw_str().to_owned())
         .map_err(malformed)
 }
 

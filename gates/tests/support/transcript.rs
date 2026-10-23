@@ -18,7 +18,7 @@ use std::{
     time::Instant,
 };
 
-use crate::vt::VtRecorder;
+use crate::pty::vt::VtRecorder;
 
 /// One framed entry in a transcript.
 #[derive(Debug)]

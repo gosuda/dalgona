@@ -571,8 +571,18 @@ impl DialogUi {
         crate::keys::resolve_in(key, false, &[crate::keys::Owner::Dialog])
     }
 
+    /// Focus moves one step toward the first verb on a button row, wrapping.
+    fn move_focus_prev(&mut self, count: usize) {
+        self.step_focus(count, false);
+    }
+
+    /// Focus moves one step toward the last verb on a button row, wrapping.
+    fn move_focus_next(&mut self, count: usize) {
+        self.step_focus(count, true);
+    }
+
     /// Focus moves one step on a button row, wrapping in both directions.
-    fn move_focus(&mut self, count: usize, forward: bool) {
+    fn step_focus(&mut self, count: usize, forward: bool) {
         let focused = self.action_focus.unwrap_or(0);
         self.action_focus = Some(if forward {
             (focused + 1) % count
@@ -648,21 +658,24 @@ impl DialogUi {
     fn question_answer(&mut self, question: &Question, key: crate::keys::Key) -> Option<Answer> {
         use crossterm::event::KeyCode;
         match question {
-            Question::Approval { .. } | Question::Grant { .. } => self.approval_key(key),
-            Question::Select { options, multi, .. } => self.select_key(options, *multi, key),
+            Question::Approval { .. } | Question::Grant { .. } => {
+                if key.code == KeyCode::Esc {
+                    return Some(Answer::Decline);
+                }
+                self.approval_answer(key)
+            }
+            Question::Select { options, multi, .. } => self.select_answer(options, *multi, key),
             Question::Text { .. } => self.text_row_key(key),
-            Question::Confirm { .. } => self.confirm_key(key),
+            Question::Confirm { .. } => self.confirm_answer_row(key),
             _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
         }
     }
 
-    fn approval_key(&mut self, key: crate::keys::Key) -> Option<Answer> {
+    /// One key on an approval or grant button row. Esc already declined
+    /// above; every other bound key resolves through the dialog owner.
+    fn approval_answer(&mut self, key: crate::keys::Key) -> Option<Answer> {
         use crate::keys::Action;
-        use crossterm::event::KeyCode;
         const VERBS: usize = 3; // allow once, allow session, deny
-        if key.code == KeyCode::Esc {
-            return Some(Answer::Decline);
-        }
         self.action_focus.get_or_insert(VERBS - 1);
         match Self::resolve(key) {
             Some(Action::ApprovalAllowOnce) => Some(Answer::Approve),
@@ -673,11 +686,11 @@ impl DialogUi {
                 None
             }
             Some(Action::DialogFocusLeft | Action::AskMoveUp) => {
-                self.move_focus(VERBS, false);
+                self.move_focus_prev(VERBS);
                 None
             }
             Some(Action::DialogFocusRight | Action::AskMoveDown) => {
-                self.move_focus(VERBS, true);
+                self.move_focus_next(VERBS);
                 None
             }
             Some(Action::AskSubmit | Action::DialogActivate) => {
@@ -699,7 +712,9 @@ impl DialogUi {
         }
     }
 
-    fn select_key(
+    /// One key on a select-question option row. The Other escape opens the
+    /// in-dialog text row; focus reaches every offered option plus that row.
+    fn select_answer(
         &mut self,
         options: &[dal_core::Choice],
         multi: bool,
@@ -778,7 +793,9 @@ impl DialogUi {
         }
     }
 
-    fn confirm_key(&mut self, key: crate::keys::Key) -> Option<Answer> {
+    /// One key on a yes-or-no confirmation row. Esc already canceled above;
+    /// the `const` sits before the statements it scopes over.
+    fn confirm_answer_row(&mut self, key: crate::keys::Key) -> Option<Answer> {
         use crate::keys::Action;
         use crossterm::event::KeyCode;
         const VERBS: usize = 2; // yes, no
@@ -790,11 +807,11 @@ impl DialogUi {
             Some(Action::ApprovalAllowOnce) => Some(confirm_answer('y')),
             Some(Action::ApprovalDeny) => Some(confirm_answer('n')),
             Some(Action::DialogFocusLeft | Action::AskMoveUp) => {
-                self.move_focus(VERBS, false);
+                self.move_focus_prev(VERBS);
                 None
             }
             Some(Action::DialogFocusRight | Action::AskMoveDown) => {
-                self.move_focus(VERBS, true);
+                self.move_focus_next(VERBS);
                 None
             }
             Some(Action::AskSubmit | Action::DialogActivate) => Some(confirm_answer(

@@ -21,6 +21,7 @@ pub struct Locator {
 
 #[derive(Debug)]
 pub(crate) struct SessionPaths {
+    data_root: PathBuf,
     directory: PathBuf,
 }
 
@@ -31,7 +32,19 @@ impl SessionPaths {
             .join("sessions")
             .join(workspace_key)
             .join(session.to_string());
-        Self { directory }
+        Self {
+            data_root: data_root.to_path_buf(),
+            directory,
+        }
+    }
+
+    /// The store root the session tree hangs under: the durability floor for
+    /// directory creation. Everything at or below it is synced by
+    /// [`crate::util::create_private_dir_all_durable`]; the parent chain
+    /// above it is the embedder's provisioned path and is never created there.
+    #[must_use]
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
     }
 
     #[must_use]
@@ -87,6 +100,7 @@ mod tests {
             .join("workspace-key")
             .join(session.to_string());
 
+        assert_eq!(paths.data_root(), Path::new("/data"));
         assert_eq!(paths.directory(), expected);
         assert_eq!(paths.journal(), expected.join("journal.jsonl"));
         assert_eq!(paths.lock(), expected.join("lock"));

@@ -43,6 +43,11 @@ pub type ConnectionFuture = Pin<Box<dyn Future<Output = Result<(), WireError>> +
 
 /// Serves local RPC connections with bounded concurrency.
 ///
+/// At most 64 connections run at once; the next connection is accepted when one ends.
+/// On POSIX, running out of descriptors while accepting is logged and retried after 100 ms,
+/// with the running connections still served. Every connection runs inside this future, so
+/// dropping it ends them all.
+///
 /// `default_data_root` is `Some` only when `path` is the default endpoint. This lets the
 /// listener repair permissions on dal-owned `<data>/rpc` while refusing to modify a
 /// user-supplied parent. Windows requires the validated current-user SID from the edge;

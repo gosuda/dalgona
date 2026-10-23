@@ -81,6 +81,20 @@ fn config_disables_on_false() {
     assert_eq!(parse_config(disabled.as_ref()), Ok(HistoryConfig::Disabled));
 }
 
+#[test]
+fn disabled_registers_no_compactor_or_hooks() {
+    let extension =
+        history(HistoryConfig::Disabled).expect("a disabled section still builds the extension");
+    assert!(
+        extension.compactors().is_empty(),
+        "disabled history wires no compactor"
+    );
+    assert!(
+        extension.session_setup().is_none(),
+        "disabled history wires no consolidation task"
+    );
+}
+
 fn covered_user(entry: u64, text: &str) -> CoveredEntry {
     CoveredEntry {
         entry: entry_id(entry).expect("nonzero entry"),
@@ -803,6 +817,241 @@ fn spans_combined_gaps_keep_journal_order() {
         }
     }
     assert_eq!((saw_text, saw_gap), (3, 2));
+}
+
+/// Deterministic xorshift64* generator: the contiguity property needs a
+/// seeded stream without adding a property-test dependency.
+struct SeedStream(u64);
+
+impl SeedStream {
+    fn next(&mut self) -> u64 {
+        let mut word = self.0;
+        word ^= word >> 12;
+        word ^= word << 25;
+        word ^= word >> 27;
+        self.0 = word;
+        word.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+}
+
+/// Every emitted text span must be ordered, non-overlapping, placed on
+/// UTF-8 boundaries, and byte-exact against the journal fixture: the
+/// concatenated span bytes equal the source bytes. The generator covers
+/// UTF-8 ASCII, CRLF, tabs, CJK, Hangul, U+0301, U+200D, ESC sequences,
+/// and non-BMP characters, shaped into lines 4..64 columns wide and
+/// 2..16 rows tall. This test checks only the uncut whole-span path:
+/// the 1800-byte cap keeps tool text under the truncation gate, so the
+/// truncation and base64 elision cuts are pinned instead by the separate
+/// fixed-input test below.
+#[test]
+fn span_contiguity_property() {
+    const PIECES: [&str; 14] = [
+        "a",
+        "Z",
+        "0",
+        " ",
+        "\r\n",
+        "\t",
+        "中",
+        "한",
+        "é",
+        "\u{301}",
+        "\u{200d}",
+        "\u{1b}",
+        "\u{1f600}",
+        "~",
+    ];
+    let mut stream = SeedStream(0x1234_5678_9ABC_DEF0);
+    for round in 0..256u64 {
+        let cols = 4 + stream.below(61);
+        let rows = 2 + stream.below(15);
+        let mut source = String::new();
+        for _ in 0..rows {
+            for _ in 0..cols {
+                let width = u64::try_from(PIECES.len()).expect("pieces fit u64");
+                let pick = usize::try_from(stream.below(width)).expect("piece index fits usize");
+                source.push_str(PIECES[pick]);
+            }
+            if stream.below(3) > 0 {
+                source.push('\n');
+            }
+        }
+        while source.len() > 1800 {
+            source.pop();
+        }
+        let role = match round % 5 {
+            0 => Role::User,
+            1 => Role::Assistant,
+            2 => Role::Note,
+            3 => Role::Call("tool".into()),
+            _ => Role::Output("tool".into()),
+        };
+        let bytes = source.as_bytes();
+        let byte_len = u32::try_from(bytes.len()).expect("fixture fits u32");
+        let piece = CompactPiece {
+            entry: entry_id(1000 + round).expect("nonzero"),
+            part: 0,
+            off: 0,
+            len: byte_len,
+            total: byte_len,
+            role,
+            picture: None,
+        };
+        let built = items(std::slice::from_ref(&piece), |span| {
+            let start = usize::try_from(span.off).expect("span inside piece");
+            let end = start + usize::try_from(span.len).expect("span inside piece");
+            Ok(bytes[start..end].to_vec())
+        })
+        .expect("items build");
+        let mut cursor = 0usize;
+        let mut joined = Vec::new();
+        for item in &built {
+            let Item::Text {
+                span, total, text, ..
+            } = item
+            else {
+                continue;
+            };
+            assert_eq!(*total, byte_len);
+            let start = usize::try_from(span.off).expect("span offset fits");
+            let end = start + usize::try_from(span.len).expect("span length fits");
+            assert!(source.is_char_boundary(start), "span starts on a boundary");
+            assert!(source.is_char_boundary(end), "span ends on a boundary");
+            assert!(start >= cursor, "spans are ordered and non-overlapping");
+            cursor = end;
+            joined.extend_from_slice(text.as_bytes());
+        }
+        assert_eq!(
+            joined, bytes,
+            "concatenated span bytes equal the source bytes"
+        );
+    }
+}
+
+/// Truncation and base64 cuts keep the contiguity contract: the head is a
+/// UTF-8-safe prefix of at most 1200 bytes, the tail resumes on a
+/// boundary, and every emitted span stays ordered and non-overlapping.
+#[test]
+fn span_truncation_and_elision_cuts_keep_contiguity() {
+    let head_pad = "中".repeat(400);
+    let tail_pad = "한".repeat(300);
+    // One ASCII byte first so byte 1200 lands inside a 3-byte character
+    // and the 1200-byte head cut must step back through utf8_floor.
+    let tool = format!("x{head_pad}{tail_pad}");
+    assert!(tool.len() > 2000);
+    let tool_len = u32::try_from(tool.len()).expect("fixture fits u32");
+    let piece = CompactPiece {
+        entry: entry_id(7).expect("nonzero"),
+        part: 0,
+        off: 0,
+        len: tool_len,
+        total: tool_len,
+        role: Role::Output("tool".into()),
+        picture: None,
+    };
+    let built = items(std::slice::from_ref(&piece), |span| {
+        let start = usize::try_from(span.off).expect("span inside piece");
+        let end = start + usize::try_from(span.len).expect("span inside piece");
+        Ok(tool.as_bytes()[start..end].to_vec())
+    })
+    .expect("items build");
+    let mut cursor = 0usize;
+    let mut joined = Vec::new();
+    let mut saw_gap = false;
+    let mut text_spans = Vec::new();
+    let mut gap_omitted: Vec<usize> = Vec::new();
+    for item in &built {
+        match item {
+            Item::Text { span, text, .. } => {
+                let start = usize::try_from(span.off).expect("span offset fits");
+                let end = start + usize::try_from(span.len).expect("span length fits");
+                assert!(tool.is_char_boundary(start));
+                assert!(tool.is_char_boundary(end));
+                assert!(start >= cursor, "truncated spans stay ordered");
+                if start > cursor {
+                    saw_gap = true;
+                }
+                cursor = end;
+                text_spans.push((start, end));
+                joined.extend_from_slice(text.as_bytes());
+            }
+            Item::Mark(mark) if mark.starts_with("¶gap:") => {
+                saw_gap = true;
+                let count = mark
+                    .strip_prefix("¶gap:")
+                    .and_then(|rest| rest.strip_suffix(" bytes"))
+                    .expect("gap mark names the omitted bytes");
+                gap_omitted.push(count.parse().expect("gap mark holds a byte count"));
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_gap, "tool text past 2000 bytes keeps a gap mark");
+    // The misaligned head must end on a boundary strictly below 1200,
+    // proving utf8_floor stepped back instead of cutting mid-character.
+    let (head_start, head_end) = text_spans.first().expect("truncation keeps a head span");
+    assert_eq!(*head_start, 0, "the head span starts at zero");
+    assert!(
+        *head_end < 1200,
+        "the misaligned head cut steps back below 1200, got {head_end}"
+    );
+    assert!(tool.is_char_boundary(*head_end));
+    // The gap mark must name exactly the omitted interval between head and tail.
+    let (tail_start, _) = text_spans.get(1).expect("truncation keeps a tail span");
+    assert_eq!(
+        gap_omitted.as_slice(),
+        &[tail_start - head_end],
+        "the gap mark names the omitted head-to-tail interval"
+    );
+    assert!(cursor <= tool.len());
+    assert!(joined.len() < tool.len(), "truncation omits bytes");
+    assert_eq!(joined[0], tool.as_bytes()[0]);
+
+    base64_elision_keeps_contiguity();
+}
+
+/// Base64 half of the contiguity contract: a 300-byte run is elided to a
+/// gap mark while the surviving spans stay ordered and non-overlapping.
+fn base64_elision_keeps_contiguity() {
+    let elided = format!("prefix ;base64,{} suffix", "A".repeat(300));
+    let elided_len = u32::try_from(elided.len()).expect("fixture fits u32");
+    let epiece = CompactPiece {
+        entry: entry_id(8).expect("nonzero"),
+        part: 0,
+        off: 0,
+        len: elided_len,
+        total: elided_len,
+        role: Role::User,
+        picture: None,
+    };
+    let ebuilt = items(std::slice::from_ref(&epiece), |span| {
+        let start = usize::try_from(span.off).expect("span inside piece");
+        let end = start + usize::try_from(span.len).expect("span inside piece");
+        Ok(elided.as_bytes()[start..end].to_vec())
+    })
+    .expect("items build");
+    let mut ecursor = 0usize;
+    let mut ejoined = Vec::new();
+    let mut egap = false;
+    for item in &ebuilt {
+        match item {
+            Item::Text { span, text, .. } => {
+                let start = usize::try_from(span.off).expect("span offset fits");
+                let end = start + usize::try_from(span.len).expect("span length fits");
+                assert!(start >= ecursor, "elided spans stay ordered");
+                ecursor = end;
+                ejoined.extend_from_slice(text.as_bytes());
+            }
+            Item::Mark(mark) if mark.starts_with("¶gap:") => egap = true,
+            _ => {}
+        }
+    }
+    assert!(egap, "a 300-byte base64 run is elided to a gap mark");
+    assert!(!ejoined.windows(256).any(|w| w.iter().all(|b| b == &b'A')));
 }
 
 #[test]

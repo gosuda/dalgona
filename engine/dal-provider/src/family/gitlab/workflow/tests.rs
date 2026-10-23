@@ -563,6 +563,32 @@ fn test_turn<'a>(
     }
 }
 
+fn tool_call(id: &str) -> ContextItem {
+    ContextItem::Assistant {
+        source: ReplaySource {
+            family: Family::GitLab,
+            model: "duo-agent".into(),
+        },
+        parts: vec![AssistantPart::ToolCall {
+            call: CallId::new(id),
+            name: "read".into(),
+            args: raw(r#"{"q":"x"}"#),
+            replay: None,
+        }],
+        replay: None,
+    }
+}
+
+fn resume_request(call: &str, file_text: &str, go: &str) -> ModelRequest {
+    let result = ContextItem::ToolResult {
+        call: CallId::new(call),
+        name: "read".into(),
+        is_error: false,
+        parts: vec![text_part(file_text)],
+    };
+    request(vec![user(go), tool_call(call), result])
+}
+
 async fn drain(mut stream: EventStream) -> (Vec<StreamEvent>, Option<ProviderError>) {
     let mut events = Vec::new();
     while let Some(item) = stream.next().await {
@@ -572,6 +598,17 @@ async fn drain(mut stream: EventStream) -> (Vec<StreamEvent>, Option<ProviderErr
         }
     }
     (events, None)
+}
+
+async fn drain_turn(
+    client: &reqwest::Client,
+    sessions: &WorkflowSessions,
+    turn: &WorkflowTurn<'_>,
+) -> Vec<StreamEvent> {
+    let stream = run_turn(client, sessions, turn).await.unwrap().unwrap();
+    let (events, error) = drain(stream).await;
+    assert!(error.is_none());
+    events
 }
 
 #[tokio::test]
@@ -956,15 +993,63 @@ fn start_frame_ignores_text_tool_and_message_replay() {
     assert!(!laden.contains("REPLAY-MARKER"), "{laden}");
 }
 
+async fn serve_workflow_test_connection(
+    tcp: tokio::net::TcpStream,
+    closed_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
+) {
+    let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+    let start = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert!(start.contains("\"startRequest\""));
+    let text = |body: &str| tokio_tungstenite::tungstenite::Message::Text(body.into());
+    if start.contains("\"workflowID\":\"w-1\"") {
+        // Session A parks on an action; ending its session must
+        // terminate this socket together with its row.
+        socket.send(text(&action_frame("r-a"))).await.unwrap();
+        while socket.next().await.is_some() {}
+        let _ = closed_tx.send("a");
+    } else if start.contains("\"workflowID\":\"w-2\"") {
+        // Session B parks, then resumes on this same socket.
+        socket.send(text(&action_frame("r-b"))).await.unwrap();
+        let answer = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(answer.contains("\"requestID\":\"r-b\""));
+        assert!(answer.contains("file text B"));
+        socket
+            .send(text(
+                r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"b2\",\"content\":\"b used it\"}]}}"}}"#,
+            ))
+            .await
+            .unwrap();
+        socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
+        while socket.next().await.is_some() {}
+    } else {
+        // Session A's fresh resume after its rows were dropped.
+        socket
+            .send(text(
+                r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"a3\",\"content\":\"a fresh\"}]}}"}}"#,
+            ))
+            .await
+            .unwrap();
+        socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
+        while socket.next().await.is_some() {}
+    }
+}
+
+async fn accept_workflow_test_connections(
+    ws: TcpListener,
+    closed_tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
+) {
+    // Three connections serve two parked turns and one fresh resume; each
+    // handler routes on the START frame it reads, so accept order is free.
+    let mut conns = tokio::task::JoinSet::new();
+    loop {
+        let Ok((tcp, _)) = ws.accept().await else {
+            return;
+        };
+        conns.spawn(serve_workflow_test_connection(tcp, closed_tx.clone()));
+    }
+}
+
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "two-session loopback fixture covers park, end, resume, and restart"
-)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the loopback server detaches one handler task per accepted connection"
-)]
 async fn loopback_end_session_drops_only_its_parked_workflows() {
     let rest = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rest_base = format!("http://{}", rest.local_addr().unwrap());
@@ -975,54 +1060,7 @@ async fn loopback_end_session_drops_only_its_parked_workflows() {
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
     let mut servers = tokio::task::JoinSet::new();
     servers.spawn(rest_router(rest, Arc::clone(&counts)));
-    // Three connections serve two parked turns and one fresh resume; each
-    // handler routes on the START frame it reads, so accept order is free.
-    servers.spawn(async move {
-        loop {
-            let Ok((tcp, _)) = ws.accept().await else {
-                return;
-            };
-            let closed_tx = closed_tx.clone();
-            tokio::spawn(async move {
-                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
-                let start = socket.next().await.unwrap().unwrap().into_text().unwrap();
-                assert!(start.contains("\"startRequest\""));
-                let text =
-                    |body: &str| tokio_tungstenite::tungstenite::Message::Text(body.into());
-                if start.contains("\"workflowID\":\"w-1\"") {
-                    // Session A parks on an action; ending its session must
-                    // terminate this socket together with its row.
-                    socket.send(text(&action_frame("r-a"))).await.unwrap();
-                    while socket.next().await.is_some() {}
-                    let _ = closed_tx.send("a");
-                } else if start.contains("\"workflowID\":\"w-2\"") {
-                    // Session B parks, then resumes on this same socket.
-                    socket.send(text(&action_frame("r-b"))).await.unwrap();
-                    let answer = socket.next().await.unwrap().unwrap().into_text().unwrap();
-                    assert!(answer.contains("\"requestID\":\"r-b\""));
-                    assert!(answer.contains("file text B"));
-                    socket
-                        .send(text(
-                            r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"b2\",\"content\":\"b used it\"}]}}"}}"#,
-                        ))
-                        .await
-                        .unwrap();
-                    socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
-                    while socket.next().await.is_some() {}
-                } else {
-                    // Session A's fresh resume after its rows were dropped.
-                    socket
-                        .send(text(
-                            r#"{"newCheckpoint":{"checkpoint":"{\"channel_values\":{\"ui_chat_log\":[{\"message_type\":\"agent\",\"message_id\":\"a3\",\"content\":\"a fresh\"}]}}"}}"#,
-                        ))
-                        .await
-                        .unwrap();
-                    socket.send(text(r#"{"status":"FINISHED"}"#)).await.unwrap();
-                    while socket.next().await.is_some() {}
-                }
-            });
-        }
-    });
+    servers.spawn(accept_workflow_test_connections(ws, closed_tx));
     let cancel = CancellationToken::new();
     let session_a = SessionId::new_v7();
     let session_b = SessionId::new_v7();
@@ -1035,26 +1073,11 @@ async fn loopback_end_session_drops_only_its_parked_workflows() {
         project_path: None,
         workflow_definition: None,
     };
-    let tool_call = |id: &str| ContextItem::Assistant {
-        source: ReplaySource {
-            family: Family::GitLab,
-            model: "duo-agent".into(),
-        },
-        parts: vec![AssistantPart::ToolCall {
-            call: CallId::new(id),
-            name: "read".into(),
-            args: raw(r#"{"q":"x"}"#),
-            replay: None,
-        }],
-        replay: None,
-    };
     // Two sessions park one workflow each.
     for (session, id, go) in [(session_a, "r-a", "go A"), (session_b, "r-b", "go B")] {
         let model_request = request(vec![user(go), tool_call(id)]);
         let turn = test_turn(&model_request, &scope, &cancel, &rest_base, session);
-        let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
-        let (events, error) = drain(stream).await;
-        assert!(error.is_none());
+        let events = drain_turn(&client, &sessions, &turn).await;
         assert!(matches!(
             events.last(),
             Some(StreamEvent::Stop {
@@ -1078,17 +1101,9 @@ async fn loopback_end_session_drops_only_its_parked_workflows() {
         Some("a")
     );
     // Session B still resumes on its live socket with no fresh workflow.
-    let result_b = ContextItem::ToolResult {
-        call: CallId::new("r-b"),
-        name: "read".into(),
-        is_error: false,
-        parts: vec![text_part("file text B")],
-    };
-    let resumed_b = request(vec![user("go B"), tool_call("r-b"), result_b]);
+    let resumed_b = resume_request("r-b", "file text B", "go B");
     let turn = test_turn(&resumed_b, &scope, &cancel, &rest_base, session_b);
-    let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
-    let (events, error) = drain(stream).await;
-    assert!(error.is_none());
+    let events = drain_turn(&client, &sessions, &turn).await;
     assert!(
         events
             .iter()
@@ -1101,17 +1116,9 @@ async fn loopback_end_session_drops_only_its_parked_workflows() {
         })
     ));
     // Session A, its rows gone, starts a fresh workflow for its tool result.
-    let result_a = ContextItem::ToolResult {
-        call: CallId::new("r-a"),
-        name: "read".into(),
-        is_error: false,
-        parts: vec![text_part("file text A")],
-    };
-    let resumed_a = request(vec![user("go A"), tool_call("r-a"), result_a]);
+    let resumed_a = resume_request("r-a", "file text A", "go A");
     let turn = test_turn(&resumed_a, &scope, &cancel, &rest_base, session_a);
-    let stream = run_turn(&client, &sessions, &turn).await.unwrap().unwrap();
-    let (events, error) = drain(stream).await;
-    assert!(error.is_none());
+    let events = drain_turn(&client, &sessions, &turn).await;
     assert!(
         events
             .iter()

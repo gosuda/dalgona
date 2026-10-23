@@ -327,8 +327,8 @@ fn usage() -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
-        premium_requests: None,
         cost_usd: Some(0.001),
+        premium_requests: None,
     }
 }
 
@@ -591,9 +591,12 @@ fn cancel_parent_response(context: &[ContextItem]) -> Result<EventStream, dal_co
     });
     if results.len() == 1 && cancel_now == Some(true) {
         let Some(run) = results[0].split("started run ").nth(1).and_then(|rest| {
+            // Run ids are hyphenated UUIDs: stop at the first quote, not
+            // the first hyphen, or the cancel names a run that never
+            // existed.
             let id: String = rest
                 .chars()
-                .take_while(char::is_ascii_alphanumeric)
+                .take_while(|character| character.is_ascii_hexdigit() || *character == '-')
                 .collect();
             (!id.is_empty()).then_some(id)
         }) else {
@@ -653,7 +656,10 @@ fn cancel_child_response(context: &[ContextItem]) -> Result<EventStream, dal_cor
         return tool_calls_stream(&[Call {
             id: "park".to_owned(),
             tool: "exec",
-            args: format!(r#"{{"command":{}}}"#, support::json_text(&command)),
+            args: format!(
+                r#"{{"command":{},"foreground_s":{CANCEL_PARK_S}}}"#,
+                support::json_text(&command)
+            ),
         }]);
     }
     Ok(text_stream("parked"))
@@ -962,6 +968,90 @@ fn scenario_ok(marker: &str) {
     eprintln!("{}", support::scenario_marker(marker));
 }
 
+/// Waits for every held tree to self-report, then proves them all alive
+/// before the close. Preserves the 120 s report bound, the PID/group counts,
+/// and every error string.
+async fn await_held_census(reports: &Path) -> support::TestResult<Vec<support::ReportedProcess>> {
+    let held = tokio::task::spawn_blocking({
+        let reports = reports.to_path_buf();
+        move || {
+            support::await_process_reports(
+                &reports,
+                SESSIONS * HELD_PER_SESSION,
+                Duration::from_secs(120),
+            )
+        }
+    })
+    .await
+    .map_err(|join| format!("report reader task failed: {join}"))??;
+    let held_census = held.clone();
+    let held_alive = tokio::task::spawn_blocking(move || support::assert_all_alive(&held))
+        .await
+        .map_err(|join| format!("census task failed: {join}"))??;
+    // `tree_report_command` writes the shell PID and its background sibling PID.
+    let want_pids = SESSIONS * HELD_PER_SESSION * 2;
+    let want_groups = if cfg!(windows) {
+        0
+    } else {
+        SESSIONS * HELD_PER_SESSION
+    };
+    if held_alive.pids.len() != want_pids || held_alive.groups.len() != want_groups {
+        return Err(format!(
+            "held census saw {}/{} PIDs and {}/{} groups alive before cancel",
+            held_alive.pids.len(),
+            want_pids,
+            held_alive.groups.len(),
+            want_groups
+        )
+        .into());
+    }
+    eprintln!(
+        "exec-stress census: {} PIDs in {} groups alive before cancel",
+        held_alive.pids.len(),
+        held_alive.groups.len()
+    );
+    Ok(held_census)
+}
+
+/// Closes every session, then proves every recorded held tree is gone from
+/// the OS table within 3 s of the cancel. Preserves the close ordering, the
+/// census end-time assertion, and every error string.
+async fn close_sessions_and_prove_held_gone(
+    host: &dal_agent::Host,
+    agents: &[dal_agent::Agent],
+    held: Vec<support::ReportedProcess>,
+) -> support::TestResult<()> {
+    // Cancel: closing a session kills its held jobs and ends its watches.
+    let cancel_at = Instant::now();
+    let closed =
+        futures::future::join_all(agents.iter().map(|agent| host.close(agent.session()))).await;
+    for result in closed {
+        result?;
+    }
+    // Every recorded tree must be gone from the OS table within 3 s of the
+    // cancel. The census end time (not its start) is asserted: census
+    // latency is measurement resolution and is logged, never budgeted.
+    let census_started = Instant::now();
+    let held_gone_at = tokio::task::spawn_blocking(move || {
+        support::wait_until_gone(&held, cancel_at, GONE_WITHIN)
+    })
+    .await
+    .map_err(|join| format!("census task failed: {join}"))??;
+    eprintln!(
+        "exec-stress census: all held trees gone {:?} after cancel (census took {:?})",
+        held_gone_at.duration_since(cancel_at),
+        held_gone_at.duration_since(census_started)
+    );
+    if held_gone_at.duration_since(cancel_at) > GONE_WITHIN {
+        return Err(format!(
+            "held trees took {:?} to vanish, above {GONE_WITHIN:?}",
+            held_gone_at.duration_since(cancel_at)
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Runs every session through one real host, checks them, then cancels the
 /// run by closing every session and shuts the host down.
 async fn run_scenario(
@@ -1001,56 +1091,8 @@ async fn run_scenario(
     // Nonvacuous census: every held tree self-reported, so prove them all
     // alive before the close; a later disappearance proof then means the
     // close killed them, not that they never started.
-    let held = tokio::task::spawn_blocking({
-        let reports = reports.clone();
-        move || {
-            support::await_process_reports(
-                &reports,
-                SESSIONS * HELD_PER_SESSION,
-                Duration::from_secs(120),
-            )
-        }
-    })
-    .await
-    .map_err(|join| format!("report reader task failed: {join}"))??;
-    let held_census = held.clone();
-    let held_alive = tokio::task::spawn_blocking(move || support::assert_all_alive(&held))
-        .await
-        .map_err(|join| format!("census task failed: {join}"))??;
-    eprintln!(
-        "exec-stress census: {} PIDs in {} groups alive before cancel",
-        held_alive.pids.len(),
-        held_alive.groups.len()
-    );
-
-    // Cancel: closing a session kills its held jobs and ends its watches.
-    let cancel_at = Instant::now();
-    let closed =
-        futures::future::join_all(agents.iter().map(|agent| host.close(agent.session()))).await;
-    for result in closed {
-        result?;
-    }
-    // Every recorded tree must be gone from the OS table within 3 s of the
-    // cancel. The census end time (not its start) is asserted: census
-    // latency is measurement resolution and is logged, never budgeted.
-    let census_started = Instant::now();
-    let held_gone_at = tokio::task::spawn_blocking(move || {
-        support::wait_until_gone(&held_census, cancel_at, GONE_WITHIN)
-    })
-    .await
-    .map_err(|join| format!("census task failed: {join}"))??;
-    eprintln!(
-        "exec-stress census: all held trees gone {:?} after cancel (census took {:?})",
-        held_gone_at.duration_since(cancel_at),
-        held_gone_at.duration_since(census_started)
-    );
-    if held_gone_at.duration_since(cancel_at) > GONE_WITHIN {
-        return Err(format!(
-            "held trees took {:?} to vanish, above {GONE_WITHIN:?}",
-            held_gone_at.duration_since(cancel_at)
-        )
-        .into());
-    }
+    let held = await_held_census(&reports).await?;
+    close_sessions_and_prove_held_gone(&host, &agents, held).await?;
     let report = host.shutdown(Duration::from_secs(10)).await;
     assert_eq!(
         report.tasks_remaining, 0,
@@ -1491,6 +1533,77 @@ fn subagent_exec_cancel_kills_every_process_tree() -> support::TestResult<()> {
     runtime.block_on(cancel_scenario())
 }
 
+/// Waits for all 220 cancel trees to self-report, then proves them all alive
+/// before the cancel. Preserves the 300 s report bound, the PID/group counts,
+/// and every error string.
+async fn await_cancel_census(reports: &Path) -> support::TestResult<Vec<support::ReportedProcess>> {
+    // The last spawn: all 220 trees (200 background plus 20 parked) have
+    // written their PID files.
+    let reported = tokio::task::spawn_blocking({
+        let reports = reports.to_path_buf();
+        move || support::await_process_reports(&reports, CANCEL_TREES, Duration::from_secs(300))
+    })
+    .await
+    .map_err(|join| format!("report reader task failed: {join}"))??;
+    let live = tokio::task::spawn_blocking({
+        let reported = reported.clone();
+        move || support::assert_all_alive(&reported)
+    })
+    .await
+    .map_err(|join| format!("census task failed: {join}"))??;
+    // `tree_report_command` writes the shell PID and its background sibling PID.
+    let want_pids = CANCEL_TREES * 2;
+    let want_groups = if cfg!(windows) { 0 } else { CANCEL_TREES };
+    if live.pids.len() != want_pids || live.groups.len() != want_groups {
+        return Err(format!(
+            "cancel census saw {}/{} PIDs and {}/{} groups alive before cancel",
+            live.pids.len(),
+            want_pids,
+            live.groups.len(),
+            want_groups
+        )
+        .into());
+    }
+    eprintln!(
+        "cancel census: {} PIDs in {} groups alive before cancel",
+        live.pids.len(),
+        live.groups.len()
+    );
+    Ok(reported)
+}
+
+/// Proves the durable cancel evidence: the run notice delivered once in the
+/// parent journal, exactly 10 cancelled ends in every child ledger, and the
+/// single cancelled run end in the parent ledger. Preserves every ledger read
+/// and every error string.
+async fn check_cancel_ledgers(
+    data: &Path,
+    session: &str,
+    children: &[String],
+) -> support::TestResult<()> {
+    // The run notice, delivered once, in the parent journal.
+    let journal = wait_for_parent_cancel(data, session).await?;
+    // Every child ledger: exactly 10 cancelled ends.
+    for child in children {
+        let ends = wait_for_ledger_ends(data, child, CANCEL_JOBS_PER_CHILD).await?;
+        if ends.iter().any(|end| end.state != "cancelled") {
+            return Err(format!("child {child} has a non-cancelled job end").into());
+        }
+    }
+    // The parent ledger: exactly the run's own cancelled end.
+    let parent_ends = wait_for_ledger_ends(data, session, 1).await?;
+    if parent_ends.len() != 1 || parent_ends[0].state != "cancelled" {
+        return Err("the parent ledger holds no single cancelled run end".into());
+    }
+    if !parent_ends[0].text.contains("cancelled after") {
+        return Err("the parent run end carries no cancel summary".into());
+    }
+    eprintln!(
+        "cancel ledgers: 200 child exec ends plus 1 run end, all cancelled; journal:\n{journal}"
+    );
+    Ok(())
+}
+
 /// 20 subagents in `yolo` mode each start 10 background exec jobs plus one
 /// parked foreground exec; the run is cancelled 2 s after the last spawn.
 /// Durable proof: 200 `cancelled` ends across the child ledgers, 20
@@ -1510,25 +1623,7 @@ async fn cancel_scenario() -> support::TestResult<()> {
     let mut lifecycle = host.subscribe();
     let sampler = support::PeakSampler::start(SAMPLE_PERIOD);
     submit_prompt(&agent, CANCEL_TAG.to_owned()).await?;
-    // The last spawn: all 220 trees (200 background plus 20 parked) have
-    // written their PID files.
-    let reported = tokio::task::spawn_blocking({
-        let reports = reports.clone();
-        move || support::await_process_reports(&reports, CANCEL_TREES, Duration::from_secs(300))
-    })
-    .await
-    .map_err(|join| format!("report reader task failed: {join}"))??;
-    let live = tokio::task::spawn_blocking({
-        let reported = reported.clone();
-        move || support::assert_all_alive(&reported)
-    })
-    .await
-    .map_err(|join| format!("census task failed: {join}"))??;
-    eprintln!(
-        "cancel census: {} PIDs in {} groups alive before cancel",
-        live.pids.len(),
-        live.groups.len()
-    );
+    let reported = await_cancel_census(&reports).await?;
     // 2 s after the last spawn, to the instant.
     let observed = Instant::now();
     let due = observed + CANCEL_DELAY;
@@ -1536,59 +1631,54 @@ async fn cancel_scenario() -> support::TestResult<()> {
         tokio::time::sleep(due - Instant::now()).await;
     }
     let cancel_at = Instant::now();
-    submit_prompt(&agent, CANCEL_NOW_TAG.to_owned()).await?;
-    // Children of this parent: `ChildStarted` is published per child; no
-    // `ChildEnded` exists, so each child's end is proven from its durable
-    // ledger below, not from a host event.
-    let mut children: Vec<String> = Vec::new();
-    let drained = tokio::time::timeout(Duration::from_secs(180), async {
-        while children.len() < CANCEL_CHILDREN {
-            match lifecycle.next().await {
-                Some(dal_agent::HostUpdate::ChildStarted { parent, child, .. })
-                    if parent.to_string() == session =>
-                {
-                    children.push(child.to_string());
-                }
-                Some(_) => {}
-                None => break,
-            }
-        }
-    })
-    .await;
-    drained.map_err(|_| "only a fraction of the 20 children started".to_string())?;
-    if children.len() != CANCEL_CHILDREN {
-        return Err(format!(
-            "saw {} child starts, expected {CANCEL_CHILDREN}",
-            children.len()
-        )
-        .into());
-    }
-    // The run notice, delivered once, in the parent journal.
-    let journal = wait_for_parent_cancel(&data, &session).await?;
-    // Every child ledger: exactly 10 cancelled ends.
-    for child in &children {
-        let ends = wait_for_ledger_ends(&data, child, CANCEL_JOBS_PER_CHILD).await?;
-        if ends.iter().any(|end| end.state != "cancelled") {
-            return Err(format!("child {child} has a non-cancelled job end").into());
-        }
-    }
-    // The parent ledger: exactly the run's own cancelled end.
-    let parent_ends = wait_for_ledger_ends(&data, &session, 1).await?;
-    if parent_ends.len() != 1 || parent_ends[0].state != "cancelled" {
-        return Err("the parent ledger holds no single cancelled run end".into());
-    }
-    if !parent_ends[0].text.contains("cancelled after") {
-        return Err("the parent run end carries no cancel summary".into());
-    }
-    eprintln!(
-        "cancel ledgers: 200 child exec ends plus 1 run end, all cancelled; journal:\n{journal}"
-    );
-    // The OS table: nothing recorded survives past 3 s after the cancel.
-    let gone_at = tokio::task::spawn_blocking(move || {
+    // The OS census starts at the cancel boundary, so the 3 s bound measures
+    // process disappearance, not report settlement: settlement (prompt, drain,
+    // ledgers) runs concurrently with the census below.
+    let census = tokio::task::spawn_blocking(move || {
         support::wait_until_gone(&reported, cancel_at, GONE_WITHIN)
-    })
-    .await
-    .map_err(|join| format!("census task failed: {join}"))??;
+    });
+    // Settlement reports a value instead of `?`-ing out, so the census handle
+    // is awaited on every path.
+    let settlement: support::TestResult<()> = async {
+        submit_prompt(&agent, CANCEL_NOW_TAG.to_owned()).await?;
+        // Children of this parent: `ChildStarted` is published per child; no
+        // `ChildEnded` exists, so each child's end is proven from its durable
+        // ledger below, not from a host event.
+        let mut children: Vec<String> = Vec::new();
+        let drained = tokio::time::timeout(Duration::from_secs(180), async {
+            while children.len() < CANCEL_CHILDREN {
+                match lifecycle.next().await {
+                    Some(dal_agent::HostUpdate::ChildStarted { parent, child, .. })
+                        if parent.to_string() == session =>
+                    {
+                        children.push(child.to_string());
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await;
+        drained.map_err(|_| "only a fraction of the 20 children started".to_string())?;
+        if children.len() != CANCEL_CHILDREN {
+            return Err(format!(
+                "saw {} child starts, expected {CANCEL_CHILDREN}",
+                children.len()
+            )
+            .into());
+        }
+        check_cancel_ledgers(&data, &session, &children).await?;
+        Ok(())
+    }
+    .await;
+    // The OS table: nothing recorded survives past 3 s after the cancel.
+    let census_outcome = census
+        .await
+        .map_err(|join| format!("census task failed: {join}"))?;
+    // Census first: when trees genuinely survive, settlement usually fails
+    // too, and the survival signal must not hide behind it.
+    let gone_at = census_outcome?;
+    settlement?;
     if gone_at.duration_since(cancel_at) > GONE_WITHIN {
         return Err(format!(
             "process trees took {:?} to vanish, above {GONE_WITHIN:?}",
@@ -1596,6 +1686,10 @@ async fn cancel_scenario() -> support::TestResult<()> {
         )
         .into());
     }
+    eprintln!(
+        "cancel census: all process trees gone {:?} after cancel",
+        gone_at.duration_since(cancel_at)
+    );
     let shutdown = host.shutdown(Duration::from_secs(10)).await;
     if shutdown.tasks_remaining != 0 {
         return Err("tasks outlived the cancel shutdown".into());
@@ -1687,6 +1781,103 @@ fn parent_fast_jobs_complete_and_deliver_once() -> support::TestResult<()> {
     runtime.block_on(fast_scenario())
 }
 
+/// What one subscription drain saw of the job traffic of its session.
+#[derive(Default)]
+struct JobDrain {
+    /// Every delivery drained.
+    count: usize,
+    /// How many deliveries were `Resync`.
+    resync: usize,
+    /// The jobs named by `JobStarted`/`JobSettled` updates, for the per-job
+    /// rate bound.
+    jobs: Vec<String>,
+    /// How many `exec` results named a detached job.
+    detached: usize,
+    /// Whether the stream ended.
+    ended: bool,
+}
+
+impl JobDrain {
+    /// The drained deliveries that prove job traffic reached the reader.
+    ///
+    /// Production publishes no `JobStarted`/`JobSettled` for `exec` jobs, so
+    /// the `detached as job` result of the call that started one is the job
+    /// start a session subscriber can see. Turn, tree, and usage updates
+    /// flow with no job at all and prove nothing about this workload.
+    fn relevant(&self) -> usize {
+        self.jobs.len() + self.detached
+    }
+}
+
+/// Drains every delivery that is ready now, without parking.
+fn drain_jobs(subscription: &mut dal_agent::Subscription) -> JobDrain {
+    let mut drain = JobDrain::default();
+    loop {
+        match pump(subscription) {
+            Pump::Delivery(dal_agent::Delivery::Update(update)) => {
+                drain.count += 1;
+                match &update.kind {
+                    dal_core::UpdateKind::JobStarted { job }
+                    | dal_core::UpdateKind::JobSettled { job } => drain.jobs.push(job.to_string()),
+                    dal_core::UpdateKind::ToolSettled { outcome, .. }
+                        if detached_id(&outcome.text).is_some() =>
+                    {
+                        drain.detached += 1;
+                    }
+                    _ => {}
+                }
+            }
+            Pump::Delivery(dal_agent::Delivery::Resync { .. }) => {
+                drain.count += 1;
+                drain.resync += 1;
+            }
+            Pump::Empty => return drain,
+            Pump::Ended => {
+                drain.ended = true;
+                return drain;
+            }
+        }
+    }
+}
+
+/// Spawns the 250 ms slow reader on `agent`: every drain goes to a shared
+/// [`support::SubscriberLedger`], which fails on any `Resync`, an early end,
+/// or a stream that carried no job traffic.
+fn spawn_job_reader(
+    agent: &dal_agent::Agent,
+    stop: &Arc<AtomicBool>,
+) -> support::TestResult<tokio::task::JoinHandle<support::SubscriberLedger>> {
+    let mut subscription = agent.subscribe_listen(None)?;
+    let stop = Arc::clone(stop);
+    Ok(tokio::spawn(async move {
+        let mut ledger = support::SubscriberLedger::default();
+        loop {
+            tokio::time::sleep(support::SUBSCRIBER_PERIOD).await;
+            // The flag is read before the drain: a drain that starts after
+            // the stop flag sees everything delivered before it.
+            let stopping = stop.load(Ordering::Acquire);
+            let drain = drain_jobs(&mut subscription);
+            if drain.ended {
+                ledger.record_early_end();
+                break;
+            }
+            if drain.count > 0 || stopping {
+                ledger.record_drain(
+                    drain.count,
+                    drain.resync,
+                    &drain.jobs,
+                    drain.relevant(),
+                    Instant::now(),
+                );
+            }
+            if stopping {
+                break;
+            }
+        }
+        ledger
+    }))
+}
+
 /// 200 fast background jobs across 25 parent sessions: each `sleep 1`
 /// detaches at the 1 s foreground floor and exits half a second later, so
 /// every completion travels the real detached-job delivery path. All 200
@@ -1703,56 +1894,11 @@ async fn fast_scenario() -> support::TestResult<()> {
         agents.push(open_session(&host, &workspace).await?);
     }
     // One slow subscriber on the first session proves the 250 ms reader
-    // takes no Resync under the 200-job delivery load.
+    // takes no Resync under the 200-job delivery load. Its workload
+    // evidence is the job traffic its own session carries: see
+    // `JobDrain::relevant`.
     let stop = Arc::new(AtomicBool::new(false));
-    let slow = {
-        let mut subscription = agents[0].subscribe_listen(None)?;
-        let stop = Arc::clone(&stop);
-        tokio::spawn(async move {
-            let mut ledger = support::SubscriberLedger::default();
-            loop {
-                tokio::time::sleep(support::SUBSCRIBER_PERIOD).await;
-                let mut count = 0;
-                let mut resync = 0;
-                let mut jobs: Vec<String> = Vec::new();
-                let mut ended = false;
-                loop {
-                    match pump(&mut subscription) {
-                        Pump::Delivery(dal_agent::Delivery::Update(update)) => {
-                            count += 1;
-                            if let dal_core::UpdateKind::JobStarted { job }
-                            | dal_core::UpdateKind::JobSettled { job } = &update.kind
-                            {
-                                jobs.push(job.to_string());
-                            }
-                        }
-                        Pump::Delivery(dal_agent::Delivery::Resync { .. }) => {
-                            count += 1;
-                            resync += 1;
-                        }
-                        Pump::Empty => break,
-                        Pump::Ended => {
-                            ended = true;
-                            break;
-                        }
-                    }
-                }
-                if ended {
-                    ledger.record_early_end();
-                    break;
-                }
-                if count > 0 || stop.load(Ordering::Acquire) {
-                    // The 200-job delivery load is job start/settle traffic;
-                    // `jobs` holds exactly this drain's job updates.
-                    ledger.record_drain(count, resync, &jobs, jobs.len(), Instant::now());
-                }
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
-            }
-            ledger
-        })
-    };
+    let slow = spawn_job_reader(&agents[0], &stop)?;
     let session_ids: Vec<String> = agents
         .iter()
         .map(|agent| agent.session().to_string())
@@ -1770,6 +1916,15 @@ async fn fast_scenario() -> support::TestResult<()> {
         .map_err(|join| format!("slow reader failed: {join}"))?;
     eprintln!("fast-batch subscriber: {}", ledger.summary());
     ledger.verdict()?;
+    // Session 0 detached every one of its jobs before the stop flag, so its
+    // reader must have seen each of them, not merely some traffic.
+    if ledger.relevant < FAST_PER_SESSION {
+        return Err(format!(
+            "the slow reader saw {} job starts of its session's {FAST_PER_SESSION}",
+            ledger.relevant
+        )
+        .into());
+    }
     check_fast_sessions(&data, &records, &session_ids).await?;
     let shutdown = host.shutdown(Duration::from_secs(10)).await;
     if shutdown.tasks_remaining != 0 {

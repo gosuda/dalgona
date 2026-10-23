@@ -1,6 +1,46 @@
 # Changelog
 
 ## Unreleased
+- Preserve cache-write prices when regenerating the model catalog.
+- Count assistant replay payloads toward session-page byte limits so large
+  replay records cannot bypass pagination.
+- Clear stale session-lock owner records before publishing a new owner.
+- Release abandoned grant questions and preserve revocations when a pending
+  approval is saved.
+- Redact captured working-directory paths in provider debug output.
+- Describe the `agent` tool with a flat object schema for Anthropic
+  requests. Keep action-specific argument checks in the tool.
+- Report cancellation when `agent wait` observes a cancelled child.
+- Stop retrying Google quota-exhaustion responses. Keep retrying temporary
+  rate limits.
+- Resolve family-only model routes through the single configured provider.
+  Refuse ambiguous routes instead of choosing a provider implicitly.
+- Stop unfinished process groups when their owner is dropped. A reaped leader's identity is consumed so a later drop cannot signal it again, and Unix wait paths observe the native leader before the group reap.
+- Make live owned jobs observable in `list`, `find`, `status`, and counts without moving process capacity: owned rows join the running start-order stream while the session child limit still bounds process-backed children only.
+- Bound completed Gemini CLI lines: a newline-terminated line longer than 1 MiB ends the stream with a protocol error before decoding, so the trailing result event cannot complete the turn; an exactly 1 MiB line is still accepted.
+- Keep wire line-transport partial-read and close behavior: the bytes of a partly received line stay on the transport so a dropped read resumes the same line, and closing never waits out a stalled write while later writes fail closed.
+- Reject sandbox write roots that overlap protected configuration or
+  plugin paths, including automatic roots and symlinked parents.
+- Accept `/exit` as an alias for `/quit` in terminal sessions.
+- Offer browser and device-code sign-in for OpenAI Codex in `/login`.
+  Browser sign-in also accepts a pasted localhost redirect URL when the
+  browser cannot reach the callback listener.
+- Avoid a second panic during terminal-loop cleanup by restoring the
+  previous panic hook after unwinding.
+- Preserve typed `j`, `k`, and spaces in picker filters. Ctrl+P and Ctrl+N
+  move the selection with either an empty or a populated filter.
+- Update the TLS certificate verifier and root bundles to address
+  RUSTSEC-2026-0381, RUSTSEC-2026-0382, and RUSTSEC-2026-0383.
+- Try the next Antigravity endpoint after a transient request failure before
+  streaming starts. Stop immediately on errors that cannot be retried.
+- Return an unavailable denial when a run approval expires without an answer.
+  An explicit decline remains distinct. Neither outcome starts the process,
+  and the next run can request approval.
+- Keep a refused journal batch from widening live authority. A refused
+  `ApproveForSession` answer takes its session allowance back, so the tool
+  asks again instead of running on an allowance the journal never recorded,
+  and a refused `SetApproval` puts the approval mode back to the one the
+  journal records, so no policy snapshot grants under a mode no record backs.
 - Verify WebSocket TLS with the platform certificate verifier instead of the
   bundled WebSocket root list. `wss` connections now trust the same system
   roots and chain checks as HTTPS requests; a verifier that cannot start
@@ -63,9 +103,9 @@
   Journals written by an earlier build read as before, including a `model`
   record without a provider.
 - API model routes name their provider. `ModelRoute::Api` gains an optional
-  `provider`. It is left out of JSON, journal `model` records, and
-  `[model_route]` when absent, so every existing record, command, and file
-  reads and writes exactly as before. A route that names its provider resolves
+  `provider`. It is left out of JSON and journal `model` records when absent,
+  so every existing record and command reads and writes exactly as before. A
+  route that names its provider resolves
   that provider's row and nothing else: not through a same-family provider
   that lists the same native id, and not through a registered synthetic model
   that spells the same id. When that provider is not configured, or serves
@@ -102,22 +142,10 @@
   `provider/model`. A row from a server that predates the members keeps its
   old selection by name, is not scoped, and the list is never refused for
   lacking them. The protocol version stays 1.
-- A default saved from a provider-carrying route writes `provider` in
-  `[model_route]`; the legacy `model` string never carries it, and a route
-  without a provider writes the same bytes as before. A dalgon from before this
-  change cannot load a `dal.toml` whose `[model_route]` has `provider`: its
-  table decoder rejects the unknown member, and one rejected setting makes the
-  whole file fail to load, so that version refuses to start and names the
-  config error until you delete the `provider` line. Do not share one
-  `dal.toml` between this version and an earlier one after saving a provider
-  default.
 - Model rows carry the catalog provider that resolved them (`ModelInfo.provider`,
   absent in older payloads and read as empty). Synthetic rows report their
   model-id namespace. Provider-qualified model scoping can now use the row's
   own provider instead of rebuilding it from a display label.
-- Publish the committed model scope with every settings update. A change to
-  thinking, mode, approval, or name no longer reads as "scope unset" to a
-  client that adopts the update as sent; an explicit clear stays an empty list.
 - Add `Host::delete_session`: it refuses a session that is live in the host,
   leaves a tree whose lock another process holds untouched, and fails with
   not-found for an unknown id.
@@ -175,35 +203,25 @@
   not change anything, and a failed save says why it did not persist; neither
   prints "Saved as the default." or the resume hint. A rejected prompt from a
   skill or review command now reads `rejected: …` instead of `save failed: …`.
-- Detached jobs carry the command that started them. `exec` detaches now
-  report the validated command text on their job row (`JobStatus::command`,
-  absent when the starter supplied none), it survives settlement and the job
-  ledger across restarts, and extension code holding the `jobs` grant can
-  query it. Commandless jobs keep `command: None` and `ToolCx::detach`
-  unchanged; command-bearing detachers use the new `ToolCx::detach_command`.
-- Keep the `signature` of Mistral Conversations `thinking` chunks and send it
-  back on the next request. The published `ThinkChunk` schema defines
-  `signature` (`string | null`, "Signature to replay some reasoning blocks
-  across turns") on streamed chunks and on the `message.output` entries a
-  request carries, but the decoder dropped it, so every turn replayed the
-  reasoning as one unsigned text chunk. Each run of reasoning (the chunks
-  between two visible text deltas) that holds a signed chunk now journals
-  its chunks exactly as received, in order and unmerged, with unsigned chunks
-  staying unsigned. The next request sends them back only to the same
-  provider family and model, only while reasoning is on, and only while they
-  still match the recorded text; any other reasoning, including every
-  session recorded before this change, replays as before as one text-only
-  chunk. The schema does not say whether the service issues or requires
-  signatures; this change does not rely on either.
+- Complete the native Ollama and Mistral conversations wires. New built-in
+  providers `ollama`, `ollama-cloud`, and `mistral` need no `[providers]`
+  entry. Ollama model discovery joins `GET /api/tags` to a `POST /api/show`
+  probe per model (six at a time): `thinking` opens the reasoning levels,
+  `vision` opens image input, a model without `tools` is sent none, and
+  `<architecture>.context_length` sets the context window; a failed probe
+  keeps the model's last cached row and a server without `/api/show` still
+  lists its models. On Ollama Cloud `options.num_predict` is held to 65,536,
+  DeepSeek V4 Pro and Flash carry that output limit, and replayed history drops
+  assistant reasoning except for GLM 5.2; a self-hosted server now replays
+  reasoning instead of stripping it. Mistral cards map `capabilities.reasoning`
+  to `reasoning_effort`, a model with no reasoning card is sent no reasoning
+  control, and prior reasoning replays only while reasoning is on. Signed thinking chunks are kept verbatim in arrival order and replayed as the full array ahead of the message text for an assistant message this family and model produced, only while reasoning is on and only when the stored shape and text still match; anything else replays as one text-only chunk.
 - The automatic compaction notice at a tool-round boundary now reports the
   measured context size that triggered it (`Compacting context (threshold, 85
   percent of the window).`). It read the usage after the round's route was
   cleared, so a session whose requested model is a `provider/model` reference,
   such as the configured default, always reported `usage or context window is
   unavailable` even when measured usage drove the decision.
-- Save private-effect receipts on fresh persistent sessions before acknowledging
-  them, without requiring an earlier user turn or sidecar write. Ephemeral
-  sessions remain memory-only.
 - Repair the guard's warning router for real exec results. The exec tool
   spills a long result to `<session dir>/jobs/<job id>.log` and ends its text
   with a `Full output: <path>` line; the guard now reads that log, takes the
@@ -213,9 +231,102 @@
   `fs.read` serves a Builtin caller an absolute path under the session's own
   `jobs/` directory. Every other absolute path, and every absolute path from
   a non-Builtin caller, is still refused.
-- Return an unavailable denial when a run approval expires without an answer.
-  An explicit decline remains distinct. Neither outcome starts the process,
-  and the next run can request approval.
+- Cancelling a turn while a `before_request` hook is held now ends the hook and
+  the turn at once. The hook ran under the session's cancel token, so the turn
+  waited out the hook deadline and then sent a provider request for the
+  cancelled turn; the hook now runs under the turn's token and no request is
+  sent.
+- Add the `pi-messages` API family (`api = "pi-messages"`) and the built-in
+  `radius` provider. Requests post `{model, context, options}` to
+  `<base>/messages` and decode the gateway's assistant-message event stream
+  into the neutral stream grammar, including thinking signatures that replay
+  on the next turn. Radius signs in with an API key (`RADIUS_API_KEY`) and
+  lists models from the gateway's `/v1/config`. Rust callers with exhaustive
+  matches on `Family` must handle the new `PiMessages` variant.
+- In GitHub Copilot device sign-in, submitting a blank enterprise domain
+  defaults to `github.com`. Prompts for required OAuth authorization codes
+  or redirect URLs continue to require non-empty input.
+- Cancelling CLI device-code authorization with Ctrl+C during completion
+  polling restores the terminal cleanly and cancels authorization without
+  saving incomplete credentials.
+- Prefer device authorization over an API key in terminal sign-in when the
+  provider does not offer browser sign-in, matching the interactive CLI.
+- Breaking Rust API: `LoginProgress::AskPaste` adds field `default: Option<String>`.
+  Constructors and pattern matches must handle the new field: pass `None`
+  when a non-empty submission is required, or `Some(fallback)` when an empty
+  submission accepts a fallback value.
+- Keep provider names separate from their state in `login status`, including
+  long provider names and custom Bedrock routes.
+- Save private-effect receipts on fresh persistent sessions before acknowledging
+  them, without requiring an earlier user turn or sidecar write. Ephemeral
+  sessions remain memory-only.
+- Add Factory Droid device sign-in and GitLab Duo browser sign-in. Verify
+  Factory sessions before storing new tokens. Read sign-in overrides from
+  the environment captured at startup.
+- Serialize Droid refresh commits with shutdown so cancelled refreshes cannot
+  publish new credentials after shutdown.
+- Add explicit `api-key` and `none` authentication styles. Reject credentials
+  at request boundaries that cannot carry them.
+- Replace each accepted Cursor replay segment once, without duplicating its
+  assistant messages or tool results. Invalid replay data still uses ordinary
+  history. Keep blob identifiers in their textual form when binding replay
+  records to tool results.
+- Decode Cursor repository-connector announcements so the adapter can reject
+  their account-level effects instead of silently ignoring them.
+- Harden Cursor request identity and replay guards: provider-ID checks cover streamed announcements and exec frames (a foreign streamed call emits nothing; a foreign exec call answers ToolNotFound), malformed present replay is refused instead of rebuilt, detail payloads with whitespace or unpadded base64 alphabets decode before validation, and request-scoped wire IDs keep colliding normalized calls distinct while stored replay IDs stay verbatim. Tool-name resolution and the approval probe flow are unchanged. The opening request and the context handshake set hosted web search false.
+- Preserve valid JSON when marking Droid Responses tools as non-strict.
+- Retain service cancellation receipts until service admission consumes them,
+  so repeated cancellations do not strand `ask` or `run` capacity.
+- Add `ArtifactFile::StatusTxt` (`status.txt`) to task isolation directories,
+  saved atomically with file mode 0600 on Unix. Rust callers with exhaustive
+  matches on `ArtifactFile` must handle the new variant.
+- Estimate history image context from its stored token bill, not its encoded
+  image size. Avoid unnecessary automatic compaction before the next response
+  reports usage.
+- Reject compaction before calling a compactor when its selected prefix has
+  no live context left to replace.
+- Measure repeated compaction against the context still in use. Count the
+  earlier replacement when it is removed, and do not count messages that
+  an earlier compaction already replaced.
+- Send the resolved provider model for auxiliary requests selected through
+  model aliases, including history consolidation requests.
+- Restore stored plain-text blobs before sending requests, including after a
+  session restart. Reject missing, corrupt, or invalid UTF-8 text before
+  sending it to a provider.
+- Preserve in-memory blobs needed by an ephemeral fork's restart prompt.
+  Forks and clones keep their blob contents after the parent closes without
+  creating durable session files.
+- Keep the live terminal block on screen when a resize requires scrolling.
+  Place the session-saved message below the final live block so it does not
+  overwrite the cancellation notice.
+- Reuse the input-hook model resolution for the first request and any
+  compaction before it. An explicit model selection before the request
+  still takes effect without running the input hooks again.
+- Release completed tool cards from live terminal state. Keep their output
+  and elapsed time in the transcript across follow-up turns. Clear unfinished
+  live cards when their turn ends.
+- Stop attaching skill letter images to a model that does not read images.
+  The `letter` hook now stores no letter records for such a model, passes the
+  input through as ordinary text, and says why in one `letter` notice per
+  session. It does the same when the model does not resolve at input time.
+  A stored letter set that no longer matches the loaded skills stays frozen:
+  the hook adds no duplicate records. A frozen set is no longer redrawn on
+  every input, and the hook reports a failed letter write with its cause in a
+  `letter` notice.
+- Render the `skills` prompt section as plain text when the letter font table
+  fails to parse, instead of omitting the whole section. Skill names and
+  descriptions stay visible; previously the section disappeared.
+- Breaking Rust API: `InputEvent` gains `model: Option<ModelInfo>`, the model
+  resolved for the input hooks from the session's selection or configured
+  default. A later explicit model selection can change the first request's
+  model. Set `model: None` at each construction site. Script hooks see the
+  same payload as before.
+- Breaking Rust API: `dal_ext::letter::handle_first_input` stays public but
+  takes the whole `InputEvent` instead of bare user parts, because the
+  capability gate needs the turn's resolved model. Callers without a resolved
+  route pass `model: None` and always take the text-only path. The
+  first-input hook is also internal to `letter::extension`; extension-driven
+  turns should prefer adding that extension.
 - Reject inconsistent request-resolution causes before writing a session journal.
   Refused records leave both stored bytes and the live journal unchanged.
   Older records without a cause remain readable.
@@ -481,6 +592,7 @@
 - Fix replies that stream in several parts: the journal now keeps adjacent text as one block, so the terminal shows one paragraph instead of one row per part.
 - Fix multiline drafts in the terminal: a pasted draft shows each line on its own row in the composer instead of one row with `\n` inside it.
 - Fix the saved-session line on exit: an unnamed session now shows its id in `run dalgon -r <id> to resume`. Before, the line named "session", which resumed nothing.
+- Fix the resume hint for names with shell characters. `/name` and the saved-session exit line print a name bare when it holds only ASCII letters, digits, `.`, `_`, and `-`, and in double quotes when it also holds spaces or apostrophes. Any other name, and any name that starts with `-`, prints the session id, which `-r` resumes. Before, `$(...)` and backticks in a name ran, and `%VAR%` expanded, when the hint was pasted; the exit line also printed names unquoted, so a name with a space or an apostrophe did not paste as one argument.
 - Fix grant denials for extension services: the error now names the plugin and the service and says to approve the grant request, then try again. Before, it said only that the extension's services are not granted.
 - Fix the services `run` operation under an `ask` approval policy: it now opens an approval request like the exec tool does, runs after approval, and fails closed with a clear message when no front end can answer. Before, it skipped the approval question and ran, or failed with a bare denial.
 - Fix the WebSocket server for oversized messages: a message over 16 MiB now ends the connection without a close frame, as the protocol documents. Before, the server sent a normal close frame.

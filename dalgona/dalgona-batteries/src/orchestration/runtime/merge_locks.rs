@@ -102,7 +102,7 @@ impl MergeLocks {
     }
 
     /// The most merges that ever held one canonical workspace key at once.
-    /// Under the T-66 load this never goes above 1: merges into one
+    /// Under the scale load this never goes above 1: merges into one
     /// workspace run one at a time.
     #[cfg(test)]
     pub(super) fn key_peak(&self, key: &Path) -> usize {

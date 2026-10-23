@@ -40,6 +40,44 @@ fn a_429_code_decides_before_the_retryable_status() {
 }
 
 #[test]
+fn resource_exhausted_quota_wording_is_terminal_quota() {
+    let google = request(Family::GoogleGenerativeAi, "gemini-3-pro");
+    for message in [
+        "You have exhausted your capacity on this model. Your quota will reset after 3h15m38s.",
+        "Your quota will reset after 1h.",
+        "quota will reset at midnight",
+    ] {
+        let decision = classify(Some(429), Some("RESOURCE_EXHAUSTED"), message, &google);
+        assert!(
+            matches!(&decision, RetryDecision::Fail(ProviderError::Quota { message: m }) if m == message),
+            "{message}: {decision:?}"
+        );
+    }
+    // A numeric-only frame (HTTP status, no RPC spelling) with the wording is
+    // the same terminal quota: the status leg covers it.
+    let decision = classify(Some(429), None, "Your quota will reset after 1h.", &google);
+    assert!(
+        matches!(&decision, RetryDecision::Fail(ProviderError::Quota { .. })),
+        "{decision:?}"
+    );
+    // No quota wording: a plain throttle stays retryable, and a details-only
+    // exhaustion signal stays with the Google join, which owns the envelope.
+    for message in ["Slow down", "Resource has been exhausted"] {
+        assert!(
+            matches!(
+                classify(Some(429), Some("RESOURCE_EXHAUSTED"), message, &google),
+                RetryDecision::Retry(ProviderError::RateLimited { .. })
+            ),
+            "{message}"
+        );
+    }
+    // Other families never send this code; the wording rule still holds, so a
+    // future caller cannot silently turn quota into a retry.
+    assert!(google_quota_wording("quota will reset after 1h."));
+    assert!(!google_quota_wording("Slow down"));
+}
+
+#[test]
 fn overload_retries_and_ends_overloaded_but_plain_503_ends_in_status() {
     let anthropic = request(Family::Anthropic, "claude");
     assert!(matches!(

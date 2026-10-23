@@ -170,3 +170,34 @@ fn a_host_that_is_shut_down_maps_to_server_draining() {
     assert_eq!(error.code, -32009);
     assert_eq!(error.message, DRAINING_TEXT);
 }
+
+#[test]
+fn cancel_names_only_typed_integer_or_nonempty_string_ids() {
+    use crate::jsonrpc::Id;
+    use crate::rpc::{InflightKey, cancel_target, inflight_key};
+
+    assert_eq!(
+        cancel_target(&sonic_rs::json!({"requestId": 1})),
+        Some(inflight_key(&Id::Integer(1)))
+    );
+    assert_eq!(
+        cancel_target(&sonic_rs::json!({"requestId": "1"})),
+        Some(inflight_key(&Id::String("1".to_owned())))
+    );
+    assert_ne!(
+        inflight_key(&Id::Integer(1)),
+        inflight_key(&Id::String("1".to_owned())),
+        "a numeric cancel never names a string request"
+    );
+    assert_eq!(inflight_key(&Id::Integer(1)), InflightKey::Int(1));
+    for params in [
+        sonic_rs::json!({"requestId": 1.5}),
+        sonic_rs::json!({"requestId": ""}),
+        sonic_rs::json!({"requestId": null}),
+        sonic_rs::json!({"requestId": {"id": 1}}),
+        sonic_rs::json!({"requestId": [1]}),
+        sonic_rs::json!({}),
+    ] {
+        assert_eq!(cancel_target(&params), None, "{params:?}");
+    }
+}

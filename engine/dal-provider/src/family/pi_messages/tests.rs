@@ -173,9 +173,7 @@ fn fragmented_frames_reassemble_and_decode() {
     for item in items {
         match item.expect("clean decode") {
             StreamEvent::TextDelta { text } => texts.push(text),
-            StreamEvent::ToolCallsDone { calls } => {
-                assert_eq!(calls, [] as [crate::stream::ToolCall; 0]);
-            }
+            StreamEvent::ToolCallsDone { calls } => assert_eq!(calls, Vec::new()),
             StreamEvent::Usage { usage } => {
                 assert_eq!(usage.input_tokens, 10);
                 assert_eq!(usage.output_tokens, 3);

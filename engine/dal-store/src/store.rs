@@ -168,6 +168,23 @@ impl Store {
         journal::arm_fault_for_path(&self.paths(id).journal(), faults);
     }
 
+    /// Drains every journal batch an injected write or sync fault rejected for
+    /// one session, in attempt order, clearing that journal path's list.
+    ///
+    /// Test support only. The rejected bytes ride the same process-global,
+    /// path-keyed cell as the armed fault, so a `Store` handle different from
+    /// the session actor's still observes the failed append. Each element is
+    /// exactly the newline-terminated encoded batch passed to
+    /// `append_unsynced`. Empty before the first real rejection; successful
+    /// appends never record. Draining (rather than peeking) keeps retention
+    /// bounded: poll until the first non-empty drain, then decode
+    /// `PrivateStart`/`PrivateEnd` from its first element.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn rejected_journal_batches(&self, id: SessionId) -> Vec<Vec<u8>> {
+        journal::take_rejected_batches(&self.paths(id).journal())
+    }
+
     #[cfg(test)]
     fn set_faults_for_test(&self, faults: Faults) -> Result<(), StoreError> {
         let mut current = self.inner.faults.lock().map_err(|_| {
@@ -431,7 +448,7 @@ impl Store {
         let text = anchor_text(source, &branch.anchor_parts)?;
         let header = self.retarget_header(branch.header);
         let journal = self
-            .branch_to_journal(source, header, branch.records)
+            .branch_to_journal(source, header, branch.records, &branch.anchor_parts)
             .await?;
         Ok((journal, text))
     }
@@ -457,7 +474,10 @@ impl Store {
             )
         })?;
         let header = self.retarget_header(branch.header);
-        self.branch_to_journal(source, header, branch.records).await
+        let journal = self
+            .branch_to_journal(source, header, branch.records, &branch.anchor_parts)
+            .await?;
+        Ok(journal)
     }
 
     fn retarget_header(&self, mut header: Header) -> Header {
@@ -488,13 +508,14 @@ impl Store {
         source: &Journal,
         header: Header,
         records: Vec<Record>,
+        anchor_parts: &[dal_core::JournalPart],
     ) -> Result<Journal, StoreError> {
         let mut destination = if source.ephemeral {
             Journal::memory_with_header(Arc::clone(&self.inner), header)
         } else {
             Journal::lazy_with_header(Arc::clone(&self.inner), header)
         };
-        Self::share_branch_blobs(source, &mut destination, &records)?;
+        Self::share_branch_blobs(source, &mut destination, &records, anchor_parts)?;
         if !records.is_empty() {
             destination.append(records).await?;
         }
@@ -505,11 +526,15 @@ impl Store {
         source: &Journal,
         destination: &mut Journal,
         records: &[Record],
+        anchor_parts: &[dal_core::JournalPart],
     ) -> Result<(), StoreError> {
-        let ids = records
+        let mut ids = records
             .iter()
             .flat_map(blob::named_blobs)
             .collect::<std::collections::HashSet<_>>();
+        if destination.ephemeral {
+            ids.extend(blob::named_part_blobs(anchor_parts));
+        }
         if ids.is_empty() {
             return Ok(());
         }
@@ -521,8 +546,10 @@ impl Store {
             return Ok(());
         }
 
-        util::create_private_dir_all(destination.paths.directory())
-            .map_err(|source| util::io_err(destination.paths.directory(), source))?;
+        util::create_private_dir_all_durable(
+            &destination.inner.data_root,
+            destination.paths.directory(),
+        )?;
         let lock = LockGuard::acquire(&destination.paths.lock(), destination.id)?;
         let blob_dir = destination.paths.directory().join("blobs");
         util::create_private_dir_all(&blob_dir)
@@ -760,16 +787,31 @@ struct FirstAppendSetup {
     prelocked: Option<LockGuard>,
     /// The session's current display name, when set.
     current_name: Option<String>,
-    /// The blobs to stage and publish.
-    blobs: Vec<PendingBlob>,
     /// The encoded journal batch.
     bytes: Vec<u8>,
+}
+
+/// A failed first-append setup and every blob it did not publish, handed back
+/// so a retry can still publish what buffered records already name.
+struct FirstAppendFailure {
+    error: StoreError,
+    blobs: Vec<PendingBlob>,
 }
 
 /// Runs the first-append disk setup on the blocking pool: mkdirs, lock,
 /// name and blob publishes, then the journal create — every step writes
 /// and syncs, so the async worker must not own it (R-perf).
-fn first_append_setup(setup: FirstAppendSetup) -> Result<(LockGuard, FileJournal), StoreError> {
+fn first_append_setup(
+    setup: FirstAppendSetup,
+    blobs: Vec<PendingBlob>,
+) -> Result<(LockGuard, FileJournal), FirstAppendFailure> {
+    first_append_steps(setup, &blobs).map_err(|error| FirstAppendFailure { error, blobs })
+}
+
+fn first_append_steps(
+    setup: FirstAppendSetup,
+    blobs: &[PendingBlob],
+) -> Result<(LockGuard, FileJournal), StoreError> {
     let FirstAppendSetup {
         directory,
         blob_dir,
@@ -782,7 +824,6 @@ fn first_append_setup(setup: FirstAppendSetup) -> Result<(LockGuard, FileJournal
         id,
         prelocked,
         current_name,
-        blobs,
         bytes,
     } = setup;
     let lap = |step: &str, since: std::time::Instant| {
@@ -793,7 +834,7 @@ fn first_append_setup(setup: FirstAppendSetup) -> Result<(LockGuard, FileJournal
         std::time::Instant::now()
     };
     let mut mark = std::time::Instant::now();
-    util::create_private_dir_all(&directory).map_err(|source| util::io_err(&directory, source))?;
+    util::create_private_dir_all_durable(&inner.data_root, &directory)?;
     mark = lap("session-dirs", mark);
     let lock = match prelocked {
         Some(lock) => lock,
@@ -905,11 +946,9 @@ impl Journal {
         matches!(&self.state, State::Lazy { .. })
     }
 
-    /// Writes a lazy journal's buffered records to its durable journal
-    /// file through the same path as the first user append. Afterwards
-    /// the session is recoverable, so callers may acknowledge writes
-    /// that must outlive the in-memory journal — memory state must
-    /// never be more durable than the journal.
+    /// Writes a lazy journal's buffered records through the initial durable
+    /// append path. The session is then recoverable. Callers can acknowledge
+    /// writes that must survive the loss of the in-memory journal.
     ///
     /// No-op on a file-backed or ephemeral journal.
     ///
@@ -936,14 +975,10 @@ impl Journal {
             .ok_or_else(|| invalid_record("session validator is unavailable"))?
             .prepare_batch(&[])
             .map_err(validation_error)?;
-        let blobs = match &mut self.state {
-            State::Lazy { blobs } => std::mem::take(blobs),
-            _ => unreachable!("lazy state was checked above"),
-        };
         self.append_initial(
             Vec::new(),
             next_index,
-            blobs,
+            Vec::new(),
             self.generation,
             validation,
             true,
@@ -1000,7 +1035,8 @@ impl Journal {
     pub fn put_blob(&mut self, bytes: Vec<u8>) -> Result<BlobId, StoreError> {
         if matches!(&self.state, State::Lazy { .. }) {
             return Err(StoreError::Invalid {
-                reason: "a blob cannot be published before the first user entry".into(),
+                reason: "the journal is not durable; materialize it before publishing a blob"
+                    .into(),
             });
         }
         let pending = PendingBlob::prepare_put(bytes)?;
@@ -1140,16 +1176,11 @@ impl Journal {
                 self.commit_validation(validation)?;
                 return Ok(AppendOutcome::Buffered);
             }
-            let mut blobs = match &mut self.state {
-                State::Lazy { blobs } => std::mem::take(blobs),
-                _ => unreachable!("lazy state was checked above"),
-            };
-            blobs.extend(pending_blobs);
             return self
                 .append_initial(
                     records,
                     next_index,
-                    blobs,
+                    pending_blobs,
                     generation,
                     validation,
                     refresh_info,
@@ -1180,8 +1211,8 @@ impl Journal {
         .await
     }
 
-    /// Validates and encodes the first batch; the caller restores
-    /// `State::Lazy` on the error return.
+    /// Validates and encodes the first batch. The state is untouched on the
+    /// error return, so the journal stays lazy with its buffered blobs.
     fn encode_first(&self, records: &[Record]) -> Result<(Vec<u8>, u64), StoreError> {
         validate_record_values(records)?;
         let bytes = encode_records(self.records.iter().chain(records.iter()))?;
@@ -1219,13 +1250,7 @@ impl Journal {
         validation: journal::ValidationDelta,
         refresh_info: bool,
     ) -> Result<AppendOutcome, StoreError> {
-        let (bytes, byte_len) = match self.encode_first(&records) {
-            Ok(pair) => pair,
-            Err(error) => {
-                self.state = State::Lazy { blobs };
-                return Err(error);
-            }
-        };
+        let (bytes, byte_len) = self.encode_first(&records)?;
         let current_name = self.first_user_name(&records);
         let id = self.id;
         let mut mark = std::time::Instant::now();
@@ -1236,23 +1261,11 @@ impl Journal {
             }
             *mark = std::time::Instant::now();
         };
-        let shards = match crate::shard::shared() {
-            Ok(shards) => shards,
-            Err(error) => {
-                self.state = State::Lazy { blobs };
-                return Err(error.into());
-            }
-        };
+        let shards = crate::shard::shared()?;
         lap("shards-init", &mut mark);
         // A permit wait has no timeout: holder starvation would park
         // every later create in silence, so long waits log each 30 s.
-        let create_permit = match self.inner.acquire_create().await {
-            Ok(permit) => permit,
-            Err(error) => {
-                self.state = State::Lazy { blobs };
-                return Err(error);
-            }
-        };
+        let create_permit = self.inner.acquire_create().await?;
         lap("create-permit", &mut mark);
         let file_journal = self.spawn_first_create(blobs, current_name, bytes).await?;
         drop(create_permit);
@@ -1294,14 +1307,25 @@ impl Journal {
     }
 
     /// Spawns and joins the first-append disk setup, parking the lock in
-    /// `State::Broken` for the shard attach to collect; on failure the
-    /// state restores `Lazy` when no journal file landed.
+    /// `State::Broken` for the shard attach to collect.
+    ///
+    /// The setup publishes the blobs that buffered records already name
+    /// together with this batch's own. When it fails before any journal file
+    /// landed, the state restores `Lazy` holding the buffered blobs again, so
+    /// a retry still publishes everything its records name; this batch's own
+    /// blobs are prepared anew from its records on the retry.
     async fn spawn_first_create(
         &mut self,
-        blobs: Vec<PendingBlob>,
+        batch_blobs: Vec<PendingBlob>,
         current_name: Option<String>,
         bytes: Vec<u8>,
     ) -> Result<FileJournal, StoreError> {
+        let mut blobs = match &mut self.state {
+            State::Lazy { blobs } => std::mem::take(blobs),
+            _ => Vec::new(),
+        };
+        let buffered = blobs.len();
+        blobs.extend(batch_blobs);
         self.state = State::Broken {
             lane: None,
             lock: None,
@@ -1335,21 +1359,23 @@ impl Journal {
                 guard.mark_detached();
             }
             move || {
-                first_append_setup(FirstAppendSetup {
-                    directory,
-                    blob_dir,
-                    jobs_dir,
-                    lock_path,
-                    journal_path: setup_journal_path,
-                    workspace_dir,
-                    workspace,
-                    inner,
-                    id,
-                    prelocked,
-                    current_name,
+                first_append_setup(
+                    FirstAppendSetup {
+                        directory,
+                        blob_dir,
+                        jobs_dir,
+                        lock_path,
+                        journal_path: setup_journal_path,
+                        workspace_dir,
+                        workspace,
+                        inner,
+                        id,
+                        prelocked,
+                        current_name,
+                        bytes,
+                    },
                     blobs,
-                    bytes,
-                })
+                )
             }
         });
         let mut creation = Box::pin(creation);
@@ -1363,14 +1389,17 @@ impl Journal {
         };
         let (lock, file_journal) = match outcome {
             Ok(Ok(pair)) => pair,
-            Ok(Err(error)) => {
+            Ok(Err(FirstAppendFailure { error, mut blobs })) => {
                 if !journal_path.exists() {
-                    self.state = State::Lazy { blobs: Vec::new() };
+                    blobs.truncate(buffered);
+                    self.state = State::Lazy { blobs };
                 }
                 return Err(write_failure(self.id, error));
             }
             Err(join) => {
-                if !journal_path.exists() {
+                // A lost task owned every blob and cannot hand them back, so
+                // only a journal with nothing buffered may return to Lazy.
+                if buffered == 0 && !journal_path.exists() {
                     self.state = State::Lazy { blobs: Vec::new() };
                 }
                 return Err(StoreError::Invalid {
@@ -1633,6 +1662,30 @@ impl Journal {
         };
         lock.into_iter().chain(self.prelocked.iter()).collect()
     }
+
+    /// Hands the session lock to the shard worker when this journal is
+    /// dropped with an append the worker admitted but has not finished.
+    ///
+    /// That batch is still headed for the journal file. Releasing the lock
+    /// first would let a reopen scan the file and attach a second writer at
+    /// the same end offset, which the late batch then overwrites. The worker
+    /// releases the lock only after it drops its journal handle.
+    fn retire_unsettled_lane(&mut self) {
+        let (mut lane, lock) = match std::mem::replace(&mut self.state, State::Closed) {
+            State::File { lane, lock } if lane.has_unsettled_append() => (lane, Some(lock)),
+            State::Broken {
+                lane: Some(lane),
+                lock,
+            } if lane.has_unsettled_append() => (lane, lock),
+            other => {
+                self.state = other;
+                return;
+            }
+        };
+        if let Some(lock) = lock {
+            lane.retire_holding(Box::new(lock));
+        }
+    }
 }
 
 impl Drop for Journal {
@@ -1644,6 +1697,7 @@ impl Drop for Journal {
         for guard in self.guards() {
             guard.mark_detached();
         }
+        self.retire_unsettled_lane();
     }
 }
 fn boot_record(generation: Gen) -> Record {

@@ -760,6 +760,45 @@ async fn an_in_workspace_spill_log_is_read_and_its_warning_reported() -> Outcome
 }
 
 #[tokio::test]
+async fn log_text_replaces_preview_text_through_the_host() -> Outcome<()> {
+    let replies = vec![
+        Reply::Call {
+            id: "e1",
+            tool: "exec",
+            args: FIRST_BUILD,
+        },
+        Reply::Text("built"),
+    ];
+    let mut rig = rig("precedence", Guard::On, Log::Workspace, replies).await?;
+    let turn = prompt(&mut rig, "build").await?;
+    assert_eq!(turn.stop, Stop::EndTurn, "{turn:?}");
+
+    // The preview and the served log each carry a different warning: the log
+    // replaces the preview instead of adding to it.
+    let findings = findings_of(&rig, turn.id).await?;
+    let texts = warning_texts(&findings);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("only_in_the_first_log")),
+        "the served job log is the scanned text: {texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains("only_in_the_first_preview")),
+        "a served log replaces its preview; scanning both double-reports: {texts:?}"
+    );
+    assert_eq!(
+        turn.notices_of("guard_fs_read_denied"),
+        0,
+        "the host served the read: {:?}",
+        turn.notices
+    );
+    finish(rig).await
+}
+
+#[tokio::test]
 async fn a_refused_spill_path_falls_back_to_previews_and_reports_once() -> Outcome<()> {
     let first_replies = vec![
         Reply::Call {

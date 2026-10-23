@@ -1,4 +1,4 @@
-use std::{io::Write, process::ExitCode};
+use std::{borrow::Cow, io::Write, process::ExitCode};
 
 use dal_provider::{
     Catalog, CatalogEntry, EnvSnapshot, Listing, ProviderConfig, ProviderIdentity, ProviderSet,
@@ -29,16 +29,16 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
             os_version: String::new().into(),
             arch: std::env::consts::ARCH.into(),
         },
-        EnvSnapshot::from_vars(&startup.vars),
+        EnvSnapshot::from_vars(&startup.vars).with_cwd(startup.cwd.clone()),
         &startup.data_root,
         &startup.data_root.join("cache"),
     ) {
         Ok(providers) => providers,
-        Err(error) => return config_error(&error.to_string()),
+        Err(error) => return endpoint_error(&error),
     };
     let mut sources = Vec::with_capacity(provider_config.providers.len());
     let mut entries = Vec::new();
-    let mut fetch_error: Option<String> = None;
+    let mut fetch_error: Option<(String, String, Option<String>)> = None;
     for provider in &provider_config.providers {
         let ready = match providers.credential(&provider.id) {
             Ok(_) => true,
@@ -65,10 +65,12 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
                     &startup.data_root.join("auth.json"),
                 );
             }
-            Err(error) => return catalog_error(&error.to_string()),
+            Err(error) => {
+                return catalog_error_for(&provider.id, &error.to_string(), error.fix().as_deref());
+            }
         };
         if ready && let Some(error) = loaded.live_error {
-            fetch_error.get_or_insert(error.to_string());
+            fetch_error.get_or_insert((provider.id.to_string(), error.to_string(), error.fix()));
         }
         sources.push((provider.clone(), loaded.source));
         entries.extend(loaded.entries);
@@ -78,7 +80,7 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
     let result = if args.json {
         print_json(&rows)
     } else {
-        print_table(&rows)
+        print_table(&rows, &startup.config)
     };
     if let Err(error) = result {
         if let Some(code) = exit::broken_pipe(&error) {
@@ -87,7 +89,7 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
         return internal_models_error(&error.to_string(), &startup.data_root);
     }
     match fetch_error {
-        Some(error) => catalog_error(&error),
+        Some((provider, error, fix)) => catalog_error_for(&provider, &error, fix.as_deref()),
         None => exit::code(exit::ExitKind::Success),
     }
 }
@@ -126,7 +128,7 @@ fn print_json(rows: &[&CatalogEntry]) -> std::io::Result<()> {
     writeln!(stdout, "{line}")
 }
 
-fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
+fn print_table(rows: &[&CatalogEntry], config: &dal_core::Config) -> std::io::Result<()> {
     let providers: Vec<String> = rows.iter().map(|entry| visible(&entry.provider)).collect();
     let ids: Vec<String> = rows.iter().map(|entry| visible(&entry.id)).collect();
     let contexts: Vec<String> = rows
@@ -142,9 +144,17 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
         "{:<provider_width$}  {:<id_width$}  {:<context_width$}  PRICE",
         "PROVIDER", "ID", "CONTEXT"
     )?;
+    let mut configured = false;
+    let mut estimated = false;
     for (((entry, provider), id), context) in rows.iter().zip(&providers).zip(&ids).zip(&contexts) {
-        let price = model_price(entry)
-            .as_ref()
+        let (price, source) = model_price(entry, config);
+        match source {
+            PriceSource::Configured => configured = true,
+            PriceSource::Live => estimated = true,
+            PriceSource::Snapshot => {}
+        }
+        let price = price
+            .as_deref()
             .map_or_else(|| "-".to_owned(), format_price);
         writeln!(
             stdout,
@@ -152,7 +162,17 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
         )?;
     }
     let (source, _, date) = price_source();
-    writeln!(stdout, "Prices: {source}, fetched {date}.")
+    write!(stdout, "Prices: {source}, fetched {date}.")?;
+    if configured {
+        write!(stdout, " Includes configured price overrides.")?;
+    }
+    if estimated {
+        write!(
+            stdout,
+            " Includes provider-reported price estimates (not billed totals)."
+        )?;
+    }
+    writeln!(stdout)
 }
 
 /// Renders a catalog field for the terminal table with control and format
@@ -211,9 +231,28 @@ fn context_text(entry: &CatalogEntry) -> String {
         .map_or_else(|| "unknown".to_owned(), |value| format!("{value} tokens"))
 }
 
-fn model_price(entry: &CatalogEntry) -> Option<dal_core::ModelPrice> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PriceSource {
+    Configured,
+    Live,
+    Snapshot,
+}
+
+fn model_price<'a>(
+    entry: &'a CatalogEntry,
+    config: &'a dal_core::Config,
+) -> (Option<Cow<'a, dal_core::ModelPrice>>, PriceSource) {
     let qualified = format!("{}/{}", entry.provider, entry.id);
-    compiled_price(&qualified)
+    if let Some(price) = config.price_for_model(&qualified) {
+        return (Some(Cow::Borrowed(price)), PriceSource::Configured);
+    }
+    if let Some(price) = entry.price.as_ref() {
+        return (Some(Cow::Borrowed(price)), PriceSource::Live);
+    }
+    (
+        compiled_price(&qualified).map(Cow::Owned),
+        PriceSource::Snapshot,
+    )
 }
 
 fn format_price(price: &dal_core::ModelPrice) -> String {
@@ -243,14 +282,33 @@ fn config_error(error: &str) -> ExitCode {
     )
 }
 
-fn catalog_error(error: &str) -> ExitCode {
+fn endpoint_error(error: &dal_provider::ProviderError) -> ExitCode {
+    two_lines(endpoint_lines(error), exit::ExitKind::RequestedFailure)
+}
+
+fn endpoint_lines(error: &dal_provider::ProviderError) -> [String; 2] {
+    let hint = match error {
+        dal_provider::ProviderError::Transport { .. }
+        | dal_provider::ProviderError::PlainHttp { .. } => {
+            "Set providers.PROVIDER.base_url to an https URL in dal.toml, or remove the override."
+        }
+        _ => crate::cli::texts::CONFIG_FIX_HINT,
+    };
+    [format!("dalgon: {error}"), hint.into()]
+}
+
+fn catalog_error_for(provider: &str, error: &str, fix: Option<&str>) -> ExitCode {
     two_lines(
-        [
-            format!("dalgon: could not fetch the model list: {error}"),
-            crate::cli::texts::MODELS_FETCH_HINT.into(),
-        ],
+        catalog_lines_for(provider, error, fix),
         exit::ExitKind::RequestedFailure,
     )
+}
+
+fn catalog_lines_for(provider: &str, error: &str, fix: Option<&str>) -> [String; 2] {
+    [
+        format!("dalgon: could not fetch the model list for {provider}: {error}"),
+        fix.unwrap_or(crate::cli::texts::MODELS_FETCH_HINT).into(),
+    ]
 }
 
 fn internal_models_error(error: &str, data_root: &std::path::Path) -> ExitCode {
@@ -262,7 +320,42 @@ fn internal_models_error(error: &str, data_root: &std::path::Path) -> ExitCode {
 }
 #[cfg(test)]
 mod tests {
-    use super::{format_price, visible};
+    use super::{catalog_lines_for, endpoint_lines, format_price, visible};
+    use dal_provider::ProviderError;
+
+    #[test]
+    fn catalog_failure_names_the_failing_provider() {
+        let [what, hint] = catalog_lines_for("openai", "request failed: timeout", None);
+        assert_eq!(
+            what,
+            "dalgon: could not fetch the model list for openai: request failed: timeout"
+        );
+        assert_eq!(
+            hint,
+            crate::cli::texts::MODELS_FETCH_HINT,
+            "transport failures keep the network-plus-login hint"
+        );
+        let [_, fix_hint] =
+            catalog_lines_for("openai", "no credentials", Some("Run dalgon login openai."));
+        assert_eq!(fix_hint, "Run dalgon login openai.");
+    }
+
+    #[test]
+    fn endpoint_failures_name_the_base_url_key() {
+        let [what, hint] = endpoint_lines(&ProviderError::Transport {
+            family: dal_core::Family::Chat,
+            reason: "base URL is not a URL: relative URL without a base".into(),
+        });
+        assert!(what.contains("base URL is not a URL"), "{what}");
+        assert_eq!(
+            hint,
+            "Set providers.PROVIDER.base_url to an https URL in dal.toml, or remove the override."
+        );
+        let [_, plain] = endpoint_lines(&ProviderError::PlainHttp {
+            host: "example.test".into(),
+        });
+        assert!(plain.contains("providers.PROVIDER.base_url"), "{plain}");
+    }
     use dal_core::ModelPrice;
 
     #[test]

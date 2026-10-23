@@ -8,16 +8,22 @@
 
 #[path = "replay/anthropic.rs"]
 mod anthropic;
+#[path = "replay/azure.rs"]
+mod azure;
 #[path = "replay/chat.rs"]
 mod chat;
 #[path = "replay/codex.rs"]
 mod codex;
+#[path = "replay/copilot.rs"]
+mod copilot;
 #[path = "replay/google.rs"]
 mod google;
 #[path = "support/replay_server.rs"]
 mod replay_server;
 #[path = "replay/responses.rs"]
 mod responses;
+#[path = "replay/signature_carriage.rs"]
+mod signature_carriage;
 #[path = "replay/websocket.rs"]
 mod websocket;
 

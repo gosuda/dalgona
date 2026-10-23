@@ -32,6 +32,18 @@ const QUOTA_CODES: [&str; 5] = [
     "organization_usage_limit_exceeded",
 ];
 
+/// Whether a 429 / `RESOURCE_EXHAUSTED` server message carries the
+/// account-exhaustion wording the Google reference treats as terminal quota.
+///
+/// The Google join owns the structured signals (`google.rpc.ErrorInfo`
+/// reasons, long `RetryInfo` delays) and checks this wording itself for HTTP
+/// bodies; the shared table applies it so in-band stream frames, which carry
+/// no envelope details here, classify the same way without a Google edit.
+#[must_use]
+pub(crate) fn google_quota_wording(message: &str) -> bool {
+    message.contains("quota will reset") || message.contains("exhausted your capacity")
+}
+
 /// What the lifecycle does with one failed attempt.
 #[derive(Debug)]
 pub enum RetryDecision {
@@ -194,6 +206,9 @@ fn table(
         if QUOTA_CODES.contains(&code) {
             return Fail(ProviderError::Quota { message });
         }
+        if code == "RESOURCE_EXHAUSTED" && google_quota_wording(&message) {
+            return Fail(ProviderError::Quota { message });
+        }
         match code {
             "usage_limit_reached" => {
                 return Fail(ProviderError::UsageLimit {
@@ -204,6 +219,14 @@ fn table(
             "usage_not_included" => return Fail(ProviderError::UsageNotIncluded { message }),
             _ => {}
         }
+    }
+
+    // A numeric-only 429 with quota wording and no RPC spelling (an in-band
+    // frame without a status field) is the same terminal quota. This sits
+    // after the code checks so an exact overflow or quota code keeps its
+    // established meaning.
+    if status == Some(429) && google_quota_wording(&message) {
+        return Fail(ProviderError::Quota { message });
     }
 
     let Some(status) = status else {

@@ -78,6 +78,7 @@ pub(crate) struct Shared {
     child_prompt_policy: OnceLock<ChildPromptPolicy>,
     /// The tool-round bound the next turn takes; the turn consumes it.
     next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
+    scoped: Mutex<Option<Vec<Box<str>>>>,
     service_grants: ServiceGrants,
 }
 
@@ -145,6 +146,7 @@ impl Shared {
             tool_allowlist: OnceLock::new(),
             child_prompt_policy: OnceLock::new(),
             next_turn_step_cap: Mutex::new(None),
+            scoped: Mutex::new(None),
             service_grants: ServiceGrants::default(),
         }
     }
@@ -221,6 +223,31 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .projection
             .approval()
+    }
+
+    /// The execution mode the session runs under now.
+    pub(crate) fn mode(&self) -> Mode {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .effective_settings()
+            .mode
+    }
+
+    pub(crate) fn set_scoped(&self, scoped: Option<Vec<Box<str>>>) {
+        *self
+            .scoped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scoped;
+    }
+
+    pub(crate) fn scoped_models(&self) -> Vec<Box<str>> {
+        self.scoped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
     }
 
     /// Refreshes fold-owned promotion and always-allowed sets on every call,
@@ -426,37 +453,18 @@ impl Shared {
 
     /// Applies one update kind, publishes it, and offers it to subscribers.
     pub(crate) fn publish(&self, kind: UpdateKind) {
+        let scoped = self.scoped_models();
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::publish_locked(&mut inner, kind);
-    }
-
-    /// Commits the authoritative scoped-model list `SetScopedModels` set and
-    /// publishes the settings carrying it, verbatim (an empty list is a
-    /// clear). The settings are read and republished under one lock, so a
-    /// concurrent fold settings update can never be reverted by this one.
-    pub(crate) fn publish_scope(&self, scope: Vec<Box<str>>) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let settings = inner.projection.set_scope(scope);
-        Self::publish_locked(&mut inner, UpdateKind::Settings(settings));
-    }
-
-    /// Applies, sequences, rings, and offers one update under the held lock.
-    ///
-    /// A settings update is offered as the projection's effective settings,
-    /// not as it arrived. The fold authors settings with `scoped_models:
-    /// None` (inherit); the projection merges that with the committed scope,
-    /// and a subscriber that adopts the update wholesale must see the merged
-    /// value or it would drop a scope another client committed.
-    fn publish_locked(inner: &mut SharedInner, kind: UpdateKind) {
         inner.projection.apply(&kind);
         let kind = match kind {
-            UpdateKind::Settings(_) => UpdateKind::Settings(inner.projection.effective_settings()),
+            UpdateKind::Settings(_) => {
+                let mut settings = inner.projection.effective_settings();
+                settings.scoped_models = scoped;
+                UpdateKind::Settings(settings)
+            }
             other => other,
         };
         let seq = Seq::new(NonZeroU64::new(inner.next_seq.max(1)).unwrap_or(NonZeroU64::MIN));
@@ -481,11 +489,15 @@ impl Shared {
 
     /// Snapshots the materialized view with leaf paging applied.
     pub(crate) fn snapshot(&self, args: SnapshotArgs) -> View {
-        self.inner
+        let scoped = self.scoped_models();
+        let mut view = self
+            .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .projection
-            .snapshot(args)
+            .snapshot(args);
+        view.settings.scoped_models = scoped;
+        view
     }
 
     /// The last terminal stop the projection recorded, when any.
@@ -526,12 +538,14 @@ impl Shared {
 
     /// Captures a view and its full leaf path from one projection state.
     pub(crate) fn snapshot_with_leaf_entries(&self, args: SnapshotArgs) -> (View, Vec<EntryView>) {
+        let scoped = self.scoped_models();
         let inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entries = inner.projection.leaf_entries();
-        let view = inner.projection.snapshot(args);
+        let mut view = inner.projection.snapshot(args);
+        view.settings.scoped_models = scoped;
         (view, entries)
     }
     /// Reports whether a live approval-answering subscriber watches this
@@ -680,70 +694,6 @@ mod tests {
             shared
                 .allow_always()
                 .contains(&Name::parse("run").expect("run name parses"))
-        );
-    }
-
-    /// The fold authors settings with `scoped_models: None` (inherit). The
-    /// owner offers subscribers the effective settings, so a client that
-    /// adopts the update wholesale keeps a scope another client committed,
-    /// and an explicit clear stays `Some([])` instead of reading as inherit.
-    #[test]
-    fn settings_updates_publish_the_effective_scope() {
-        let generation = Gen::new(NonZeroU64::MIN);
-        let shared = Shared::new(
-            false,
-            generation,
-            ThinkingLevel::Medium,
-            ApprovalMode::Ask,
-            Mode::Normal,
-        );
-        let fold_settings = |thinking| dal_core::SettingsView {
-            model: None,
-            thinking,
-            approval: ApprovalMode::Ask,
-            mode: Mode::Normal,
-            name: None,
-            scoped_models: None,
-        };
-        let published_after = |seen: u64| {
-            let inner = shared
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let cursor = (
-                generation,
-                Seq::new(NonZeroU64::new(seen).expect("sequence numbers start at one")),
-            );
-            match inner.ring.replay(Some(cursor)) {
-                Replay::Suffix(mut suffix) => match suffix.next().map(|update| update.kind.clone())
-                {
-                    Some(UpdateKind::Settings(settings)) => settings,
-                    other => panic!("expected a retained settings update, got {other:?}"),
-                },
-                other => panic!("expected a retained suffix, got {other:?}"),
-            }
-        };
-
-        shared.publish_scope(vec!["openai/gpt-6".into()]);
-        let at_scope = shared.cursor();
-        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::High)));
-        let after_fold = published_after(at_scope);
-        assert_eq!(after_fold.thinking, ThinkingLevel::High);
-        assert_eq!(
-            after_fold.scoped_models,
-            Some(vec!["openai/gpt-6".into()]),
-            "a fold settings update keeps the committed scope"
-        );
-
-        shared.publish_scope(Vec::new());
-        let at_clear = shared.cursor();
-        shared.publish(UpdateKind::Settings(fold_settings(ThinkingLevel::Low)));
-        let after_clear = published_after(at_clear);
-        assert_eq!(after_clear.thinking, ThinkingLevel::Low);
-        assert_eq!(
-            after_clear.scoped_models,
-            Some(Vec::new()),
-            "an explicit clear stays committed as an empty list"
         );
     }
 }

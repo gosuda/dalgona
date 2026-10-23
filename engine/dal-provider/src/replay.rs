@@ -1113,8 +1113,8 @@ mod tests {
                     output_tokens: 2,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
-                    premium_requests: None,
                     cost_usd: None,
+                    premium_requests: None,
                 },
             }),
             Ok(StreamEvent::Stop {
@@ -1139,6 +1139,60 @@ mod tests {
         assert_eq!(items.len(), replayed_items.len());
         for (original, roundtripped) in items.iter().zip(replayed_items.iter()) {
             assert_eq!(original.as_ref().ok(), roundtripped.as_ref().ok());
+        }
+    }
+    /// Pins the D04 divergence on the encode side: a capture on a response
+    /// with tool calls encodes to a line the scripted decoder still accepts
+    /// (the grammar checks event order, never the call list), so the encoder
+    /// never writes a line the decoder rejects. The fold drops the capture
+    /// downstream; the replayed stream delivers it verbatim.
+    #[tokio::test]
+    async fn encode_step_roundtrips_a_capture_on_a_tool_call_response() {
+        let events = vec![
+            StreamEvent::ToolCallsDone {
+                calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    args: ToolArgs::from_bytes(br#"{"path":"a.rs"}"#),
+                }],
+            },
+            StreamEvent::MessageReplay {
+                capture: ReplayCapture::Captured {
+                    payload: RawJson::parse(r#"{"cursor_history":[1]}"#).unwrap(),
+                },
+            },
+            StreamEvent::Usage {
+                usage: dal_core::Usage {
+                    input_tokens: 10,
+                    cached_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                    premium_requests: None,
+                },
+            },
+            StreamEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ];
+        let line = encode_step(&events).expect("divergence shape encodes");
+        assert!(line.contains("message_replay"), "{line}");
+        let script = Script::from_replay(line.as_bytes()).expect("encoded line decodes");
+        let mut stream = script.open().expect("script opens");
+        let seen = drain(&mut stream).await;
+        assert_eq!(seen.len(), events.len(), "{seen:?}");
+        assert!(
+            matches!(
+                &seen[1],
+                Ok(StreamEvent::MessageReplay {
+                    capture: ReplayCapture::Captured { .. },
+                })
+            ),
+            "decode reaches the capture arm: {seen:?}"
+        );
+        for (original, roundtripped) in events.iter().zip(seen.iter()) {
+            assert_eq!(Some(original), roundtripped.as_ref().ok());
         }
     }
 

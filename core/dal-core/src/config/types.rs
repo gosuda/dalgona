@@ -177,7 +177,6 @@ use super::ask::{AskConfig, AskTimeoutClamp};
 pub struct Config {
     pub(super) mode: Mode,
     pub(super) model: Option<Box<str>>,
-    pub(super) model_route: Option<crate::model::ModelRoute>,
     pub(super) thinking: crate::model::ThinkingLevel,
     pub(super) approval: ApprovalMode,
     pub(super) screen: Screen,

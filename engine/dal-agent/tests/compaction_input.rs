@@ -4,14 +4,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_agent::ext::{
-    BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExtensionBuilder, ImageProfile,
-    Services,
+    BoxFuture, CompactError, CompactInput, Compaction, Compactor, EventStream, Extension,
+    ExtensionBuilder, ImageProfile, ModelCx, ModelError, ModelHandler, ModelRecord, Services,
 };
 use dal_agent::{Env, Host, Product, SessionRef};
 use dal_core::{
-    ClientId, Command, Config, ConfigProduct, Entry, EntryId, EntryKind, Expect, JournalPart, Part,
-    Product as JournalProduct, Record, ServiceSet, SessionId, Workspace,
+    AssistantPart, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, Entry, EntryId,
+    EntryKind, Expect, JournalPart, ModelId, ModelRequest, Part, Product as JournalProduct, Record,
+    ServiceSet, SessionId, ThinkingLevel, Usage, Workspace,
 };
+use dal_provider::{ProviderError, StopReason, StreamEvent};
 use dal_store::Store;
 
 const FIXTURE: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"warm\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
@@ -144,7 +146,7 @@ fn seed_records(image: &[u8], image_id: dal_core::BlobId) -> Vec<Record> {
             at: jiff::Timestamp::UNIX_EPOCH,
             kind: EntryKind::Compaction {
                 summary: Some("carried history summary".into()),
-                first_kept: Some(entry(2)),
+                first_kept: Some(entry(1)),
                 tokens_before: 40_000,
                 replay: None,
                 usage: None,
@@ -179,6 +181,25 @@ async fn compact_fixture_with(
     Arc<Mutex<Option<Captured>>>,
     SessionId,
 ) {
+    let seen = Arc::new(Mutex::new(None));
+    let extension = ExtensionBuilder::new("capture", "0.1.0", ServiceSet::EMPTY)
+        .expect("extension builder")
+        .compactor("capture", Arc::new(CaptureCompactor(Arc::clone(&seen))))
+        .build()
+        .expect("capture extension");
+    let (temp, agent, host, session) =
+        seeded_host(records, blob, "openai/gpt-6-luna", extension).await;
+    (temp, agent, host, seen, session)
+}
+
+/// Seeds `records`, stores `blob` after the first record, and resumes the session
+/// on a host whose default model is `model` and whose only extension is `extension`.
+async fn seeded_host(
+    records: Vec<Record>,
+    blob: Option<Vec<u8>>,
+    model: &str,
+    extension: Extension,
+) -> (tempfile::TempDir, dal_agent::Agent, Host, SessionId) {
     let temp = tempfile::tempdir().expect("temp directory");
     let data = temp.path().join("data");
     let workspace_dir = temp.path().join("workspace");
@@ -199,18 +220,12 @@ async fn compact_fixture_with(
 
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, FIXTURE).expect("write provider fixture");
+    let fixture = fixture.to_string_lossy().replace('\\', "\\\\");
     let config_text = format!(
-        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.to_string_lossy().replace('\\', "\\\\")
+        "approval = \"all\"\nmodel = \"{model}\"\n\n[providers.scripted]\nfixture = \"{fixture}\"\n"
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(&config_text)).expect("config");
-    let seen = Arc::new(Mutex::new(None));
-    let extension = ExtensionBuilder::new("capture", "0.1.0", ServiceSet::EMPTY)
-        .expect("extension builder")
-        .compactor("capture", Arc::new(CaptureCompactor(Arc::clone(&seen))))
-        .build()
-        .expect("capture extension");
     let product = Product {
         name: "dal",
         data_root: data,
@@ -237,7 +252,7 @@ async fn compact_fixture_with(
         )
         .await
         .expect("resume seeded session");
-    (temp, agent, host, seen, session)
+    (temp, agent, host, session)
 }
 
 /// Runs one warm turn and a manual compaction, then returns what the compactor saw.
@@ -390,4 +405,380 @@ async fn driver_hands_before_turn_text_to_compactors_as_user_context() {
         "the hook text weighs as the same text in a user entry"
     );
     host.close(session).await.expect("close session");
+}
+
+/// Tokens the seeded compaction entry bills for its replacement page.
+const PAGE_TOKENS: u64 = 1_000;
+
+/// The recompacting compactor's replacement; at the shared 3.5-characters-per-token
+/// rate it costs `REPLACEMENT_TOKENS`.
+const REPLACEMENT_CHARACTERS: usize = 1_400;
+const REPLACEMENT_TOKENS: u64 = 400;
+
+/// How long a recompaction step may take before the test fails.
+const STEP: Duration = Duration::from_secs(15);
+
+/// The registered model the recompaction tests run on.
+const MODEL: &str = "acme/recorder";
+
+fn replacement() -> String {
+    "r".repeat(REPLACEMENT_CHARACTERS)
+}
+
+/// The covered entries the driver handed the compactor on its latest call,
+/// with their estimates, and how many times it was called.
+#[derive(Clone, Debug, Default)]
+struct Covered {
+    entries: Vec<(EntryId, u64)>,
+    calls: usize,
+}
+
+impl Covered {
+    fn ids(&self) -> Vec<EntryId> {
+        self.entries.iter().map(|(id, _)| *id).collect()
+    }
+
+    fn total(&self) -> u64 {
+        self.entries.iter().map(|(_, tokens)| *tokens).sum()
+    }
+}
+
+/// Commits `replacement()` over whatever span it is given and records the
+/// covered entries it was handed.
+struct ReplaceCompactor(Arc<Mutex<Covered>>);
+
+impl Compactor for ReplaceCompactor {
+    fn compact<'a>(
+        &'a self,
+        input: CompactInput<'a>,
+        _services: Arc<dyn Services>,
+    ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
+        let entries = input
+            .covered
+            .iter()
+            .map(|covered| (covered.entry, covered.estimated_tokens))
+            .collect();
+        let mut seen = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        seen.entries = entries;
+        seen.calls += 1;
+        drop(seen);
+        let compaction = Compaction::text(input.span, replacement(), None);
+        Box::pin(async move { Ok(Some(compaction)) })
+    }
+}
+
+/// A registered model that answers `ok`, reports `input_tokens` of context, and
+/// records every request it receives.
+struct Recorder {
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+    input_tokens: u64,
+}
+
+impl ModelHandler for Recorder {
+    fn run<'a>(
+        &'a self,
+        request: ModelRequest,
+        _cx: ModelCx<'a>,
+    ) -> BoxFuture<'a, Result<EventStream, ModelError>> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        let usage = Usage {
+            input_tokens: self.input_tokens,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            premium_requests: None,
+        };
+        let events: Vec<Result<StreamEvent, ProviderError>> = vec![
+            Ok(StreamEvent::TextDelta { text: "ok".into() }),
+            Ok(StreamEvent::ToolCallsDone { calls: Vec::new() }),
+            Ok(StreamEvent::Usage { usage }),
+            Ok(StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            }),
+        ];
+        Box::pin(async move { Ok(EventStream::new(futures::stream::iter(events), || {})) })
+    }
+}
+
+/// An inline text part of `bytes` bytes of `marker`, under the store's spill bound.
+fn marked(marker: char, bytes: usize) -> JournalPart {
+    JournalPart::Text {
+        text: marker.to_string().repeat(bytes).into(),
+    }
+}
+
+/// A compaction entry that replaces everything before `first_kept` with one
+/// page of `page_bytes` bytes, billed at `PAGE_TOKENS`.
+fn paged_compaction(id: u64, parent: u64, first_kept: u64, page_bytes: usize) -> Record {
+    Record::Compaction(Entry {
+        id: entry(id),
+        parent: Some(entry(parent)),
+        at: jiff::Timestamp::UNIX_EPOCH,
+        kind: EntryKind::Compaction {
+            summary: None,
+            first_kept: Some(entry(first_kept)),
+            tokens_before: 40_000,
+            replay: None,
+            usage: None,
+            parts: vec![marked('p', page_bytes)],
+            parts_tokens: PAGE_TOKENS,
+        },
+    })
+}
+
+/// A seeded session after one warm turn and one manual compaction.
+struct Recompacted {
+    _temp: tempfile::TempDir,
+    agent: dal_agent::Agent,
+    host: Host,
+    session: SessionId,
+    subscription: dal_agent::Subscription,
+    covered: Covered,
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+    /// Kind of every notice up to and including the awaited one.
+    notices: Vec<String>,
+}
+
+impl Recompacted {
+    /// The summary of every compaction entry on the branch, oldest first.
+    fn compactions(&self) -> Vec<Option<Box<str>>> {
+        let view = self
+            .agent
+            .view(dal_core::PageReq::default())
+            .expect("session view");
+        view.entries
+            .items
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Compaction { summary, .. } => Some(summary),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many requests the registered model received.
+    fn request_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// The text of every part of the newest request, in order.
+    fn last_request_texts(&self) -> Vec<String> {
+        let requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request = requests.last().expect("the model received a request");
+        let mut texts = Vec::new();
+        for item in request.context.iter() {
+            match item {
+                ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => {
+                    texts.extend(parts.iter().filter_map(|part| match part {
+                        Part::Text { text } => Some(text.to_string()),
+                        Part::Image { .. } | Part::Blob { .. } => None,
+                    }));
+                }
+                ContextItem::Assistant { parts, .. } => {
+                    texts.extend(parts.iter().filter_map(|part| match part {
+                        AssistantPart::Text { text, .. } => Some(text.to_string()),
+                        _ => None,
+                    }));
+                }
+            }
+        }
+        texts
+    }
+
+    /// Submits one prompt and waits for its turn to end.
+    async fn prompt(&mut self, text: &str) {
+        self.agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text { text: text.into() }],
+            })
+            .await
+            .expect("submit prompt");
+        turn_ended(&mut self.subscription).await;
+    }
+
+    async fn close(self) {
+        self.host.close(self.session).await.expect("close session");
+    }
+}
+
+/// Reads notice kinds until one equals `kind`, and returns every kind seen,
+/// that one last.
+async fn notices_until(subscription: &mut dal_agent::Subscription, kind: &str) -> Vec<String> {
+    tokio::time::timeout(STEP, async {
+        let mut seen = Vec::new();
+        while let Some(delivery) = subscription.next().await {
+            let dal_agent::Delivery::Update(update) = delivery else {
+                continue;
+            };
+            let dal_core::UpdateKind::Notice(notice) = &update.kind else {
+                continue;
+            };
+            seen.push(notice.kind.to_string());
+            if notice.kind.as_ref() == kind {
+                break;
+            }
+        }
+        seen
+    })
+    .await
+    .expect("the awaited notice arrives in time")
+}
+
+/// Seeds `records`, runs one warm turn on a registered model that reports
+/// `input_tokens` of context, compacts manually, and waits for a notice of
+/// kind `until`.
+async fn recompact(records: Vec<Record>, input_tokens: u64, until: &str) -> Recompacted {
+    assert_eq!(
+        dal_core::estimate_text_tokens(&replacement()),
+        REPLACEMENT_TOKENS,
+        "the replacement costs what the premises below assume"
+    );
+    let covered = Arc::new(Mutex::new(Covered::default()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let extension = ExtensionBuilder::new("recompact", "0.1.0", ServiceSet::EMPTY)
+        .expect("extension builder")
+        .compactor("replace", Arc::new(ReplaceCompactor(Arc::clone(&covered))))
+        .model(ModelRecord {
+            id: ModelId::parse(MODEL).expect("model id"),
+            caps: Caps {
+                context_window: Some(100_000),
+                thinking: Box::new([ThinkingLevel::Off]),
+                tool_use: true,
+                image_input: true,
+                custom_grammar: false,
+            },
+            handler: Arc::new(Recorder {
+                requests: Arc::clone(&requests),
+                input_tokens,
+            }),
+            export: None,
+        })
+        .build()
+        .expect("recompact extension");
+    let (temp, agent, host, session) = seeded_host(records, None, MODEL, extension).await;
+    let subscription = agent.subscribe(None).expect("subscribe");
+    let mut run = Recompacted {
+        _temp: temp,
+        agent,
+        host,
+        session,
+        subscription,
+        covered: Covered::default(),
+        requests,
+        notices: Vec::new(),
+    };
+    run.prompt("warm").await;
+    run.agent
+        .submit(Command::Compact { focus: None })
+        .await
+        .expect("manual compaction is accepted");
+    run.notices = notices_until(&mut run.subscription, until).await;
+    run.covered = covered
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    run
+}
+
+/// The seeded compaction's page and the entry it replaced no longer count as
+/// context once a second compaction supersedes the page, so the replacement
+/// shrinks it and is committed. Counting the covered entries alone, the old
+/// accounting saw them pay less than the replacement and rejected it.
+#[tokio::test]
+async fn a_second_compaction_superseding_a_page_commits_and_replaces_it_in_the_next_request() {
+    let records = vec![
+        user(1, None, vec![marked('b', 100)]),
+        user(2, Some(entry(1)), vec![marked('c', 100)]),
+        paged_compaction(3, 2, 2, 3_000),
+        user(4, Some(entry(3)), vec![marked('d', 100)]),
+    ];
+    let mut run = recompact(records, 40_000, "compaction_ended").await;
+    assert_eq!(
+        run.covered.ids(),
+        [entry(1), entry(2), entry(4)],
+        "the cut passes the compaction and still covers the path from the root"
+    );
+    assert_eq!(run.covered.calls, 1, "the compactor ran once");
+    assert!(
+        run.covered.total() < REPLACEMENT_TOKENS,
+        "the covered entries alone do not pay for the replacement"
+    );
+    assert_eq!(
+        run.compactions(),
+        [None, Some(replacement().into_boxed_str())],
+        "the second compaction is committed"
+    );
+
+    run.prompt("follow up").await;
+    assert_eq!(
+        run.last_request_texts(),
+        [replacement().as_str(), "warm", "ok", "follow up"],
+        "the next request carries the replacement and the kept exchange, and neither \
+         the superseded page nor the entries before the cut"
+    );
+    run.close().await;
+}
+
+/// A cut that stops at the first compaction's own kept entry covers only what
+/// that compaction already replaced. Nothing leaves the live context, so any
+/// replacement would only add to it: the driver refuses before it runs a
+/// compactor, and the journal keeps its one compaction.
+///
+/// The replaced entry alone is larger than the replacement, so counting it as
+/// removed would make the replacement look shrinking, commit it, and fail the
+/// journal assertion below.
+#[tokio::test]
+async fn a_second_compaction_that_covers_only_already_replaced_entries_is_rejected() {
+    let replaced = marked('b', 14_000);
+    let JournalPart::Text { text } = &replaced else {
+        unreachable!("`marked` builds inline text");
+    };
+    assert!(
+        dal_core::estimate_text_tokens(text) > REPLACEMENT_TOKENS,
+        "counted as removed, the replaced entry alone would pay for the replacement"
+    );
+    let records = vec![
+        user(1, None, vec![replaced]),
+        user(2, Some(entry(1)), vec![marked('c', 14_000); 6]),
+        paged_compaction(3, 2, 2, 100),
+        user(4, Some(entry(3)), vec![marked('d', 100)]),
+    ];
+    let run = recompact(records, 15_000, "compact.manual_failed").await;
+    assert_eq!(
+        run.covered.calls, 0,
+        "no compactor runs when nothing live precedes the cut"
+    );
+    assert_eq!(
+        run.request_count(),
+        1,
+        "only the warm turn reached the model"
+    );
+    assert!(
+        run.notices
+            .iter()
+            .any(|kind| kind == "compact.manual_failed"),
+        "the manual compaction reports its failure: {:?}",
+        run.notices
+    );
+    assert_eq!(
+        run.compactions(),
+        [None],
+        "no compaction is added to the journal"
+    );
+    run.close().await;
 }

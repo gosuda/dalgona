@@ -23,17 +23,15 @@ mod pty;
     reason = "gate support helpers are shared across independent test targets"
 )]
 mod support;
-#[path = "support/vt.rs"]
-mod vt;
 
 use std::{
     error::Error,
     time::{Duration, Instant},
 };
 
+use pty::vt::FollowedScreen;
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture, shell_quote};
 use support::TestDir;
-use vt::FollowedScreen;
 
 const SPAWN: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(400);
@@ -276,6 +274,7 @@ fn approval_dialog_ignores_garbage_keystrokes() -> TestResult {
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"run the command\r")?;
     wait_for_armed_approval(&mut terminal, &mut screen)?;
+
     terminal.write(b"\xff\x00\x08\x7f\x1b[A\x1b[Bx\x0b\x0c")?;
     terminal.collect_for(SETTLE)?;
     assert!(
@@ -335,6 +334,7 @@ fn keys_typed_as_an_approval_opens_never_answer_it() -> TestResult {
     );
 
     wait_for_armed_approval(&mut terminal, &mut screen)?;
+
     terminal.collect_for(SETTLE)?;
     assert!(
         !marker.exists(),
@@ -367,6 +367,7 @@ fn input_during_working_turn_stays_sane() -> TestResult {
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"go\r")?;
     wait_for_armed_approval(&mut terminal, &mut screen)?;
+
     terminal.write(b"y")?;
     terminal.wait_until("the held command to start", SPAWN, |_| started.exists())?;
     wait_for_closed_approval(&mut terminal, &mut screen)?;
@@ -376,8 +377,8 @@ fn input_during_working_turn_stays_sane() -> TestResult {
             screen.shows(output, "queued text")
         })
         .map_err(|error| format!("{error}\nscreen:\n{}", screen.visible()))?;
-    terminal.write(b"\x1b[A\x1b[B\x1b[Z\x05\x19")?;
     std::fs::write(&release, b"")?;
+    terminal.write(b"\x1b[A\x1b[B\x1b[Z\x05\x19")?;
     terminal.wait_for(b"turn finished", SPAWN)?;
     quit_cleanly(&mut terminal)?;
     assert!(started.exists(), "the approved command must have run");

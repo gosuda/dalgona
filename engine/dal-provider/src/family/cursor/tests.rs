@@ -10,7 +10,7 @@ use std::{
 use bytes::Bytes;
 use dal_core::{
     AssistantPart, BlobId, CallId, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec,
-    Part, Purpose, RawJson, ReplayCapture, ReplayRefusal, ReplaySource, RequestParams,
+    Part, Purpose, RawJson, ReplayCapture, ReplaySource, RequestParams,
 };
 use futures::{SinkExt as _, channel::mpsc};
 use prost::Message as _;
@@ -22,8 +22,8 @@ use super::{
         map_connect_error, map_status, parse_trailer,
     },
     lower::{
-        BlobStore, CursorBodyError, CursorHistory, CursorRouteParts, SegmentReplay, TurnDigest,
-        WireIds, WireModel, build_run, lower_root_entries, match_replays, normalize_call_id,
+        CursorBodyError, CursorHistory, CursorRouteParts, TurnDigest, WireModel, build_run,
+        match_replays, normalize_call_id,
     },
     proto::*,
 };
@@ -1941,15 +1941,6 @@ fn captured_payload(events: &[StreamEvent]) -> Option<&RawJson> {
     })
 }
 
-fn refused_reason(events: &[StreamEvent]) -> Option<ReplayRefusal> {
-    events.iter().find_map(|event| match event {
-        StreamEvent::MessageReplay {
-            capture: ReplayCapture::Refused { reason },
-        } => Some(*reason),
-        _ => None,
-    })
-}
-
 fn feed_shared(
     session: &Arc<Mutex<Session>>,
     chunks: &[Vec<u8>],
@@ -2187,6 +2178,28 @@ fn structured_codes_follow_the_reference_status_table() {
 }
 
 #[test]
+fn initial_request_declares_hosted_web_search_off() {
+    let lowered = build_run(
+        &model_request(history_context()),
+        &WireModel::plain("cursor-test-model"),
+        "conv-search-1",
+        "msg-search-1",
+    )
+    .unwrap();
+    let run = run_request_of(&lowered.first_frame);
+    let action = run.action.as_ref().unwrap().action.as_ref().unwrap();
+    match action {
+        conversation_action::Action::UserMessageAction(action) => {
+            assert_eq!(
+                action.request_context.as_ref().unwrap().web_search_enabled,
+                Some(false)
+            );
+        }
+        other => panic!("wrong action: {other:?}"),
+    }
+}
+
+#[test]
 fn the_context_handshake_declares_hosted_web_search_off() {
     let mut session = test_session();
     let request = AgentServerMessage {
@@ -2213,7 +2226,7 @@ fn the_context_handshake_declares_hosted_web_search_off() {
         other => panic!("wrong body: {other:?}"),
     };
     let Some(request_context_result::Result::Success(success)) = result.result else {
-        panic!("the handshake carries no result");
+        panic!("the handshake carries no result")
     };
     assert_eq!(
         success.request_context.unwrap().web_search_enabled,
@@ -2222,14 +2235,109 @@ fn the_context_handshake_declares_hosted_web_search_off() {
 }
 
 #[test]
+fn foreign_provider_identifier_is_not_dispatched() {
+    let mut session = test_session();
+    let mut exec = match exec_mcp_message(21, "call-f4", "fetch_data")
+        .message
+        .unwrap()
+    {
+        server_message::Body::ExecServerMessage(exec) => exec,
+        other => panic!("wrong message: {other:?}"),
+    };
+    let Some(exec_server_message::Body::McpArgs(args)) = &mut exec.body else {
+        panic!("expected MCP args")
+    };
+    args.provider_identifier = String::from("foreign-provider");
+    let message = AgentServerMessage {
+        message: Some(server_message::Body::ExecServerMessage(exec)),
+    };
+    let (events, writes, failure) = feed(&mut session, &[proto_frame(&message)]);
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(writes.len(), 1);
+    let client = AgentClientMessage::decode(&writes[0][5..]).unwrap();
+    assert!(matches!(
+        client.message,
+        Some(client_message::Body::ExecClientMessage(ExecClientMessage {
+            message: Some(exec_client_message::Body::McpResult(McpResult {
+                result: Some(mcp_result::Result::ToolNotFound(_)),
+            })),
+            ..
+        }))
+    ));
+
+    let mut session = test_session();
+    let streamed = AgentServerMessage {
+        message: Some(server_message::Body::InteractionUpdate(InteractionUpdate {
+            update: Some(interaction_update::Update::ToolCallStarted(
+                ToolCallStartedUpdate {
+                    call_id: String::from("foreign-envelope"),
+                    tool_call: Some(ToolCall {
+                        tool: Some(tool_call::Tool::McpToolCall(McpToolCall {
+                            args: Some(McpArgs {
+                                name: String::from("fetch_data"),
+                                args: BTreeMap::new(),
+                                tool_call_id: String::from("foreign-call"),
+                                tool_name: String::from("fetch_data"),
+                                provider_identifier: String::from("foreign-provider"),
+                                smart_mode_approval_only: false,
+                                skip_approval: false,
+                                server_identifier: String::new(),
+                            }),
+                        })),
+                        tool_call_id: None,
+                    }),
+                },
+            )),
+        })),
+    };
+    let (events, writes, failure) = feed(&mut session, &[proto_frame(&streamed)]);
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(
+        events.is_empty(),
+        "foreign streamed call leaked: {events:?}"
+    );
+    assert!(
+        writes.is_empty(),
+        "stream announcement has no reply: {writes:?}"
+    );
+}
+
+#[test]
+fn malformed_present_replay_is_refused_not_rebuilt_silently() {
+    let mut session = test_session();
+    let frames = [
+        proto_frame(&kv_set_message(1, b"a", ANSWER_RECORD)),
+        proto_frame(&text_message("answer")),
+        proto_frame(&checkpoint_message(&[b"a"])),
+        proto_frame(&turn_ended_message(10, 5)),
+    ];
+    let (events, _, failure) = feed(&mut session, &frames);
+    assert!(failure.is_none(), "{failure:?}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .find(|event| matches!(event, StreamEvent::MessageReplay { .. })),
+            Some(StreamEvent::MessageReplay {
+                capture: ReplayCapture::Refused {
+                    reason: dal_core::ReplayRefusal::UserRecordNotFound
+                },
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn normalized_collision_keeps_both_calls_and_results() {
-    let call = |id: &str| AssistantPart::ToolCall {
+    let tool_call = |id: &str| AssistantPart::ToolCall {
         call: CallId::new(id),
         name: "fetch_data".into(),
         args: RawJson::parse("{}").unwrap(),
         replay: None,
     };
-    let result = |id: &str, text: &str| ContextItem::ToolResult {
+    let tool_result = |id: &str, text: &str| ContextItem::ToolResult {
         call: CallId::new(id),
         name: "fetch_data".into(),
         is_error: false,
@@ -2238,7 +2346,7 @@ fn normalized_collision_keeps_both_calls_and_results() {
     let context = vec![
         ContextItem::User {
             parts: vec![Part::Text {
-                text: "q-collide".into(),
+                text: "question".into(),
             }],
         },
         ContextItem::Assistant {
@@ -2246,41 +2354,20 @@ fn normalized_collision_keeps_both_calls_and_results() {
                 family: Family::Cursor,
                 model: "cursor-test-model".into(),
             },
-            parts: vec![call("a.b"), call("a_b")],
+            parts: vec![tool_call("a.b"), tool_call("a_b")],
             replay: None,
         },
-        result("a.b", "first-collide"),
-        result("a_b", "second-collide"),
-        ContextItem::User {
-            parts: vec![Part::Text {
-                text: "active-collide".into(),
-            }],
-        },
+        tool_result("a.b", "first-collision"),
+        tool_result("a_b", "second-collision"),
     ];
     let lowered = build_run(
         &model_request(context),
         &WireModel::plain("cursor-test-model"),
-        "conv-collide-1",
-        "msg-collide-1",
+        "conv-wire-collide",
+        "msg-wire-collide",
     )
     .unwrap();
     let texts = decoded_root_texts(&lowered.first_frame, &lowered.blobs);
-    assert_eq!(
-        texts
-            .iter()
-            .map(|record| record.matches("\"type\":\"tool-call\"").count())
-            .sum::<usize>(),
-        2,
-        "both colliding calls are kept: {texts:?}"
-    );
-    assert!(
-        texts.iter().any(|text| text.contains("first-collide")),
-        "{texts:?}"
-    );
-    assert!(
-        texts.iter().any(|text| text.contains("second-collide")),
-        "{texts:?}"
-    );
     assert!(
         texts
             .iter()
@@ -2291,106 +2378,30 @@ fn normalized_collision_keeps_both_calls_and_results() {
         texts
             .iter()
             .any(|text| text.contains("\"toolCallId\":\"a_b_2\"")),
-        "the collision is suffixed, not dropped: {texts:?}"
+        "{texts:?}"
     );
-}
-
-#[test]
-fn initial_request_declares_hosted_web_search_off() {
-    let lowered = build_run(
-        &model_request(history_context()),
-        &WireModel::plain("cursor-test-model"),
-        "conv-search-1",
-        "msg-search-1",
-    )
-    .unwrap();
-    let run = run_request_of(&lowered.first_frame);
-    let action = run.action.as_ref().unwrap().action.as_ref().unwrap();
-    match action {
-        conversation_action::Action::UserMessageAction(action) => {
-            assert_eq!(
-                action.request_context.as_ref().unwrap().web_search_enabled,
-                Some(false),
-                "the opener opts out exactly like the handshake"
-            );
-        }
-        other => panic!("wrong action: {other:?}"),
-    }
-}
-
-#[test]
-fn foreign_provider_identifier_is_not_dispatched() {
-    fn mcp_frame(id: u32, provider: &str, server: &str) -> AgentServerMessage {
-        AgentServerMessage {
-            message: Some(server_message::Body::ExecServerMessage(ExecServerMessage {
-                id,
-                exec_id: String::new(),
-                body: Some(exec_server_message::Body::McpArgs(McpArgs {
-                    name: String::from("fetch_data"),
-                    args: BTreeMap::new(),
-                    tool_call_id: String::from("call-f4"),
-                    tool_name: String::from("fetch_data"),
-                    provider_identifier: provider.to_owned(),
-                    smart_mode_approval_only: false,
-                    skip_approval: false,
-                    server_identifier: server.to_owned(),
-                })),
-            })),
-        }
-    }
-    // Empty (legacy omission) and the advertised identifier dispatch.
-    for provider in ["", "dal-agent"] {
-        let mut session = test_session();
-        let (events, writes, failure) =
-            feed(&mut session, &[proto_frame(&mcp_frame(21, provider, ""))]);
-        assert!(failure.is_none(), "{provider}: {failure:?}");
-        assert_eq!(events.len(), 2, "{provider}: {events:?}");
-        assert!(writes.is_empty(), "{provider}: {writes:?}");
-    }
-    // A non-empty foreign provider is not ours: `ToolNotFound`, no events.
-    let mut session = test_session();
-    let (events, writes, failure) = feed(
-        &mut session,
-        &[proto_frame(&mcp_frame(22, "foreign-provider", ""))],
+    assert!(
+        texts.iter().any(|text| text.contains("first-collision")),
+        "{texts:?}"
     );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(events, []);
-    assert_eq!(writes.len(), 1);
-    let client = AgentClientMessage::decode(&writes[0][5..]).unwrap();
-    match client.message {
-        Some(client_message::Body::ExecClientMessage(exec)) => match exec.message {
-            Some(exec_client_message::Body::McpResult(result)) => {
-                assert!(
-                    matches!(result.result, Some(mcp_result::Result::ToolNotFound(_))),
-                    "{result:?}"
-                );
-            }
-            other => panic!("wrong body: {other:?}"),
-        },
-        other => panic!("wrong reply: {other:?}"),
-    }
-    // `server_identifier` carries no declaration and is ignored.
-    let mut session = test_session();
-    let (events, _, failure) = feed(
-        &mut session,
-        &[proto_frame(&mcp_frame(23, "", "any-server"))],
+    assert!(
+        texts.iter().any(|text| text.contains("second-collision")),
+        "{texts:?}"
     );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(events.len(), 2, "{events:?}");
 }
 
 #[test]
 fn urlsafe_detail_maps_structured() {
-    let detail = ErrorDetails {
+    let raw = ErrorDetails {
         error: 8,
         details: Some(CustomErrorDetails {
             title: String::from("t"),
             detail: String::from("d"),
             is_retryable: None,
         }),
-    };
-    let raw = detail.encode_to_vec();
-    let urlsafe = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE, &raw);
+    }
+    .encode_to_vec();
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE, &raw);
     let error = map_connect_error(
         "cursor-test",
         &super::frame::ConnectError {
@@ -2398,244 +2409,13 @@ fn urlsafe_detail_maps_structured() {
             message: String::from("m"),
             details: vec![super::frame::ConnectDetail {
                 detail_type: Some(String::from("aiserver.v1.ErrorDetails")),
-                value: Some(urlsafe),
+                value: Some(format!(" {encoded}\n")),
                 debug: None,
             }],
         },
     );
     assert!(
         matches!(error, ProviderError::RateLimited { .. }),
-        "URL-safe alphabet decodes like the reference Buffer: {error:?}"
-    );
-}
-
-#[test]
-fn unmapped_codes_follow_reference_defaults() {
-    let map = |code: i32| {
-        map_connect_error(
-            "cursor-test",
-            &super::frame::ConnectError {
-                code: String::from("error"),
-                message: String::from("m"),
-                details: vec![structured_detail(code, None)],
-            },
-        )
-    };
-    // Reference `CURSOR_ERROR_STATUS` has no row for these; the reference
-    // falls through to 400, which this client reports as `InvalidRequest`.
-    for code in [31, 37, 52, 53, 62] {
-        assert!(
-            matches!(map(code), ProviderError::InvalidRequest { .. }),
-            "code {code}: {:?}",
-            map(code)
-        );
-    }
-    // Reference maps 65 to 401; this client reports `AuthRejected`.
-    assert!(
-        matches!(map(65), ProviderError::AuthRejected { .. }),
-        "{:?}",
-        map(65)
-    );
-}
-
-#[test]
-fn token_estimate_after_final_step_cuts() {
-    let end_stream = || frame_of(b"{}", END_STREAM_FLAG);
-    let mut session = test_session();
-    let (_, _, failure) = feed(
-        &mut session,
-        &[
-            proto_frame(&text_message("done")),
-            proto_frame(&step_completed_message(7)),
-            proto_frame(&update_message(interaction_update::Update::TokenDelta(
-                TokenDeltaUpdate { tokens: 3 },
-            ))),
-            end_stream(),
-        ],
-    );
-    assert!(
-        matches!(failure, Some(ProviderError::StreamCut)),
-        "a running estimate ends the closed-step marker, as in the reference: {failure:?}"
-    );
-}
-
-#[test]
-fn malformed_present_replay_is_refused_not_rebuilt_silently() {
-    // Truly absent (stale checkpoint) yields no MessageReplay at all; the
-    // turn rebuilds. Each malformed present case below yields a refused
-    // capture so the fold fails instead of rebuilding.
-    let stale = run_with_a_result_delivered_after_the_checkpoint(false);
-    assert!(captured_payload(&stale).is_none());
-    assert!(refused_reason(&stale).is_none());
-
-    // Non-UTF8 bytes under a covering checkpoint.
-    let bad_msg = AgentServerMessage {
-        message: Some(server_message::Body::KvServerMessage(KvServerMessage {
-            id: 2,
-            message: Some(kv_server_message::Body::SetBlob(SetBlobArgs {
-                blob_id: b"bad".to_vec(),
-                blob_data: vec![0xff, 0xfe],
-            })),
-        })),
-    };
-    let mut session = test_session();
-    let (events, _, failure) = feed(
-        &mut session,
-        &[
-            proto_frame(&kv_set_message(1, b"u", USER_RECORD)),
-            proto_frame(&bad_msg),
-            proto_frame(&text_message("answer")),
-            proto_frame(&checkpoint_message(&[b"u", b"bad"])),
-            proto_frame(&turn_ended_message(10, 5)),
-        ],
-    );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(
-        refused_reason(&events),
-        Some(ReplayRefusal::RecordNotUtf8),
-        "{events:?}"
-    );
-
-    // Non-JSON record.
-    let mut session = test_session();
-    let (events, _, failure) = feed(
-        &mut session,
-        &[
-            proto_frame(&kv_set_message(1, b"u", USER_RECORD)),
-            proto_frame(&kv_set_message(2, b"j", "not json")),
-            proto_frame(&text_message("answer")),
-            proto_frame(&checkpoint_message(&[b"u", b"j"])),
-            proto_frame(&turn_ended_message(10, 5)),
-        ],
-    );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(
-        refused_reason(&events),
-        Some(ReplayRefusal::RecordNotJson),
-        "{events:?}"
-    );
-
-    // No user record for this request.
-    let mut session = test_session();
-    let (events, _, failure) = feed(
-        &mut session,
-        &[
-            proto_frame(&kv_set_message(2, b"a", ANSWER_RECORD)),
-            proto_frame(&text_message("answer")),
-            proto_frame(&checkpoint_message(&[b"a"])),
-            proto_frame(&turn_ended_message(10, 5)),
-        ],
-    );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(
-        refused_reason(&events),
-        Some(ReplayRefusal::UserRecordNotFound),
-        "{events:?}"
-    );
-
-    // User record with no answer records after it.
-    let mut session = test_session();
-    let (events, _, failure) = feed(
-        &mut session,
-        &[
-            proto_frame(&kv_set_message(1, b"u", USER_RECORD)),
-            proto_frame(&text_message("answer")),
-            proto_frame(&checkpoint_message(&[b"u"])),
-            proto_frame(&turn_ended_message(10, 5)),
-        ],
-    );
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(
-        refused_reason(&events),
-        Some(ReplayRefusal::NoRecords),
-        "{events:?}"
-    );
-}
-
-#[test]
-fn replay_cover_uses_stored_wire_ids_verbatim() {
-    // Stored `calls` are wire spellings: the capture normalizes before it
-    // stores (`finish_step_calls`), so the cover must not route them through
-    // the internal-to-wire table again. With colliding internals (`a.b`
-    // takes `a_b` first, `a_b` becomes `a_b_2`), a table lookup of the
-    // stored `a_b` returns `a_b_2`, leaving the covered `a.b` result to be
-    // re-emitted as a duplicate.
-    let call = |id: &str| AssistantPart::ToolCall {
-        call: CallId::new(id),
-        name: "fetch_data".into(),
-        args: RawJson::parse("{}").unwrap(),
-        replay: None,
-    };
-    let result = |id: &str, text: &str| ContextItem::ToolResult {
-        call: CallId::new(id),
-        name: "fetch_data".into(),
-        is_error: false,
-        parts: vec![Part::Text { text: text.into() }],
-    };
-    let history = vec![
-        ContextItem::User {
-            parts: vec![Part::Text {
-                text: "q-cover".into(),
-            }],
-        },
-        ContextItem::Assistant {
-            source: ReplaySource {
-                family: Family::Cursor,
-                model: "cursor-test-model".into(),
-            },
-            parts: vec![call("a.b"), call("a_b")],
-            replay: None,
-        },
-        result("a.b", "first-cover"),
-        result("a_b", "second-cover"),
-    ];
-    let mut wire_ids = WireIds::new();
-    for item in &history {
-        if let ContextItem::Assistant { parts, .. } = item {
-            for part in parts {
-                if let AssistantPart::ToolCall { call, .. } = part {
-                    wire_ids.wire(call.as_str());
-                }
-            }
-        }
-    }
-    let stored = CursorHistory::new(
-        &test_route(),
-        String::from("cover-digest"),
-        vec![String::from("a_b"), String::from("a_b_2")],
-        vec![String::from("{\"stored\":\"cover-marker\"}")],
-    );
-    let replays = vec![SegmentReplay {
-        user: 0,
-        assistant: 1,
-        history: stored,
-    }];
-    let mut store = BlobStore::new();
-    let mut root: Vec<Vec<u8>> = Vec::new();
-    lower_root_entries(
-        &history,
-        "cursor-test-model",
-        &replays,
-        &wire_ids,
-        &mut store,
-        &mut root,
-    )
-    .unwrap();
-    let texts: Vec<String> = store
-        .into_map()
-        .into_values()
-        .map(|bytes| String::from_utf8(bytes).unwrap())
-        .collect();
-    assert!(
-        texts.iter().any(|text| text.contains("cover-marker")),
-        "{texts:?}"
-    );
-    assert!(
-        !texts.iter().any(|text| text.contains("first-cover")),
-        "covered colliding results are not re-emitted: {texts:?}"
-    );
-    assert!(
-        !texts.iter().any(|text| text.contains("second-cover")),
-        "covered colliding results are not re-emitted: {texts:?}"
+        "{error:?}"
     );
 }

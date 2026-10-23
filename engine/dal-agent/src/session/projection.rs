@@ -75,7 +75,7 @@ impl Projection {
                 approval,
                 mode,
                 name: None,
-                scoped_models: None,
+                scoped_models: Vec::new(),
             },
             usage: UsageView {
                 usage: Usage {
@@ -84,8 +84,8 @@ impl Projection {
                     output_tokens: 0,
                     reasoning_tokens: None,
                     cache_write_tokens: 0,
-                    premium_requests: None,
                     cost_usd: None,
+                    premium_requests: None,
                 },
                 context_tokens: 0,
                 context_window: 0,
@@ -145,16 +145,7 @@ impl Projection {
                 }
             }
             UpdateKind::Settings(settings) => {
-                // Scope merge: the fold always emits `scoped_models: None`
-                // (keep-existing); only the driver's authoritative
-                // publication carries `Some` (replace, possibly empty on
-                // clear). Catalog gaps never reach here: scope is stored
-                // verbatim and never intersected with the catalog.
-                let mut next_settings = settings.clone();
-                if next_settings.scoped_models.is_none() {
-                    next_settings.scoped_models = self.settings.scoped_models.take();
-                }
-                self.settings = next_settings;
+                self.settings = settings.clone();
             }
             UpdateKind::Usage(usage) => {
                 self.usage = usage.clone();
@@ -201,18 +192,8 @@ impl Projection {
         self.auto_compaction = auto;
     }
 
-    /// Records the authoritative scope committed by `SetScopedModels` and
-    /// returns the settings view carrying it for publication. The driver
-    /// is the single writer; the fold only ever emits `None`.
-    pub(crate) fn set_scope(&mut self, scope: Vec<Box<str>>) -> SettingsView {
-        self.settings.scoped_models = Some(scope);
-        self.settings.clone()
-    }
-
-    /// The effective settings the projection holds: the last settings
-    /// update with the committed scope merged in. This is exactly what a
-    /// snapshot reports, so a published settings update that carries it
-    /// leaves every subscriber agreeing with a fresh view.
+    /// The effective settings for publication: the projection's current
+    /// settings, returned unchanged.
     pub(crate) fn effective_settings(&self) -> SettingsView {
         self.settings.clone()
     }
@@ -355,8 +336,15 @@ fn entry_bytes(entry: &EntryView) -> usize {
         EntryKind::User { parts } | EntryKind::ToolResult { parts, .. } => {
             parts.iter().map(part_bytes).sum::<usize>()
         }
-        EntryKind::Assistant { model, content, .. } => {
-            model.len() + content.iter().map(block_bytes).sum::<usize>()
+        EntryKind::Assistant {
+            model,
+            content,
+            replay,
+            ..
+        } => {
+            model.len()
+                + content.iter().map(block_bytes).sum::<usize>()
+                + replay.as_ref().map_or(0, |json| json.as_str().len())
         }
         EntryKind::Reminder { source, text } => source.len() + text.len(),
         EntryKind::Model { route } => match route {
@@ -416,15 +404,98 @@ mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
 
     use dal_core::{
-        ApprovalMode, Entry, EntryId, EntryKind, EntryView, Family, Gen, JournalPart, Mode,
-        ModelRoute, PageReq, Record, Session, SessionId, Settings, ThinkingLevel, Timestamp,
-        TreeDelta, UpdateKind, Workspace,
+        ApprovalMode, AssistantStop, Block, Entry, EntryId, EntryKind, EntryView, Family, Gen,
+        JournalPart, Mode, ModelRoute, PageReq, RawJson, Record, Session, SessionId, Settings,
+        ThinkingLevel, Timestamp, TreeDelta, UpdateKind, Usage, Workspace,
     };
 
     use super::{Projection, SnapshotArgs};
 
     fn entry_id(value: u64) -> EntryId {
         EntryId::new(NonZeroU64::new(value).expect("fixture id is nonzero"))
+    }
+
+    #[test]
+    fn assistant_entry_replay_counts_against_the_page_byte_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Each entry carries one short text block and a large entry-level
+        // replay: only the entry-level payload can push two of them past the
+        // page byte cap.
+        let replay = RawJson::parse(&format!("\"{}\"", "r".repeat(150_000)))?;
+        let entries = (1..=2)
+            .map(|value| EntryView {
+                id: entry_id(value),
+                parent: (value > 1).then(|| entry_id(value - 1)),
+                kind: EntryKind::Assistant {
+                    api: Family::Responses,
+                    model: "test-model".into(),
+                    content: vec![Block::Text {
+                        text: "short".into(),
+                        replay: None,
+                    }],
+                    usage: Usage {
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_tokens: None,
+                        cache_write_tokens: 0,
+                        cost_usd: None,
+                        premium_requests: None,
+                    },
+                    stop: AssistantStop::Done,
+                    route: None,
+                    replay: Some(replay.clone()),
+                },
+            })
+            .collect::<Vec<_>>();
+        let mut projection =
+            Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+        projection.apply(&UpdateKind::Tree(TreeDelta {
+            added: entries,
+            leaf: Some(entry_id(2)),
+        }));
+        let root = tempfile::tempdir()?;
+        let workspace = Workspace::new(root.path().to_path_buf())?;
+        let session = SessionId::parse("018f0f62-3b00-7000-8000-000000000001")
+            .expect("fixture session id is valid");
+        let limit = NonZeroU32::new(PageReq::MAX_LIMIT).expect("page limit is nonzero");
+        let page = |before| {
+            projection
+                .snapshot(SnapshotArgs {
+                    generation: Gen::new(NonZeroU64::MIN),
+                    id: session,
+                    workspace: workspace.clone(),
+                    open: Vec::new(),
+                    updated_at: Timestamp::now(),
+                    created_at: None,
+                    archived: None,
+                    page: PageReq { limit, before },
+                })
+                .entries
+        };
+
+        let newest = page(None);
+        let newest_ids = newest
+            .items
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            newest_ids,
+            [entry_id(2).to_string()],
+            "two 150 kB replays exceed the page byte cap"
+        );
+        assert_eq!(newest.next_before, Some(entry_id(2)));
+
+        let oldest = page(newest.next_before);
+        let oldest_ids = oldest
+            .items
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(oldest_ids, [entry_id(1).to_string()]);
+        assert_eq!(oldest.next_before, None);
+        Ok(())
     }
 
     #[test]

@@ -175,7 +175,7 @@ impl Judge {
             model,
             model_id,
             services,
-            caller,
+            caller: caller.without_continuation(),
             calls: Mutex::new(CallState::default()),
         });
         let mut sessions = lock(judge_sessions());

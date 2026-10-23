@@ -81,6 +81,8 @@ impl Transport {
 impl Transport {
     /// Reads the next complete frame.
     ///
+    /// Cancel safe: a read that is dropped before it completes loses no input.
+    ///
     /// # Errors
     ///
     /// Returns [`ReadFrameError`] when the input ends, a frame exceeds the limit,
@@ -279,12 +281,18 @@ type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
 pub(crate) type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// A line-framed transport over separate asynchronous reader and writer handles.
+///
+/// `read_frame` is cancel safe: the serve loops poll it beside other events
+/// and drop it whenever one of those fires. The bytes of a line that is only
+/// partly received live on the transport, so a dropped read resumes the same
+/// line instead of losing its head.
 pub(crate) struct LineTransport {
     reader: BufReader<BoxRead>,
-    partial: Vec<u8>,
     writer: FrameWriter,
     closed: Arc<AtomicBool>,
     eof: bool,
+    /// The line being assembled, without its LF.
+    line: Vec<u8>,
 }
 
 impl LineTransport {
@@ -296,13 +304,17 @@ impl LineTransport {
         let closed = Arc::new(AtomicBool::new(false));
         Self {
             reader: BufReader::new(Box::new(reader)),
-            partial: Vec::new(),
             writer: FrameWriter::new(Box::new(writer), Arc::clone(&closed)),
             closed,
             eof: false,
+            line: Vec::new(),
         }
     }
 
+    /// Reads the next complete frame.
+    ///
+    /// Cancel safe: dropping the future between chunks keeps the received
+    /// part of the line for the next call.
     async fn read_frame(&mut self) -> Result<String, ReadFrameError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ReadFrameError::Closed);
@@ -311,47 +323,8 @@ impl LineTransport {
             return Err(ReadFrameError::EndOfInput);
         }
         loop {
-            let mut reached_eof = false;
-            loop {
-                let available = match self.reader.fill_buf().await {
-                    Ok(available) => available,
-                    Err(error) => {
-                        self.closed.store(true, Ordering::Release);
-                        tracing::debug!(%error, "transport read failed");
-                        return Err(ReadFrameError::Closed);
-                    }
-                };
-                if available.is_empty() {
-                    self.eof = true;
-                    reached_eof = true;
-                    break;
-                }
-
-                if let Some(end) = available.iter().position(|byte| *byte == b'\n') {
-                    if self.partial.len().saturating_add(end) > MAX_FRAME_BYTES {
-                        self.reader.consume(end + 1);
-                        self.partial = Vec::new();
-                        self.closed.store(true, Ordering::Release);
-                        return Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES));
-                    }
-                    self.partial.extend_from_slice(&available[..end]);
-                    self.reader.consume(end + 1);
-                    break;
-                }
-
-                if self.partial.len().saturating_add(available.len()) > MAX_FRAME_BYTES {
-                    let len = available.len();
-                    self.reader.consume(len);
-                    self.partial = Vec::new();
-                    self.closed.store(true, Ordering::Release);
-                    return Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES));
-                }
-                let len = available.len();
-                self.partial.extend_from_slice(available);
-                self.reader.consume(len);
-            }
-
-            let mut frame = std::mem::take(&mut self.partial);
+            let reached_eof = self.fill_line().await?;
+            let mut frame = std::mem::take(&mut self.line);
             if frame.last() == Some(&b'\r') {
                 frame.pop();
             }
@@ -363,6 +336,46 @@ impl LineTransport {
             }
 
             return String::from_utf8(frame).map_err(|_| ReadFrameError::InvalidUtf8);
+        }
+    }
+
+    /// Appends input to [`Self::line`] up to the next LF, which it consumes
+    /// without storing, or up to the end of input.
+    ///
+    /// Returns true when the input ended instead. A line past the frame limit
+    /// closes the transport. The only suspension point is the buffered read,
+    /// which holds no bytes taken from the stream, so the future may be
+    /// dropped there.
+    async fn fill_line(&mut self) -> Result<bool, ReadFrameError> {
+        loop {
+            let available = match self.reader.fill_buf().await {
+                Ok(available) => available,
+                Err(error) => {
+                    self.closed.store(true, Ordering::Release);
+                    self.line = Vec::new();
+                    tracing::debug!(%error, "transport read failed");
+                    return Err(ReadFrameError::Closed);
+                }
+            };
+            if available.is_empty() {
+                self.eof = true;
+                return Ok(true);
+            }
+
+            let end = available.iter().position(|byte| *byte == b'\n');
+            let taken = end.unwrap_or(available.len());
+            if self.line.len().saturating_add(taken) > MAX_FRAME_BYTES {
+                let consumed = taken + usize::from(end.is_some());
+                self.reader.consume(consumed);
+                self.closed.store(true, Ordering::Release);
+                self.line = Vec::new();
+                return Err(ReadFrameError::FrameTooLarge(MAX_FRAME_BYTES));
+            }
+            self.line.extend_from_slice(&available[..taken]);
+            self.reader.consume(taken + usize::from(end.is_some()));
+            if end.is_some() {
+                return Ok(false);
+            }
         }
     }
 

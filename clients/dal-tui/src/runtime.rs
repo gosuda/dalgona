@@ -95,7 +95,7 @@ struct Session {
     popup_base: Option<String>,
     /// The draft the ring last wrote. Any user edit that diverges from this
     /// ends the ring, so the next Tab starts a fresh base instead of
-    /// resurrecting a stale one.
+    /// compounding the previous result.
     popup_last: String,
     /// The candidate the ring most recently accepted; the next Tab steps
     /// from here and wraps in both directions.
@@ -142,6 +142,15 @@ enum FrontRequest {
     StartKey {
         provider: Box<str>,
         key: SecretString,
+    },
+    /// Start one sign-in method: a `/login` picker per-method row, or the
+    /// method picker's choice. The API key still prompts for the key;
+    /// every other method starts its flow directly.
+    StartMethod {
+        /// The provider id.
+        provider: Box<str>,
+        /// The method to start.
+        method: Method,
     },
     /// Open the logout picker with the stored credentials.
     LogoutPicker(Box<str>),
@@ -206,6 +215,8 @@ impl Session {
     }
 
     fn update_popup(&mut self) {
+        // While a ring is live, any user edit diverges from the ring's own
+        // output: end the ring so the next Tab starts a fresh one.
         if self.popup_base.is_some() && self.composer.text() != self.popup_last {
             self.popup_base = None;
             self.popup_index = 0;
@@ -240,61 +251,6 @@ impl Session {
                         .push(format!("/{name} · {}", crate::width::escape(hint)));
                 }
             }
-        }
-    }
-
-    /// Tab: accepts the next candidate of the completion ring. A fresh ring
-    /// takes the top candidate; a live one steps on from the last accepted
-    /// candidate and wraps past the end.
-    fn complete_forward(&mut self) {
-        // A fresh ring has accepted nothing: it enters one step before the
-        // first candidate.
-        self.cycle_completion(crate::popup::cycle_next, |count| count - 1);
-    }
-
-    /// Shift+Tab: accepts the previous candidate of the completion ring. A
-    /// fresh ring takes the bottom candidate; a live one steps back from the
-    /// last accepted candidate and wraps past the start.
-    fn complete_backward(&mut self) {
-        // A fresh ring has accepted nothing: it enters one step after the
-        // last candidate, which is the seam before the first.
-        self.cycle_completion(crate::popup::cycle_prev, |_| 0);
-    }
-
-    /// Accepts one candidate of the ring into the base draft the ring
-    /// started from, so cycling never compounds prefixes. `fresh_from` gives
-    /// the position a fresh ring steps from, given the candidate count.
-    /// With no candidates Tab keeps its plain-text contract of two spaces.
-    /// A ring of one has nothing to cycle: accepting its only candidate ends
-    /// the ring, so the accepted draft completes as arguments again.
-    fn cycle_completion(
-        &mut self,
-        step: fn(&str, &[crate::popup::Candidate], usize) -> (usize, String),
-        fresh_from: fn(usize) -> usize,
-    ) {
-        let count = self.candidates.len();
-        if count == 0 {
-            self.popup_base = None;
-            self.popup_index = 0;
-            self.popup_last.clear();
-            self.composer.insert("  ");
-            return;
-        }
-        let (base, from) = match self.popup_base.take() {
-            Some(base) => (base, self.popup_index),
-            None => (self.composer.text().to_owned(), fresh_from(count)),
-        };
-        let (index, draft) = step(&base, &self.candidates, from);
-        self.composer.set(&draft);
-        if count == 1 {
-            // The args hint shows for the accepted command and a second Tab
-            // inserts its two spaces, as before the ring existed.
-            self.popup_index = 0;
-            self.popup_last.clear();
-        } else {
-            self.popup_base = Some(base);
-            self.popup_last = draft;
-            self.popup_index = index;
         }
     }
 
@@ -349,6 +305,12 @@ impl Session {
                 self.front.push(FrontRequest::StartKey {
                     provider: signin.provider().into(),
                     key: typed,
+                });
+            }
+            KeyAction::StartMethod(method) => {
+                self.front.push(FrontRequest::StartMethod {
+                    provider: signin.provider().into(),
+                    method,
                 });
             }
             KeyAction::RemoveAll => {
@@ -815,8 +777,9 @@ fn open_resume_target<H: TuiHost>(
 ///
 /// `run_loop` parked the caret on the last row of the live block with
 /// `Painter::rest_below_block`, so a leading CRLF steps below the block
-/// without moving to or erasing the top row (which can hold committed transcript
-/// or prior shell output) and leaves the caret ready for `write_exit`.
+/// without moving to or erasing the first terminal row (which can hold
+/// committed transcript or prior shell output) and leaves the caret ready
+/// for `write_exit`.
 fn cancel_active<A: TuiAgent>(
     opts: &TuiOptions,
     agent: &A,
@@ -1031,6 +994,7 @@ fn boot<A: TuiAgent>(
         columns: io.size().map_or(80, |(columns, _)| columns),
         branch,
         view,
+        view_arrived: true,
     };
     surfaces.dialog.resync(surfaces.view.open.clone());
     surfaces.live.seed_ext_status(&agent.ext_status());
@@ -1149,39 +1113,26 @@ where
     let mut resumed = None;
     let mut dialog_landed = false;
     loop {
-        if io.shutdown_code().is_some() {
+        let Some((events, term_width, term_height)) = poll_input(io, &mut decoder, &mut surfaces)?
+        else {
             break;
-        }
-        let bytes = io
-            .read(Duration::from_millis(33))
-            .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
-        if io.take_resize()
-            && let Ok((width, _)) = io.size()
-        {
-            surfaces.columns = width;
-        }
-        if io.shutdown_code().is_some() {
-            break;
-        }
-        let now = Instant::now();
-        let events = if bytes.is_empty() {
-            decoder.tick(now)
-        } else {
-            decoder.feed(&bytes, now)
         };
-        let (term_width, term_height) = io.size().unwrap_or((80, 24));
+        let now = Instant::now();
         for event in events {
             apply_event_at(
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: term_width,
+                    height: term_height,
+                },
                 event,
                 probe.kitty_keyboard,
-                opts.screen,
-                (term_width, term_height),
             );
         }
         surfaces.flush_answers(opts, agent);
@@ -1226,7 +1177,9 @@ where
         }
         surfaces.live.spin(now);
         dialog_landed = surfaces.paint(io, state, &mut painter, opts, &theme)?;
-        if !dialog_landed {
+        if !dialog_landed
+            && (!surfaces.dialog.is_open() || crate::render::below_floor(term_width, term_height))
+        {
             surfaces.dialog.tick_without_dialog(Instant::now());
         }
         if surfaces.session.cancel_settled
@@ -1254,6 +1207,37 @@ where
     }
     let (exit, running, rows) = surfaces.finish(ephemeral);
     Ok((exit, running, rows, resumed))
+}
+
+/// Reads one input batch, advancing the decoder and the tracked columns.
+/// Returns `None` once shutdown is requested so the loop breaks.
+fn poll_input(
+    io: &dyn TermIo,
+    decoder: &mut KeyDecoder,
+    surfaces: &mut Surfaces,
+) -> Result<Option<(Vec<InputEvent>, u16, u16)>, TuiError> {
+    if io.shutdown_code().is_some() {
+        return Ok(None);
+    }
+    let bytes = io
+        .read(Duration::from_millis(33))
+        .map_err(|error| crate::term::terminal_error(&error.to_string()))?;
+    if io.take_resize()
+        && let Ok((width, _)) = io.size()
+    {
+        surfaces.columns = width;
+    }
+    if io.shutdown_code().is_some() {
+        return Ok(None);
+    }
+    let now = Instant::now();
+    let events = if bytes.is_empty() {
+        decoder.tick(now)
+    } else {
+        decoder.feed(&bytes, now)
+    };
+    let (term_width, term_height) = io.size().unwrap_or((80, 24));
+    Ok(Some((events, term_width, term_height)))
 }
 
 fn wait_for_cancelled<S: TuiSubscription>(
@@ -1427,6 +1411,7 @@ fn terminal_kitty(state: &std::sync::Mutex<TermState>) -> bool {
 /// inputs move together through every drain.
 struct Surfaces {
     view: dal_core::View,
+    view_arrived: bool,
     session: Session,
     dialog: DialogUi,
     live: Live,
@@ -1713,8 +1698,19 @@ impl Surfaces {
                 }
                 continue;
             }
+            let pending_scope = match &command {
+                Command::SetScopedModels(ids) => Some(ids.clone()),
+                _ => None,
+            };
             let submit_reply = opts.rt.block_on(agent.submit(command));
+            let applied_scope = match &submit_reply {
+                Ok(Reply::Done(_)) => pending_scope,
+                _ => None,
+            };
             self.fold_submit_reply(opts, agent, host, model_source, submit_reply)?;
+            if let Some(ids) = applied_scope {
+                self.view.settings.scoped_models = ids;
+            }
         }
         Ok(())
     }
@@ -1770,15 +1766,13 @@ impl Surfaces {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
                         None
                     }
-                    Chooser::ScopedModels => {
-                        self.scoped_models_choice(opts, agent, &filter, model_source)
-                    }
-                    Chooser::Session => self.session_choice(opts, host, &filter),
+                    Chooser::ScopedModels => self.scoped_models_choice(model_source, &filter),
                     Chooser::Thinking => {
                         self.live
                             .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
                         None
                     }
+                    Chooser::Session => self.session_choice(opts, host, &filter),
                 };
                 self.session.picker = picker;
                 Vec::new()
@@ -1813,62 +1807,6 @@ impl Surfaces {
             .commit(&format!("command-{}", self.session.command_seq), &rows);
     }
 
-    /// Builds the scoped-models picker from live catalog rows and the
-    /// committed scope the agent reports right now. The terminal keeps no
-    /// scope of its own: every open reads `settings.scoped_models` from a
-    /// fresh `Agent::view`, where `None` (never committed) and `Some([])`
-    /// (explicitly cleared) both mean no scope. Only scope-eligible rows
-    /// (`scoped_id: Some`) become rows; synthetic, harness, and legacy rows
-    /// are excluded so the gate can match every offered id. Active scope
-    /// strings compare verbatim; an active id the list does not name shows as
-    /// its own checked row, so it stays until unchecked and can be removed.
-    /// A failing model source or view read shows
-    /// the failure and opens no picker: an unknown scope is never guessed
-    /// as empty, because submitting it would clear the real restriction.
-    fn scoped_models_choice<A, M>(
-        &mut self,
-        opts: &TuiOptions,
-        agent: &A,
-        filter: &str,
-        model_source: &mut M,
-    ) -> Option<crate::picker::PickerUi>
-    where
-        A: TuiAgent,
-        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
-    {
-        let models = match model_source() {
-            Ok(models) => models,
-            Err(error) => {
-                self.live.notice_as(
-                    crate::theme::Role::Error,
-                    format!("note: cannot list models for the scope picker: {error}"),
-                );
-                return None;
-            }
-        };
-        let fresh = match opts.rt.block_on(agent.view(snapshot_page())) {
-            Ok(fresh) => fresh,
-            Err(error) => {
-                self.live.notice_as(
-                    crate::theme::Role::Error,
-                    format!("note: cannot read the current model scope: {error}"),
-                );
-                return None;
-            }
-        };
-        let rows = models
-            .into_iter()
-            .filter_map(|model| {
-                model.scoped_id.map(|id| crate::picker::ScopedModelRow {
-                    id,
-                    label: model.label,
-                })
-            })
-            .collect::<Vec<_>>();
-        let active: &[Box<str>] = fresh.settings.scoped_models.as_deref().unwrap_or(&[]);
-        Some(crate::picker::scoped_models_picker(rows, active, filter))
-    }
-
     /// Builds the resume picker from the public host listing. Rows render
     /// through the existing `RESUME_ROW` deck entry; activation arms the
     /// open that the live loop attempts with this session still open. A
@@ -1895,6 +1833,33 @@ impl Surfaces {
         }
     }
 
+    fn scoped_models_choice<M>(
+        &mut self,
+        model_source: &mut M,
+        filter: &str,
+    ) -> Option<crate::picker::PickerUi>
+    where
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        if !self.view_arrived {
+            self.live
+                .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
+            return None;
+        }
+        let active = &self.view.settings.scoped_models;
+        let rows = model_source()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|model| {
+                model.scoped_id.map(|id| crate::picker::ScopedModelRow {
+                    id,
+                    label: model.label,
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(crate::picker::scoped_models_picker(rows, active, filter))
+    }
+
     /// Runs the host- and agent-backed requests the input pass queued.
     fn run_front<H: TuiHost, A: TuiAgent>(&mut self, opts: &TuiOptions, host: &H, agent: &A) {
         for request in std::mem::take(&mut self.session.front) {
@@ -1909,6 +1874,14 @@ impl Surfaces {
                         Some(key),
                     ));
                 }
+                FrontRequest::StartMethod { provider, method } => {
+                    self.session.picker = None;
+                    self.session.signin = Some(if method == Method::ApiKey {
+                        SignIn::key_prompt(&provider)
+                    } else {
+                        SignIn::flow(host, &opts.rt, &provider, method, None)
+                    });
+                }
                 FrontRequest::LogoutPicker(filter) => self.logout_picker(opts, host, &filter),
                 FrontRequest::Logout(provider) => self.logout(opts, host, Some(&provider)),
                 FrontRequest::LogoutAll => self.logout(opts, host, None),
@@ -1920,22 +1893,28 @@ impl Surfaces {
         }
     }
 
-    /// Opens the sign-in overlay for `provider`: the key prompt, or the flow.
+    /// Opens the sign-in overlay for `provider`: the key prompt, the flow,
+    /// or the method choice when the provider offers several methods.
     fn begin_login<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H, provider: &str) {
         self.session.picker = None;
-        self.session.signin = match signin::preferred_method(provider) {
-            Some(Method::ApiKey) => Some(SignIn::key_prompt(provider)),
-            Some(method) => Some(SignIn::flow(host, &opts.rt, provider, method, None)),
-            None => {
-                self.live.notice_as(
-                    crate::theme::Role::Error,
-                    format!(
-                        "note: unknown provider \"{}\".",
-                        crate::width::escape(provider)
-                    ),
-                );
-                None
-            }
+        let methods = signin::offered_methods(provider);
+        self.session.signin = if methods.is_empty() {
+            self.live.notice_as(
+                crate::theme::Role::Error,
+                format!(
+                    "note: unknown provider \"{}\".",
+                    crate::width::escape(provider)
+                ),
+            );
+            None
+        } else if methods.len() == 1 {
+            Some(if methods[0] == Method::ApiKey {
+                SignIn::key_prompt(provider)
+            } else {
+                SignIn::flow(host, &opts.rt, provider, methods[0], None)
+            })
+        } else {
+            Some(SignIn::method_pick(provider, methods))
         };
     }
 
@@ -2361,15 +2340,18 @@ fn probe_terminal(
             let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
             apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &parser.finish(),
-                opts.screen,
-                (probe_width, probe_height),
             );
             break;
         }
@@ -2393,15 +2375,18 @@ fn probe_terminal(
             let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
             apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &keys,
-                opts.screen,
-                (probe_width, probe_height),
             );
             // A key event requests an immediate frame that bypasses the batch.
             surfaces
@@ -2413,15 +2398,18 @@ fn probe_terminal(
             let (probe_width, probe_height) = io.size().unwrap_or((80, 24));
             apply_type_ahead_at(
                 decoder,
-                &mut surfaces.session,
-                &mut surfaces.dialog,
-                &surfaces.transcript,
-                &mut surfaces.live,
-                &surfaces.view.entries.items,
-                surfaces.diagram_settings,
+                EventTarget {
+                    session: &mut surfaces.session,
+                    dialog: &mut surfaces.dialog,
+                    transcript: &surfaces.transcript,
+                    live: &mut surfaces.live,
+                    entries: &surfaces.view.entries.items,
+                    diagrams: surfaces.diagram_settings,
+                    screen: opts.screen,
+                    width: probe_width,
+                    height: probe_height,
+                },
                 &held,
-                opts.screen,
-                (probe_width, probe_height),
             );
             break;
         }
@@ -2429,27 +2417,57 @@ fn probe_terminal(
     Ok(probe)
 }
 
+/// The surfaces one input event acts on, plus the screen geometry it was
+/// measured at. Bundling these keeps the event entry points under the
+/// argument-count lint without changing what any event can touch.
+struct EventTarget<'a> {
+    session: &'a mut Session,
+    dialog: &'a mut DialogUi,
+    transcript: &'a Transcript,
+    live: &'a mut Live,
+    entries: &'a [dal_core::EntryView],
+    diagrams: crate::diagram::DiagramSettings,
+    screen: crate::Screen,
+    width: u16,
+    height: u16,
+}
+
 /// Decodes terminal bytes into key events and applies them at the current
 /// terminal size, so startup type-ahead below the usable floor fails closed
 /// exactly like main-loop input: only Ctrl+C is admitted.
 fn apply_type_ahead_at(
     decoder: &mut KeyDecoder,
-    session: &mut Session,
-    dialog: &mut DialogUi,
-    transcript: &Transcript,
-    live: &mut Live,
-    entries: &[dal_core::EntryView],
-    diagrams: crate::diagram::DiagramSettings,
+    EventTarget {
+        session,
+        dialog,
+        transcript,
+        live,
+        entries,
+        diagrams,
+        screen,
+        width,
+        height,
+    }: EventTarget<'_>,
     bytes: &[u8],
-    screen: crate::Screen,
-    size: (u16, u16),
 ) {
     if bytes.is_empty() {
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
         apply_event_at(
-            session, dialog, transcript, live, entries, diagrams, event, false, screen, size,
+            EventTarget {
+                session: &mut *session,
+                dialog: &mut *dialog,
+                transcript,
+                live: &mut *live,
+                entries,
+                diagrams,
+                screen,
+                width,
+                height,
+            },
+            event,
+            false,
         );
     }
 }
@@ -2663,20 +2681,22 @@ fn apply_viewport_action(
 /// `interrupt_or_dismiss` so a floored loop stays interruptible; resize back
 /// to a usable size re-arms every surface with its state intact.
 fn apply_event_at(
-    session: &mut Session,
-    dialog: &mut DialogUi,
-    transcript: &Transcript,
-    live: &mut Live,
-    entries: &[dal_core::EntryView],
-    diagrams: crate::diagram::DiagramSettings,
+    EventTarget {
+        session,
+        dialog,
+        transcript,
+        live,
+        entries,
+        diagrams,
+        screen,
+        width,
+        height,
+    }: EventTarget<'_>,
     event: InputEvent,
     kitty: bool,
-    screen: crate::Screen,
-    size: (u16, u16),
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    let (width, height) = size;
     if crate::render::below_floor(width, height) {
         let interrupt = matches!(
             &event,
@@ -2710,24 +2730,31 @@ fn apply_event_at(
     {
         live.close_expand();
     }
-    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-        session.interrupt_or_dismiss(live, transcript);
-        return;
-    }
     if let Some(mut confirm) = session.dialog.take() {
         match confirm.key(key) {
             Some(crate::dialog::DraftChoice::Discard) => session.discard_draft(),
-            // `Keep` answers the question: the dialog closes and the draft stays.
-            Some(crate::dialog::DraftChoice::Keep) => {}
-            // A focus move or an ignored key leaves the question open.
+            Some(crate::dialog::DraftChoice::Keep) => {
+                // An answered Keep closes the question; the draft and
+                // session stay exactly as they were.
+                session.dialog = None;
+            }
             None => session.dialog = Some(confirm),
         }
         return;
     }
     if dialog.is_open() {
+        live.close_expand();
         if let Some(answer) = dialog.key(key) {
             session.pending_answers.push(answer);
         }
+        return;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        session.interrupt_or_dismiss(live, transcript);
+        return;
+    }
+    if session.overlay {
+        apply_overlay_key(session, transcript, key, kitty);
         return;
     }
     if session.signin.is_some() {
@@ -2738,16 +2765,12 @@ fn apply_event_at(
         apply_picker_key(session, live, key);
         return;
     }
-    if session.help.is_some() {
-        apply_help_key(session, key, kitty);
-        return;
-    }
-    if session.overlay {
-        apply_overlay_key(session, transcript, key, kitty);
-        return;
-    }
     if live.expanded().is_some() {
         apply_expand_key(live, key, kitty);
+        return;
+    }
+    if session.help.is_some() {
+        apply_help_key(session, key, kitty);
         return;
     }
     let viewport = screen == crate::Screen::Fullscreen;
@@ -2796,6 +2819,56 @@ fn apply_expand_key(live: &mut Live, key: crate::keys::Key, kitty: bool) {
     }
 }
 
+/// Steps the completion ring: Tab on no candidates keeps its two-space
+/// contract. The first Tab of a fresh ring pins the base draft and takes
+/// the top candidate (Shift+Tab the bottom); every later press steps the
+/// ring from the last accepted index off that untouched base, so cycling
+/// never compounds prefixes and wraps both ways. `update_popup` ends a ring
+/// whose draft diverged from its own output, so an edit starts a fresh one.
+fn accept_cycle_completion(session: &mut Session, key: crate::keys::Key) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let backward = key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+    session.viewport.clear_selection();
+    let count = session.candidates.len();
+    if count == 0 {
+        // No candidates: Tab keeps its plain-text contract of two
+        // spaces, matching the documented empty-popup behavior.
+        session.popup_base = None;
+        session.popup_index = 0;
+        session.popup_last.clear();
+        session.composer.insert("  ");
+        return;
+    }
+    // A fresh ring has accepted nothing: forward enters one step before
+    // the first candidate, backward one step after the last (the seam
+    // before the first). A live ring steps from the last accepted index.
+    let (base, from) = match session.popup_base.take() {
+        Some(base) => (base, session.popup_index),
+        None => (
+            session.composer.text().to_owned(),
+            if backward { 0 } else { count - 1 },
+        ),
+    };
+    let step = if backward {
+        crate::popup::cycle_prev
+    } else {
+        crate::popup::cycle_next
+    };
+    let (index, draft) = step(&base, &session.candidates, from);
+    if count == 1 {
+        // The args hint shows for the accepted command and a second Tab
+        // inserts its two spaces, as before the ring existed.
+        session.popup_index = 0;
+        session.popup_last.clear();
+    } else {
+        session.popup_base = Some(base);
+        session.popup_last.clone_from(&draft);
+        session.popup_index = index;
+    }
+    session.composer.set(&draft);
+}
+
 fn apply_composer_action(
     session: &mut Session,
     transcript: &Transcript,
@@ -2828,16 +2901,7 @@ fn apply_composer_action(
             session.viewport.clear_selection();
             session.composer.insert("\n");
         }
-        Some(Action::AcceptCycleCompletion) => {
-            session.viewport.clear_selection();
-            // Shift+Tab reaches the loop as `BackTab` from a legacy terminal
-            // and as Tab plus Shift from a kitty one; both walk the ring back.
-            if key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT) {
-                session.complete_backward();
-            } else {
-                session.complete_forward();
-            }
-        }
+        Some(Action::AcceptCycleCompletion) => accept_cycle_completion(session, key),
         Some(Action::Help) => session.help = Some(HelpUi::default()),
         // Ctrl+Z parks the terminal through the same restore the exit path
         // uses, then raises SIGTSTP; the loop's resume path re-enters the
@@ -2967,11 +3031,19 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
                     session.signin = Some(SignIn::confirm_all());
                     session.picker = None;
                 }
+                Some(PickerAction::Login { provider, method }) => {
+                    session
+                        .front
+                        .push(FrontRequest::StartMethod { provider, method });
+                    session.picker = None;
+                }
                 Some(PickerAction::SetDraft(text)) => {
                     // History recall: the row's message becomes the draft.
                     session.composer.set(&text);
-                    session.update_popup();
+                    session.popup_base = None;
+                    session.popup_index = 0;
                     session.picker = None;
+                    session.update_popup();
                 }
                 Some(PickerAction::ResumeSession(target)) => {
                     if Some(target.id) == session.own {
@@ -3319,7 +3391,7 @@ where
 mod tests {
     use std::num::NonZeroU64;
 
-    use super::{Session, apply_event_at, poll_model_retry};
+    use super::{EventTarget, Session, apply_event_at, poll_model_retry};
 
     /// A resolution that names `core` and the default deny answer: the shape
     /// every deadline resolution has, so no cause can be read off it.
@@ -3369,21 +3441,26 @@ mod tests {
 
     /// Applies one key to a fresh dialog, live region, and transcript on the
     /// inline screen.
-    fn apply_key(session: &mut Session, key: crate::keys::Key) {
+    fn apply_key(session: &mut Session, key: crate::keys::Key) -> crate::live::Live {
         use crate::keys::InputEvent;
 
+        let mut live = crate::live::Live::default();
         apply_event_at(
-            session,
-            &mut crate::dialog::DialogUi::default(),
-            &crate::transcript::Transcript::default(),
-            &mut crate::live::Live::default(),
-            &[],
-            crate::diagram::DiagramSettings::default(),
+            EventTarget {
+                session,
+                dialog: &mut crate::dialog::DialogUi::default(),
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut live,
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width: 80,
+                height: 24,
+            },
             InputEvent::Key(key),
             false,
-            crate::Screen::Inline,
-            (80, 24),
         );
+        live
     }
 
     #[test]
@@ -3484,7 +3561,11 @@ mod tests {
         // No candidates: Tab inserts two spaces, the documented fallback.
         session.composer.set("plain text");
         session.update_popup();
-        assert_eq!(session.candidates, [] as [crate::popup::Candidate; 0]);
+        assert_eq!(
+            session.candidates,
+            [] as [crate::popup::Candidate; 0],
+            "plain text must leave no completion candidates"
+        );
         apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(session.composer.text(), "plain text  ");
     }
@@ -3577,6 +3658,22 @@ mod tests {
             "past the newest, the draft returns"
         );
 
+        // A submitted line leaves the composer empty; the draft Ctrl+R must
+        // preserve is the one typed after it, which was never submitted.
+        session.submit_line("typed draft");
+        session.composer.set("another draft");
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            session.composer.text(),
+            "another draft",
+            "the unsent draft survives the search"
+        );
+        // The picker renders no rows without journal entries, but the
+        // surface opens; Enter on a row loads it back into the draft.
+        assert!(session.picker.is_some(), "Ctrl+R opens the history picker");
         // An unsent draft, typed rather than submitted: submitting empties
         // the composer.
         session.composer.set("typed draft");
@@ -3939,6 +4036,82 @@ mod tests {
         assert_eq!(session.popup, ["/model · provider/model"]);
         apply_key(&mut session, Key::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(session.composer.text(), "/model   ");
+    }
+
+    #[test]
+    fn populated_filter_letters_join_text_and_control_keys_navigate() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let rows = vec![
+            crate::picker::ScopedModelRow {
+                id: "openai/gpt-6".into(),
+                label: "GPT 6".into(),
+            },
+            crate::picker::ScopedModelRow {
+                id: "anthropic/opus-4".into(),
+                label: "Opus 4".into(),
+            },
+        ];
+        let mut session = Session {
+            picker: Some(crate::picker::scoped_models_picker(rows, &[], "")),
+            ..Session::default()
+        };
+        // Once the filter holds text, plain letters join the query again.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("g")
+        );
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("gp")
+        );
+        // Ctrl+Space (0x00) toggles from a non-empty filter.
+        apply_key(
+            &mut session,
+            Key::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        );
+        assert!(
+            session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_checked(0)),
+            "ctrl+space toggles while the filter holds text"
+        );
+        for character in ['j', 'k', ' '] {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(
+            session.picker.as_ref().map(crate::picker::PickerUi::filter),
+            Some("gpjk ")
+        );
+        let picker = session.picker.as_mut().expect("picker stays open");
+        while !picker.filter().is_empty() {
+            picker.remove_filter_char();
+        }
+        for (character, selected) in [('n', 1), ('p', 0)] {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+            );
+            assert!(
+                session
+                    .picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.is_selected(selected))
+            );
+        }
     }
 
     #[test]
@@ -4454,16 +4627,19 @@ mod tests {
             apply_key(&mut session, key);
         }
         apply_event_at(
-            &mut session,
-            &mut crate::dialog::DialogUi::default(),
-            &crate::transcript::Transcript::default(),
-            &mut crate::live::Live::default(),
-            &[],
-            crate::diagram::DiagramSettings::default(),
+            EventTarget {
+                session: &mut session,
+                dialog: &mut crate::dialog::DialogUi::default(),
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut crate::live::Live::default(),
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width: 80,
+                height: 24,
+            },
             InputEvent::Paste(b"ignored paste".to_vec()),
             false,
-            crate::Screen::Inline,
-            (80, 24),
         );
         assert!(
             session.help.is_some(),
@@ -4710,7 +4886,7 @@ mod tests {
     mod fullscreen_selection {
         use std::num::NonZeroU64;
 
-        use super::{Session, apply_event_at};
+        use super::{EventTarget, Session, apply_event_at};
         use crate::dialog::DialogUi;
         use crate::keys::{InputEvent, Key};
         use crate::transcript::Transcript;
@@ -4732,16 +4908,19 @@ mod tests {
             key: Key,
         ) {
             apply_event_at(
-                session,
-                dialog,
-                transcript,
-                &mut crate::live::Live::default(),
-                &[],
-                crate::diagram::DiagramSettings::default(),
+                EventTarget {
+                    session,
+                    dialog,
+                    transcript,
+                    live: &mut crate::live::Live::default(),
+                    entries: &[],
+                    diagrams: crate::diagram::DiagramSettings::default(),
+                    screen: crate::Screen::Fullscreen,
+                    width: 80,
+                    height: 24,
+                },
                 InputEvent::Key(key),
                 false,
-                crate::Screen::Fullscreen,
-                (80, 24),
             );
         }
 
@@ -4811,16 +4990,19 @@ mod tests {
             let mut dialog = DialogUi::default();
             for code in [KeyCode::Up, KeyCode::Left, KeyCode::Down, KeyCode::Right] {
                 apply_event_at(
-                    &mut session,
-                    &mut dialog,
-                    &transcript,
-                    &mut crate::live::Live::default(),
-                    &[],
-                    crate::diagram::DiagramSettings::default(),
+                    EventTarget {
+                        session: &mut session,
+                        dialog: &mut dialog,
+                        transcript: &transcript,
+                        live: &mut crate::live::Live::default(),
+                        entries: &[],
+                        diagrams: crate::diagram::DiagramSettings::default(),
+                        screen: crate::Screen::Inline,
+                        width: 80,
+                        height: 24,
+                    },
                     InputEvent::Key(shift(code)),
                     false,
-                    crate::Screen::Inline,
-                    (80, 24),
                 );
             }
             assert!(
@@ -4833,16 +5015,19 @@ mod tests {
                 "no stray text reaches the composer"
             );
             apply_event_at(
-                &mut session,
-                &mut dialog,
-                &transcript,
-                &mut crate::live::Live::default(),
-                &[],
-                crate::diagram::DiagramSettings::default(),
+                EventTarget {
+                    session: &mut session,
+                    dialog: &mut dialog,
+                    transcript: &transcript,
+                    live: &mut crate::live::Live::default(),
+                    entries: &[],
+                    diagrams: crate::diagram::DiagramSettings::default(),
+                    screen: crate::Screen::Inline,
+                    width: 80,
+                    height: 24,
+                },
                 InputEvent::Key(control_c()),
                 false,
-                crate::Screen::Inline,
-                (80, 24),
             );
             assert_eq!(session.pending_copies, []);
             assert!(matches!(
@@ -4922,6 +5107,61 @@ mod tests {
         }
     }
 
+    /// A single unmodified character key for the floored-surface tests.
+    fn char_key(c: char) -> crate::keys::Key {
+        crate::keys::Key::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// An armed approval request so floored keys have a dialog to miss.
+    fn approval(id: dal_core::RequestId) -> dal_core::Request {
+        dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "echo hi".into(),
+                    digest: None,
+                },
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Decline,
+        }
+    }
+
+    /// Applies one event at `width`x`height` on the inline screen with
+    /// fresh live, transcript, and diagram state.
+    fn apply_at(
+        session: &mut Session,
+        dialog: &mut crate::dialog::DialogUi,
+        event: crate::keys::InputEvent,
+        width: u16,
+        height: u16,
+    ) {
+        super::apply_event_at(
+            super::EventTarget {
+                session,
+                dialog,
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut crate::live::Live::default(),
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width,
+                height,
+            },
+            event,
+            false,
+        );
+    }
+
     fn floored_char_key(c: char) -> crate::keys::Key {
         crate::keys::Key::new(
             crossterm::event::KeyCode::Char(c),
@@ -4956,16 +5196,19 @@ mod tests {
         size: (u16, u16),
     ) {
         super::apply_event_at(
-            session,
-            dialog,
-            &crate::transcript::Transcript::default(),
-            &mut crate::live::Live::default(),
-            &[],
-            crate::diagram::DiagramSettings::default(),
+            super::EventTarget {
+                session,
+                dialog,
+                transcript: &crate::transcript::Transcript::default(),
+                live: &mut crate::live::Live::default(),
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: crate::Screen::Inline,
+                width: size.0,
+                height: size.1,
+            },
             event,
             false,
-            crate::Screen::Inline,
-            size,
         );
     }
 
@@ -5098,6 +5341,87 @@ mod tests {
     }
 
     #[test]
+    fn floored_surface_drops_blind_dialog_and_picker_keys() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        assert!(crate::render::below_floor(20, 5));
+        assert!(!crate::render::below_floor(80, 24));
+
+        let mut session = Session::default();
+        let mut dialog = DialogUi::default();
+        let id = dal_core::RequestId::new_v7();
+        dialog.opened(approval(id));
+        let start = std::time::Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + crate::dialog::ARM_DELAY);
+        assert!(dialog.armed());
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            20,
+            5,
+        );
+        assert!(
+            session.pending_answers.is_empty(),
+            "a blind `y` below the floor must not approve"
+        );
+        assert!(dialog.is_open(), "the unseen question stays open");
+        assert!(
+            !dialog.awaiting_resolution(),
+            "no answer may latch while floored"
+        );
+
+        apply_at(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(char_key('y')),
+            80,
+            24,
+        );
+        assert_eq!(session.pending_answers.len(), 1);
+        assert!(
+            matches!(
+                &session.pending_answers[0],
+                (answered, dal_core::Answer::Approve) if *answered == id
+            ),
+            "resize back re-arms the still-open approval: {:?}",
+            session.pending_answers
+        );
+
+        let mut picker_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut no_dialog = DialogUi::default();
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            20,
+            5,
+        );
+        assert!(
+            picker_session.pending_commands.is_empty(),
+            "picker Enter below the floor must not activate"
+        );
+        assert!(
+            picker_session.picker.is_some(),
+            "the unseen picker stays open"
+        );
+        apply_at(
+            &mut picker_session,
+            &mut no_dialog,
+            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            80,
+            24,
+        );
+    }
+
+    #[test]
     fn floored_surface_drops_blind_keys_until_resized_back() {
         assert!(crate::render::below_floor(20, 5));
         assert!(!crate::render::below_floor(80, 24));
@@ -5105,6 +5429,57 @@ mod tests {
         check_floored_picker_flow();
         check_floored_composer_flow();
         check_floored_interrupt_flow();
+    }
+
+    #[test]
+    fn floored_surface_drops_blind_typing_but_keeps_interrupt() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut type_session = Session::default();
+        let mut type_dialog = DialogUi::default();
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Key(char_key('x')),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "composer typing below the floor must not mutate the draft"
+        );
+        apply_at(
+            &mut type_session,
+            &mut type_dialog,
+            InputEvent::Paste(b"x".to_vec()),
+            20,
+            5,
+        );
+        assert_eq!(
+            type_session.composer.text(),
+            "",
+            "paste below the floor must not reach the composer"
+        );
+
+        let mut interrupt_session = Session {
+            picker: Some(crate::picker::model_picker_failed("")),
+            ..Session::default()
+        };
+        let mut interrupt_dialog = DialogUi::default();
+        apply_at(
+            &mut interrupt_session,
+            &mut interrupt_dialog,
+            InputEvent::Key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            20,
+            5,
+        );
+        assert!(
+            interrupt_session.picker.is_none(),
+            "Ctrl+C stays the interrupt path while floored"
+        );
     }
 }
 
@@ -6275,7 +6650,7 @@ mod loop_tests {
                 approval: ApprovalMode::Ask,
                 mode: Mode::Normal,
                 name: None,
-                scoped_models: None,
+                scoped_models: Vec::new(),
             },
             open: Vec::new(),
             changes: Vec::new(),
@@ -6330,6 +6705,7 @@ mod loop_tests {
         let diagram_cache = crate::diagram::RenderCache::default();
         let mut surfaces = super::Surfaces {
             view: idle_view(),
+            view_arrived: false,
             session: super::Session::default(),
             dialog: crate::dialog::DialogUi::default(),
             live: crate::live::Live::default(),
@@ -6509,7 +6885,7 @@ mod loop_tests {
     /// A session whose journal the test appends to: `view` answers with every
     /// entry appended so far, as the host does after the same updates.
     #[derive(Clone, Default)]
-    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>);
+    struct Ledger(Arc<Mutex<Vec<dal_core::EntryView>>>, Vec<Box<str>>);
 
     impl TuiAgent for Ledger {
         type Subscription = Silent;
@@ -6521,6 +6897,7 @@ mod loop_tests {
         fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
             let mut view = idle_view();
             view.entries.items = self.0.lock().expect("ledger").clone();
+            view.settings.scoped_models = self.1.clone();
             std::future::ready(Ok(view))
         }
 
@@ -6557,7 +6934,7 @@ mod loop_tests {
         opts: TuiOptions,
         seq: u64,
         entries: u64,
-        _runtime: tokio::runtime::Runtime,
+        runtime: tokio::runtime::Runtime,
     }
 
     impl Rig {
@@ -6570,6 +6947,7 @@ mod loop_tests {
             let diagram_cache = crate::diagram::RenderCache::default();
             let surfaces = super::Surfaces {
                 view: idle_view(),
+                view_arrived: false,
                 session: super::Session::default(),
                 dialog: crate::dialog::DialogUi::default(),
                 live: crate::live::Live::default(),
@@ -6586,7 +6964,7 @@ mod loop_tests {
                 opts,
                 seq: 0,
                 entries: 0,
-                _runtime: runtime,
+                runtime,
             }
         }
 
@@ -6889,182 +7267,6 @@ mod loop_tests {
         }
     }
 
-    /// A session whose `view` reports one fixed committed scope, or fails.
-    /// The surfaces under test keep a view that says "no scope", so a picker
-    /// checked from this agent's answer proves the seed is a fresh read.
-    #[derive(Clone)]
-    struct ScopeAgent {
-        scope: Option<Vec<Box<str>>>,
-        view_fails: bool,
-    }
-
-    impl TuiAgent for ScopeAgent {
-        type Subscription = Silent;
-
-        fn session(&self) -> SessionId {
-            SessionId::new_v7()
-        }
-
-        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
-            std::future::ready(if self.view_fails {
-                Err(TuiError::Terminal("the view is unavailable".to_owned()))
-            } else {
-                let mut view = idle_view();
-                view.settings.scoped_models = self.scope.clone();
-                Ok(view)
-            })
-        }
-
-        fn subscribe(
-            &self,
-            _after: Option<(Gen, Seq)>,
-        ) -> impl Future<Output = Result<Silent, TuiError>> {
-            std::future::ready(Ok(Silent))
-        }
-
-        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
-            std::future::ready(Ok(Reply::Done(Output::Nothing)))
-        }
-
-        fn answer(
-            &self,
-            _id: RequestId,
-            _answer: Answer,
-        ) -> impl Future<Output = Result<(), TuiError>> {
-            std::future::ready(Ok(()))
-        }
-
-        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
-            Vec::new()
-        }
-    }
-
-    /// Two scope-eligible catalog rows, in display order.
-    fn scope_catalog() -> Vec<crate::picker::ModelOption> {
-        ["openai/gpt-6", "anthropic/opus-4"]
-            .into_iter()
-            .map(|id| crate::picker::ModelOption {
-                label: id.to_owned(),
-                command: Command::SetModel {
-                    model: dal_core::ModelRoute::Synthetic { id: id.into() },
-                    save: dal_core::command::Save::SessionAndDefault,
-                },
-                scoped_id: Some(id.into()),
-            })
-            .collect()
-    }
-
-    /// The scoped-models picker checks the committed scope the agent reports
-    /// right now. The terminal keeps no scope copy: its own view stays at
-    /// "no scope" throughout, an unmatched committed id survives submit, and
-    /// `None` and an explicit `Some([])` both open with nothing checked.
-    #[test]
-    fn scoped_picker_seeds_from_a_fresh_agent_view() {
-        let mut rig = Rig::new();
-        assert_eq!(rig.surfaces.view.settings.scoped_models, None);
-
-        let agent = ScopeAgent {
-            scope: Some(vec!["anthropic/opus-4".into(), "anthropic/vanished".into()]),
-            view_fails: false,
-        };
-        let mut models = || Ok(scope_catalog());
-        let mut picker = rig
-            .surfaces
-            .scoped_models_choice(&rig.opts, &agent, "", &mut models)
-            .expect("a readable scope opens the picker");
-        assert!(!picker.is_checked(0), "openai/gpt-6 is outside the scope");
-        assert!(picker.is_checked(1), "anthropic/opus-4 is inside the scope");
-        assert!(matches!(
-            picker.activate_selected(),
-            Some(crate::picker::PickerAction::Command(Command::SetScopedModels(ids)))
-                if ids
-                    .iter()
-                    .map(std::convert::AsRef::as_ref)
-                    .eq(["anthropic/opus-4", "anthropic/vanished"])
-        ));
-        assert_eq!(
-            rig.surfaces.view.settings.scoped_models, None,
-            "the terminal never stores a scope of its own"
-        );
-
-        for scope in [None, Some(Vec::new())] {
-            let agent = ScopeAgent {
-                scope,
-                view_fails: false,
-            };
-            let picker = rig
-                .surfaces
-                .scoped_models_choice(&rig.opts, &agent, "", &mut models)
-                .expect("an empty scope still opens the picker");
-            assert!(!picker.is_checked(0), "no scope checks nothing");
-            assert!(!picker.is_checked(1), "no scope checks nothing");
-        }
-    }
-
-    /// `/scoped-models` reaches the same fresh read through the reply fold:
-    /// the chooser reply opens a picker already checked from the agent view.
-    #[test]
-    fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
-        let mut rig = Rig::new();
-        let host = FakeHost {
-            agent: FakeAgent {
-                log: Log::default(),
-                run_entered: Arc::new(AtomicBool::new(false)),
-            },
-        };
-        let agent = ScopeAgent {
-            scope: Some(vec!["openai/gpt-6".into()]),
-            view_fails: false,
-        };
-        let mut models = || Ok(scope_catalog());
-        rig.surfaces
-            .fold_submit_reply(
-                &rig.opts,
-                &agent,
-                &host,
-                &mut models,
-                Ok(Reply::Choose {
-                    chooser: dal_core::Chooser::ScopedModels,
-                    filter: "".into(),
-                }),
-            )
-            .expect("the chooser reply folds");
-        let picker = rig
-            .surfaces
-            .session
-            .picker
-            .as_ref()
-            .expect("the scoped picker opens");
-        assert!(picker.is_checked(0), "the committed id arrives checked");
-        assert!(!picker.is_checked(1));
-    }
-
-    /// A failed view read never degrades to an empty scope: submitting that
-    /// guess would clear the real restriction. The failure shows as an error
-    /// notice and no picker opens.
-    #[test]
-    fn scoped_picker_refuses_to_guess_when_the_view_read_fails() {
-        let mut rig = Rig::new();
-        let agent = ScopeAgent {
-            scope: Some(vec!["openai/gpt-6".into()]),
-            view_fails: true,
-        };
-        let mut models = || Ok(scope_catalog());
-        let picker = rig
-            .surfaces
-            .scoped_models_choice(&rig.opts, &agent, "", &mut models);
-        assert!(picker.is_none(), "an unreadable scope opens no picker");
-        let notices = rig.surfaces.live.notices();
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].role, crate::theme::Role::Error);
-        assert!(
-            notices[0]
-                .text
-                .starts_with("note: cannot read the current model scope"),
-            "{notices:?}"
-        );
-    }
-
     /// `/new` cannot open a session in place: the refusal is an error notice
     /// with the `note:` prefix, never a plain transcript row.
     #[test]
@@ -7091,6 +7293,229 @@ mod loop_tests {
         assert_eq!(notices[0].role, crate::theme::Role::Error);
         assert!(notices[0].text.starts_with("note: /new"), "{notices:?}");
         assert!(rig.rows().is_empty(), "the refusal is not a transcript row");
+    }
+
+    #[test]
+    fn scoped_chooser_reply_opens_the_picker_on_the_agent_scope() {
+        let mut rig = Rig::new();
+        rig.agent.1 = vec!["openai/gpt-6".into(), "anthropic/opus-4".into()];
+        let arrived = rig
+            .runtime
+            .block_on(rig.agent.view(super::snapshot_page()))
+            .expect("the agent view arrives");
+        rig.surfaces.view = arrived;
+        rig.surfaces.view_arrived = true;
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![
+            crate::picker::ModelOption {
+                label: "GPT 6".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("openai/gpt-6".into()),
+            },
+            crate::picker::ModelOption {
+                label: "Opus 4".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness {
+                        id: "opus-4".into(),
+                    },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("anthropic/opus-4".into()),
+            },
+        ];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("the chooser opens the picker");
+        assert!(picker.is_multi());
+        assert_eq!(picker.visible_len(), 2);
+        assert!(
+            picker.is_checked(0),
+            "the first committed id arrives checked"
+        );
+        assert!(
+            picker.is_checked(1),
+            "the second committed id arrives checked"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "the supported picker posts no unsupported notice"
+        );
+    }
+
+    #[derive(Clone)]
+    struct ViewScopedAgent {
+        view: View,
+    }
+
+    impl TuiAgent for ViewScopedAgent {
+        type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(Ok(self.view.clone()))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        fn submit(&self, _command: Command) -> impl Future<Output = Result<Reply, TuiError>> {
+            std::future::ready(Ok(Reply::Done(Output::Nothing)))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn scoped_chooser_reply_opens_the_picker_on_the_remote_view_scope() {
+        let mut rig = Rig::new();
+        let mut view = idle_view();
+        view.settings.scoped_models = vec!["openai/gpt-6".into(), "anthropic/opus-4".into()];
+        let agent = ViewScopedAgent { view };
+        let arrived = rig
+            .runtime
+            .block_on(agent.view(super::snapshot_page()))
+            .expect("the remote view arrives");
+        rig.surfaces.view = arrived;
+        rig.surfaces.view_arrived = true;
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![
+            crate::picker::ModelOption {
+                label: "GPT 6".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("openai/gpt-6".into()),
+            },
+            crate::picker::ModelOption {
+                label: "Opus 4".into(),
+                command: dal_core::Command::SetModel {
+                    model: dal_core::ModelRoute::Harness {
+                        id: "opus-4".into(),
+                    },
+                    save: dal_core::command::Save::SessionOnly,
+                },
+                scoped_id: Some("anthropic/opus-4".into()),
+            },
+        ];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("the chooser opens the picker");
+        assert!(picker.is_multi());
+        assert_eq!(picker.visible_len(), 2);
+        assert!(
+            picker.is_checked(0),
+            "the first view-carried id arrives checked"
+        );
+        assert!(
+            picker.is_checked(1),
+            "the second view-carried id arrives checked"
+        );
+        assert!(
+            rig.surfaces.live.notices().is_empty(),
+            "the view-carried scope posts no notice"
+        );
+    }
+
+    #[test]
+    fn scoped_chooser_reply_without_a_view_refuses_the_picker() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let models = vec![crate::picker::ModelOption {
+            label: "GPT 6".into(),
+            command: dal_core::Command::SetModel {
+                model: dal_core::ModelRoute::Harness { id: "gpt-6".into() },
+                save: dal_core::command::Save::SessionOnly,
+            },
+            scoped_id: Some("openai/gpt-6".into()),
+        }];
+        let mut source = || Ok(models.clone());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::ScopedModels,
+                    filter: "".into(),
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "no view means no picker, never an empty scope"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].text.contains("not available"), "{notices:?}");
     }
 
     /// The plain text of every row one frame paints over the rig's surfaces,
@@ -7139,16 +7564,19 @@ mod loop_tests {
     /// and live region.
     fn press(rig: &mut Rig, key: crate::keys::Key) {
         super::apply_event_at(
-            &mut rig.surfaces.session,
-            &mut crate::dialog::DialogUi::default(),
-            &rig.surfaces.transcript,
-            &mut rig.surfaces.live,
-            &[],
-            crate::diagram::DiagramSettings::default(),
+            super::EventTarget {
+                session: &mut rig.surfaces.session,
+                dialog: &mut crate::dialog::DialogUi::default(),
+                transcript: &rig.surfaces.transcript,
+                live: &mut rig.surfaces.live,
+                entries: &[],
+                diagrams: crate::diagram::DiagramSettings::default(),
+                screen: Screen::Inline,
+                width: 80,
+                height: 24,
+            },
             crate::keys::InputEvent::Key(key),
             false,
-            Screen::Inline,
-            (80, 24),
         );
     }
 

@@ -1,4 +1,6 @@
-# dal and dalgona: a terminal coding agent with one extension door
+# dal and dalgona
+
+**A terminal coding agent with one extension door.**
 
 Dal is a complete terminal coding agent. Dalgona is dal with opinionated batteries, switched on through the same public extension door.
 
@@ -49,7 +51,9 @@ $env:PATH = "$PWD\target\release;$env:PATH"
 
 The binaries land in `target/release/` (`dalgon` with `dal` and `dl`, plus `dalgona` with `dg`), assuming the default Cargo target directory (`CARGO_TARGET_DIR` and `--target-dir` move it). Run `dalgon --version` to check the install.
 
-Supported platforms are Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published. Configuration and data use the same XDG-style layout on every OS: `$XDG_CONFIG_HOME/dal/` and `$XDG_DATA_HOME/dal/`. Without those variables, the defaults are `~/.config/dal/` and `~/.local/share/dal/` under your home directory. On Windows, the home directory is `HOME`, `USERPROFILE`, or `HOMEDRIVE` with `HOMEPATH`. Dalgona uses `dalgona` in place of `dal`. Plugins need no toolchain.
+- **Platforms**: Linux, macOS, and Windows on x86_64 and aarch64. Unsigned Windows binaries may trigger SmartScreen; verify the checksum where one is published.
+- **Paths**: `$XDG_CONFIG_HOME/dal/` and `$XDG_DATA_HOME/dal/` on every OS; an `XDG_*` value must be an absolute path or it is ignored. Without those variables, the defaults are `~/.config/dal/` and `~/.local/share/dal/` under your home directory. On Windows, the home directory is `HOME`, `USERPROFILE`, or `HOMEDRIVE` with `HOMEPATH`. Dalgona uses `dalgona` in place of `dal`.
+- **Plugins need no toolchain**: a plugin is Starlark text loaded at startup.
 
 ## Quick start
 
@@ -61,11 +65,13 @@ dalgon
 dalgon -p "Summarize this repository's README"
 ```
 
-`dalgon login` signs in to a provider. `dalgon` opens the terminal; type `/model` to pick a model, then send a prompt. `dalgon -p` runs one turn and exits; it needs a model. Dal asks before every `patch` and every `exec`.
+**`dalgon login`** signs in to a provider. **`dalgon`** opens the terminal; type `/model` to pick a model, then send a prompt. **`dalgon -p`** runs one turn and exits; it needs a model. Dal asks before every `patch` and every `exec`.
 
 To verify the install, run these checks. Each comment names the start of the real output or the exit code.
 
 ```sh
+dalgon --version
+# dalgon 0.1.0
 dalgon docs
 # prints the dal manual index starting with `# dal://`
 dalgon docs dal://cli
@@ -83,12 +89,18 @@ dalgon login status
 - **Starlark plugins**: ship tools, commands, hooks, skills, rules, and prompt text from one `plugin.star` with no compile step. A broken plugin stops startup and names `path:line:col`. `/reload` keeps the previous set on failure.
 - **Approval first**: ask before every `patch` and every `exec` by default. Headless runs deny when no person can answer. `eval` runs Starlark only and is not a sandbox.
 - **Durable sessions**: continue with `-c`, resume with `-r`, branch with `/fork` and `/clone`, and share with `/export`. Compaction starts at 85 percent of the context window.
-- **Terminal and headless**: work inline or fullscreen, print with `-p`, emit JSON with `--json`, or drive ACP, RPC, router, and A2A clients over one protocol.
-- **Batteries on demand**: run dalgona for orchestration, plan and todo, ask, web search and fetch, MCP client, review, judged rules, quality guard, history, skills, ttsr-rules, symbol search, hashline edits, and the deferred `procs` tool over background jobs.
+- **Terminal and headless**: work inline or fullscreen, print with `-p`, emit JSON with `--json`, or drive ACP, app-server, RPC, router, and A2A clients over one protocol.
+- **Batteries on demand**: run dalgona for orchestration, plan and todo, ask, web search and fetch, MCP client, review, judged rules, quality guard, history, skills, ttsr-rules, symbol search, hashline edits, and the deferred `procs` tool over background jobs. `dalgona eval` runs Starlark eval packs.
 
 ### Scope limits
 
-Dal keeps its core small. It has no MCP client (dalgona ships one; a plugin can reach HTTP services with `net.fetch`), no plan or todo (dalgona ships both), and no subagents by default. There is no LSP in either product, no upload (`/export` writes a file you share yourself), no self-rebuild (`/reload` reloads plugins), nothing but Starlark in `eval`, no second store besides the journal, and no browser front end in the binary. The optional sandbox is off by default, guards the home directory, and sets no network restriction. A plugin runs with your permissions, so read it before you install it.
+Dal keeps its core small:
+
+- **No MCP client** in dal; dalgona ships one, and a plugin can reach HTTP services with `net.fetch`.
+- **No plan or todo** in dal; dalgona ships both. **No subagents** by default.
+- **No LSP** in either product, **no upload** (`/export` writes a file you share yourself), **no self-rebuild** (`/reload` reloads plugins), **nothing but Starlark** in `eval`, **no second store** besides the journal, and **no browser front end** in the binary.
+- **Sandbox off by default**: when on, it guards the home directory and sets no network restriction.
+- **A plugin runs with your permissions**: read it before you install it.
 
 ## Usage
 
@@ -101,7 +113,16 @@ dalgon models
 dalgon logout
 ```
 
-`login` signs in interactively or with `--api-key` or `--device-auth` where the provider supports it. `login status` exits 0 when at least one provider is ready and 1 otherwise, with a sign-in hint and no secret output. `models` lists models with built-in prices and sources. `logout` removes stored credentials. Secrets live in `auth.json` with mode `0600`; the loader refuses symlinks and group or other permission bits.
+`dalgon models` prints the catalog with built-in prices:
+
+```text
+PROVIDER  ID             CONTEXT        PRICE
+openai    gpt-5.6        922000 tokens  $4.000/$20.000 per M tokens
+openai    gpt-5.6-luna   922000 tokens  $0.200/$1.200 per M tokens
+Prices: models.dev, fetched 2026-09-27.
+```
+
+**`login`** signs in interactively or with `--api-key` or `--device-auth` where the provider supports it. **`login status`** exits 0 when at least one provider is ready and 1 otherwise, with a sign-in hint and no secret output. **`models`** lists models with built-in prices and sources. **`logout`** removes stored credentials. **Secrets** live in `auth.json` with mode `0600`; the loader refuses symlinks and group or other permission bits.
 
 ### Read the manual
 
@@ -111,7 +132,7 @@ dalgon docs dal://cli
 dalgona docs dalgona://batteries
 ```
 
-With no URI, `docs` prints the index. With a page URI, it prints the page. Unknown URIs fail with a miss message on stderr and nothing on stdout.
+**No URI**: `docs` prints the index. **A page URI**: it prints the page. **Unknown URIs** fail with a miss message on stderr and nothing on stdout.
 
 ### Run in the terminal
 
@@ -121,7 +142,7 @@ dal --screen fullscreen
 dalgona
 ```
 
-`dal` starts the inline terminal by default once a provider and model are set. `--screen fullscreen` uses the alternate screen and replays the settled transcript on exit. `dalgona` starts the batteries product with its own config, data, and sessions. You can type while dal works; a steer reaches the model at the next safe point, a follow-up waits for the turn to end, and stop ends the turn at once.
+**`dal`** starts the inline terminal by default once a provider and model are set. **`--screen fullscreen`** uses the alternate screen and replays the settled transcript on exit. **`dalgona`** starts the batteries product with its own config, data, and sessions. **Type while dal works**: a steer reaches the model at the next safe point, a follow-up waits for the turn to end, and stop ends the turn at once.
 
 ### Run one turn without the TUI
 
@@ -132,7 +153,7 @@ dalgon -c -p "Continue with the next file"
 dalgon -r my-session -p "Resume and finish"
 ```
 
-These need a configured model; without one dalgon reports the missing model and how to set it. Print mode runs one turn and waits up to 3 seconds for extension status to go quiet. JSON mode writes one JSON result or error line on stdout (with the stop reason, not the assistant text) only after every status kind is quiet; pair it with `-o FILE` to save the assistant message. Common run flags are `-m` for model, `--thinking`, `--mode`, `-n` for name, `-C` for workspace directory, and `--no-session` to skip saving.
+**Print mode** runs one turn, waits up to 3 seconds for extension status to go quiet, and needs a configured model (without one, dalgon reports the missing model and how to set it). **JSON mode** writes one JSON result or error line on stdout (with the stop reason, not the assistant text) only after every status kind is quiet; pair it with `-o FILE` to save the assistant message. **Common run flags**: `-m` for model, `--thinking`, `--mode`, `-n` for name, `-C` for workspace directory, and `--no-session` to skip saving.
 
 ### Control sessions and safety
 
@@ -142,7 +163,7 @@ dalgon -p --approval edits "Format and update the changelog"
 dalgon -p --approval edits --sandbox "Run the test suite"
 ```
 
-Pass `--approval` and `--sandbox` as run modifiers on a TUI or headless invocation (without a prompt, bare `dalgon --approval ...` starts the TUI on a terminal and fails on a pipe). The default `ask` asks before every `patch` and every `exec`. `edits` approves edits without asking and still asks for `exec`. `all` approves every call and is only for runs already confined by an external sandbox; the built-in `--sandbox` sets no network restriction, so it is not that confinement. When no controller can answer, dal denies and says why. `--sandbox` runs `exec` children through the platform helper with workspace, temporary, cache, and `sandbox_writable` roots writable. `dalgon serve` binds loopback only unless `--public` is given with a token from `dalgon serve token`.
+**Run modifiers**: pass `--approval` and `--sandbox` on a TUI or headless invocation (without a prompt, bare `dalgon --approval ...` starts the TUI on a terminal and fails on a pipe). **`ask`** (default) asks before every `patch` and every `exec`. **`edits`** approves edits without asking and still asks for `exec`. **`all`** approves every call and is only for runs already confined by an external sandbox; the built-in `--sandbox` sets no network restriction, so it is not that confinement. **Fail closed**: when no controller can answer, dal denies and says why. **`--sandbox`** runs `exec` children through the platform helper with workspace, temporary, cache, and `sandbox_writable` roots writable. **`dalgon serve`** binds loopback only unless `--public` is given with a token from `dalgon serve token`.
 
 ### Manage plugins
 
@@ -152,7 +173,7 @@ dalgona plugin grant quality
 dalgona plugin revoke quality
 ```
 
-User plugins load from the data root only, never from the workspace, and must be listed in `plugins` in `dal.toml` before `dalgon plugin grant <name>` can grant them. In `dalgona`, bundled batteries such as `quality` are already registered (`dalgon` alone rejects `dalgon plugin grant quality` as not configured). `list` shows configured plugins and persistent grants. `grant` and `revoke` change the stored grant; session grants end with their sessions.
+**Data root only**: user plugins never load from the workspace and must be listed in `plugins` in `dal.toml` before `dalgon plugin grant <name>` can grant them. **Bundled batteries**: in `dalgona`, batteries such as `quality` are already registered (`dalgon` alone rejects `dalgon plugin grant quality` as not configured). **`list`** shows configured plugins and persistent grants. **`grant` and `revoke`** change the stored grant; session grants end with their sessions.
 
 ### Serve and integrate
 
@@ -167,7 +188,7 @@ dalgon completion bash
 dalgon rules test "check this text"
 ```
 
-`serve` starts the local router; `--public` listens wider and requires a token, and `--a2a` enables the agent-to-agent surface. `rpc` serves JSON-RPC over stdio or a local socket. `completion` prints shell completions for `bash`, `elvish`, `fish`, `powershell`, and `zsh`. `rules test` simulates one stream rule against the given text with `--source`, `--tool`, and `--path` selectors.
+**`serve`** starts the local router; **`--public`** listens wider and requires a token, and **`--a2a`** enables the agent-to-agent surface. **`rpc`** serves JSON-RPC over stdio or a local socket. **`completion`** prints shell completions for `bash`, `elvish`, `fish`, `powershell`, and `zsh`. **`rules test`** simulates one stream rule against the given text with `--source`, `--tool`, and `--path` selectors.
 
 ## Documentation
 

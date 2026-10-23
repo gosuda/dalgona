@@ -62,6 +62,12 @@ pub enum BuildError {
 pub struct ProductFactory {
     /// Binary identity selecting the version line (`dalgon`, `dal`, or `dl`).
     pub binary: &'static str,
+    /// Product version rendered on the `--version` line.
+    ///
+    /// Each product bakes its own crate version here: the dalgon and dalgona
+    /// products version independently, so the shared edge must not read the
+    /// version from the crate it was compiled in.
+    pub version: &'static str,
     /// Embedded product-default TOML layered after dal code defaults.
     pub defaults: &'static str,
     /// Builds the architecture product from the captured edge context.
@@ -122,6 +128,9 @@ pub(crate) struct Startup {
     #[cfg(feature = "tui")]
     pub(crate) binary: &'static str,
     pub(crate) helper: Option<PathBuf>,
+    /// Whether the user `dal.toml` sets `[serve] bind`. Only a user-set bind
+    /// outranks `--public`'s wildcard default; the compiled default does not.
+    pub(crate) serve_bind_explicit: bool,
 }
 
 /// Runs the process edge for one product factory.
@@ -137,7 +146,7 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     if argv.get(1).is_some_and(|arg| arg == "__sandbox") {
         return sandbox::run(&argv);
     }
-    let cli = match cli::parse_cli(factory.binary, argv) {
+    let cli = match cli::parse_cli(factory.binary, factory.version, argv) {
         Ok(cli) => cli,
         Err(error) => return clap_exit(&error),
     };
@@ -146,6 +155,11 @@ pub fn run(factory: ProductFactory) -> ExitCode {
     }
     let (vars, cwd) = match capture_process() {
         Ok(captured) => captured,
+        Err(code) => return code,
+    };
+    #[cfg(all(feature = "test-support", unix))]
+    let vars = match claim_controlling_pty(vars) {
+        Ok(vars) => vars,
         Err(code) => return code,
     };
     // The tracing dispatcher is process lifetime: from here, product
@@ -167,13 +181,15 @@ pub fn run(factory: ProductFactory) -> ExitCode {
         Ok(startup) => startup,
         Err(code) => return code,
     };
-    if let Some(cli::Commands::Docs(args)) = &cli.command {
-        return dispatch::docs(args.clone(), factory.binary, (factory.docs)());
-    }
     let sink = open_log_sink(
         edge::parse_log_level(&startup.vars).ok().flatten(),
         &startup.data_root,
     );
+    if let Some(cli::Commands::Docs(args)) = &cli.command {
+        let code = dispatch::docs(args.clone(), factory.binary, (factory.docs)());
+        flush_log(sink.as_ref(), exit::flush_budget());
+        return code;
+    }
     let product = match build_once(&factory, startup.data_root.clone(), &startup.config) {
         Ok(product) => product,
         Err(code) => {
@@ -260,7 +276,7 @@ async fn run_command(
             exit::ExitKind::RequestedFailure,
         ),
         Some(cli::Commands::Completion(args)) => {
-            let script = cli::completion_script(args.shell, factory.binary);
+            let script = cli::completion_script(args.shell, factory.binary, factory.version);
             let _ = write!(std::io::stdout().lock(), "{script}");
             exit::code(exit::ExitKind::Success)
         }
@@ -356,32 +372,45 @@ async fn run_headless(
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
     let mut signals = edge::ShutdownSignals::register();
-    let outcome = dispatch::drive(
+    let outcome = match dispatch::drive(
         &stop,
         &mut signals,
         print::run_print(agent, options, &mut stdout, &mut stderr),
     )
-    .await;
-    let shutdown = if matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
-        host.shutdown_after_quiet_wait(Duration::from_secs(3)).await
-    } else {
-        host.shutdown(Duration::from_secs(3)).await
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(code) => {
+            let _closed = exit::Ladder::begin()
+                .close_host_after_quiet_wait(host)
+                .await;
+            return ExitCode::from(code);
+        }
     };
-    if !shutdown.status_quiet && !matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
+    // The print run already waited for status kinds to go quiet when it
+    // timed out on them, so the host must not spend that grace again.
+    let quiet_waited = matches!(&outcome, Err(print::PrintError::NotQuiet { .. }));
+    let ladder = exit::Ladder::begin();
+    let closed = if quiet_waited {
+        ladder.close_host_after_quiet_wait(host).await
+    } else {
+        ladder.close_host(host, &mut signals).await
+    };
+    if let Some(code) = closed.skipped_by {
+        return ExitCode::from(code);
+    }
+    if !closed.report.status_quiet && !quiet_waited {
         let [what, hint] = cli::texts::status_not_quiet_shutdown();
         let _ = stderr
             .write_all(format!("{what}\n{hint}\n").as_bytes())
             .await;
     }
     match outcome {
-        Ok(Ok(print::PrintOutcome::Completed)) => exit::code(exit::ExitKind::Success),
-        Ok(Ok(print::PrintOutcome::Interrupted)) => exit::code(exit::ExitKind::Signal(2)),
-        Ok(Err(error)) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
+        Ok(print::PrintOutcome::Completed) => exit::code(exit::ExitKind::Success),
+        Ok(print::PrintOutcome::Interrupted) => exit::code(exit::ExitKind::Signal(2)),
+        Err(error) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
         // A headless denial is a requested failure like a tool error.
-        Ok(Ok(print::PrintOutcome::Denied) | Err(_)) => {
-            exit::code(exit::ExitKind::RequestedFailure)
-        }
-        Err(code) => ExitCode::from(code),
+        Ok(print::PrintOutcome::Denied) | Err(_) => exit::code(exit::ExitKind::RequestedFailure),
     }
 }
 
@@ -535,7 +564,17 @@ fn clap_exit(error: &clap::Error) -> ExitCode {
 }
 
 /// Renders one configuration failure with its fix line.
-fn config_exit(binary: &str, error: &ConfigError) -> ExitCode {
+///
+/// Corrupt compiled defaults are an internal invariant failure, not a user
+/// configuration error: they exit with the internal status and point at the
+/// process log.
+fn config_exit(binary: &str, error: &ConfigError, log_path: &Path) -> ExitCode {
+    if let ConfigError::DefaultsInvalid { message } = error {
+        return two_lines(
+            cli::texts::internal_error_at("config", message, log_path),
+            exit::ExitKind::Internal,
+        );
+    }
     two_lines(
         config_error_lines(error, binary),
         exit::ExitKind::RequestedFailure,
@@ -547,10 +586,29 @@ fn config_exit(binary: &str, error: &ConfigError) -> ExitCode {
 ///
 /// The unknown-key catalog names the closest key at suggestion distance or
 /// lists the product's key table in table order; both end with the config
-/// docs pointer. Any other error keeps its rendered text and the fix hint.
+/// docs pointer. Invalid `[rules]` and `[eval] uses` values, a non-table
+/// `[judge]`, and a TOML syntax failure render through the lines their owner
+/// supplies, so the CLI never rewrites a value or recomputes a position. Any
+/// other error keeps its rendered text and the fix hint.
 fn config_error_lines(error: &ConfigError, binary: &str) -> [String; 2] {
-    if let Some([first, second]) = error.rules_lines(binary) {
-        return [first, second];
+    if let Some(lines) = error
+        .rules_lines(binary)
+        .or_else(|| error.eval_lines(binary))
+    {
+        return lines;
+    }
+    if let Some([what, fix]) = error.judge_lines() {
+        return [format!("{binary}: {}: {what}", edge::CONFIG_FILE_NAME), fix];
+    }
+    if let ConfigError::Syntax { line, message } = error {
+        let place = line.map_or_else(
+            || edge::CONFIG_FILE_NAME.to_owned(),
+            |line| format!("{}:{line}", edge::CONFIG_FILE_NAME),
+        );
+        return [
+            format!("{binary}: {place}: {message}"),
+            cli::texts::CONFIG_FIX_HINT.into(),
+        ];
     }
     if let ConfigError::UnknownKey {
         key,
@@ -601,6 +659,13 @@ pub(crate) fn host_exit(error: &HostError, data_root: &Path) -> ExitCode {
             exit::ExitKind::RequestedFailure,
         );
     }
+    if let HostError::Provider(error) = error
+        && let Some(fix) = error.fix()
+    {
+        let _ = writeln!(std::io::stderr().lock(), "dalgon: {error}");
+        let _ = writeln!(std::io::stderr().lock(), "{fix}");
+        return exit::code(exit::ExitKind::RequestedFailure);
+    }
     let _ = writeln!(std::io::stderr().lock(), "dalgon: {error}");
     let hint = if matches!(error, HostError::SessionBusy { .. }) {
         cli::texts::CONNECT_HINT
@@ -645,6 +710,57 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
         ));
     }
     Ok((vars, cwd))
+}
+
+/// The test-only request flag for a foreground controlling terminal.
+///
+/// Only gate-launched children opt in: the PTY helper sets it before spawn,
+/// and the already-executing child consumes it here. Release builds never
+/// read it.
+#[cfg(all(feature = "test-support", unix))]
+const CONTROLLING_PTY_ENV: &str = "DAL_TEST_CONTROLLING_PTY";
+
+/// Acquires the stdin PTY as this process's controlling terminal when the
+/// test-only flag requests it, then consumes the flag.
+///
+/// Runs in the already-executing child: a new session via `setsid`, attaches
+/// the stdin slave with `TIOCSCTTY`, and makes this process the foreground
+/// group with `tcsetpgrp`. Every step uses the safe Rustix wrappers, with no
+/// `pre_exec`, no parent-session mutation, and no new command or flag. The
+/// flag is removed from the captured map so it does not enter the host's
+/// provider, tool, or child snapshots. Setup failures exit
+/// explicitly instead of falling back to plain PTY I/O.
+#[cfg(all(feature = "test-support", unix))]
+fn claim_controlling_pty(mut vars: VarsMap) -> Result<VarsMap, ExitCode> {
+    let opted_in = vars
+        .remove(std::ffi::OsStr::new(CONTROLLING_PTY_ENV))
+        .is_some_and(|value| !value.is_empty());
+    if !opted_in {
+        return Ok(vars);
+    }
+    if let Err(error) = attach_stdin_as_controlling_terminal() {
+        return Err(two_lines(
+            [
+                format!("dalgon: cannot acquire the test controlling terminal: {error}"),
+                "Run this gate through its PTY test harness.".into(),
+            ],
+            exit::ExitKind::Internal,
+        ));
+    }
+    Ok(vars)
+}
+
+/// Attaches the stdin slave as this process's controlling terminal and
+/// foreground group: a new session, `TIOCSCTTY` on stdin, then `tcsetpgrp`
+/// to this process. Safe Rustix wrappers only; the caller maps the failure.
+#[cfg(all(feature = "test-support", unix))]
+fn attach_stdin_as_controlling_terminal() -> Result<(), rustix::io::Errno> {
+    let stdin = rustix::stdio::stdin();
+    rustix::process::setsid()?;
+    rustix::process::ioctl_tiocsctty(stdin)?;
+    let pid = rustix::process::getpid();
+    rustix::termios::tcsetpgrp(stdin, pid)?;
+    Ok(())
 }
 
 /// Opens the family log sink once after the roots resolve and installs it.
@@ -720,9 +836,13 @@ fn assemble_startup(
     let config_path = edge::config_file_path(&roots);
     let user_toml = match edge::read_user_config(&config_path) {
         Ok(user) => user,
-        Err(edge::EdgeError::Io { path, source, .. }) => {
+        Err(edge::EdgeError::Io {
+            operation,
+            path,
+            source,
+        }) => {
             return Err(two_lines(
-                cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+                cli::texts::startup_file_failed(operation, &path, &source.to_string()),
                 exit::ExitKind::RequestedFailure,
             ));
         }
@@ -745,7 +865,13 @@ fn assemble_startup(
     };
     let base = match Config::load(kind, &roots.data, factory.defaults, user_toml.as_deref()) {
         Ok(config) => config,
-        Err(error) => return Err(config_exit(factory.binary, &error)),
+        Err(error) => {
+            return Err(config_exit(
+                factory.binary,
+                &error,
+                &edge::data_root_log_path(&roots.data),
+            ));
+        }
     };
     let (mode, model) = split_mode_model(cli.mode, cli.model.clone());
     let config = base.with_overrides(&ConfigOverrides {
@@ -768,8 +894,69 @@ fn assemble_startup(
         #[cfg(feature = "tui")]
         binary: factory.binary,
         helper: edge::current_exe(),
+        serve_bind_explicit: user_sets_serve_bind(user_toml.as_deref()),
     };
     Ok(startup)
+}
+
+/// Reports whether the user configuration text sets `[serve] bind`.
+///
+/// `Config::load` has already accepted the text, so a parse failure here
+/// cannot happen for text that reached this point; it reads as unset.
+fn user_sets_serve_bind(user_toml: Option<&str>) -> bool {
+    user_toml
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .and_then(|table| table.get("serve")?.as_table()?.get("bind").cloned())
+        .is_some()
+}
+
+/// Renders a plugin load failure with the plugin's name, or `None` when the
+/// error carries no plugin to name.
+///
+/// A configured plugin with no directory is the missing-plugin error. Every
+/// other failure names the plugin whose directory holds the failing file and
+/// keeps the loader's own `path:line:col: message` detail.
+fn plugin_load_lines(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+    plugins_dir: &Path,
+) -> Option<[String; 2]> {
+    use dal_star::LoadError;
+
+    let error = error.downcast_ref::<LoadError>()?;
+    if let LoadError::UnknownPlugin { name, dir } = error {
+        return Some(cli::texts::plugin_missing(name, &dir.join(&**name)));
+    }
+    let name = failing_plugin(error, plugins_dir)?;
+    Some(cli::texts::plugin_failed_to_load(&name, &error.render()))
+}
+
+/// Names the plugin whose directory holds the file a load error points at.
+fn failing_plugin(error: &dal_star::LoadError, plugins_dir: &Path) -> Option<String> {
+    use dal_star::LoadError;
+
+    let path = match error {
+        LoadError::Eval { path, .. }
+        | LoadError::Registration { path, .. }
+        | LoadError::PluginRebound { path, .. }
+        | LoadError::UnsupportedEntry { path }
+        | LoadError::InvalidPlugin { path, .. }
+        | LoadError::Uses { path, .. }
+        | LoadError::Schema { path, .. }
+        | LoadError::Asset { path, .. }
+        | LoadError::Unreadable { path, .. } => path,
+        LoadError::NameMismatch { dir, .. } => return Some(dir.to_string()),
+        LoadError::MissingEntryFile { dir } => return Some(dir.file_name()?.to_str()?.to_owned()),
+        _ => return None,
+    };
+    let relative = path.strip_prefix(plugins_dir).ok()?;
+    Some(
+        relative
+            .components()
+            .next()?
+            .as_os_str()
+            .to_str()?
+            .to_owned(),
+    )
 }
 
 /// Maps an `resolve_roots` failure to its usage diagnostics.
@@ -821,6 +1008,7 @@ fn build_once(
     data_root: PathBuf,
     config: &Config,
 ) -> Result<dal_agent::Product, ExitCode> {
+    let plugins_dir = data_root.join("plugins");
     match (factory.build)(&BuildCx { data_root, config }) {
         Ok(product) => Ok(product),
         Err(BuildError::Registration(error)) => Err(two_lines(
@@ -831,10 +1019,12 @@ fn build_once(
             ref section,
             ref source,
         }) if section.as_ref() == "plugins" => Err(two_lines(
-            [
-                format!("plugin load failed: {source}"),
-                cli::texts::CONFIG_FIX_HINT.into(),
-            ],
+            plugin_load_lines(&**source, &plugins_dir).unwrap_or_else(|| {
+                [
+                    format!("plugin load failed: {source}"),
+                    cli::texts::CONFIG_FIX_HINT.into(),
+                ]
+            }),
             exit::ExitKind::RequestedFailure,
         )),
         Err(error) => Err(two_lines(
@@ -923,6 +1113,66 @@ mod config_exit_tests {
         );
     }
 
+    #[test]
+    fn invalid_rules_values_name_the_key_value_and_allowed_range() {
+        let lines = lines_for("[rules]\nmax_retries = \"many\"\n");
+        assert!(
+            lines[0].starts_with("dalgon: dal.toml:")
+                && lines[0].contains("rules.max_retries")
+                && lines[0].contains("many"),
+            "the diagnostic identifies the config key and rejected value: {}",
+            lines[0]
+        );
+        assert!(lines[1].contains("whole number"), "{}", lines[1]);
+        let bounds = lines[1]
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|token| !token.is_empty());
+        assert_eq!(bounds.collect::<Vec<_>>(), ["0", "20"], "{}", lines[1]);
+    }
+
+    #[test]
+    fn syntax_failures_name_the_file_and_the_parser_line() {
+        let lines = lines_for("mode = \"normal\"\nmode = \"eval-first\"\n");
+        let prefix = format!("dalgon: {}:2: ", crate::edge::CONFIG_FILE_NAME);
+        assert!(
+            lines[0].starts_with(&prefix) && lines[0].len() > prefix.len(),
+            "the first line carries the file, the line, and the parser message: {}",
+            lines[0]
+        );
+        assert_eq!(lines[1], crate::cli::texts::CONFIG_FIX_HINT);
+    }
+
+    #[test]
+    fn non_table_judge_uses_the_judge_lines() {
+        let lines = lines_for("judge = 3\n");
+        assert_eq!(
+            lines[0],
+            format!(
+                "dalgon: {}: judge must be a table",
+                crate::edge::CONFIG_FILE_NAME
+            )
+        );
+        assert!(lines[1].starts_with("Use a [judge] table"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn invalid_eval_uses_render_for_the_dalgona_product() {
+        let error = dal_core::Config::load(
+            ConfigProduct::Dalgona,
+            Path::new("/t"),
+            "",
+            Some("[eval]\nuses = [\"nope\"]\n"),
+        )
+        .unwrap_err();
+        let lines = config_error_lines(&error, "dalgona");
+        assert_eq!(lines[0], "dalgona: dal.toml: eval.uses \"nope\" is invalid");
+        assert!(
+            lines[1].starts_with("Use an exact operation id"),
+            "{}",
+            lines[1]
+        );
+    }
+
     /// An invalid `[rules]` value renders as exactly two lines: the key and
     /// the value in TOML form, then the fix. A string keeps its quotes, so a
     /// quoted number is not reported as if the number itself were out of
@@ -954,5 +1204,93 @@ mod config_exit_tests {
             lines[0],
             "dalgon: invalid config value jit for mode: normal, eval-first, eval-only"
         );
+    }
+}
+
+#[cfg(test)]
+mod plugin_load_tests {
+    use super::{BuildCx, BuildError, Config, plugin_load_lines};
+    use dal_core::ConfigProduct;
+
+    /// Builds the dal product over a temporary data root holding `files`
+    /// under `plugins/`, and renders the plugin failure it reports.
+    fn failure_lines(plugins_key: &str, files: &[(&str, &str)]) -> [String; 2] {
+        let dir = tempfile::tempdir().expect("temporary data root");
+        for (path, text) in files {
+            let full = dir.path().join("plugins").join(path);
+            std::fs::create_dir_all(full.parent().expect("a file path")).expect("plugin dir");
+            std::fs::write(full, text).expect("plugin file");
+        }
+        let config = Config::load(
+            ConfigProduct::Dalgon,
+            dir.path(),
+            "",
+            Some(&format!("plugins = {plugins_key}\n")),
+        )
+        .expect("the configuration is valid");
+        let built = crate::product::build(&BuildCx {
+            data_root: dir.path().to_path_buf(),
+            config: &config,
+        });
+        let Err(BuildError::Section { source, .. }) = built else {
+            panic!("the plugin set must fail to load");
+        };
+        plugin_load_lines(&*source, &dir.path().join("plugins"))
+            .expect("a plugin failure renders as plugin lines")
+    }
+
+    #[test]
+    fn a_configured_plugin_without_a_directory_is_missing() {
+        let lines = failure_lines("[\"gone\"]", &[]);
+        let prefix = "dalgon: plugin \"gone\" is missing: ";
+        let location = lines[0]
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("the missing-plugin prefix: {}", lines[0]));
+        assert!(
+            std::path::Path::new(location).ends_with("plugins/gone"),
+            "the path names the plugin directory: {location}"
+        );
+        assert_eq!(
+            lines[1],
+            "Remove \"gone\" from the plugins key in dal.toml, or create that directory with a plugin.star file."
+        );
+    }
+
+    #[test]
+    fn an_evaluation_failure_names_the_plugin_and_its_location() {
+        let lines = failure_lines(
+            "[\"bad\"]",
+            &[(
+                "bad/plugin.star",
+                "load(\"@dal/v1\", \"dal\")\n\nx = 1 + \"a\"\n",
+            )],
+        );
+        assert!(
+            lines[0].starts_with("dalgon: plugin \"bad\" failed to load: ")
+                && lines[0].contains("plugin.star:3:"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(
+            lines[1],
+            "Fix the error and run dalgon again, or remove \"bad\" from the plugins key."
+        );
+    }
+}
+
+#[cfg(test)]
+mod serve_bind_provenance_tests {
+    use super::user_sets_serve_bind;
+
+    #[test]
+    fn only_a_user_set_bind_counts_as_explicit() {
+        assert!(!user_sets_serve_bind(None));
+        assert!(!user_sets_serve_bind(Some("")));
+        assert!(!user_sets_serve_bind(Some("[serve]\nport = 7500\n")));
+        assert!(!user_sets_serve_bind(Some("bind = \"0.0.0.0\"\n")));
+        assert!(user_sets_serve_bind(Some(
+            "[serve]\nbind = \"127.0.0.1\"\n"
+        )));
+        assert!(user_sets_serve_bind(Some("serve.bind = \"::1\"\n")));
     }
 }

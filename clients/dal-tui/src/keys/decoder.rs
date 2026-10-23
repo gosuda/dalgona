@@ -42,7 +42,9 @@ impl KeyDecoder {
         self.decode_available(now)
     }
 
-    /// Applies the timeout rules when no new bytes arrived.
+    /// Applies the timeout rules when no new bytes arrived. The clock used
+    /// here must move forward from the instant of the last `feed`, or the
+    /// pending escape's 50 ms deadline can never expire.
     #[must_use]
     pub fn tick(&mut self, now: Instant) -> Vec<InputEvent> {
         self.decode_available(now)
@@ -142,6 +144,10 @@ impl KeyDecoder {
             EscapeParse::Partial
                 if now.saturating_duration_since(started) >= Duration::from_millis(50) =>
             {
+                // A timed-out partial is always a real Esc: emit it and let
+                // the remaining bytes re-parse on their own (this also
+                // splits a fragmented `\x1b\x1b` meta prefix into two Esc
+                // presses once the tail never completes the sequence).
                 self.consume(1);
                 events.push(InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE)));
                 true

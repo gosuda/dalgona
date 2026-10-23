@@ -362,14 +362,8 @@ mod copilot {
         "raptor-mini",
     ];
 
-    #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one device-login fixture proves the full public success path in place"
-    )]
-    async fn copilot_device_login_public_success_persists_api_key_envelope() {
-        let dir = TestDir::new();
-        let server = Server::start(|request: &Request| match request.path() {
+    async fn start_copilot_device_server() -> Server {
+        Server::start(|request: &Request| match request.path() {
             "/login/device/code" => {
                 let form = request.form();
                 let client_id = form
@@ -432,7 +426,13 @@ mod copilot {
             _ => json_reply(404, "not found"),
         })
         .await
-        .expect("start server");
+        .expect("start server")
+    }
+
+    #[tokio::test]
+    async fn copilot_device_login_public_success_persists_api_key_envelope() {
+        let dir = TestDir::new();
+        let server = start_copilot_device_server().await;
 
         let endpoints = LoginEndpoints::loopback(server.base(), &EnvSnapshot::default())
             .expect("loopback endpoints");
@@ -696,22 +696,14 @@ mod copilot {
         cancel2.cancel();
         let (io2, _rx2) = LoginIo::channel(None, cancel2);
         let result2 = login("github-copilot", Method::Device, io2, &site).await;
-        assert!(
-            matches!(result2, Err(ProviderError::LoginCancelled)),
-            "cancellation must never be swallowed: got {result2:?}"
-        );
+        let Err(ProviderError::LoginCancelled) = result2 else {
+            panic!("cancellation must never be swallowed")
+        };
     }
 
-    #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one discovery fixture proves the truncated-body path in place"
-    )]
-    async fn copilot_discovery_truncated_body_is_best_effort_and_persists_without_endpoint() {
-        use std::time::Duration;
+    async fn start_truncated_discovery_peer() -> (String, AbortOnDrop) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let dir = TestDir::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback peer");
@@ -720,7 +712,7 @@ mod copilot {
             clippy::disallowed_methods,
             reason = "test edge: loopback server runs in the background of login test"
         )]
-        let _peer = AbortOnDrop(tokio::spawn(async move {
+        let peer = AbortOnDrop(tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
@@ -800,6 +792,15 @@ mod copilot {
                 });
             }
         }));
+        (base, peer)
+    }
+
+    #[tokio::test]
+    async fn copilot_discovery_truncated_body_is_best_effort_and_persists_without_endpoint() {
+        use std::time::Duration;
+
+        let dir = TestDir::new();
+        let (base, _peer) = start_truncated_discovery_peer().await;
 
         let endpoints =
             LoginEndpoints::loopback(&base, &EnvSnapshot::default()).expect("loopback endpoints");

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from typing import Protocol
 
 
 def _load_generator() -> ModuleType:
@@ -20,6 +21,16 @@ def _load_generator() -> ModuleType:
     return module
 
 
+class _Tier(Protocol):
+    size: int
+
+
+class _Row(Protocol):
+    model: str
+    tiers: tuple[_Tier, ...]
+    cache_write: float | None
+
+
 up = _load_generator()
 
 
@@ -27,7 +38,7 @@ def tier(size: object, **rates: object) -> dict[str, object]:
     return {"tier": {"type": "context", "size": size}, "input": 1, "output": 2, **rates}
 
 
-def parse(*tiers: object) -> tuple[up.PriceTier, ...]:
+def parse(*tiers: object) -> tuple[_Tier, ...]:
     return up.parse_tiers({"tiers": list(tiers)})
 
 
@@ -106,9 +117,8 @@ class ParseTiersTest(unittest.TestCase):
             [tier(1, output="2")],
         ]
         for tiers in bad:
-            with self.subTest(tiers=tiers):
-                with self.assertRaises(up.UpdatePricesError):
-                    up.parse_tiers({"tiers": tiers})
+            with self.subTest(tiers=tiers), self.assertRaises(up.UpdatePricesError):
+                up.parse_tiers({"tiers": tiers})
 
     def test_u64_max_size_is_accepted(self) -> None:
         self.assertEqual([t.size for t in parse(tier(18_446_744_073_709_551_615))], [18_446_744_073_709_551_615])
@@ -117,11 +127,12 @@ class ParseTiersTest(unittest.TestCase):
 class RenderTest(unittest.TestCase):
     def test_render_emits_every_tier_in_order(self) -> None:
         rows = [
-            up.PriceRow("a/plain", 1.0, None, 2.0, None, ()),
+            up.PriceRow("a/plain", 1.0, None, None, 2.0, None, ()),
             up.PriceRow(
                 "b/tiered",
                 0.5,
                 0.25,
+                0.75,
                 1.5,
                 None,
                 (
@@ -140,16 +151,24 @@ class RenderTest(unittest.TestCase):
         self.assertIn("input: Some(0.5),\n                cached_input: None,", text)
         self.assertIn("cache_write: Some(2.0),", text)
         self.assertIn("reasoning: Some(4.0),", text)
+        self.assertIn(
+            'model: "a/plain",\n        input: Some(1.0),\n        cached_input: None,\n        cache_write: None,',
+            text,
+        )
+        self.assertIn(
+            'model: "b/tiered",\n        input: Some(0.5),\n        cached_input: Some(0.25),\n        cache_write: Some(0.75),',
+            text,
+        )
         self.assertIn('    ("p", "m"),', text)
         self.assertTrue(text.endswith("];\n"))
 
     def test_render_is_deterministic(self) -> None:
-        rows = [up.PriceRow("m", 1.0, None, None, None, (up.PriceTier(5, 1.0, None, None, None, None),))]
+        rows = [up.PriceRow("m", 1.0, None, None, None, None, (up.PriceTier(5, 1.0, None, None, None, None),))]
         self.assertEqual(up.render("2026-01-02", rows, []), up.render("2026-01-02", rows, []))
 
 
 class LoadCatalogTest(unittest.TestCase):
-    def load(self, catalog: object) -> tuple[list[up.PriceRow], list[tuple[str, str]]]:
+    def load(self, catalog: object) -> tuple[list[_Row], list[tuple[str, str]]]:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.json"
             path.write_text(json.dumps(catalog), encoding="utf-8")
@@ -165,6 +184,21 @@ class LoadCatalogTest(unittest.TestCase):
     def test_malformed_tier_in_catalog_is_fatal(self) -> None:
         with self.assertRaises(up.UpdatePricesError):
             self.load({"p": {"models": {"m": {"cost": {"input": 1, "tiers": [tier(5), tier(5)]}}}}})
+
+    def test_base_cache_write_flows_from_catalog(self) -> None:
+        rows, _ = self.load(
+            {
+                "p": {
+                    "models": {
+                        "stated": {"cost": {"input": 1, "cache_write": 0.5, "output": 2}},
+                        "absent": {"cost": {"input": 1, "output": 2}},
+                    }
+                }
+            }
+        )
+        by_model = {row.model: row for row in rows}
+        self.assertEqual(by_model["p/stated"].cache_write, 0.5)
+        self.assertIsNone(by_model["p/absent"].cache_write)
 
 
 class CommittedTableTest(unittest.TestCase):

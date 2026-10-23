@@ -113,7 +113,19 @@ impl LockGuard {
     fn acquire_with(
         path: &Path,
         session: SessionId,
+        after_open: impl FnMut(&Path),
+    ) -> Result<Self, StoreError> {
+        Self::acquire_observed(path, session, after_open, |_| {})
+    }
+
+    /// [`Self::acquire_with`] with `after_lock` called once the lock is held
+    /// and before this process publishes itself as the owner, so a test can
+    /// run a contender in that window.
+    fn acquire_observed(
+        path: &Path,
+        session: SessionId,
         mut after_open: impl FnMut(&Path),
+        after_lock: impl FnOnce(&Path),
     ) -> Result<Self, StoreError> {
         let deadline = Instant::now() + PID_WAIT;
         let mut file = open_lock_file(path)?;
@@ -143,6 +155,19 @@ impl LockGuard {
             // the next opener creates and locks a fresh file. Reopen and lock
             // again, within the same wait bound.
             if names_locked_file(&file, path).map_err(|source| util::io_err(path, source))? {
+                // A holder killed before its guard dropped leaves its owner
+                // sidecar behind. Clear it the moment the lock is ours and
+                // before any contender hook runs: a contender arriving in the
+                // held-but-unpublished window must see no owner, never the
+                // dead holder's pid. The sidecar-less state is transient and
+                // `read_pid_until` polls it as such.
+                let stale = owner_path(path);
+                match fs::remove_file(&stale) {
+                    Ok(()) => {}
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(util::io_err(&stale, source)),
+                }
+                after_lock(path);
                 return Self::publish_owner(file, path);
             }
             if Instant::now() >= deadline {
@@ -160,6 +185,11 @@ impl LockGuard {
     }
 
     /// Writes this process's pid into the freshly locked `file` and its sidecar.
+    ///
+    /// The stale owner sidecar is already gone: `acquire_observed` clears it
+    /// the moment the lock is won, before any contender hook runs, so the
+    /// sidecar-less window here is the only contender-visible gap and the
+    /// rename below is the sole publisher.
     fn publish_owner(mut file: File, path: &Path) -> Result<Self, StoreError> {
         file.set_len(0)
             .map_err(|source| util::io_err(path, source))?;
@@ -169,7 +199,10 @@ impl LockGuard {
         // The owner sidecar repeats the pid outside the locked file:
         // `LockFileEx` makes the held file unreadable to every other
         // handle on Windows, so a contended acquirer reads the pid
-        // from the sidecar that the lock never seals.
+        // from the sidecar that the lock never seals. `write_atomic`
+        // publishes the replacement in one rename, so the only
+        // sidecar-less state is the window above where a contender sees
+        // no sidecar at all, and it polls as transient.
         util::write_atomic(
             &owner_path(path),
             format!("{}\n", std::process::id()).as_bytes(),
@@ -478,6 +511,42 @@ mod tests {
         );
         let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
         assert!(owner.exists(), "the next holder republishes its own pid");
+    }
+
+    #[test]
+    fn stale_owner_sidecar_is_cleared_before_the_new_holder_publishes() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        let owner = super::owner_path(&path);
+        // A holder killed before its guard dropped leaves its pid behind.
+        fs::write(&owner, b"999999\n").expect("write the dead holder's owner text");
+        let seen = std::cell::Cell::new(None);
+
+        let guard = LockGuard::acquire_observed(
+            &path,
+            id,
+            |_| {},
+            |held| match LockGuard::acquire(held, id) {
+                // The lock is held but this process has not published itself:
+                // the contender must not be told the dead holder's pid.
+                Err(StoreError::Locked { pid, .. }) => seen.set(Some(pid)),
+                other => panic!("the lock is held, so a contender is refused, got {other:?}"),
+            },
+        )
+        .expect("acquire over a stale owner sidecar");
+
+        assert_eq!(
+            seen.get(),
+            Some(None),
+            "a contender in that window sees no owner, never the dead pid"
+        );
+        assert_eq!(
+            fs::read(&owner).expect("read the owner sidecar"),
+            format!("{}\n", std::process::id()).as_bytes(),
+            "the new holder publishes its own pid"
+        );
+        drop(guard);
     }
 
     #[test]

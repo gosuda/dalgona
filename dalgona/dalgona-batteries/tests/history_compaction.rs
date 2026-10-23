@@ -12,7 +12,9 @@
 //! image part lacks a resolvable durable letter, that the entry precedes its
 //! letters contiguously, and that a blob-publication failure, a journal write
 //! failure inside the first letter, and a journal sync failure each commit
-//! neither entry nor letters.
+//! neither entry nor letters. A final test compacts twice across new turns
+//! and proves the second entry leaves the first entry's blobs and letters
+//! resolvable under the next ordinal.
 //!
 //! The blob-publication failure stops before the journal append boundary. The
 //! write and sync failures arm one real fault on the live session's journal
@@ -120,10 +122,13 @@ async fn retry_fixture(data: PathBuf, workspace: Workspace, session: SessionId) 
     }
 }
 
-/// Builds a real host over a directly assembled product with the `history`
-/// battery enabled and the provider scripted. The product carries no other
-/// compactor, so the history battery alone decides the manual compact.
-async fn fixture(tag: &str) -> Fixture {
+/// Starts a real host over a directly assembled product with the `history`
+/// battery enabled and the provider scripted, without seeding any turn. The
+/// script carries one events step per prompt in `prompts`, consumed in order,
+/// so the caller can seed turns across a resume as long as the remaining
+/// prompts match the remaining steps. The product carries no other compactor,
+/// so the history battery alone decides the manual compact.
+async fn unseeded_fixture(tag: &str, prompts: &[Vec<String>]) -> Fixture {
     let root = temp_root(tag);
     let data = root.join("data");
     let workspace_dir = root.join("workspace");
@@ -134,14 +139,9 @@ async fn fixture(tag: &str) -> Fixture {
         .await
         .expect("workspace directory");
     let workspace = Workspace::new(workspace_dir.clone()).expect("workspace");
-    let prompts = [
-        vec![COVERED_TEXT.repeat(1_400)],
-        vec![COVERED_TEXT.repeat(1_400)],
-        vec![RETAINED_TEXT.repeat(2_000); 10],
-    ];
     let mut input_tokens = 0;
     let mut steps = String::new();
-    for parts in &prompts {
+    for parts in prompts {
         input_tokens += parts
             .iter()
             .map(|text| dal_core::estimate_text_tokens(text))
@@ -161,11 +161,28 @@ async fn fixture(tag: &str) -> Fixture {
         },
     )
     .await;
+    let session = agent.session();
+    Fixture {
+        _root: root,
+        data,
+        workspace,
+        host,
+        agent,
+        session,
+    }
+}
+
+/// Seeds each prompt as one ordinary turn, in order.
+async fn seed_prompts(agent: &dal_agent::Agent, prompts: Vec<Vec<String>>) {
     let mut subscription = agent.subscribe(None).expect("seed subscription");
     for parts in prompts {
-        seed_turn(&agent, &mut subscription, parts).await;
+        seed_turn(agent, &mut subscription, parts).await;
     }
-    let session = agent.session();
+}
+
+/// Asserts every seeded user part stays inline text, so later faults target
+/// PNG publication rather than text-blob reads.
+fn assert_all_text_inline(agent: &dal_agent::Agent) {
     let view = agent.view(dal_core::PageReq::default()).expect("seed view");
     for entry in view.entries.items {
         if let EntryKind::User { parts } = entry.kind {
@@ -177,14 +194,21 @@ async fn fixture(tag: &str) -> Fixture {
             );
         }
     }
-    Fixture {
-        _root: root,
-        data,
-        workspace,
-        host,
-        agent,
-        session,
-    }
+}
+
+/// Builds a real host over a directly assembled product with the `history`
+/// battery enabled and the provider scripted. The product carries no other
+/// compactor, so the history battery alone decides the manual compact.
+async fn fixture(tag: &str) -> Fixture {
+    let prompts = vec![
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![RETAINED_TEXT.repeat(2_000); 10],
+    ];
+    let fixture = unseeded_fixture(tag, &prompts).await;
+    seed_prompts(&fixture.agent, prompts).await;
+    assert_all_text_inline(&fixture.agent);
+    fixture
 }
 
 async fn seed_turn(
@@ -288,6 +312,7 @@ async fn compaction_end(subscription: &mut dal_agent::Subscription) -> (Box<str>
 }
 
 /// One durable letter in journal order.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Letter {
     id: String,
     png_blob: String,
@@ -361,6 +386,14 @@ fn compaction_letters(records: &[Record]) -> Option<(&Entry, Vec<Letter>)> {
     let Record::Compaction(entry) = &records[entry_index] else {
         return None;
     };
+    Some((entry, letters_after(records, entry_index)))
+}
+
+/// Collects the contiguous history letters after one compaction entry.
+///
+/// The fold emits the entry and its letters in one batch, so the letters end
+/// at the first record that is not a `history` `letter`.
+fn letters_after(records: &[Record], entry_index: usize) -> Vec<Letter> {
     let mut letters = Vec::new();
     for record in records.iter().skip(entry_index + 1) {
         let Record::Ext {
@@ -391,7 +424,32 @@ fn compaction_letters(records: &[Record]) -> Option<(&Entry, Vec<Letter>)> {
         }
         letters.push(letter);
     }
-    Some((entry, letters))
+    letters
+}
+
+/// Collects every durable compaction entry with its contiguous history
+/// letters in journal order.
+fn all_compaction_batches(records: &[Record]) -> Vec<(&Entry, Vec<Letter>)> {
+    let mut batches = Vec::new();
+    let mut start = 0;
+    while start < records.len() {
+        let Some(offset) = records[start..].iter().position(|record| {
+            matches!(
+                record,
+                Record::Compaction(entry)
+                    if matches!(&entry.kind, EntryKind::Compaction { .. })
+            )
+        }) else {
+            break;
+        };
+        let entry_index = start + offset;
+        let Record::Compaction(entry) = &records[entry_index] else {
+            break;
+        };
+        batches.push((entry, letters_after(records, entry_index)));
+        start = entry_index + 1;
+    }
+    batches
 }
 
 /// Resolves one entry image part to its durable bytes: inline base64, or a
@@ -416,36 +474,67 @@ fn image_bytes(
         .expect("entry image decodes")
 }
 
-/// Asserts every image part resolves to a durable letter with the same PNG
-/// digest and every declared byte length matches the reopened bytes.
-fn assert_resolvable(journal: &dal_store::Journal, entry: &Entry, letters: &[Letter]) {
+/// Asserts every image part of one compaction entry resolves, through the
+/// `letter://<id>` label right before it, to a durable letter with the same
+/// PNG digest and byte length as the reopened image.
+///
+/// A label names either a letter this entry committed (`letters`) or a letter
+/// an earlier entry committed (`earlier`) that this entry drew again
+/// unchanged: a later compaction that re-draws the same journal under the same
+/// grid reuses the stored letter and appends no record for it. No two images
+/// carry one label, and the letters this entry committed label exactly its
+/// fresh images, in committed order, so a fresh image never lacks a record and
+/// a committed record never lacks its image. Returns how many images reuse an
+/// earlier entry's letter.
+fn assert_resolvable(
+    journal: &dal_store::Journal,
+    entry: &Entry,
+    letters: &[Letter],
+    earlier: &[Letter],
+) -> usize {
     let EntryKind::Compaction { parts, .. } = &entry.kind else {
         panic!("the reopened entry must stay a compaction entry");
     };
-    let images: Vec<(&str, &str, Option<u64>)> = parts
-        .iter()
-        .filter_map(|part| match part {
-            JournalPart::Image { mime, base64 } => Some((mime.as_ref(), base64.as_ref(), None)),
+    let mut images: Vec<(&str, &str, &str, Option<u64>)> = Vec::new();
+    for (position, part) in parts.iter().enumerate() {
+        let (mime, encoded, declared_blob_bytes) = match part {
+            JournalPart::Image { mime, base64 } => (mime.as_ref(), base64.as_ref(), None),
             JournalPart::ImageBlob { mime, blob, bytes } => {
-                Some((mime.as_ref(), blob.as_ref(), Some(*bytes)))
+                (mime.as_ref(), blob.as_ref(), Some(*bytes))
             }
-            _ => None,
-        })
-        .collect();
+            _ => continue,
+        };
+        let label = position
+            .checked_sub(1)
+            .and_then(|before| match &parts[before] {
+                JournalPart::Text { text } => text.strip_prefix("letter://"),
+                _ => None,
+            });
+        let Some(id) = label else {
+            panic!("image part {position} must follow its letter://<id> label");
+        };
+        images.push((id, mime, encoded, declared_blob_bytes));
+    }
     if images.is_empty() {
         panic!("the history compactor must commit image parts for this fixture");
     }
-    if images.len() != letters.len() {
-        panic!(
-            "one letter per drawn image: {} images but {} letters",
-            images.len(),
-            letters.len()
-        );
-    }
-    for (index, ((mime, encoded, declared_blob_bytes), letter)) in
-        images.iter().zip(letters.iter()).enumerate()
-    {
-        let bytes = image_bytes(journal, mime, encoded, *declared_blob_bytes, index);
+    let mut labeled = std::collections::HashSet::new();
+    let mut fresh: Vec<&str> = Vec::new();
+    let mut reused = 0;
+    for (index, &(id, mime, encoded, declared_blob_bytes)) in images.iter().enumerate() {
+        if !labeled.insert(id) {
+            panic!("letter {id} labels more than one image part");
+        }
+        let letter = if let Some(letter) = letters.iter().find(|letter| letter.id == id) {
+            fresh.push(letter.id.as_str());
+            letter
+        } else if let Some(letter) = earlier.iter().find(|letter| letter.id == id) {
+            reused += 1;
+            letter
+        } else {
+            panic!("image part {index} names letter {id}, which no durable letter record carries");
+        };
+        let bytes = image_bytes(journal, mime, encoded, declared_blob_bytes, index);
         let actual_bytes = u64::try_from(bytes.len()).expect("PNG length fits u64");
         if u64::from(letter.png_bytes) != actual_bytes {
             panic!(
@@ -454,7 +543,7 @@ fn assert_resolvable(journal: &dal_store::Journal, entry: &Entry, letters: &[Let
             );
         }
         if let Some(declared) = declared_blob_bytes
-            && *declared != actual_bytes
+            && declared != actual_bytes
         {
             panic!(
                 "image part {index} declares {declared} blob bytes but reopened image has {actual_bytes}"
@@ -474,6 +563,13 @@ fn assert_resolvable(journal: &dal_store::Journal, entry: &Entry, letters: &[Let
             }
         }
     }
+    let committed: Vec<&str> = letters.iter().map(|letter| letter.id.as_str()).collect();
+    if fresh != committed {
+        panic!(
+            "one committed letter per fresh image, in order: images label {fresh:?} but the entry committed {committed:?}"
+        );
+    }
+    reused
 }
 
 /// Opens one durable journal copy after the host released its session lock.
@@ -564,7 +660,97 @@ async fn history_compaction_reopens_letters_with_the_entry() {
     if letters.is_empty() {
         panic!("the committed compaction must carry durable letters");
     }
-    assert_resolvable(&journal, entry, &letters);
+    assert_resolvable(&journal, entry, &letters, &[]);
+    journal.close().await.expect("close reopened journal");
+}
+
+/// A second production compaction keeps the first compaction's blobs and
+/// letters durable.
+///
+/// Six scripted turns are seeded in two batches of three with one manual
+/// compaction between them. After the second compaction the reopened journal
+/// carries two compaction entries; every image part of both entries resolves
+/// through its label to a letter digest, the first entry's letters are
+/// unchanged since the first reopen, the second entry's fresh letters use the
+/// next ordinal, and the second entry reuses at least one first-entry letter
+/// instead of recording it again.
+#[tokio::test]
+async fn second_compaction_keeps_first_letters_resolvable() {
+    let mut prompts = vec![
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![RETAINED_TEXT.repeat(2_000); 10],
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![COVERED_TEXT.repeat(1_400)],
+        vec![RETAINED_TEXT.repeat(2_000); 10],
+    ];
+    let fixture = unseeded_fixture("second-commit", &prompts).await;
+    let rest = prompts.split_off(3);
+    seed_prompts(&fixture.agent, prompts).await;
+
+    let mut subscription = fixture.agent.subscribe(None).expect("subscribe");
+    fixture
+        .agent
+        .submit(Command::Compact { focus: None })
+        .await
+        .expect("manual compaction is accepted");
+    let (kind, text) = compaction_end(&mut subscription).await;
+    if kind.as_ref() != "compaction_ended" || !text.starts_with("Context compacted by history:") {
+        panic!("the history battery must commit before any fallback: {kind} {text}");
+    }
+    let (data, workspace, session) = shutdown(fixture).await;
+    let mut journal = reopen(&data, &workspace, session).await;
+    let records = journal.records().to_vec();
+    let (_, first_letters) = compaction_letters(&records).expect("reopened first compaction entry");
+    if first_letters.is_empty() {
+        panic!("the first compaction must carry durable letters");
+    }
+    journal.close().await.expect("close first reopen");
+
+    let retry = retry_fixture(data, workspace, session).await;
+    seed_prompts(&retry.agent, rest).await;
+    assert_all_text_inline(&retry.agent);
+    let mut resumed = retry.agent.subscribe(None).expect("resumed subscribe");
+    retry
+        .agent
+        .submit(Command::Compact { focus: None })
+        .await
+        .expect("second manual compaction is accepted");
+    let (kind, text) = compaction_end(&mut resumed).await;
+    if kind.as_ref() != "compaction_ended" || !text.starts_with("Context compacted by history:") {
+        panic!("the second compaction must commit through history: {kind} {text}");
+    }
+    let (data, workspace, session) = shutdown(retry).await;
+    let mut journal = reopen(&data, &workspace, session).await;
+    let records = journal.records().to_vec();
+    let batches = all_compaction_batches(&records);
+    if batches.len() != 2 {
+        panic!(
+            "two compactions must leave two durable entries: {}",
+            batches.len()
+        );
+    }
+    assert_resolvable(&journal, batches[0].0, &batches[0].1, &[]);
+    let reused = assert_resolvable(&journal, batches[1].0, &batches[1].1, &batches[0].1);
+    if reused == 0 {
+        panic!(
+            "the second compaction must reuse a first-entry letter for the history it draws again"
+        );
+    }
+    if batches[0].1 != first_letters {
+        panic!("the second compaction must leave the first entry's letters unchanged");
+    }
+    if batches[1].1.is_empty() {
+        panic!("the second compaction must carry durable letters");
+    }
+    for letter in &batches[1].1 {
+        if !letter.id.starts_with("history/2.") {
+            panic!(
+                "second compaction letters use the next ordinal: {}",
+                letter.id
+            );
+        }
+    }
     journal.close().await.expect("close reopened journal");
 }
 
@@ -665,7 +851,7 @@ async fn failed_blob_publication_reopens_cleanly_before_retry() {
     if letters.is_empty() {
         panic!("the retried compaction must carry durable letters");
     }
-    assert_resolvable(&journal, entry, &letters);
+    assert_resolvable(&journal, entry, &letters, &[]);
     journal.close().await.expect("close reopened journal");
 }
 
@@ -823,7 +1009,10 @@ async fn failed_append_leaves_no_entry_or_letter(tag: &str, fault: AppendFault) 
     if letters.is_empty() {
         panic!("the retried compaction must carry durable letters");
     }
-    assert_resolvable(&journal, entry, &letters);
+    // The failed batch left no letter and the retry is the journal's only
+    // compaction, so no earlier entry can have committed a letter to reuse.
+    let reused = assert_resolvable(&journal, entry, &letters, &[]);
+    assert_eq!(reused, 0, "the first committed compaction reuses no letter");
     journal.close().await.expect("close reopened journal");
 }
 

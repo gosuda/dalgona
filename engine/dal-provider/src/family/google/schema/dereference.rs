@@ -80,8 +80,8 @@ pub(super) fn dereference(schema: &Node) -> Option<Cow<'_, Node>> {
         budget: MAX_INLINED_OBJECTS,
         exhausted: false,
     };
-    let fields = inliner.fields(root, 0);
-    (!inliner.exhausted).then_some(Cow::Owned(fields))
+    let output = inliner.fields(root, 0);
+    (!inliner.exhausted).then_some(Cow::Owned(output))
 }
 
 impl Inliner<'_> {

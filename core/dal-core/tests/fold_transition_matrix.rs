@@ -1,12 +1,10 @@
 #![expect(
-    clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
-    clippy::single_match_else,
-    clippy::too_many_lines,
     reason = "integration tests fail loudly"
 )]
 
-//! ENG-10 fold state-transition matrix (FLD-03A, FLD-03B, FLD-05A, FLD-06A).
+//! Fold state-transition matrix (lifecycle reachability + every event variant).
 //!
 //! Drives one `Session` into every reachable lifecycle phase through the
 //! public event API, then fires one instance of every `Event` variant (with a
@@ -42,7 +40,7 @@ fn stamp() -> jiff::Timestamp {
 }
 
 fn turn(value: u64) -> TurnId {
-    TurnId::new(NonZeroU64::new(value).unwrap())
+    TurnId::new(NonZeroU64::new(value).expect("nonzero id"))
 }
 
 fn route() -> ModelRoute {
@@ -66,7 +64,7 @@ fn usage(tokens: u64) -> Usage {
 }
 
 fn raw(text: &str) -> RawJson {
-    RawJson::parse(text).unwrap()
+    RawJson::parse(text).expect("json parses")
 }
 
 fn client() -> ClientId {
@@ -88,7 +86,8 @@ fn guard(turn: TurnId) -> Event {
         turn,
         call: None,
         extension: None,
-        outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None)).unwrap(),
+        outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))
+            .expect("guard outcome builds"),
     }
 }
 
@@ -136,7 +135,7 @@ fn hostile(kind: HostileUsage) -> Usage {
 
 fn compaction_summary(usage: Option<Usage>) -> CompactionSummary {
     CompactionSummary {
-        compactor: Name::parse("compactor").unwrap(),
+        compactor: Name::parse("compactor").expect("parses"),
         tokens_before: 100,
         tokens_after: 10,
         summary: Some("summary".into()),
@@ -156,7 +155,7 @@ fn resolved_reads(turn: TurnId, calls: &[&str]) -> Event {
             .iter()
             .map(|call| ResolvedCall {
                 call: CallId::new(*call),
-                name: Name::parse("read_file").unwrap(),
+                name: Name::parse("read_file").expect("parses"),
                 promoted: false,
                 result: Ok(ToolClass::Read),
             })
@@ -198,7 +197,7 @@ fn collect(effects: &[Effect], journal: &mut Vec<Record>) {
 
 impl Fixture {
     fn fresh(label: &'static str) -> Self {
-        let (session, effects) = Session::replay([], stamp()).unwrap();
+        let (session, effects) = Session::replay([], stamp()).expect("replays");
         let mut journal = Vec::new();
         collect(&effects, &mut journal);
         Self {
@@ -322,20 +321,12 @@ fn fixtures() -> Vec<Fixture> {
     ]
 }
 
-/// One instance of every `Event` variant; `turn` is the target turn id.
-fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
-    let job = JobId::new_v7();
-    let request = Request {
-        id: RequestId::new_v7(),
-        turn: Some(turn),
-        owner: Owner::Core,
-        question: Question::Confirm {
-            text: "continue?".into(),
-        },
-        timeout: Duration::from_secs(30),
-        default: Answer::Cancel,
-    };
-    let entry = dal_core::EntryId::new(NonZeroU64::MIN);
+/// Command half of the matrix: every `Command` variant as an `Event::Command`.
+fn command_events(
+    turn: TurnId,
+    job: JobId,
+    entry: dal_core::EntryId,
+) -> Vec<(&'static str, Event)> {
     let commands = vec![
         (
             "cmd_prompt_idle",
@@ -432,11 +423,25 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
         ),
         ("cmd_reload_plugins", Command::ReloadPlugins),
     ];
-    let mut events: Vec<(&'static str, Event)> = commands
+    commands
         .into_iter()
         .map(|(label, cmd)| (label, Event::Command { cmd, by: client() }))
-        .collect();
-    events.extend([
+        .collect()
+}
+
+/// Guard, verdict, retry, inference, request-open, and grant events.
+fn guard_and_grant_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    let request = Request {
+        id: RequestId::new_v7(),
+        turn: Some(turn),
+        owner: Owner::Core,
+        question: Question::Confirm {
+            text: "continue?".into(),
+        },
+        timeout: Duration::from_secs(30),
+        default: Answer::Cancel,
+    };
+    vec![
         ("guard", guard(turn)),
         (
             "stream_verdict_continue",
@@ -502,6 +507,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 cause: ResolutionCause::Cancelled,
             },
         ),
+    ]
+}
+
+/// Job, wake, steer, cancel, stream, and request-started events.
+fn job_lifecycle_events(turn: TurnId, job: JobId) -> Vec<(&'static str, Event)> {
+    vec![
         (
             "job_started",
             Event::JobStarted {
@@ -583,6 +594,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 family: Family::Chat,
             },
         ),
+    ]
+}
+
+/// First half of the `StreamEnded` outcomes: clean results and hard failures.
+fn stream_ended_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    vec![
         (
             "stream_ended_end_turn",
             Event::StreamEnded {
@@ -662,6 +679,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 partial: None,
             },
         ),
+    ]
+}
+
+/// Second half of the `StreamEnded` outcomes: hostile usage totals.
+fn stream_ended_hostile_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    vec![
         (
             "stream_ended_negative_premium",
             Event::StreamEnded {
@@ -725,6 +748,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 }),
             },
         ),
+    ]
+}
+
+/// Tail of the stream block: partial cancels and compaction-shaped endings.
+fn stream_ended_tail_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    vec![
         (
             "cancel_partial_nan_cost",
             Event::Cancel {
@@ -774,6 +803,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 partial: None,
             },
         ),
+    ]
+}
+
+/// The accepted `CompactionSettled` outcomes, manual and turn-scoped.
+fn compaction_settled_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    vec![
         (
             "compaction_settled_applied",
             Event::CompactionSettled {
@@ -802,6 +837,12 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
                 outcome: Ok(compaction_summary(Some(hostile(HostileUsage::NanCost)))),
             },
         ),
+    ]
+}
+
+/// Dispatch, boundary, limits, failed-compaction, and close events.
+fn dispatch_events(turn: TurnId) -> Vec<(&'static str, Event)> {
+    vec![
         ("resolved_known", resolved_reads(turn, &["c1", "c2"])),
         ("resolved_unknown", resolved_reads(turn, &["nope"])),
         ("resolved_duplicate", resolved_reads(turn, &["c1", "c1"])),
@@ -858,7 +899,21 @@ fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
             },
         ),
         ("close", Event::Close),
-    ]);
+    ]
+}
+
+/// One instance of every `Event` variant; `turn` is the target turn id.
+fn catalogue(turn: TurnId) -> Vec<(&'static str, Event)> {
+    let job = JobId::new_v7();
+    let entry = dal_core::EntryId::new(NonZeroU64::MIN);
+    let mut events = command_events(turn, job, entry);
+    events.extend(guard_and_grant_events(turn));
+    events.extend(job_lifecycle_events(turn, job));
+    events.extend(stream_ended_events(turn));
+    events.extend(stream_ended_hostile_events(turn));
+    events.extend(stream_ended_tail_events(turn));
+    events.extend(compaction_settled_events(turn));
+    events.extend(dispatch_events(turn));
     events
 }
 
@@ -889,59 +944,56 @@ fn check_cell(fixture: &Fixture, label: &str, event: &Event, tally: &mut Tally) 
         );
     }
 
-    match result {
-        Err(rejection) => {
-            tally.refused += 1;
-            assert_eq!(
-                session, before,
-                "{cell}: refused with {rejection:?} but the session changed"
-            );
-            assert!(
-                out == sentinel() || out.is_empty(),
-                "{cell}: refused with {rejection:?} but left effects in the caller's buffer: {out:?}"
-            );
-        }
-        Ok(()) => {
-            tally.accepted += 1;
-            // Purity: an equal clone replays the same transition.
-            let mut twin = fixture.session.clone();
-            let mut twin_out = sentinel();
-            twin.step(event.clone(), stamp(), &mut twin_out)
-                .unwrap_or_else(|error| panic!("{cell}: nondeterministic refusal {error:?}"));
-            assert_eq!(session, twin, "{cell}: transition is not deterministic");
-            assert_eq!(out, twin_out, "{cell}: effects are not deterministic");
+    if let Err(rejection) = result {
+        tally.refused += 1;
+        assert_eq!(
+            session, before,
+            "{cell}: refused with {rejection:?} but the session changed"
+        );
+        assert!(
+            out == sentinel() || out.is_empty(),
+            "{cell}: refused with {rejection:?} but left effects in the caller's buffer: {out:?}"
+        );
+    } else {
+        tally.accepted += 1;
+        // Purity: an equal clone replays the same transition.
+        let mut twin = fixture.session.clone();
+        let mut twin_out = sentinel();
+        twin.step(event.clone(), stamp(), &mut twin_out)
+            .unwrap_or_else(|error| panic!("{cell}: nondeterministic refusal {error:?}"));
+        assert_eq!(session, twin, "{cell}: transition is not deterministic");
+        assert_eq!(out, twin_out, "{cell}: effects are not deterministic");
 
-            // Every emitted record is encodable, decodable, and replayable.
-            let mut emitted = Vec::new();
-            collect(&out, &mut emitted);
-            for record in &emitted {
-                let bytes = encode(record).unwrap_or_else(|error| {
-                    panic!("{cell}: emitted record not encodable: {error:?}: {record:?}")
-                });
-                let decoded = decode(&bytes).unwrap_or_else(|error| {
-                    panic!("{cell}: emitted record not decodable: {error:?}: {record:?}")
-                });
-                assert_eq!(
-                    &decoded.record, record,
-                    "{cell}: record changed across the journal codec"
-                );
-            }
-            let mut journal = fixture.journal.clone();
-            journal.extend(emitted);
-            let replayed = Session::replay_declared(journal).unwrap_or_else(|error| {
-                panic!("{cell}: the fold emitted records its own replay rejects: {error:?}")
+        // Every emitted record is encodable, decodable, and replayable.
+        let mut emitted = Vec::new();
+        collect(&out, &mut emitted);
+        for record in &emitted {
+            let bytes = encode(record).unwrap_or_else(|error| {
+                panic!("{cell}: emitted record not encodable: {error:?}: {record:?}")
+            });
+            let decoded = decode(&bytes).unwrap_or_else(|error| {
+                panic!("{cell}: emitted record not decodable: {error:?}: {record:?}")
             });
             assert_eq!(
-                replayed.approval_mode(),
-                session.approval_mode(),
-                "{cell}: approval mode is not reconstructible from the journal"
-            );
-            assert_eq!(
-                replayed.allow_always(),
-                session.allow_always(),
-                "{cell}: the allow-always set is not reconstructible from the journal"
+                &decoded.record, record,
+                "{cell}: record changed across the journal codec"
             );
         }
+        let mut journal = fixture.journal.clone();
+        journal.extend(emitted);
+        let replayed = Session::replay_declared(journal).unwrap_or_else(|error| {
+            panic!("{cell}: the fold emitted records its own replay rejects: {error:?}")
+        });
+        assert_eq!(
+            replayed.approval_mode(),
+            session.approval_mode(),
+            "{cell}: approval mode is not reconstructible from the journal"
+        );
+        assert_eq!(
+            replayed.allow_always(),
+            session.allow_always(),
+            "{cell}: the allow-always set is not reconstructible from the journal"
+        );
     }
 }
 
@@ -1222,7 +1274,9 @@ fn approval_mode_changes_are_journaled_and_cannot_hide_in_a_busy_turn() {
         by: client(),
     });
     assert_eq!(idle.session.approval_mode(), ApprovalMode::All);
-    let replayed = Session::replay(idle.journal.clone(), stamp()).unwrap().0;
+    let replayed = Session::replay(idle.journal.clone(), stamp())
+        .expect("replays")
+        .0;
     assert_eq!(replayed.approval_mode(), ApprovalMode::All);
 
     let busy = Fixture::fresh("busy").opening().boundary();
@@ -1243,17 +1297,16 @@ fn approval_mode_changes_are_journaled_and_cannot_hide_in_a_busy_turn() {
     // Whichever way the reducer rules (accept as a live setting or refuse as
     // busy), a refusal must not have changed the mode and an acceptance must be
     // journaled.
-    match refused {
-        Err(_) => assert_eq!(session, before),
-        Ok(()) => {
-            let mut emitted = Vec::new();
-            collect(&out, &mut emitted);
-            assert!(
-                emitted
-                    .iter()
-                    .any(|record| matches!(record, Record::Approval(_))),
-                "an accepted approval change must be journaled: {emitted:?}"
-            );
-        }
+    if refused.is_err() {
+        assert_eq!(session, before);
+    } else {
+        let mut emitted = Vec::new();
+        collect(&out, &mut emitted);
+        assert!(
+            emitted
+                .iter()
+                .any(|record| matches!(record, Record::Approval(_))),
+            "an accepted approval change must be journaled: {emitted:?}"
+        );
     }
 }

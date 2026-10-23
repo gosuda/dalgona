@@ -14,6 +14,10 @@
 //! delivery wake calls `review` again into the git check. The shared FIFO
 //! replay fixture cannot give that, because one queue serves every session
 //! in script order.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate builds real git fixtures for the review tool"
+)]
 use dalgona_gates::support;
 
 use std::fs;
@@ -208,8 +212,8 @@ fn usage() -> Usage {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
-        premium_requests: None,
         cost_usd: Some(0.001),
+        premium_requests: None,
     }
 }
 
@@ -253,6 +257,11 @@ fn review_refuses_a_round_while_a_run_is_live() -> support::TestResult<()> {
     let workspace = root.0.join("workspace");
     fs::create_dir_all(&data)?;
     fs::create_dir_all(&workspace)?;
+    // Real git lifecycle: the workspace is its own repository so review's
+    // `git diff`/`git status` never discover the outer checkout. One seed
+    // commit leaves the tree clean, so the second review takes the
+    // no-changes path after proving it is past the live-work refusal.
+    init_git_repo(&workspace)?;
     // Parent turn: start the run, call review (refused), end the turn. The
     // child then reports and acks. The delivery wake turn calls review a
     // second time and proceeds past the refusal into the git check.
@@ -329,12 +338,9 @@ fn review_refuses_a_round_while_a_run_is_live() -> support::TestResult<()> {
         )
         .await?;
 
-        wait_for_journal(
-            &data,
-            &session,
-            "review needs a git repository",
-            |journal| journal.contains("review needs a git repository"),
-        )
+        wait_for_journal(&data, &session, "No changes to review.", |journal| {
+            journal.contains("No changes to review.")
+        })
         .await?;
 
         let journal = read_journal(&data, &session).unwrap_or_default();
@@ -347,6 +353,33 @@ fn review_refuses_a_round_while_a_run_is_live() -> support::TestResult<()> {
         assert_eq!(report.tasks_remaining, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })?;
+    Ok(())
+}
+
+/// Inits `workspace` as its own git repository with one seed commit, so
+/// review's `git diff HEAD` and `git status` run against this tree instead
+/// of discovering the outer checkout. The clean tree makes the second
+/// review return the deterministic no-changes text.
+fn init_git_repo(workspace: &Path) -> support::TestResult<()> {
+    let run = |args: &[&str]| -> support::TestResult<()> {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .map_err(|error| format!("git {} failed to run: {error}", args.join(" ")))?;
+        if !status.success() {
+            return Err(format!("git {} failed", args.join(" ")).into());
+        }
+        Ok(())
+    };
+    run(&["init"])?;
+    run(&["config", "user.email", "test@example.com"])?;
+    run(&["config", "user.name", "test"])?;
+    fs::write(workspace.join("seed.txt"), b"seed")?;
+    run(&["add", "-A"])?;
+    run(&["-c", "commit.gpgsign=false", "commit", "-m", "seed"])?;
     Ok(())
 }
 

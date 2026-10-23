@@ -13,7 +13,8 @@ use std::{
 };
 
 use dal_core::{
-    Entry, EntryId, EntryKind, JournalPart, Product, Record, SessionId, Workspace, encode,
+    Entry, EntryId, EntryKind, JournalPart, Product, Record, SessionId, TurnEndStop, TurnId,
+    Workspace, encode,
 };
 use dal_store::{AppendOutcome, JournalError, Store};
 use support::{fault_sink::FaultSink, temp_dir::TempDir};
@@ -316,6 +317,52 @@ fn assistant_line_of(line_len: usize) -> Record {
     record
 }
 
+fn premium_assistant(id: u64, input_tokens: u64, premium: Option<f64>) -> Record {
+    Record::Assistant(Entry {
+        id: entry_id(id),
+        parent: Some(entry_id(1)),
+        at: timestamp(),
+        kind: EntryKind::Assistant {
+            api: dal_core::Family::Chat,
+            model: "test-model".into(),
+            route: Some(dal_core::AssistantRoute::Api(dal_core::Family::Chat)),
+            content: vec![dal_core::Block::Text {
+                text: "ok".into(),
+                replay: None,
+            }],
+            usage: dal_core::Usage {
+                input_tokens,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                premium_requests: premium,
+                cost_usd: None,
+            },
+            stop: dal_core::AssistantStop::Done,
+            replay: None,
+        },
+    })
+}
+
+fn turn_total(input_tokens: u64, premium: Option<f64>) -> Record {
+    Record::TurnEnd {
+        at: timestamp(),
+        turn: TurnId::new(NonZeroU64::MIN),
+        stop: TurnEndStop::Done,
+        usage: Some(dal_core::Usage {
+            input_tokens,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            premium_requests: premium,
+            cost_usd: None,
+        }),
+        changes: vec![],
+    }
+}
+
 fn with_id(record: Record, id: u64, parent: u64) -> Record {
     match record {
         Record::Assistant(mut entry) => {
@@ -469,5 +516,66 @@ async fn oversized_record_before_the_first_user_entry_is_refused_at_append() {
         .append(vec![user(2, "still usable")])
         .await
         .expect("the session is not poisoned by the refused record");
+    journal.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn turn_end_partial_premium_sum_is_refused() {
+    let (_temp, store) = setup("journal-premium-refusal");
+    let mut journal = store.create_session(SessionId::new_v7());
+    journal
+        .append(vec![user(1, "start")])
+        .await
+        .expect("user appends");
+    journal
+        .append(vec![
+            Record::TurnStart {
+                at: timestamp(),
+                turn: TurnId::new(NonZeroU64::MIN),
+            },
+            premium_assistant(2, 10, Some(1.5)),
+        ])
+        .await
+        .expect("turn opens");
+    let refused = journal
+        .append(vec![turn_total(10, Some(0.5))])
+        .await
+        .expect_err("a partial premium sum is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("turn end usage or file-change totals do not match the turn"),
+        "the refusal names the totals mismatch: {refused}"
+    );
+    journal
+        .append(vec![turn_total(10, Some(1.5))])
+        .await
+        .expect("the exact premium total is accepted after the refusal");
+    journal.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn turn_end_mixed_premium_collapses_to_unknown() {
+    let (_temp, store) = setup("journal-premium-mixed");
+    let mut journal = store.create_session(SessionId::new_v7());
+    journal
+        .append(vec![user(1, "start")])
+        .await
+        .expect("user appends");
+    journal
+        .append(vec![
+            Record::TurnStart {
+                at: timestamp(),
+                turn: TurnId::new(NonZeroU64::MIN),
+            },
+            premium_assistant(2, 10, Some(1.5)),
+            premium_assistant(3, 4, None),
+        ])
+        .await
+        .expect("mixed turn appends");
+    journal
+        .append(vec![turn_total(14, None)])
+        .await
+        .expect("one unmeasured contributor leaves the turn unknown");
     journal.close().await.expect("session closes");
 }

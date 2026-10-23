@@ -97,8 +97,8 @@ fn done_stream() -> EventStream {
         output_tokens: 1,
         reasoning_tokens: None,
         cache_write_tokens: 0,
-        premium_requests: None,
         cost_usd: None,
+        premium_requests: None,
     };
     let items: Vec<Result<ProviderEvent, ProviderError>> = vec![
         Ok(ProviderEvent::TextDelta { text: "ok".into() }),
@@ -719,12 +719,15 @@ async fn corrupt_blob_refuses_the_turn_without_sending() {
     host.shutdown(Duration::from_secs(1)).await;
 }
 
-/// Seeds a session whose journal records a wrong length for a real blob.
-async fn seed_length_mismatch(
+/// Seeds a session whose second user entry names the published `bytes`.
+///
+/// `parts` receives the published digest and returns that entry's parts, so
+/// a test can record any media type or length for the same stored bytes.
+async fn seed_stored_blob(
     data: &Path,
     workspace: &Workspace,
     bytes: &[u8],
-    recorded: u64,
+    parts: impl FnOnce(&str) -> Vec<JournalPart>,
 ) -> SessionId {
     let session = SessionId::new_v7();
     let store = Store::new(data.to_path_buf(), workspace.clone(), JournalProduct::Dal);
@@ -739,27 +742,40 @@ async fn seed_length_mismatch(
         )])
         .await
         .expect("seed first user");
-    let published = journal.put_blob(bytes.to_vec()).expect("publish image");
+    let published = journal.put_blob(bytes.to_vec()).expect("publish blob");
     assert_eq!(published, BlobId::from_bytes(bytes));
     journal
         .append(vec![user_record(
             2,
             Some(entry_id(1)),
-            vec![
-                JournalPart::Text {
-                    text: "look".into(),
-                },
-                JournalPart::Blob {
-                    mime: "image/png".into(),
-                    blob: published.to_string().into(),
-                    bytes: recorded,
-                },
-            ],
+            parts(&published.to_string()),
         )])
         .await
-        .expect("seed misrecorded blob");
+        .expect("seed stored blob");
     journal.close().await.expect("close seeded session");
     session
+}
+
+/// Seeds a session whose journal records a wrong length for a real blob.
+async fn seed_length_mismatch(
+    data: &Path,
+    workspace: &Workspace,
+    bytes: &[u8],
+    recorded: u64,
+) -> SessionId {
+    seed_stored_blob(data, workspace, bytes, |blob| {
+        vec![
+            JournalPart::Text {
+                text: "look".into(),
+            },
+            JournalPart::Blob {
+                mime: "image/png".into(),
+                blob: blob.into(),
+                bytes: recorded,
+            },
+        ]
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1173,5 +1189,89 @@ async fn seeded_compaction_images_hydrate_in_order() {
             Seen::Text("go".to_owned()),
         ]
     );
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+/// UTF-8 text past the spill threshold, with multi-byte characters throughout.
+fn spilled_text() -> String {
+    let line = "na\u{ef}ve caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e} \u{2713}\n";
+    line.repeat(ContentLimits::INLINE_BYTES / line.len() + 2)
+}
+
+/// Spills `text` through a live prompt, then closes the session.
+async fn spill_text_session(rig: &Rig, host: &Host, text: &str) -> SessionId {
+    let agent = open_new(host, &rig.workspace).await;
+    let id = agent.session();
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    let (turn, _) = prompt(&agent, vec![Part::Text { text: text.into() }]).await;
+    assert_eq!(wait_end(&mut subscription, turn).await.stop, Stop::EndTurn);
+    host.close(id).await.expect("close session");
+    drop(agent);
+    id
+}
+
+/// Resumes `id` and sends one more prompt; the turn must fail naming
+/// `blob`, and no provider request may leave.
+async fn assert_turn_refused(rig: &Rig, host: &Host, id: SessionId, blob: BlobId) {
+    let sent = rig.requests.len();
+    let agent = resume(host, &rig.workspace, id).await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    let (turn, _) = prompt(
+        &agent,
+        vec![Part::Text {
+            text: "again".into(),
+        }],
+    )
+    .await;
+    let outcome = wait_end(&mut subscription, turn).await;
+    assert_eq!(outcome.stop, Stop::Failed);
+    assert_eq!(
+        rig.requests.len(),
+        sent,
+        "no request leaves without the text"
+    );
+    assert!(
+        outcome
+            .notices
+            .iter()
+            .any(|(kind, text)| kind.as_str() == "turn.failed" && text.contains(&blob.to_string())),
+        "the failure names the blob: {:?}",
+        outcome.notices
+    );
+}
+
+#[tokio::test]
+async fn missing_text_blob_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let text = spilled_text();
+    let host = start_host(&rig).await;
+    let id = spill_text_session(&rig, &host, &text).await;
+
+    let missing = BlobId::from_bytes(text.as_bytes());
+    let path = blob_file(&rig.data, missing).expect("spilled text file");
+    std::fs::remove_file(&path).expect("delete spilled text");
+
+    assert_turn_refused(&rig, &host, id, missing).await;
+    host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn non_utf8_text_blob_refuses_the_turn_without_sending() {
+    let rig = rig();
+    let mut stored = spilled_text().into_bytes();
+    stored[100] = 0xff;
+    assert!(std::str::from_utf8(&stored).is_err());
+    let blob = BlobId::from_bytes(&stored);
+    let length = blob_len(&stored);
+    let id = seed_stored_blob(&rig.data, &rig.workspace, &stored, |digest| {
+        vec![JournalPart::TextBlob {
+            blob: digest.into(),
+            bytes: length,
+        }]
+    })
+    .await;
+
+    let host = start_host(&rig).await;
+    assert_turn_refused(&rig, &host, id, blob).await;
     host.shutdown(Duration::from_secs(1)).await;
 }

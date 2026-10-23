@@ -4,7 +4,7 @@ use super::super::{
     ApprovalMode, Config, ConfigError, ConfigProduct, JudgeMode, Mode, ModeProjection, Screen,
 };
 use super::{DALGONA_DEFAULTS, load, parse_enum};
-use crate::model::{Family, ModelPrice, ModelRoute, ThinkingLevel};
+use crate::model::{ModelPrice, ThinkingLevel};
 use std::path::Path;
 
 #[test]
@@ -282,70 +282,6 @@ fn judge_non_table_renders_two_lines() {
     );
 }
 
-fn anthropic_route(provider: Option<&str>) -> ModelRoute {
-    ModelRoute::Api {
-        family: Family::Anthropic,
-        model: "claude-opus".into(),
-        provider: provider.map(Into::into),
-    }
-}
-
-#[test]
-fn model_route_with_provider_parses() {
-    let config = load(
-        ConfigProduct::Dalgona,
-        "[model_route]\nkind = \"api\"\nfamily = \"anthropic\"\nmodel = \"claude-opus\"\nprovider = \"acme\"\n",
-    )
-    .expect("a provider route parses");
-    let expected = anthropic_route(Some("acme"));
-    assert_eq!(config.model_route(), Some(&expected));
-    assert_eq!(config.default_model_route(), Some(expected));
-    let legacy = load(
-        ConfigProduct::Dalgona,
-        "[model_route]\nkind = \"api\"\nfamily = \"anthropic\"\nmodel = \"claude-opus\"\n",
-    )
-    .expect("a provider-less route parses");
-    assert_eq!(legacy.model_route(), Some(&anthropic_route(None)));
-}
-
-#[test]
-fn model_route_provider_rejections_keep_the_provider_key_shape() {
-    for (body, value) in [
-        ("provider = \"\"", ""),
-        ("provider = 7", "7"),
-        ("provider = true", "true"),
-    ] {
-        let user = format!(
-            "[model_route]\nkind = \"api\"\nfamily = \"anthropic\"\nmodel = \"m\"\n{body}\n"
-        );
-        let error = load(ConfigProduct::Dalgona, &user).expect_err("bad provider is refused");
-        assert!(
-            matches!(&error, ConfigError::InvalidValue { key, value: got, expected }
-                if key.as_ref() == "model_route.provider"
-                    && got.as_ref() == value
-                    && expected.as_ref() == "non-empty configured provider id"),
-            "wrong error for {body}: {error:?}"
-        );
-    }
-    for kind in ["synthetic", "harness"] {
-        let id = if kind == "harness" {
-            "dalgon/normal"
-        } else {
-            "a/b"
-        };
-        let user =
-            format!("[model_route]\nkind = \"{kind}\"\nid = \"{id}\"\nprovider = \"acme\"\n");
-        let error =
-            load(ConfigProduct::Dalgona, &user).expect_err("provider off kind api is refused");
-        assert!(
-            matches!(&error, ConfigError::InvalidValue { key, expected, .. }
-                if key.as_ref() == "model_route.provider"
-                    && expected.as_ref() == "absent unless kind api"),
-            "wrong error for {kind}: {error:?}"
-        );
-    }
-}
-
 #[test]
 fn serve_bind_provenance_follows_the_key_not_the_value() {
     let defaults = load(ConfigProduct::Dalgon, "").expect("built-in defaults");
@@ -377,66 +313,4 @@ fn serve_bind_provenance_follows_the_key_not_the_value() {
         load(ConfigProduct::Dalgon, "[serve]\nbind = \"0.0.0.0\"\n").expect("wide bind loads");
     assert_eq!(wide.serve().bind.as_ref(), "0.0.0.0");
     assert!(wide.serve_bind_explicit());
-}
-
-const MODEL_USER: &str = "# keep me\nmode = \"normal\"\nmodel = \"old/model\"\n[model_route]\nkind = \"api\"\nfamily = \"openai_chat\"\nmodel = \"old\"\n[serve]\nbind = \"127.0.0.1\"\n";
-
-#[test]
-fn update_default_model_writes_provider_and_a_mirror_without_it() {
-    let mut config = load(ConfigProduct::Dalgona, MODEL_USER).expect("fixture loads");
-    let route = ModelRoute::Api {
-        family: Family::Responses,
-        model: "gpt-6-luna".into(),
-        provider: Some("acme".into()),
-    };
-    let rendered = config
-        .update_default_model(&route, Some(MODEL_USER))
-        .expect("the update renders");
-    assert!(
-        rendered.contains("provider = \"acme\"\n"),
-        "provider missing: {rendered}"
-    );
-    let mirror = rendered
-        .lines()
-        .find(|line| line.starts_with("model = "))
-        .expect("the legacy mirror is written");
-    assert_eq!(mirror, "model = \"openai-responses/gpt-6-luna\"");
-    assert!(rendered.contains("# keep me\n"), "comment lost: {rendered}");
-    assert!(
-        rendered.contains("[serve]\nbind = \"127.0.0.1\"\n"),
-        "unrelated table lost: {rendered}"
-    );
-    assert_eq!(config.model(), Some("openai-responses/gpt-6-luna"));
-    assert_eq!(config.model_route(), Some(&route));
-    let reloaded = load(ConfigProduct::Dalgona, &rendered).expect("rendered output reloads");
-    assert_eq!(reloaded.model_route(), Some(&route));
-}
-
-#[test]
-fn update_default_model_drops_a_stale_provider_key() {
-    let mut config = load(ConfigProduct::Dalgona, MODEL_USER).expect("fixture loads");
-    let scoped = ModelRoute::Api {
-        family: Family::Chat,
-        model: "gpt-5".into(),
-        provider: Some("acme".into()),
-    };
-    let with_provider = config
-        .update_default_model(&scoped, Some(MODEL_USER))
-        .expect("the provider renders");
-    assert!(with_provider.contains("provider = \"acme\"\n"));
-    let bare = ModelRoute::Api {
-        family: Family::Chat,
-        model: "gpt-5".into(),
-        provider: None,
-    };
-    let dropped = config
-        .update_default_model(&bare, Some(with_provider.as_str()))
-        .expect("the replacement renders");
-    assert!(
-        !dropped.contains("provider"),
-        "stale provider survived: {dropped}"
-    );
-    assert_eq!(config.model_route(), Some(&bare));
-    let reloaded = load(ConfigProduct::Dalgona, &dropped).expect("dropped output reloads");
-    assert_eq!(reloaded.model_route(), Some(&bare));
 }

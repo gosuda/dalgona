@@ -68,7 +68,7 @@ pub use setup::{SessionCx, SessionInstalls, SessionRule, SessionSetup};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 pub use tool::{Approved, ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 
 use dal_core::{
@@ -97,6 +97,13 @@ pub struct Caller {
     kind: CallerKind,
     turn: Option<TurnId>,
     invocation: Option<CallInvocation>,
+    /// Continuation slot for the same invocation, when the minting root
+    /// attached one. `None` keeps today's one-shot path (tests,
+    /// service-only inference, callers with no owner). Requests carry this
+    /// [`Weak`] only; the strong owner stays held by the invocation root
+    /// through the full async call with explicit release at invocation end.
+    /// Never matched by name, owner, or history content.
+    continuation: Option<Weak<crate::session::continuation::ContinuationSlot>>,
 }
 
 /// How a [`Caller`] was minted.
@@ -133,6 +140,7 @@ impl Caller {
             kind,
             turn,
             invocation: None,
+            continuation: None,
         }
     }
 
@@ -169,6 +177,45 @@ impl Caller {
     /// from one.
     pub(crate) fn invocation(&self) -> Option<CallInvocation> {
         self.invocation
+    }
+    /// Attaches the explicit continuation slot for the same invocation.
+    ///
+    /// Internal attachment constructor (builder precedent
+    /// [`Caller::with_extension`]/[`Caller::with_invocation`]); the
+    /// [`Caller::new`] signature is unchanged and inits `None`, so existing
+    /// test paths stay valid with no compatibility shim. Invocation roots
+    /// call this exactly once with the owner's downgrade for this
+    /// invocation; scope children receive a distinct owner's slot, never the
+    /// parent's by name matching.
+    #[must_use]
+    pub(crate) fn with_continuation(
+        mut self,
+        slot: Weak<crate::session::continuation::ContinuationSlot>,
+    ) -> Self {
+        self.continuation = Some(slot);
+        self
+    }
+
+    /// Borrows the continuation slot for the same invocation, when attached.
+    ///
+    /// Clones the [`Weak`]; the caller never upgrades it here. Continuation
+    /// consumers upgrade and route strictly by this handle.
+    #[must_use]
+    pub(crate) fn continuation(
+        &self,
+    ) -> Option<Weak<crate::session::continuation::ContinuationSlot>> {
+        self.continuation.clone()
+    }
+
+    /// Drops the attached continuation slot, if any.
+    ///
+    /// Callers retained past their minting invocation must not carry its
+    /// slot: the owner is released at invocation end, and a later Cursor
+    /// inference through the dead handle fails instead of running one-shot.
+    #[must_use]
+    pub fn without_continuation(mut self) -> Self {
+        self.continuation = None;
+        self
     }
 
     /// Borrows the owning extension name.

@@ -7,10 +7,10 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dal_core::{
-    BlobId, ContextItem, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
+    BlobId, ContextItem, Family, InferFailure, ModelRequest, ModelRoute, Part, SessionId, Stop,
     StreamChannel, StreamEvent,
 };
 use dal_provider::{
@@ -31,6 +31,11 @@ pub(crate) struct RequestDeps {
     pub host: Arc<HostState>,
     /// The turn's script host, absent for relay and service-only inference.
     pub script: Option<Arc<super::script::SessionScriptHost>>,
+    /// The continuation slot of the owning turn, invocation root, or relay
+    /// stream, when one owns this request. Cursor steps persist through it;
+    /// every other route ignores it. Absent for service-only inference and
+    /// until its owner threads its handle.
+    pub continuation: Option<Weak<super::continuation::ContinuationSlot>>,
 }
 
 /// Resolves one route without opening a provider stream or consuming a
@@ -54,6 +59,8 @@ pub(crate) async fn model_ready(
     let aliases: Vec<(Box<str>, Box<str>)> = host
         .shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -84,15 +91,39 @@ pub(crate) async fn model_ready(
             ) => return Ok(None),
             Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         };
+        let provider_id = resolved.provider.clone();
+        let bedrock = matches!(
+            resolved.route,
+            ModelRoute::Api {
+                family: Family::Bedrock,
+                ..
+            }
+        );
         let provider = host.shared.providers.provider(resolved);
         if operation_cancel.is_cancelled() {
             return Err(ServiceError::Cancelled);
         }
         match provider {
-            Ok(_) => Ok(Some(model)),
-            Err(dal_provider::ProviderError::NoCredentials { .. }) => Ok(None),
-            Err(error) => Err(ServiceError::failed(None, error.to_string())),
+            Ok(_) => {}
+            Err(dal_provider::ProviderError::NoCredentials { .. }) => return Ok(None),
+            Err(error) => return Err(ServiceError::failed(None, error.to_string())),
         }
+        if bedrock {
+            let available = runtime
+                .block_on(
+                    host.shared
+                        .providers
+                        .credential_source_available(&provider_id, &operation_cancel),
+                )
+                .map_err(|error| match error {
+                    dal_provider::ProviderError::Cancelled => ServiceError::Cancelled,
+                    error => ServiceError::failed(None, error.to_string()),
+                })?;
+            if !available {
+                return Ok(None);
+            }
+        }
+        Ok(Some(model))
     });
     let result = check
         .await
@@ -106,9 +137,9 @@ pub(crate) async fn model_ready(
 
 /// Opens one provider stream for a model request.
 ///
-/// Stored images and stored text are read back into the request first, so a
-/// registered model, the scripted provider, and a live provider all receive
-/// inline content. Scripted providers then bypass the catalog; live providers
+/// Stored blobs are read back into the request first, so a registered
+/// model, the scripted provider, and a live provider all receive inline
+/// content. Scripted providers then bypass the catalog; live providers
 /// resolve through one catalog fetch. Hydration and open failures return a
 /// stream yielding the single error, so callers handle transport and
 /// content uniformly.
@@ -123,7 +154,7 @@ pub(crate) async fn infer_stream(
     if let Some(found) = crate::ext::synthetic::find_route(&deps.host.shared, &req.model) {
         return crate::ext::synthetic::open(deps, found, req, cancel).await;
     }
-    match open_stream(deps, &req, cancel).await {
+    match open_stream(deps, req, cancel).await {
         Ok(stream) => crate::ext::synthetic::observe(stream),
         Err(error) => failed(error),
     }
@@ -203,7 +234,11 @@ impl Stored {
 
 /// Replaces `part` with the stored content when it names a stored image or
 /// stored text.
-async fn hydrate_part(
+///
+/// An image returns as image bytes under its own media type. Text returns
+/// as UTF-8 and refuses the request when the stored bytes are not valid
+/// UTF-8: it is never sent with replacement characters.
+pub(crate) async fn hydrate_part(
     handle: &SessionHandle,
     part: &mut Part,
     cancel: &CancellationToken,
@@ -320,15 +355,20 @@ fn fatal(message: String) -> ProviderError {
 }
 
 /// Opens the provider stream for one request.
+///
+/// A live provider binds one concrete API route, so a request that names its
+/// model another way (a catalog id such as `openai/gpt-6-luna`, which parses
+/// as a synthetic id, or a configured alias) opens under the route the
+/// catalog resolved it to. A request already on that route is sent as it is.
 async fn open_stream(
     deps: &RequestDeps,
-    req: &ModelRequest,
+    req: ModelRequest,
     cancel: &CancellationToken,
 ) -> Result<EventStream, dal_provider::ProviderError> {
     let providers = &deps.host.shared.providers;
     if let Some(script) = providers.scripted_provider() {
         return script
-            .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)
+            .open(deps.session, &req, &[], Arc::new(|_: String| {}), cancel)
             .await;
     }
     let catalog = providers.catalog().await?;
@@ -336,6 +376,8 @@ async fn open_stream(
         .host
         .shared
         .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -346,8 +388,11 @@ async fn open_stream(
                 message: error.to_string(),
             }
         })?;
-    let bound = bound_to(req, &resolved.route);
+    let bound = bound_to(&req, &resolved.route);
     let provider = providers.provider(resolved)?;
+    if matches!(&bound.model, ModelRoute::Api { family, .. } if *family == Family::Cursor) {
+        return super::continuation::open_step(deps, provider, &bound, cancel).await;
+    }
     provider
         .open(deps.session, &bound, &[], Arc::new(|_: String| {}), cancel)
         .await

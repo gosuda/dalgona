@@ -26,8 +26,6 @@
 //! `diagram::raster`, `theme`). Whole-stream diagram copying is owned by the
 //! `DiagramCopy` lane; this file never touches it.
 
-#![cfg(test)]
-
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -61,9 +59,10 @@ const ALL_ROLES: [Role; 7] = [
 ];
 const ALL_FILLS: [Fill; 3] = [Fill::Canvas, Fill::Surface, Fill::Selected];
 
-fn idle_view() -> View {
-    let workspace = Workspace::new(std::env::temp_dir()).expect("temp workspace");
-    View {
+fn idle_view() -> Result<View, dal_tui::TuiError> {
+    let workspace = Workspace::new(std::env::temp_dir())
+        .map_err(|error| dal_tui::TuiError::Terminal(format!("temp workspace: {error}")))?;
+    Ok(View {
         r#gen: Gen::new(NonZeroU64::MIN),
         seq: Seq::new(NonZeroU64::MIN),
         session: SessionInfo {
@@ -91,7 +90,7 @@ fn idle_view() -> View {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
-            scoped_models: None,
+            scoped_models: Vec::new(),
         },
         open: Vec::new(),
         changes: Vec::new(),
@@ -115,12 +114,17 @@ fn idle_view() -> View {
             dropped_observations: 0,
             auto_compaction: AutoCompaction::Off,
         },
-    }
+    })
 }
 
-fn base_opts(rt: &tokio::runtime::Handle, theme: ThemeRequest, color: ColorMode) -> TuiOptions {
-    let workspace = Workspace::new(std::env::temp_dir()).expect("temp workspace");
-    TuiOptions {
+fn base_opts(
+    rt: &tokio::runtime::Handle,
+    theme: ThemeRequest,
+    color: ColorMode,
+) -> Result<TuiOptions, dal_tui::TuiError> {
+    let workspace = Workspace::new(std::env::temp_dir())
+        .map_err(|error| dal_tui::TuiError::Terminal(format!("temp workspace: {error}")))?;
+    Ok(TuiOptions {
         session: dal_agent::SessionRef::Ephemeral { workspace },
         screen: Screen::Fullscreen,
         theme_request: theme,
@@ -133,17 +137,25 @@ fn base_opts(rt: &tokio::runtime::Handle, theme: ThemeRequest, color: ColorMode)
         binary: "dal",
         env: EnvFacts::default(),
         rt: rt.clone(),
-    }
+    })
 }
 
-fn named_screen_opts(rt: &tokio::runtime::Handle, theme: &str, color: ColorMode) -> TuiOptions {
+fn named_screen_opts(
+    rt: &tokio::runtime::Handle,
+    theme: &str,
+    color: ColorMode,
+) -> Result<TuiOptions, dal_tui::TuiError> {
     base_opts(rt, ThemeRequest::Named(theme.into()), color)
 }
 
-fn named_diagram_opts(rt: &tokio::runtime::Handle, theme: &str, color: ColorMode) -> TuiOptions {
-    let mut opts = base_opts(rt, ThemeRequest::Named(theme.into()), color);
+fn named_diagram_opts(
+    rt: &tokio::runtime::Handle,
+    theme: &str,
+    color: ColorMode,
+) -> Result<TuiOptions, dal_tui::TuiError> {
+    let mut opts = base_opts(rt, ThemeRequest::Named(theme.into()), color)?;
     opts.diagrams = true;
-    opts
+    Ok(opts)
 }
 
 fn draw(
@@ -152,11 +164,12 @@ fn draw(
     screen: Screen,
     width: u16,
     height: u16,
-) -> ratatui::Terminal<TestBackend> {
+) -> Result<ratatui::Terminal<TestBackend>, dal_tui::TuiError> {
     let backend = TestBackend::new(width, height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-    dal_tui::draw_frame(&mut terminal, screen, view, opts).expect("frame draws");
-    terminal
+    let mut terminal = ratatui::Terminal::new(backend)
+        .map_err(|error| dal_tui::TuiError::Terminal(format!("test terminal: {error}")))?;
+    dal_tui::draw_frame(&mut terminal, screen, view, opts)?;
+    Ok(terminal)
 }
 
 /// Rendered text rows, right-trimmed, in frame order.
@@ -175,9 +188,12 @@ fn texts(terminal: &ratatui::Terminal<TestBackend>, width: u16, height: u16) -> 
 }
 
 fn find_row(rows: &[String], marker: &str) -> usize {
-    rows.iter()
-        .position(|row| row.contains(marker))
-        .unwrap_or_else(|| panic!("marker {marker:?} missing from frame: {rows:?}"))
+    let position = rows.iter().position(|row| row.contains(marker));
+    assert!(
+        position.is_some(),
+        "marker {marker:?} missing from frame: {rows:?}"
+    );
+    position.unwrap_or(0)
 }
 
 /// Foreground colors of the non-space cells of one frame row.
@@ -205,30 +221,33 @@ fn row_modifiers(terminal: &ratatui::Terminal<TestBackend>, width: u16, y: usize
     out
 }
 
-fn theme_color(theme: &str, role: Role) -> Color {
-    dal_tui::theme::load(
+fn theme_color(theme: &str, role: Role) -> Result<Color, dal_tui::TuiError> {
+    Ok(dal_tui::theme::load(
         &ThemeRequest::Named(theme.into()),
         ColorMode::Truecolor,
         None,
         None,
-    )
-    .expect("shipped theme loads")
-    .color(role)
+    )?
+    .color(role))
 }
 
-fn user_entry(id: u64, text: &str) -> EntryView {
-    EntryView {
-        id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
+fn user_entry(id: u64, text: &str) -> Result<EntryView, dal_tui::TuiError> {
+    Ok(EntryView {
+        id: EntryId::new(NonZeroU64::new(id).ok_or_else(|| {
+            dal_tui::TuiError::Terminal(format!("entry id must be nonzero, got {id}"))
+        })?),
         parent: None,
         kind: EntryKind::User {
             parts: vec![JournalPart::Text { text: text.into() }],
         },
-    }
+    })
 }
 
-fn reasoning_entry(id: u64, text: &str) -> EntryView {
-    EntryView {
-        id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
+fn reasoning_entry(id: u64, text: &str) -> Result<EntryView, dal_tui::TuiError> {
+    Ok(EntryView {
+        id: EntryId::new(NonZeroU64::new(id).ok_or_else(|| {
+            dal_tui::TuiError::Terminal(format!("entry id must be nonzero, got {id}"))
+        })?),
         parent: None,
         kind: EntryKind::Assistant {
             api: Family::Chat,
@@ -250,12 +269,20 @@ fn reasoning_entry(id: u64, text: &str) -> EntryView {
             route: None,
             replay: None,
         },
-    }
+    })
 }
 
-fn tool_entry(id: u64, name: &str, error: bool, text: &str, elapsed_ms: Option<u64>) -> EntryView {
-    EntryView {
-        id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
+fn tool_entry(
+    id: u64,
+    name: &str,
+    error: bool,
+    text: &str,
+    elapsed_ms: Option<u64>,
+) -> Result<EntryView, dal_tui::TuiError> {
+    Ok(EntryView {
+        id: EntryId::new(NonZeroU64::new(id).ok_or_else(|| {
+            dal_tui::TuiError::Terminal(format!("entry id must be nonzero, got {id}"))
+        })?),
         parent: None,
         kind: EntryKind::ToolResult {
             call: CallId::new("call-1"),
@@ -265,12 +292,14 @@ fn tool_entry(id: u64, name: &str, error: bool, text: &str, elapsed_ms: Option<u
             changes: Vec::new(),
             elapsed_ms,
         },
-    }
+    })
 }
 
-fn diagram_entry(id: u64) -> EntryView {
-    EntryView {
-        id: EntryId::new(NonZeroU64::new(id).expect("entry id")),
+fn diagram_entry(id: u64) -> Result<EntryView, dal_tui::TuiError> {
+    Ok(EntryView {
+        id: EntryId::new(NonZeroU64::new(id).ok_or_else(|| {
+            dal_tui::TuiError::Terminal(format!("entry id must be nonzero, got {id}"))
+        })?),
         parent: None,
         kind: EntryKind::Assistant {
             api: Family::Chat,
@@ -292,7 +321,7 @@ fn diagram_entry(id: u64) -> EntryView {
             route: None,
             replay: None,
         },
-    }
+    })
 }
 
 fn approval_request(id: RequestId, body: &str) -> Request {
@@ -412,13 +441,15 @@ fn committed_text_cells_carry_theme_text_color() {
         .expect("probe runtime");
     let mut first_texts: Option<Vec<String>> = None;
     for name in SHIPPED_THEMES {
-        let mut view = idle_view();
-        view.entries.items = vec![user_entry(1, "theme-probe committed alpha 01")];
-        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor);
-        let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+        let mut view = idle_view().expect("temp workspace");
+        view.entries.items =
+            vec![user_entry(1, "theme-probe committed alpha 01").expect("entry id")];
+        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor)
+            .expect("temp workspace");
+        let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24).expect("frame draws");
         let rows = texts(&terminal, 80, 24);
         let y = find_row(&rows, "theme-probe committed alpha 01");
-        let expected = theme_color(name, Role::Text);
+        let expected = theme_color(name, Role::Text).expect("shipped theme loads");
         let fgs = row_fgs(&terminal, 80, y);
         assert!(!fgs.is_empty(), "{name}: committed row paints no cells");
         assert!(
@@ -448,15 +479,17 @@ fn transcript_and_approval_chrome_carry_text_dim_and_accent() {
         .collect::<Vec<_>>()
         .join("\n");
     for name in SHIPPED_THEMES {
-        let mut view = idle_view();
-        view.entries.items = vec![reasoning_entry(1, "probe step one\n\nprobe step two")];
+        let mut view = idle_view().expect("temp workspace");
+        view.entries.items =
+            vec![reasoning_entry(1, "probe step one\n\nprobe step two").expect("entry id")];
         view.open = vec![approval_request(RequestId::new_v7(), &long_body)];
-        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor);
-        let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor)
+            .expect("temp workspace");
+        let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24).expect("frame draws");
         let rows = texts(&terminal, 80, 24);
 
         let thinking = find_row(&rows, "ctrl+o to show reasoning");
-        let text = theme_color(name, Role::Text);
+        let text = theme_color(name, Role::Text).expect("shipped theme loads");
         assert!(
             row_fgs(&terminal, 80, thinking)
                 .iter()
@@ -465,14 +498,14 @@ fn transcript_and_approval_chrome_carry_text_dim_and_accent() {
         );
 
         let title = find_row(&rows, "Allow this command?");
-        let accent = theme_color(name, Role::Accent);
+        let accent = theme_color(name, Role::Accent).expect("shipped theme loads");
         assert!(
             row_fgs(&terminal, 80, title).iter().all(|fg| *fg == accent),
             "{name}: approval title must carry the accent color"
         );
 
         let footer = find_row(&rows, "more lines · pgdn");
-        let dim = theme_color(name, Role::Dim);
+        let dim = theme_color(name, Role::Dim).expect("shipped theme loads");
         assert!(
             row_fgs(&terminal, 80, footer).iter().all(|fg| *fg == dim),
             "{name}: dialog scroll footer must carry the dim color"
@@ -494,12 +527,13 @@ fn narrow_floor_carries_the_warning_role() {
         .build()
         .expect("probe runtime");
     for name in SHIPPED_THEMES {
-        let view = idle_view();
-        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor);
-        let terminal = draw(&view, &opts, Screen::Fullscreen, 11, 24);
+        let view = idle_view().expect("temp workspace");
+        let opts = named_screen_opts(runtime.handle(), name, ColorMode::Truecolor)
+            .expect("temp workspace");
+        let terminal = draw(&view, &opts, Screen::Fullscreen, 11, 24).expect("frame draws");
         let rows = texts(&terminal, 11, 24);
         let y = find_row(&rows, "dalgon need");
-        let warning = theme_color(name, Role::Warning);
+        let warning = theme_color(name, Role::Warning).expect("shipped theme loads");
         assert!(
             row_fgs(&terminal, 11, y).iter().all(|fg| *fg == warning),
             "{name}: the narrow floor must carry the warning color"
@@ -511,24 +545,29 @@ fn context_frame(
     runtime: &tokio::runtime::Handle,
     theme: &str,
     tokens: u64,
-) -> (ratatui::Terminal<TestBackend>, Vec<String>) {
-    let mut view = idle_view();
+) -> Result<(ratatui::Terminal<TestBackend>, Vec<String>), dal_tui::TuiError> {
+    let mut view = idle_view()?;
     view.usage.context_tokens = tokens;
     view.usage.context_window = 128_000;
-    let opts = named_screen_opts(runtime, theme, ColorMode::Truecolor);
-    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+    let opts = named_screen_opts(runtime, theme, ColorMode::Truecolor)?;
+    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24)?;
     let rows = texts(&terminal, 80, 24);
-    (terminal, rows)
+    Ok((terminal, rows))
 }
 
-fn assert_context_quiet(runtime: &tokio::runtime::Handle, theme: &str, tokens: u64) {
-    let (_, rows) = context_frame(runtime, theme, tokens);
+fn assert_context_quiet(
+    runtime: &tokio::runtime::Handle,
+    theme: &str,
+    tokens: u64,
+) -> Result<(), dal_tui::TuiError> {
+    let (_, rows) = context_frame(runtime, theme, tokens)?;
     assert!(
         !rows
             .iter()
             .any(|row| row.contains("rising") || row.contains("high")),
         "{theme}: sub-threshold context must name no threshold word: {rows:?}"
     );
+    Ok(())
 }
 
 fn assert_context_word(
@@ -537,14 +576,15 @@ fn assert_context_word(
     tokens: u64,
     word: &str,
     role: Role,
-) {
-    let (terminal, rows) = context_frame(runtime, theme, tokens);
+) -> Result<(), dal_tui::TuiError> {
+    let (terminal, rows) = context_frame(runtime, theme, tokens)?;
     let y = find_row(&rows, word);
-    let expected = theme_color(theme, role);
+    let expected = theme_color(theme, role)?;
     assert!(
         row_fgs(&terminal, 80, y).contains(&expected),
         "{theme}: {word} must carry the {role:?} color"
     );
+    Ok(())
 }
 
 /// The status context slot carries `warning` above 70% and `error` above 90%
@@ -556,10 +596,13 @@ fn context_slot_thresholds_name_warning_and_error() {
         .build()
         .expect("probe runtime");
     for name in SHIPPED_THEMES {
-        assert_context_quiet(runtime.handle(), name, 88_320);
-        assert_context_word(runtime.handle(), name, 89_600, "rising", Role::Warning);
-        assert_context_word(runtime.handle(), name, 115_200, "high", Role::Error);
-        assert_context_word(runtime.handle(), name, 122_880, "high", Role::Error);
+        assert_context_quiet(runtime.handle(), name, 88_320).expect("context frame");
+        assert_context_word(runtime.handle(), name, 89_600, "rising", Role::Warning)
+            .expect("context frame");
+        assert_context_word(runtime.handle(), name, 115_200, "high", Role::Error)
+            .expect("context frame");
+        assert_context_word(runtime.handle(), name, 122_880, "high", Role::Error)
+            .expect("context frame");
     }
 }
 
@@ -573,22 +616,25 @@ fn no_color_keeps_meaning_without_color() {
         .map(|n| format!("nocolor probe preview line {n:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut view = idle_view();
+    let mut view = idle_view().expect("temp workspace");
     view.entries.items = vec![
-        reasoning_entry(1, "probe step one"),
+        reasoning_entry(1, "probe step one").expect("entry id"),
         tool_entry(
             2,
             "exec",
             true,
             "Permission denied: exec was declined.",
             Some(1500),
-        ),
+        )
+        .expect("entry id"),
     ];
     view.open = vec![approval_request(RequestId::new_v7(), &long_body)];
-    let color_opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor);
-    let plain_opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Never);
-    let colored = draw(&view, &color_opts, Screen::Fullscreen, 80, 24);
-    let plain = draw(&view, &plain_opts, Screen::Fullscreen, 80, 24);
+    let color_opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+        .expect("temp workspace");
+    let plain_opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Never)
+        .expect("temp workspace");
+    let colored = draw(&view, &color_opts, Screen::Fullscreen, 80, 24).expect("frame draws");
+    let plain = draw(&view, &plain_opts, Screen::Fullscreen, 80, 24).expect("frame draws");
     assert_eq!(
         texts(&plain, 80, 24),
         texts(&colored, 80, 24),
@@ -646,10 +692,12 @@ fn thinking_collapsed_row_promises_ctrl_o() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("probe runtime");
-    let mut view = idle_view();
-    view.entries.items = vec![reasoning_entry(1, "probe step one\nprobe step two")];
-    let opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor);
-    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+    let mut view = idle_view().expect("temp workspace");
+    view.entries.items =
+        vec![reasoning_entry(1, "probe step one\nprobe step two").expect("entry id")];
+    let opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+        .expect("temp workspace");
+    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24).expect("frame draws");
     let rows = texts(&terminal, 80, 24);
     let hits: Vec<usize> = rows
         .iter()
@@ -691,19 +739,21 @@ fn tool_cards_settle_to_the_exact_collapsed_spec() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("probe runtime");
-    let mut view = idle_view();
+    let mut view = idle_view().expect("temp workspace");
     view.entries.items = vec![
-        tool_entry(1, "read", false, "1\talpha\n2\tbeta", Some(52)),
+        tool_entry(1, "read", false, "1\talpha\n2\tbeta", Some(52)).expect("entry id"),
         tool_entry(
             2,
             "exec",
             true,
             "Permission denied: exec was declined.",
             Some(1500),
-        ),
+        )
+        .expect("entry id"),
     ];
-    let opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor);
-    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+    let opts = named_screen_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+        .expect("temp workspace");
+    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24).expect("frame draws");
     let rows = texts(&terminal, 80, 24);
     assert!(
         rows.iter().any(|row| row.trim() == "ok  read 1 alpha"),
@@ -727,10 +777,11 @@ fn diagram_settled_header_advertises_ctrl_o_expands() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("probe runtime");
-    let mut view = idle_view();
-    view.entries.items = vec![diagram_entry(1)];
-    let opts = named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor);
-    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24);
+    let mut view = idle_view().expect("temp workspace");
+    view.entries.items = vec![diagram_entry(1).expect("entry id")];
+    let opts = named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+        .expect("temp workspace");
+    let terminal = draw(&view, &opts, Screen::Fullscreen, 80, 24).expect("frame draws");
     let rows = texts(&terminal, 80, 24);
     let header = find_row(&rows, "ctrl+o expands");
     assert!(
@@ -1016,14 +1067,15 @@ fn art_composer_and_status_share_no_rows_at_documented_sizes() {
         .build()
         .expect("probe runtime");
     for (width, height) in [(80_u16, 24_u16), (100, 30), (40, 12)] {
-        let mut view = idle_view();
+        let mut view = idle_view().expect("temp workspace");
         view.entries.items = vec![
-            diagram_entry(1),
-            tool_entry(2, "read", false, "hello world", Some(52)),
-            reasoning_entry(3, "probe step one"),
+            diagram_entry(1).expect("entry id"),
+            tool_entry(2, "read", false, "hello world", Some(52)).expect("entry id"),
+            reasoning_entry(3, "probe step one").expect("entry id"),
         ];
-        let opts = named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor);
-        let terminal = draw(&view, &opts, Screen::Fullscreen, width, height);
+        let opts = named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+            .expect("temp workspace");
+        let terminal = draw(&view, &opts, Screen::Fullscreen, width, height).expect("frame draws");
         let rows = texts(&terminal, width, height);
         assert!(
             rows.len() <= usize::from(height),
@@ -1055,12 +1107,14 @@ fn art_composer_and_status_share_no_rows_at_documented_sizes() {
     // At 20x10 the transcript window may show no committed rows, but the
     // frame stays valid: the prompt row never drops and status paints last.
     let narrow = draw(
-        &idle_view(),
-        &named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor),
+        &idle_view().expect("temp workspace"),
+        &named_diagram_opts(runtime.handle(), "flexoki-dark", ColorMode::Truecolor)
+            .expect("temp workspace"),
         Screen::Fullscreen,
         20,
         10,
-    );
+    )
+    .expect("frame draws");
     let narrow_rows = texts(&narrow, 20, 10);
     assert!(narrow_rows.len() <= 10, "20x10 frame exceeds its height");
     let composer = find_row(&narrow_rows, "> Ask dal");

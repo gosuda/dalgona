@@ -94,7 +94,7 @@ fn a_seeded_default_is_requested_but_not_selected() {
             approval: ApprovalMode::Ask,
             mode: Mode::Normal,
             name: None,
-            scoped_models: None,
+            scoped_models: Vec::new(),
         }
     );
 }

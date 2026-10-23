@@ -262,11 +262,12 @@ pub fn render_reminder_text(rule: &Rule, subject: RuleSubject<'_>) -> String {
     ReminderText { rule, subject }.to_string()
 }
 
-/// Renders the judge-auto-off session-start notice.
+/// Renders the judge-auto-off session-start notice for the resolved
+/// unavailability cause.
 #[must_use]
-pub fn judge_auto_off_note(judged_rule_count: usize) -> String {
+pub fn judge_auto_off_note(reason: &str, judged_rule_count: usize) -> String {
     format!(
-        "rules: judge auto resolved to off: no judge model with usable credentials. {judged_rule_count} judged rules are not watched."
+        "rules: judge auto resolved to off: {reason}. {judged_rule_count} judged rules are not watched."
     )
 }
 

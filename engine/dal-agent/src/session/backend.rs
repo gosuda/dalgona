@@ -533,7 +533,11 @@ impl Backend {
         ));
         let jobs_dir = scheme_store.session_jobs_dir(session);
         let launcher = crate::proc::sandbox::session_launcher(
-            &host.shared.config,
+            &host
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             &host.shared.env.vars,
             workspace.as_path(),
             std::slice::from_ref(&host.shared.data_root),
@@ -1027,14 +1031,29 @@ impl SessionBackend for Backend {
     }
 
     fn model_ready(&self, model: ModelRoute) -> ServiceFuture<'_, Option<ModelRoute>> {
-        let deps = self.infer_deps();
+        let deps = super::turn::RequestDeps {
+            session: self.session,
+            host: Arc::clone(&self.host),
+            script: None,
+            // Pinned: service-only readiness has no turn and no invocation
+            // owner, so it stays the one-shot fallback by construction.
+            continuation: None,
+        };
         let cancel = self.cancel.clone();
         Box::pin(async move { super::turn::model_ready(&deps, model, &cancel).await })
     }
 
-    fn infer(&self, req: ModelRequest) -> ServiceFuture<'_, Inference> {
+    fn infer(
+        &self,
+        caller: &crate::ext::Caller,
+        req: ModelRequest,
+    ) -> ServiceFuture<'_, Inference> {
+        // `caller` is a short borrow that must not cross awaits: clone the
+        // small, fully owned Caller so the future below owns it instead —
+        // the same clone-first idiom SessionServices uses for `who`.
+        let caller = caller.clone();
         Box::pin(async move {
-            let deps = self.infer_deps();
+            let deps = self.infer_deps(&caller);
             let stream = super::turn::infer_stream(&deps, req, &self.cancel).await;
             crate::ext::synthetic::collect(stream)
                 .await
@@ -1044,15 +1063,20 @@ impl SessionBackend for Backend {
 
     fn infer_with_script(
         &self,
+        caller: &crate::ext::Caller,
         req: ModelRequest,
         script: Option<Arc<crate::session::script::SessionScriptHost>>,
         cancel: CancellationToken,
     ) -> ServiceFuture<'_, Inference> {
+        // Same owned-clone rationale as `infer`: no short borrow crosses the
+        // pin boundary; the literal below borrows future-owned data only.
+        let caller = caller.clone();
         Box::pin(async move {
             let deps = super::turn::RequestDeps {
                 session: self.session,
                 host: Arc::clone(&self.host),
                 script,
+                continuation: caller.continuation(),
             };
             let session_cancel = self.cancel.clone();
             tokio::select! {
@@ -1067,9 +1091,16 @@ impl SessionBackend for Backend {
         })
     }
 
-    fn infer_stream(&self, req: ModelRequest) -> ServiceFuture<'_, EventStream> {
+    fn infer_stream(
+        &self,
+        caller: &crate::ext::Caller,
+        req: ModelRequest,
+    ) -> ServiceFuture<'_, EventStream> {
+        // Same owned-clone rationale as `infer`: the temporary RequestDeps
+        // built inside the future is future-owned, and `caller` is too.
+        let caller = caller.clone();
         Box::pin(async move {
-            Ok(super::turn::infer_stream(&self.infer_deps(), req, &self.cancel).await)
+            Ok(super::turn::infer_stream(&self.infer_deps(&caller), req, &self.cancel).await)
         })
     }
 
@@ -1253,7 +1284,15 @@ impl Backend {
     /// The depth limit when this session may not start a child: a child
     /// of this session would sit one level deeper than `agents.max_depth`.
     fn depth_refusal(&self) -> Option<u32> {
-        let max = self.host.shared.config.agents().max_depth.get();
+        let max = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agents()
+            .max_depth
+            .get();
         let depth = self
             .host
             .sessions
@@ -1274,14 +1313,44 @@ impl Backend {
     /// swapped symlink into an outside root. The containment root is the
     /// one `Backend::new` captured, so a replaceable symlink at the
     /// session workspace cannot shift the boundary mid-session.
+    ///
+    /// Worktree-isolated children are the one exception: the orchestration
+    /// battery creates each task's worktree under the host data root at
+    /// `<data root>/worktrees/<session>/<task>` and starts the child
+    /// inside it, outside the caller's workspace by design. A child
+    /// workspace under this session's own worktree root admits; anything
+    /// else under the data root — another session's trees, the isolation
+    /// receipts, the session stores — still refuses with
+    /// [`AgentRefusal::WorkspaceOutsideRoot`].
     fn child_workspace(&self, requested: Option<&Workspace>) -> Result<Workspace, AgentRefusal> {
         let workspace = requested.unwrap_or(&self.workspace);
         let child_root = std::fs::canonicalize(workspace.as_path())
             .map_err(|_| AgentRefusal::WorkspaceUnresolved)?;
-        if !child_root.starts_with(&self.canonical_root) {
+        let in_workspace = child_root.starts_with(&self.canonical_root);
+        let in_worktrees = self
+            .session_worktree_root()
+            .is_some_and(|root| child_root.starts_with(&root));
+        if !in_workspace && !in_worktrees {
             return Err(AgentRefusal::WorkspaceOutsideRoot);
         }
         Workspace::new(child_root).map_err(|_| AgentRefusal::WorkspaceUnresolved)
+    }
+
+    /// The canonical `<data root>/worktrees/<session>` root this session's
+    /// isolated task worktrees live under, when it resolves. `None` keeps
+    /// the workspace-only boundary: a session with no worktree area admits
+    /// no data-root child. The child workspace itself must already exist
+    /// to reach this check, so its worktree root resolves too — anything
+    /// unresolvable fails closed here exactly like the workspace root.
+    fn session_worktree_root(&self) -> Option<PathBuf> {
+        std::fs::canonicalize(
+            self.host
+                .shared
+                .data_root
+                .join("worktrees")
+                .join(self.session.to_string()),
+        )
+        .ok()
     }
 
     async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
@@ -1490,6 +1559,8 @@ impl Backend {
             .host
             .shared
             .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aliases()
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
@@ -1819,11 +1890,18 @@ impl Backend {
         rx.await.unwrap_or(TurnOpReply::Idle(true))
     }
 
-    fn infer_deps(&self) -> super::turn::RequestDeps {
+    /// Builds the request inputs for caller-attributed inference.
+    ///
+    /// The continuation is whatever the host-minted caller carries: `Some`
+    /// when an invocation root minted an owner, `None` for service-only
+    /// inference, which stays the one-shot fallback by construction — never
+    /// a refusal.
+    fn infer_deps(&self, caller: &crate::ext::Caller) -> super::turn::RequestDeps {
         super::turn::RequestDeps {
             session: self.session,
             host: Arc::clone(&self.host),
             script: None,
+            continuation: caller.continuation(),
         }
     }
 }
@@ -2155,6 +2233,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_child_in_the_session_worktree_tree_starts() {
+        // Worktree-isolated children live under the host data root at
+        // `<data>/worktrees/<session>/<task>`, outside the caller's
+        // workspace by design: the orchestration battery creates the tree
+        // and starts the child inside it. The session's own worktree tree
+        // admits; the general outside-root refusal below is unchanged.
+        let (host, root, _child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let tree = temp
+            .path()
+            .join("data")
+            .join("worktrees")
+            .join(root.to_string())
+            .join("task");
+        std::fs::create_dir_all(&tree).expect("worktree tree");
+        let workspace = Workspace::new(tree).expect("worktree workspace");
+        let reply = backend
+            .agents_op(AgentsOp::Start(start_in(Some(workspace), None)))
+            .await
+            .expect("a start answers");
+        let AgentsReply::Started { id } = reply else {
+            panic!("a worktree child must start, got {reply:?}");
+        };
+        host.close(id).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn data_root_paths_outside_the_session_worktree_tree_still_refuse() {
+        let (host, root, _child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        // Another session's worktree tree: the right shape, the wrong owner.
+        let foreign = temp
+            .path()
+            .join("data")
+            .join("worktrees")
+            .join("01900000-0000-7000-8000-000000000000")
+            .join("task");
+        assert_ne!(root.to_string(), "01900000-0000-7000-8000-000000000000");
+        // The isolation receipts live under the data root but are artifacts,
+        // never child workspaces.
+        let receipts = temp
+            .path()
+            .join("data")
+            .join("isolation")
+            .join(root.to_string())
+            .join("task");
+        std::fs::create_dir_all(&foreign).expect("foreign tree");
+        std::fs::create_dir_all(&receipts).expect("receipts");
+        for workspace in [foreign, receipts] {
+            let workspace = Workspace::new(workspace).expect("workspace value");
+            let reply = backend
+                .agents_op(AgentsOp::Start(start_in(Some(workspace), None)))
+                .await
+                .expect("a refusal is a reply");
+            assert_eq!(
+                reply,
+                AgentsReply::Refused {
+                    reason: AgentRefusal::WorkspaceOutsideRoot
+                }
+            );
+        }
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
     async fn an_unroutable_model_refuses_the_start_with_its_name() {
         let (host, root, _child, _temp) = host_with_child().await;
         let reply = backend_of(&host, root)
@@ -2311,47 +2455,97 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one live-actor journal proof keeps every rejected transition in order"
-    )]
-    async fn private_rejected_transitions_persist_nothing() {
+    struct PrivateRig {
+        host: Host,
+        root: SessionId,
+        child: SessionId,
+        temp: tempfile::TempDir,
+        workspace: Workspace,
+        caller: crate::ext::Caller,
+        owner: Owner,
+        backend: Arc<Backend>,
+        handle: SessionHandle,
+        r#loop: dal_core::PrivateLoopId,
+        token: dal_core::PrivateEffectId,
+    }
+
+    async fn private_rig_with_loop() -> PrivateRig {
         let (host, root, child, temp) = host_with_child().await;
         let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
         let caller = private_test_caller("focus", dal_core::Origin::User);
         let owner = private_owner_of(&caller);
-        let handle = backend_of(&host, root).handle().clone();
+        let backend = backend_of(&host, root);
+        let handle = backend.handle().clone();
         let r#loop = dal_core::PrivateLoopId::new_v7();
         let token = dal_core::PrivateEffectId::new_v7();
+        PrivateRig {
+            host,
+            root,
+            child,
+            temp,
+            workspace,
+            caller,
+            owner,
+            backend,
+            handle,
+            r#loop,
+            token,
+        }
+    }
 
-        handle
-            .private_loop_born(r#loop, owner.clone(), None)
+    async fn private_birth_loop(rig: &PrivateRig) {
+        rig.handle
+            .private_loop_born(rig.r#loop, rig.owner.clone(), None)
             .await
             .expect("loop birth receipts");
-        let baseline = private_journal_bytes(&temp, &workspace, root);
+    }
 
+    async fn private_start_effect(
+        rig: &PrivateRig,
+        round: u32,
+        call: &str,
+        tool: &str,
+        args: &str,
+    ) {
+        rig.handle
+            .private_start(
+                rig.r#loop,
+                rig.token,
+                rig.owner.clone(),
+                None,
+                round,
+                dal_core::CallId::new(call),
+                tool.into(),
+                dal_core::RawJson::parse(args).expect("args parse"),
+            )
+            .await
+            .expect("start receipts");
+    }
+
+    async fn rejected_assert_duplicate_birth(rig: &PrivateRig, baseline: &[u8]) {
         // A duplicate birth is rejected and the journal stays byte-identical.
         assert!(
-            handle
-                .private_loop_born(r#loop, owner.clone(), None)
+            rig.handle
+                .private_loop_born(rig.r#loop, rig.owner.clone(), None)
                 .await
                 .is_err(),
             "a twice-born loop must fail"
         );
         assert_eq!(
-            private_journal_bytes(&temp, &workspace, root),
+            private_journal_bytes(&rig.temp, &rig.workspace, rig.root),
             baseline,
             "a rejected birth appends nothing"
         );
+    }
 
+    async fn rejected_assert_foreign_start(rig: &PrivateRig, baseline: &[u8]) {
         // A start under a foreign owner is rejected with no new bytes.
         let stranger = private_test_caller("stranger", dal_core::Origin::User);
         assert!(
-            handle
+            rig.handle
                 .private_start(
-                    r#loop,
-                    token,
+                    rig.r#loop,
+                    rig.token,
                     private_owner_of(&stranger),
                     None,
                     0,
@@ -2364,37 +2558,31 @@ mod tests {
             "an owner-mismatched start must fail"
         );
         assert_eq!(
-            private_journal_bytes(&temp, &workspace, root),
+            private_journal_bytes(&rig.temp, &rig.workspace, rig.root),
             baseline,
             "a mismatched start appends nothing"
         );
+    }
 
+    async fn rejected_drive_valid_start(rig: &PrivateRig) -> Vec<u8> {
         // The one valid start receipts; its duplicate fails without a record.
-        handle
-            .private_start(
-                r#loop,
-                token,
-                owner.clone(),
-                None,
-                0,
-                dal_core::CallId::new("proof-call"),
-                "proof-tool".into(),
-                dal_core::RawJson::parse("null").expect("args parse"),
-            )
-            .await
-            .expect("valid start receipts");
-        let after_start = private_journal_bytes(&temp, &workspace, root);
+        private_start_effect(rig, 0, "proof-call", "proof-tool", "null").await;
+        let after_start = private_journal_bytes(&rig.temp, &rig.workspace, rig.root);
         assert_eq!(
-            count_private_starts(&private_decode_records(&after_start), &r#loop, &token),
+            count_private_starts(
+                &private_decode_records(&after_start),
+                &rig.r#loop,
+                &rig.token
+            ),
             1,
             "exactly one start record lands"
         );
         assert!(
-            handle
+            rig.handle
                 .private_start(
-                    r#loop,
-                    token,
-                    owner.clone(),
+                    rig.r#loop,
+                    rig.token,
+                    rig.owner.clone(),
                     None,
                     0,
                     dal_core::CallId::new("proof-call"),
@@ -2406,124 +2594,83 @@ mod tests {
             "a twice-started effect must fail"
         );
         assert_eq!(
-            private_journal_bytes(&temp, &workspace, root),
+            private_journal_bytes(&rig.temp, &rig.workspace, rig.root),
             after_start,
             "a duplicate start appends nothing"
         );
+        after_start
+    }
 
+    async fn rejected_drive_valid_end(rig: &PrivateRig) -> Vec<u8> {
         // One end settles the row; a second end for the token fails and the
         // journal still holds exactly one end record for it.
-        handle
-            .private_end(r#loop, token, private_settled_outcome())
+        rig.handle
+            .private_end(rig.r#loop, rig.token, private_settled_outcome())
             .await
             .expect("valid end receipts");
-        let after_end = private_journal_bytes(&temp, &workspace, root);
+        let after_end = private_journal_bytes(&rig.temp, &rig.workspace, rig.root);
         assert_eq!(
-            count_private_ends(&private_decode_records(&after_end), &r#loop, &token),
+            count_private_ends(&private_decode_records(&after_end), &rig.r#loop, &rig.token),
             1,
             "exactly one end record lands"
         );
         assert!(
-            handle
-                .private_end(r#loop, token, private_settled_outcome())
+            rig.handle
+                .private_end(rig.r#loop, rig.token, private_settled_outcome())
                 .await
                 .is_err(),
             "a twice-ended effect must fail"
         );
         assert_eq!(
-            private_journal_bytes(&temp, &workspace, root),
+            private_journal_bytes(&rig.temp, &rig.workspace, rig.root),
             after_end,
             "a duplicate end appends nothing"
         );
-
-        // The rejections above left the fold untouched: an end for a token
-        // that never started still fails instead of settling a phantom row.
-        assert!(
-            handle
-                .private_end(
-                    r#loop,
-                    dal_core::PrivateEffectId::new_v7(),
-                    private_settled_outcome()
-                )
-                .await
-                .is_err(),
-            "an end without a start must fail"
-        );
-
-        host.close(child).await.expect("close child");
-        host.close(root).await.expect("close session");
+        after_end
     }
 
-    #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one live-actor journal proof keeps the receipt and closed-lane phases in order"
-    )]
-    async fn private_receipt_persisted_and_closed_operations_reject() {
-        let (host, root, child, temp) = host_with_child().await;
-        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
-        let caller = private_test_caller("focus", dal_core::Origin::User);
-        let owner = private_owner_of(&caller);
-        let backend = backend_of(&host, root);
-        let handle = backend.handle().clone();
-        let r#loop = dal_core::PrivateLoopId::new_v7();
-        let token = dal_core::PrivateEffectId::new_v7();
-
-        handle
-            .private_loop_born(r#loop, owner.clone(), None)
-            .await
-            .expect("loop birth receipts");
-        handle
-            .private_start(
-                r#loop,
-                token,
-                owner.clone(),
-                None,
-                0,
-                dal_core::CallId::new("proof-call"),
-                "proof-tool".into(),
-                dal_core::RawJson::parse("null").expect("args parse"),
-            )
-            .await
-            .expect("start receipts");
-
+    async fn receipt_assert_start_durable_and_settle(rig: &PrivateRig) {
         // The receipt above is durable: the start record is on the file, and
         // only then does the row settle and publish its terminal.
-        let records = private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+        let records =
+            private_decode_records(&private_journal_bytes(&rig.temp, &rig.workspace, rig.root));
         assert_eq!(
-            count_private_starts(&records, &r#loop, &token),
+            count_private_starts(&records, &rig.r#loop, &rig.token),
             1,
             "the start receipt is on disk"
         );
-        handle
-            .private_end(r#loop, token, private_settled_outcome())
+        rig.handle
+            .private_end(rig.r#loop, rig.token, private_settled_outcome())
             .await
             .expect("end receipts");
-        let settled_rows = backend
-            .private_outcomes(&caller)
+        let settled_rows = rig
+            .backend
+            .private_outcomes(&rig.caller)
             .await
             .expect("owner reads its terminal");
         assert_eq!(settled_rows.len(), 1, "the settled terminal publishes");
-        assert_eq!(settled_rows[0].token, token);
+        assert_eq!(settled_rows[0].token, rig.token);
+    }
 
+    async fn receipt_assert_failed_start_rolls_back(rig: &PrivateRig) {
         // A failed append folds and publishes nothing: the armed write fault
         // rejects the start, the owner still reads only the settled row, and
         // the journal file is byte-identical (the partial batch rolls back).
         let faulted = dal_core::PrivateEffectId::new_v7();
-        let before_fault = private_journal_bytes(&temp, &workspace, root);
+        let before_fault = private_journal_bytes(&rig.temp, &rig.workspace, rig.root);
         dal_store::Store::new(
-            temp.path().join("data"),
-            workspace.clone(),
+            rig.temp.path().join("data"),
+            rig.workspace.clone(),
             dal_core::Product::Dal,
         )
-        .arm_append_write_fault(root, 0);
+        .arm_append_write_fault(rig.root, 0);
         assert!(
             matches!(
-                handle
+                rig.handle
                     .private_start(
-                        r#loop,
+                        rig.r#loop,
                         faulted,
-                        owner.clone(),
+                        rig.owner.clone(),
                         None,
                         1,
                         dal_core::CallId::new("faulted-call"),
@@ -2535,8 +2682,9 @@ mod tests {
             ),
             "a failed append must reject the start"
         );
-        let rows_after_fault = backend
-            .private_outcomes(&caller)
+        let rows_after_fault = rig
+            .backend
+            .private_outcomes(&rig.caller)
             .await
             .expect("owner reads after the failed append");
         assert_eq!(
@@ -2545,21 +2693,23 @@ mod tests {
             "the failed start publishes nothing"
         );
         assert_eq!(
-            private_journal_bytes(&temp, &workspace, root),
+            private_journal_bytes(&rig.temp, &rig.workspace, rig.root),
             before_fault,
             "the rolled-back batch leaves no bytes"
         );
+    }
 
+    async fn receipt_assert_closed_lane_rejects(rig: &PrivateRig) {
         // A closed lane rejects with typed errors.
-        host.close(child).await.expect("close child");
-        host.close(root).await.expect("close session");
+        rig.host.close(rig.child).await.expect("close child");
+        rig.host.close(rig.root).await.expect("close session");
         assert!(
             matches!(
-                handle
+                rig.handle
                     .private_start(
-                        r#loop,
+                        rig.r#loop,
                         dal_core::PrivateEffectId::new_v7(),
-                        owner.clone(),
+                        rig.owner.clone(),
                         None,
                         1,
                         dal_core::CallId::new("closed-call"),
@@ -2573,8 +2723,8 @@ mod tests {
         );
         assert!(
             matches!(
-                handle
-                    .private_end(r#loop, token, private_settled_outcome())
+                rig.handle
+                    .private_end(rig.r#loop, rig.token, private_settled_outcome())
                     .await,
                 Err(ServiceError::Failed { .. })
             ),
@@ -2582,8 +2732,8 @@ mod tests {
         );
         assert!(
             matches!(
-                handle
-                    .private_loop_born(dal_core::PrivateLoopId::new_v7(), owner, None)
+                rig.handle
+                    .private_loop_born(dal_core::PrivateLoopId::new_v7(), rig.owner.clone(), None)
                     .await,
                 Err(AgentError::SessionClosed { .. })
             ),
@@ -2591,58 +2741,27 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one live-actor journal proof keeps the reopen and repair phases in order"
-    )]
-    async fn private_unfinished_start_repairs_once_across_reopen() {
-        let (host, root, child, temp) = host_with_child().await;
-        let workspace = Workspace::new(temp.path().join("workspace")).expect("workspace value");
-        let caller = private_test_caller("focus", dal_core::Origin::User);
-        let owner = private_owner_of(&caller);
-        let r#loop = dal_core::PrivateLoopId::new_v7();
-        let token = dal_core::PrivateEffectId::new_v7();
-
-        backend_of(&host, root)
-            .handle()
-            .private_loop_born(r#loop, owner.clone(), None)
-            .await
-            .expect("loop birth receipts");
-        backend_of(&host, root)
-            .handle()
-            .private_start(
-                r#loop,
-                token,
-                owner.clone(),
-                None,
-                3,
-                dal_core::CallId::new("wire-call-9"),
-                "tool-a".into(),
-                dal_core::RawJson::parse(r#"{"n":9}"#).expect("args parse"),
-            )
-            .await
-            .expect("start receipts");
+    async fn unfinished_assert_failed_end_publishes_nothing(rig: &PrivateRig) {
         // The row stays Started with no end landed; then the armed write
         // fault rejects the end, which must fold and publish nothing.
         dal_store::Store::new(
-            temp.path().join("data"),
-            workspace.clone(),
+            rig.temp.path().join("data"),
+            rig.workspace.clone(),
             dal_core::Product::Dal,
         )
-        .arm_append_write_fault(root, 0);
+        .arm_append_write_fault(rig.root, 0);
         assert!(
             matches!(
-                backend_of(&host, root)
-                    .handle()
-                    .private_end(r#loop, token, private_settled_outcome())
+                rig.handle
+                    .private_end(rig.r#loop, rig.token, private_settled_outcome())
                     .await,
                 Err(ServiceError::Failed { .. })
             ),
             "a failed end append must reject"
         );
-        let rows_before_close = backend_of(&host, root)
-            .private_outcomes(&caller)
+        let rows_before_close = rig
+            .backend
+            .private_outcomes(&rig.caller)
             .await
             .expect("owner reads before close");
         assert!(
@@ -2650,74 +2769,85 @@ mod tests {
             "the failed end publishes no terminal"
         );
         let records_before_close =
-            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+            private_decode_records(&private_journal_bytes(&rig.temp, &rig.workspace, rig.root));
         assert_eq!(
-            count_private_ends(&records_before_close, &r#loop, &token),
+            count_private_ends(&records_before_close, &rig.r#loop, &rig.token),
             0,
             "the failed end appends no record"
         );
+    }
 
-        host.close(child).await.expect("close child");
-        host.close(root).await.expect("close session");
-
+    async fn unfinished_assert_reopen_repairs_once(rig: &PrivateRig) {
         // Reopen repairs the unresolved start to exactly one Indeterminate
         // end on disk; the owner reads that terminal, never a Settled row.
-        let reopened = host
+        let reopened = rig
+            .host
             .open(
                 SessionRef::Resume {
-                    key: root.to_string().into(),
-                    workspace: workspace.clone(),
+                    key: rig.root.to_string().into(),
+                    workspace: rig.workspace.clone(),
                 },
                 ClientId::new("backend-test"),
             )
             .await
             .expect("reopen session");
-        assert_eq!(reopened.session(), root, "resume reopens the same session");
-        let rows = backend_of(&host, root)
-            .private_outcomes(&caller)
+        assert_eq!(
+            reopened.session(),
+            rig.root,
+            "resume reopens the same session"
+        );
+        let rows = backend_of(&rig.host, rig.root)
+            .private_outcomes(&rig.caller)
             .await
             .expect("owner reads its terminals");
         assert_eq!(rows.len(), 1, "one repair terminal publishes");
-        assert_eq!(rows[0].r#loop, r#loop);
-        assert_eq!(rows[0].token, token);
+        assert_eq!(rows[0].r#loop, rig.r#loop);
+        assert_eq!(rows[0].token, rig.token);
         assert_eq!(rows[0].round, 3);
         assert!(
             matches!(rows[0].outcome, dal_core::PrivateOutcome::Indeterminate),
             "an unfinished effect reads Indeterminate, never Settled"
         );
-        let repaired = private_journal_bytes(&temp, &workspace, root);
+        let repaired = private_journal_bytes(&rig.temp, &rig.workspace, rig.root);
         assert_eq!(
-            count_private_ends(&private_decode_records(&repaired), &r#loop, &token),
+            count_private_ends(&private_decode_records(&repaired), &rig.r#loop, &rig.token),
             1,
             "the reopen persists exactly one repair end"
         );
 
-        host.close(root).await.expect("close repaired session");
-        let reopened_again = host
+        rig.host
+            .close(rig.root)
+            .await
+            .expect("close repaired session");
+    }
+
+    async fn unfinished_assert_second_reopen_repairs_nothing(rig: &PrivateRig) {
+        let reopened_again = rig
+            .host
             .open(
                 SessionRef::Resume {
-                    key: root.to_string().into(),
-                    workspace: workspace.clone(),
+                    key: rig.root.to_string().into(),
+                    workspace: rig.workspace.clone(),
                 },
                 ClientId::new("backend-test"),
             )
             .await
             .expect("second reopen");
-        assert_eq!(reopened_again.session(), root);
+        assert_eq!(reopened_again.session(), rig.root);
         let reopened_records =
-            private_decode_records(&private_journal_bytes(&temp, &workspace, root));
+            private_decode_records(&private_journal_bytes(&rig.temp, &rig.workspace, rig.root));
         assert_eq!(
-            count_private_ends(&reopened_records, &r#loop, &token),
+            count_private_ends(&reopened_records, &rig.r#loop, &rig.token),
             1,
             "the second reopen persists no extra repair"
         );
-        let rows_again = backend_of(&host, root)
-            .private_outcomes(&caller)
+        let rows_again = backend_of(&rig.host, rig.root)
+            .private_outcomes(&rig.caller)
             .await
             .expect("owner reads after second reopen");
         assert_eq!(rows_again.len(), 1, "still exactly one terminal");
-        assert_eq!(rows_again[0].r#loop, r#loop);
-        assert_eq!(rows_again[0].token, token);
+        assert_eq!(rows_again[0].r#loop, rig.r#loop);
+        assert_eq!(rows_again[0].token, rig.token);
         assert_eq!(rows_again[0].round, 3);
         assert!(
             matches!(
@@ -2727,7 +2857,57 @@ mod tests {
             "the terminal stays Indeterminate"
         );
 
-        host.close(root).await.expect("close session");
+        rig.host.close(rig.root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_rejected_transitions_persist_nothing() {
+        let rig = private_rig_with_loop().await;
+        private_birth_loop(&rig).await;
+        let baseline = private_journal_bytes(&rig.temp, &rig.workspace, rig.root);
+        rejected_assert_duplicate_birth(&rig, &baseline).await;
+        rejected_assert_foreign_start(&rig, &baseline).await;
+        let _after_start = rejected_drive_valid_start(&rig).await;
+        let _after_end = rejected_drive_valid_end(&rig).await;
+
+        // The rejections above left the fold untouched: an end for a token
+        // that never started still fails instead of settling a phantom row.
+        assert!(
+            rig.handle
+                .private_end(
+                    rig.r#loop,
+                    dal_core::PrivateEffectId::new_v7(),
+                    private_settled_outcome()
+                )
+                .await
+                .is_err(),
+            "an end without a start must fail"
+        );
+
+        rig.host.close(rig.child).await.expect("close child");
+        rig.host.close(rig.root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn private_receipt_persisted_and_closed_operations_reject() {
+        let rig = private_rig_with_loop().await;
+        private_birth_loop(&rig).await;
+        private_start_effect(&rig, 0, "proof-call", "proof-tool", "null").await;
+        receipt_assert_start_durable_and_settle(&rig).await;
+        receipt_assert_failed_start_rolls_back(&rig).await;
+        receipt_assert_closed_lane_rejects(&rig).await;
+    }
+
+    #[tokio::test]
+    async fn private_unfinished_start_repairs_once_across_reopen() {
+        let rig = private_rig_with_loop().await;
+        private_birth_loop(&rig).await;
+        private_start_effect(&rig, 3, "wire-call-9", "tool-a", r#"{"n":9}"#).await;
+        unfinished_assert_failed_end_publishes_nothing(&rig).await;
+        rig.host.close(rig.child).await.expect("close child");
+        rig.host.close(rig.root).await.expect("close session");
+        unfinished_assert_reopen_repairs_once(&rig).await;
+        unfinished_assert_second_reopen_repairs_nothing(&rig).await;
     }
 
     #[tokio::test]
@@ -2845,6 +3025,65 @@ mod tests {
                 .expect("stranger reads")
                 .is_empty(),
             "a third owner reads nothing"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn infer_deps_forwards_caller_continuation() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+
+        let owner = crate::session::continuation::ContinuationOwner::new(
+            crate::session::tasks::SessionTasks::new(),
+        );
+        let weak = owner.downgrade();
+        let expected_slot = weak.upgrade().expect("owner is alive");
+
+        let caller_with_slot =
+            private_test_caller("focus", dal_core::Origin::User).with_continuation(weak.clone());
+        let deps_with = backend.infer_deps(&caller_with_slot);
+        let carried = deps_with
+            .continuation
+            .expect("continuation carried into deps");
+        assert!(std::sync::Weak::ptr_eq(&carried, &weak));
+        let carried_slot = carried.upgrade().expect("slot lives while owner lives");
+        assert!(Arc::ptr_eq(&carried_slot, &expected_slot));
+
+        let caller_without_slot = private_test_caller("focus", dal_core::Origin::User);
+        let deps_without = backend.infer_deps(&caller_without_slot);
+        assert!(
+            deps_without.continuation.is_none(),
+            "infer_deps must not invent a continuation for unattached caller"
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn infer_deps_for_stripped_setup_caller_runs_one_shot() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+
+        let owner = crate::session::continuation::ContinuationOwner::new(
+            crate::session::tasks::SessionTasks::new(),
+        );
+        let setup_caller = private_test_caller("focus", dal_core::Origin::User)
+            .with_continuation(owner.downgrade());
+        drop(owner);
+
+        let retained = setup_caller.without_continuation();
+        assert!(
+            retained.continuation().is_none(),
+            "a caller retained past setup must not carry the setup slot"
+        );
+        let deps = backend.infer_deps(&retained);
+        assert!(
+            deps.continuation.is_none(),
+            "a stripped setup caller infers one-shot instead of failing on the released owner"
         );
 
         host.close(child).await.expect("close child");

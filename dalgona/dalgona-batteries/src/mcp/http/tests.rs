@@ -241,6 +241,84 @@ async fn consumes_request_scoped_sse_incrementally_and_extends_on_progress() {
     assert!(deadline.expires > initial_deadline);
 }
 
+/// A server that answers an in-stream request's POST with silence must not
+/// hold the call past its deadline.
+#[tokio::test]
+async fn a_stalled_answer_to_a_server_request_ends_at_the_call_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
+    let address = listener.local_addr().expect("listener address");
+    let url = Url::parse(&format!("http://{address}/mcp")).expect("fixture URL");
+    let transport = test_transport(url);
+    let event = "data: {\"jsonrpc\":\"2.0\",\"id\":\"srv-1\",\"method\":\"sampling/createMessage\",\"params\":{}}\n\n";
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{event}"
+    );
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let server = async {
+        let (stream, _) = listener.accept().await.expect("stream request");
+        let (_headers, _body, mut stream_reader) = request_parts(stream).await;
+        stream_reader
+            .get_mut()
+            .write_all(head.as_bytes())
+            .await
+            .expect("stream head and event");
+        // The client answers the in-stream request on a second connection;
+        // the fixture reads that answer and never replies to it.
+        let (answer, _) = listener.accept().await.expect("answer request");
+        let (_headers, _body, answer_reader) = request_parts(answer).await;
+        let _ = released.await;
+        drop((stream_reader, answer_reader));
+    };
+    let client = async {
+        let headers = outbound_headers(PROTOCOL_VERSION, Some("tools/call"), None, &[], None)
+            .expect("headers");
+        let response = transport
+            .client
+            .post(transport.url.clone())
+            .headers(headers)
+            .body("{}".to_owned())
+            .send()
+            .await
+            .expect("SSE response");
+        let mut deadline = CallDeadline::new(
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(300),
+        );
+        let cancel = CancellationToken::new();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.read_event_stream(
+                response,
+                &mut super::StreamCx {
+                    request_id: 9,
+                    original_id: 4,
+                    version: PROTOCOL_VERSION,
+                    token: None,
+                    cancel: &cancel,
+                    call_cancel: None,
+                    deadline: &mut deadline,
+                },
+            ),
+        )
+        .await;
+        let _ = release.send(());
+        outcome
+    };
+    let (outcome, ()) = tokio::join!(client, server);
+    let error = outcome
+        .expect("the stalled answer held the call past its deadline")
+        .expect_err("a call that never answers fails");
+    assert!(
+        matches!(
+            error,
+            crate::mcp::TransportError::Mcp(crate::mcp::McpError::Timeout { .. })
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn validates_http_loopback_policy() {
     let loopback = Url::parse("http://127.0.0.1:9000/mcp").expect("loopback URL");

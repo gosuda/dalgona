@@ -76,6 +76,10 @@ name = "kill"
 path = "tests/kill.rs"
 
 [[test]]
+name = "store_proof"
+path = "tests/store_proof.rs"
+
+[[test]]
 name = "adversarial"
 path = "tests/adversarial.rs"
 

@@ -113,12 +113,37 @@ pub(crate) async fn run(
     }
 }
 
+/// The safety margin added to the server's device-poll interval, matching the
+/// reference headless flow: every poll waits the server interval plus three
+/// seconds.
+const CODEX_POLL_SAFETY_MARGIN: Duration = Duration::from_secs(3);
+
+/// The upper bound on Codex device polls, matching the reference headless
+/// flow: after this many pending answers the sign-in times out instead of
+/// polling forever on server errors.
+const CODEX_MAX_POLLS: u32 = 120;
+
+/// The wait before a Codex device poll: the server interval, at least one
+/// second, plus the reference safety margin.
+fn codex_poll_interval(device_interval_secs: u64) -> Duration {
+    Duration::from_secs(device_interval_secs.max(1)).saturating_add(CODEX_POLL_SAFETY_MARGIN)
+}
+
+/// Whether a Codex device-poll status means approval is still pending: the
+/// remote service answers 403 and 404 while the user has not approved yet.
+fn is_codex_pending(status: u16) -> bool {
+    matches!(status, 403 | 404)
+}
+
 /// Request and poll a Codex device code until approval, cancellation, or
 /// timeout.
 ///
 /// The remote service's 403 and 404 poll responses both mean that approval is
-/// pending. Polling waits the server-provided interval between requests and is
+/// pending. Polling waits the server-provided interval plus three seconds
+/// between requests, stops after [`CODEX_MAX_POLLS`] pending answers, and is
 /// bounded by `deadline`; cancellation drops the current request or sleep.
+/// Empty device or grant fields fail the sign-in instead of polling or
+/// exchanging with a blank code.
 async fn run_codex(
     http: &OAuthHttp<'_>,
     family: Family,
@@ -127,6 +152,29 @@ async fn run_codex(
     deadline: Instant,
     progress: &(dyn Fn(LoginProgress) + Send + Sync),
     cancel: &CancellationToken,
+) -> Result<DeviceGrant, ProviderError> {
+    run_codex_with_limit(
+        http,
+        family,
+        client_id,
+        urls,
+        deadline,
+        progress,
+        cancel,
+        CODEX_MAX_POLLS,
+    )
+    .await
+}
+
+async fn run_codex_with_limit(
+    http: &OAuthHttp<'_>,
+    family: Family,
+    client_id: &str,
+    urls: &DeviceUrls,
+    deadline: Instant,
+    progress: &(dyn Fn(LoginProgress) + Send + Sync),
+    cancel: &CancellationToken,
+    max_polls: u32,
 ) -> Result<DeviceGrant, ProviderError> {
     let start = post_json(
         http,
@@ -147,7 +195,13 @@ async fn run_codex(
             message: String::from("invalid device-code response"),
         }
     })?;
-    let interval = Duration::from_secs(device.interval.max(1));
+    if device.device_auth_id.is_empty() || device.user_code.is_empty() {
+        return Err(ProviderError::DeviceCode {
+            status: start.status,
+            message: String::from("invalid device-code response"),
+        });
+    }
+    let interval = codex_poll_interval(device.interval);
     report_progress(
         progress,
         LoginProgress::ShowCode {
@@ -157,7 +211,7 @@ async fn run_codex(
         cancel,
     )?;
 
-    loop {
+    for _ in 0..max_polls {
         wait_for_next_poll(deadline, interval, cancel).await?;
         let poll = post_json(
             http,
@@ -169,7 +223,7 @@ async fn run_codex(
             },
         )
         .await?;
-        if matches!(poll.status, 403 | 404) {
+        if is_codex_pending(poll.status) {
             continue;
         }
         if !(200..300).contains(&poll.status) {
@@ -184,11 +238,18 @@ async fn run_codex(
                 message: String::from("invalid device-token response"),
             }
         })?;
+        if grant.authorization_code.is_empty() || grant.code_verifier.is_empty() {
+            return Err(ProviderError::DeviceCode {
+                status: poll.status,
+                message: String::from("invalid device-token response"),
+            });
+        }
         return Ok(DeviceGrant {
             authorization_code: grant.authorization_code,
             code_verifier: grant.code_verifier,
         });
     }
+    Err(ProviderError::LoginTimeout)
 }
 
 #[derive(serde::Serialize)]

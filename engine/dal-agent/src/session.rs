@@ -5,6 +5,7 @@ pub(crate) mod backend;
 pub(crate) mod commands;
 pub(crate) mod contain;
 pub(crate) mod context;
+pub(crate) mod continuation;
 pub(crate) mod control;
 pub(crate) mod dispatch;
 pub(crate) mod driver;
@@ -40,11 +41,6 @@ use crate::ext::services::MAX_OPEN_ASKS;
 /// Bounded command channel into one session actor.
 pub(crate) const COMMAND_CHANNEL: usize = 64;
 
-/// Settled ids gate slot reuse; ids of sessions that never re-ask would
-/// accumulate, so the set restarts past [`SETTLED_CAP`]. Eviction only
-/// fails a reuse check closed (`ask_busy`), never reopens a slot early.
-const SETTLED_CAP: usize = 4096;
-
 /// Structural bound on the withdrawals lane, derived from admission: every
 /// armed service slot ([`MAX_OPEN_ASKS`] ask slots plus the one run slot)
 /// contributes at most one withdrawal claim over its occupancy lifetime —
@@ -74,18 +70,34 @@ const _: () = assert!(WITHDRAWAL_BOUND == MAX_OPEN_ASKS + 1);
 /// Claims whose question the fold never accepted (a `Asked` that was never
 /// enqueued, or a closed fold) fold to `Ok` with no emit and release their
 /// waiter fail-closed; [`mark_settled`](Self::mark_settled) still records
-/// them so the producer's admission frees without any fabricated record.
+/// the withdrawal ones so the producer's admission frees without any
+/// fabricated record. Turn-cancel claims owe no settlement: their waiter
+/// observed the cancel and freed its slot itself.
 pub(crate) struct ResolutionInbox {
     broker: Arc<Broker>,
     pending: std::sync::Mutex<Pending>,
+    /// Settled withdrawal receipts admission has not consumed yet. Only a
+    /// withdrawal owed a settlement enters
+    /// ([`mark_settled`](ResolutionInbox::mark_settled)), and each entry
+    /// leaves through [`take_settled`](ResolutionInbox::take_settled) when
+    /// admission rechecks its still-occupied slot, so the set holds at most
+    /// [`WITHDRAWAL_BOUND`] ids with no cap and no eviction: a receipt is
+    /// never forgotten and orphan marks never accumulate.
     settled: std::sync::Mutex<HashSet<RequestId>>,
     notify: Notify,
 }
 
 /// The claimed-but-undrained resolutions of one session.
+///
+/// `owed` holds the receipts of withdrawal claims still queued for the
+/// actor — bounded by [`WITHDRAWAL_BOUND`] — so
+/// [`mark_settled`](ResolutionInbox::mark_settled) records only
+/// settlements the admission checks are actually waiting for and orphan
+/// marks cannot accumulate.
 struct Pending {
     withdrawals: VecDeque<Resolved>,
     cancelled: VecDeque<Resolved>,
+    owed: HashSet<RequestId>,
     closed: bool,
 }
 
@@ -96,9 +108,10 @@ impl ResolutionInbox {
             pending: std::sync::Mutex::new(Pending {
                 withdrawals: VecDeque::with_capacity(WITHDRAWAL_BOUND),
                 cancelled: VecDeque::new(),
+                owed: HashSet::with_capacity(WITHDRAWAL_BOUND),
                 closed: false,
             }),
-            settled: std::sync::Mutex::new(HashSet::new()),
+            settled: std::sync::Mutex::new(HashSet::with_capacity(WITHDRAWAL_BOUND)),
             notify: Notify::new(),
         }
     }
@@ -140,6 +153,7 @@ impl ResolutionInbox {
         );
         let receipt = claim.request.id;
         pending.withdrawals.push_back(claim);
+        pending.owed.insert(receipt);
         drop(pending);
         self.notify.notify_one();
         Some(receipt)
@@ -194,17 +208,26 @@ impl ResolutionInbox {
         rest
     }
 
-    /// Records that the actor settled one drained item. Claims are
-    /// single-winner under the inbox lock, so an id appears at most once;
-    /// nothing is retained from the lanes here.
+    /// Records that the actor settled one drained item. Only a withdrawal
+    /// receipt still queued for the actor is owed a settlement: marks for
+    /// turn-cancel claims or unknown ids record nothing, so the settled
+    /// set stays bounded by the armed service slots and never forgets a
+    /// receipt an admission check has not consumed yet.
     pub(crate) fn mark_settled(&self, id: RequestId) {
+        let owed = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.owed.remove(&id)
+        };
+        if !owed {
+            return;
+        }
         let mut settled = self
             .settled
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if settled.len() >= SETTLED_CAP {
-            settled.clear();
-        }
         settled.insert(id);
     }
 
@@ -320,37 +343,16 @@ pub(crate) enum ActorRequest {
         req: ExtRecordRequest,
     },
     /// Journal one private-loop birth before its first effect.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
-        )
-    )]
     PrivateLoop {
         /// The birth request.
         req: PrivateLoopRequest,
     },
     /// Journal one private-effect start before the effect runs.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
-        )
-    )]
     PrivateStart {
         /// The start request.
         req: PrivateStartRequest,
     },
     /// Journal one private-effect terminal outcome.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller constructs private-effect requests yet; only the actor-boundary tests drive them"
-        )
-    )]
     PrivateEnd {
         /// The end request.
         req: PrivateEndRequest,
@@ -769,13 +771,6 @@ impl SessionHandle {
     /// the birth record did not persist. It folds/publishes nothing
     /// (irreversible store errors may leave a partial write; the next
     /// open repairs it).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
-        )
-    )]
     pub(crate) async fn private_loop_born(
         &self,
         r#loop: PrivateLoopId,
@@ -801,13 +796,6 @@ impl SessionHandle {
     /// the standard closed-record text (same literal as the backend's
     /// closed-record error). A validation conflict appends nothing; an
     /// append failure folds/publishes no row or terminal (reopen repairs).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
-        )
-    )]
     pub(crate) async fn private_start(
         &self,
         r#loop: PrivateLoopId,
@@ -844,13 +832,6 @@ impl SessionHandle {
     /// index. A validation rejection appends nothing; an append failure
     /// folds/publishes nothing and leaves the row Started in memory, which
     /// the next open repairs to [`PrivateOutcome::Indeterminate`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no production caller journals private-effect records yet; only the actor-boundary tests call it"
-        )
-    )]
     pub(crate) async fn private_end(
         &self,
         r#loop: PrivateLoopId,
@@ -1107,10 +1088,57 @@ mod tests {
         );
     }
 
+    /// Turn-cancel claims owe no settlement: their marks record nothing, so
+    /// a churn of them neither grows the settled set nor evicts a withdrawal
+    /// receipt that admission has not consumed yet.
+    #[tokio::test]
+    async fn cancellation_marks_never_evict_an_owed_receipt() {
+        const CHURN: usize = 8192;
+        let (_handle, broker, inbox, _, _) = fixture();
+        let owed = open_turnless(&broker, "withdrawn?", None);
+        assert_eq!(inbox.withdraw(owed, None), Some(owed));
+        let claim = inbox.take().expect("the withdrawal claim");
+        inbox.mark_settled(claim.request.id);
+
+        let turn = TurnId::new(std::num::NonZeroU64::new(11).unwrap());
+        let orphans: Vec<RequestId> = (0..CHURN)
+            .map(|_| {
+                let id = open_turnless(&broker, "cancelled?", turn);
+                assert!(broker.report_opened(id).is_none());
+                id
+            })
+            .collect();
+        inbox.cancel_turn(turn);
+        let mut drained = 0;
+        while let Some(claim) = inbox.take() {
+            assert_eq!(claim.cause, dal_core::ResolutionCause::Cancelled);
+            inbox.mark_settled(claim.request.id);
+            drained += 1;
+        }
+        assert_eq!(drained, CHURN, "every cancel claim reached the drain");
+
+        assert_eq!(
+            inbox.settled.lock().unwrap().len(),
+            1,
+            "only the owed receipt is retained"
+        );
+        assert!(
+            orphans.iter().all(|id| !inbox.take_settled(*id)),
+            "orphan cancellation marks record nothing"
+        );
+        assert!(
+            inbox.take_settled(owed),
+            "the owed receipt survives the churn until admission consumes it"
+        );
+        assert!(!inbox.take_settled(owed), "the receipt is single-winner");
+    }
+
     /// A dropped actor lane turns a private-loop birth into `SessionClosed`.
     #[tokio::test]
     async fn private_loop_birth_reports_a_closed_session() {
-        let (handle, _broker, _inbox, _, _) = fixture();
+        let (handle, _broker, _inbox, rx, opening_rx) = fixture();
+        drop(rx);
+        drop(opening_rx);
         let error = handle
             .private_loop_born(PrivateLoopId::new_v7(), Owner::Core, None)
             .await
@@ -1125,7 +1153,9 @@ mod tests {
     /// service errors with the standard closed-record text.
     #[tokio::test]
     async fn private_start_and_end_report_a_closed_session() {
-        let (handle, _broker, _inbox, _, _) = fixture();
+        let (handle, _broker, _inbox, rx, opening_rx) = fixture();
+        drop(rx);
+        drop(opening_rx);
         let r#loop = PrivateLoopId::new_v7();
         let token = PrivateEffectId::new_v7();
         let args = RawJson::parse("{}").expect("literal test args parse");

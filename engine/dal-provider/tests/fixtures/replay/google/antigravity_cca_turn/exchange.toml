@@ -1,5 +1,4 @@
-# Synthetic replay fixture for the Antigravity (Cloud Code Assist) transport
-# proof (ENG-03: the `google-antigravity` family).
+# Synthetic replay fixture for the Antigravity (Cloud Code Assist) transport proof over the `google-antigravity` family.
 #
 # One exchange: `POST {base}/v1internal:streamGenerateContent?alt=sse` with
 # the OAuth access token as `Authorization: Bearer` and the Antigravity
