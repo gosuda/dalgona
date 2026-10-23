@@ -3201,6 +3201,48 @@ fn salvage_has_clean_filter(stdout: &[u8]) -> Option<bool> {
     Some(filtered)
 }
 
+fn salvage_argv_ident_attr(dir: &str, paths: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "check-attr".to_owned(),
+        "-z".to_owned(),
+        "ident".to_owned(),
+        "--".to_owned(),
+    ];
+    argv.extend(paths.iter().cloned());
+    argv
+}
+
+fn salvage_has_ident_attr(stdout: &[u8]) -> Option<bool> {
+    if stdout.is_empty() {
+        return Some(false);
+    }
+    let mut parts: Vec<&[u8]> = stdout.split(|byte| *byte == b'\0').collect();
+    if parts.last().is_some_and(|part| part.is_empty()) {
+        parts.pop();
+    }
+    if parts.is_empty() {
+        return Some(false);
+    }
+    if !parts.len().is_multiple_of(3) {
+        return None;
+    }
+    let mut converted = false;
+    for triple in parts.chunks(3) {
+        let attr = std::str::from_utf8(triple[1]).ok()?;
+        let value = std::str::from_utf8(triple[2]).ok()?;
+        if attr != "ident" {
+            return None;
+        }
+        if value != "unspecified" {
+            converted = true;
+        }
+    }
+    Some(converted)
+}
+
 fn salvage_argv_net_diff(dir: &str, base: &str) -> Vec<String> {
     vec![
         "git".to_owned(),
@@ -3229,9 +3271,10 @@ fn salvage_argv_worktree_list(top: &str) -> Vec<String> {
 /// two kinds of entry no diff against the base can carry. Tracked entries
 /// need no class of their own, because the net diff reads them. Any
 /// malformed line invalidates the whole read: doubt preserves the tree.
-fn salvage_status_class(stdout: &[u8]) -> Option<(bool, bool)> {
+fn salvage_status_class(stdout: &[u8]) -> Option<(bool, bool, bool)> {
     let mut untracked = false;
     let mut ignored = false;
+    let mut staged = false;
     for line in stdout.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -3243,9 +3286,11 @@ fn salvage_status_class(stdout: &[u8]) -> Option<(bool, bool)> {
             ignored = true;
         } else if line.starts_with(b"??") {
             untracked = true;
+        } else if line[0] != b' ' && line[1] != b' ' {
+            staged = true;
         }
     }
-    Some((untracked, ignored))
+    Some((untracked, ignored, staged))
 }
 
 fn salvage_argv_net_names(dir: &str, base: &str) -> Vec<String> {
@@ -3536,7 +3581,7 @@ async fn salvage_open_worktrees(
                 continue;
             }
         };
-        let Some((untracked, ignored)) = salvage_status_class(&status.stdout_prefix) else {
+        let Some((untracked, ignored, staged)) = salvage_status_class(&status.stdout_prefix) else {
             left.push(format!(
                 "{task} left at {dir_text}: the worktree status was not valid; left in place"
             ));
@@ -3553,6 +3598,12 @@ async fn salvage_open_worktrees(
         if untracked {
             left.push(format!(
                 "{task} left at {dir_text}: the worktree holds untracked files; left for hand recovery"
+            ));
+            continue;
+        }
+        if staged {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree holds staged-only contents; left for hand recovery"
             ));
             continue;
         }
@@ -3610,6 +3661,34 @@ async fn salvage_open_worktrees(
             if filtered {
                 left.push(format!(
                     "{task} left at {dir_text}: the worktree holds files with a clean filter driver; left for hand recovery"
+                ));
+                continue;
+            }
+            let ident = git(
+                services,
+                caller,
+                &dir,
+                salvage_argv_ident_attr(&dir_text, &tracked),
+            )
+            .await;
+            let ident = match ident {
+                Ok(ident) if complete(&ident) => ident,
+                _ => {
+                    left.push(format!(
+                        "{task} left at {dir_text}: the worktree ident attributes could not be read"
+                    ));
+                    continue;
+                }
+            };
+            let Some(converted) = salvage_has_ident_attr(&ident.stdout_prefix) else {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree ident attributes were not valid; left in place"
+                ));
+                continue;
+            };
+            if converted {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree holds files with an ident conversion; left for hand recovery"
                 ));
                 continue;
             }

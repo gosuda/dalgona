@@ -5845,6 +5845,9 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
                 .push_back(Ok(output("file.txt\0filter\0unspecified\0")));
             script
                 .run_outputs
+                .push_back(Ok(output("file.txt\0ident\0unspecified\0")));
+            script
+                .run_outputs
                 .push_back(Ok(output(format!("delta {n}").as_str())));
             script.run_outputs.push_back(Ok(output("file.txt\0")));
             script.run_outputs.push_back(Ok(output("")));
@@ -5887,6 +5890,16 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
             "check-attr",
             "-z",
             "filter",
+            "--",
+            "file.txt",
+        ]));
+        expected.push(words(&[
+            "git",
+            "-C",
+            dir.as_str(),
+            "check-attr",
+            "-z",
+            "ident",
             "--",
             "file.txt",
         ]));
@@ -5993,6 +6006,10 @@ async fn open_salvage_removes_only_unheld_lost_trees() -> TestResult {
 /// Asserts the reopen salvaged exactly the lost tree: the fixed salvage git
 /// argv, the durable delta and status records, the ordered salvage events,
 /// the single summary notice, and no merge.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one assertion walks the full salvage contract in place"
+)]
 fn assert_reopened_salvage(
     script: &Script,
     workspace_text: &str,
@@ -6022,6 +6039,16 @@ fn assert_reopened_salvage(
                 "check-attr",
                 "-z",
                 "filter",
+                "--",
+                "file.txt"
+            ]),
+            words(&[
+                "git",
+                "-C",
+                dir_text,
+                "check-attr",
+                "-z",
+                "ident",
                 "--",
                 "file.txt"
             ]),
@@ -6167,6 +6194,9 @@ fn script_status_tree(script: &mut Script, top: &str, dir_text: &str) {
     script
         .run_outputs
         .push_back(Ok(output("file.txt\0filter\0unspecified\0")));
+    script
+        .run_outputs
+        .push_back(Ok(output("file.txt\0ident\0unspecified\0")));
     script.run_outputs.push_back(Ok(output("delta")));
     script.run_outputs.push_back(Ok(output("file.txt\0")));
 }
@@ -6337,13 +6367,16 @@ async fn open_salvage_keeps_the_tree_when_its_delta_cannot_be_read() -> TestResu
             .push_back(Ok(output("f\0filter\0unspecified\0")));
         script
             .run_outputs
+            .push_back(Ok(output("f\0ident\0unspecified\0")));
+        script
+            .run_outputs
             .push_back(Ok(failed_output("fatal: not a git repository")));
     }
     run_salvage(&fixture, &data).await;
     let script = fixture.script();
     assert_eq!(
         script.run_requests.len(),
-        6,
+        7,
         "a failed net diff stops before remove and prune: {:?}",
         argv_words(&script.run_requests)
     );
@@ -6555,6 +6588,186 @@ async fn open_salvage_leaves_trees_with_a_clean_filter_driver() -> TestResult {
 }
 
 #[tokio::test]
+async fn open_salvage_leaves_trees_with_an_ident_conversion() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-ident-top";
+    let task = JobId::new_v7();
+    let dir = salvage_dir(&data, fixture.session, task);
+    salvage_receipt(&data, fixture.session, task);
+    let dir_text = dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.jobs.push(salvage_job(
+            task,
+            JobStateView::Done(dal_core::JobOutcome::Lost),
+        ));
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(
+            format!("worktree {dir_text}\nHEAD deadbeef\n").as_str(),
+        )));
+        script.run_outputs.push_back(Ok(output(" M file.txt\n")));
+        script.run_outputs.push_back(Ok(output("H file.txt\0")));
+        script
+            .run_outputs
+            .push_back(Ok(output("file.txt\0filter\0unspecified\0")));
+        script
+            .run_outputs
+            .push_back(Ok(output("file.txt\0ident\0set\0")));
+    }
+    let workspace = run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    let workspace_text = workspace.as_path().display().to_string();
+    assert!(
+        script.artifacts.is_empty(),
+        "an ident tree saves nothing: {:?}",
+        script.artifacts
+    );
+    assert_eq!(
+        argv_words(&script.run_requests),
+        vec![
+            words(&[
+                "git",
+                "-C",
+                workspace_text.as_str(),
+                "rev-parse",
+                "--show-toplevel"
+            ]),
+            words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+            words(&[
+                "git",
+                "-C",
+                dir_text.as_str(),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored"
+            ]),
+            words(&["git", "-C", dir_text.as_str(), "ls-files", "-v", "-z"]),
+            words(&[
+                "git",
+                "-C",
+                dir_text.as_str(),
+                "check-attr",
+                "-z",
+                "filter",
+                "--",
+                "file.txt"
+            ]),
+            words(&[
+                "git",
+                "-C",
+                dir_text.as_str(),
+                "check-attr",
+                "-z",
+                "ident",
+                "--",
+                "file.txt"
+            ]),
+        ],
+        "an ident tree stops after the ident gate: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(
+        !script.run_requests.iter().any(|request| request
+            .argv
+            .iter()
+            .any(|word| word == "remove" || word == "prune" || word == "apply")),
+        "an ident tree is never removed, pruned, or merged: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(dir.is_dir(), "the ident tree stays in place: {dir:?}");
+    assert_eq!(script.notices.len(), 1);
+    let text = &script.notices[0].text;
+    assert!(
+        text.contains(task.to_string().as_str()),
+        "the notice names the ident tree: {text}"
+    );
+    assert!(
+        text.contains("ident"),
+        "the notice names why the tree stayed: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_salvage_leaves_trees_with_staged_only_contents() -> TestResult {
+    let (fixture, data) = salvage_open().await?;
+    let top = "/tmp/dalgona-salvage-staged-top";
+    let task = JobId::new_v7();
+    let dir = salvage_dir(&data, fixture.session, task);
+    salvage_receipt(&data, fixture.session, task);
+    let dir_text = dir.display().to_string();
+    {
+        let mut script = fixture.script();
+        script.notices.clear();
+        script.jobs.push(salvage_job(
+            task,
+            JobStateView::Done(dal_core::JobOutcome::Lost),
+        ));
+        script.run_outputs.push_back(Ok(output(top)));
+        script.run_outputs.push_back(Ok(output(
+            format!("worktree {dir_text}\nHEAD deadbeef\n").as_str(),
+        )));
+        script.run_outputs.push_back(Ok(output("MM file.txt\n")));
+    }
+    let workspace = run_salvage(&fixture, &data).await;
+    let script = fixture.script();
+    let workspace_text = workspace.as_path().display().to_string();
+    assert!(
+        script.artifacts.is_empty(),
+        "a staged-only tree saves nothing: {:?}",
+        script.artifacts
+    );
+    assert_eq!(
+        argv_words(&script.run_requests),
+        vec![
+            words(&[
+                "git",
+                "-C",
+                workspace_text.as_str(),
+                "rev-parse",
+                "--show-toplevel"
+            ]),
+            words(&["git", "-C", top, "worktree", "list", "--porcelain"]),
+            words(&[
+                "git",
+                "-C",
+                dir_text.as_str(),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignored"
+            ]),
+        ],
+        "a staged-only tree stops after the status gate: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(
+        !script.run_requests.iter().any(|request| request
+            .argv
+            .iter()
+            .any(|word| word == "remove" || word == "prune" || word == "apply")),
+        "a staged-only tree is never removed, pruned, or merged: {:?}",
+        argv_words(&script.run_requests)
+    );
+    assert!(dir.is_dir(), "the staged-only tree stays in place: {dir:?}");
+    assert_eq!(script.notices.len(), 1);
+    let text = &script.notices[0].text;
+    assert!(
+        text.contains(task.to_string().as_str()),
+        "the notice names the staged-only tree: {text}"
+    );
+    assert!(
+        text.contains("staged-only"),
+        "the notice names why the tree stayed: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+    Ok(())
+}
+
+#[tokio::test]
 async fn open_salvage_touches_nothing_when_the_job_list_fails() -> TestResult {
     let (fixture, data) = salvage_open().await?;
     let lost = JobId::new_v7();
@@ -6752,6 +6965,9 @@ async fn open_salvage_leaves_a_tree_in_the_durable_held_set() -> TestResult {
         script
             .run_outputs
             .push_back(Ok(output("f.txt\0filter\0unspecified\0")));
+        script
+            .run_outputs
+            .push_back(Ok(output("f.txt\0ident\0unspecified\0")));
         script.run_outputs.push_back(Ok(output("lost delta")));
         script.run_outputs.push_back(Ok(output("f.txt\0")));
         script.run_outputs.push_back(Ok(output("")));
@@ -6936,6 +7152,16 @@ fn assert_only_plain_tree_salvaged(
                 "git",
                 "-C",
                 plain_text,
+                "check-attr",
+                "-z",
+                "ident",
+                "--",
+                "f.txt"
+            ]),
+            words(&[
+                "git",
+                "-C",
+                plain_text,
                 "diff",
                 "--binary",
                 "--no-ext-diff",
@@ -6995,6 +7221,9 @@ async fn open_salvage_leaves_a_tree_marked_by_a_retained_record() -> TestResult 
         script
             .run_outputs
             .push_back(Ok(output("f.txt\0filter\0unspecified\0")));
+        script
+            .run_outputs
+            .push_back(Ok(output("f.txt\0ident\0unspecified\0")));
         script.run_outputs.push_back(Ok(output("plain delta")));
         script.run_outputs.push_back(Ok(output("f.txt\0")));
         script.run_outputs.push_back(Ok(output("")));
@@ -7159,19 +7388,34 @@ async fn a_receipt_that_cannot_be_recorded_fails_the_task_and_removes_its_fresh_
 /// untracked and ignored entries. A malformed line voids the whole read.
 #[test]
 fn salvage_status_class_reports_only_untracked_and_ignored_entries() {
-    assert_eq!(super::salvage_status_class(b""), Some((false, false)));
+    assert_eq!(
+        super::salvage_status_class(b""),
+        Some((false, false, false))
+    );
     assert_eq!(
         super::salvage_status_class(b" M a.txt\nA  b.txt\nR  c.txt -> d.txt\n"),
-        Some((false, false)),
-        "tracked entries, staged or not, need no class"
+        Some((false, false, false)),
+        "staged content matching the worktree rides the net diff"
+    );
+    assert_eq!(
+        super::salvage_status_class(b"MM a.txt\n"),
+        Some((false, false, true))
+    );
+    assert_eq!(
+        super::salvage_status_class(b"AM a.txt\nAD b.txt\n"),
+        Some((false, false, true))
     );
     assert_eq!(
         super::salvage_status_class(b" M a.txt\n?? b.txt\n"),
-        Some((true, false))
+        Some((true, false, false))
     );
     assert_eq!(
         super::salvage_status_class(b"!! target/\n"),
-        Some((false, true))
+        Some((false, true, false))
+    );
+    assert_eq!(
+        super::salvage_status_class(b"MM a.txt\n?? b.txt\n"),
+        Some((true, false, true))
     );
     assert_eq!(
         super::salvage_status_class(b"M a.txt\n"),
@@ -7253,6 +7497,43 @@ fn salvage_clean_filter_argv_names_the_tracked_paths() {
             "check-attr".to_owned(),
             "-z".to_owned(),
             "filter".to_owned(),
+            "--".to_owned(),
+            "file.txt".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn salvage_ident_attr_reports_only_set_values() {
+    assert_eq!(super::salvage_has_ident_attr(b""), Some(false));
+    assert_eq!(
+        super::salvage_has_ident_attr(b"file.txt\0ident\0unspecified\0"),
+        Some(false)
+    );
+    assert_eq!(
+        super::salvage_has_ident_attr(b"file.txt\0ident\0set\0"),
+        Some(true)
+    );
+    assert_eq!(
+        super::salvage_has_ident_attr(b"a\0ident\0unspecified\0b\0ident\0set\0"),
+        Some(true)
+    );
+    assert_eq!(super::salvage_has_ident_attr(b"bogus"), None);
+    assert_eq!(super::salvage_has_ident_attr(b"a\0ident\0"), None);
+    assert_eq!(super::salvage_has_ident_attr(b"a\0other\0value\0"), None);
+}
+
+#[test]
+fn salvage_ident_attr_argv_names_the_tracked_paths() {
+    assert_eq!(
+        super::salvage_argv_ident_attr("/tree", &["file.txt".to_owned()]),
+        vec![
+            "git".to_owned(),
+            "-C".to_owned(),
+            "/tree".to_owned(),
+            "check-attr".to_owned(),
+            "-z".to_owned(),
+            "ident".to_owned(),
             "--".to_owned(),
             "file.txt".to_owned(),
         ]
