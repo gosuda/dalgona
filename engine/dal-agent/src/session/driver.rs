@@ -639,15 +639,22 @@ impl Driver {
         // second server run is opened beside the parked conversation, and the
         // owner ends in the failure branch below (idempotent with the turn
         // terminal, which repeats it harmlessly).
+        let slot = self
+            .turns
+            .get(&turn)
+            .map(|state| state.owner.downgrade())
+            .and_then(|weak| weak.upgrade());
         let abandoned = has_active_input(&request)
             && matches!(&resolved.route, ModelRoute::Api { family, .. } if *family == Family::Cursor)
-            && self
-                .turns
-                .get(&turn)
-                .map(|state| state.owner.downgrade())
-                .and_then(|weak| weak.upgrade())
-                .is_some_and(|slot| slot.abandon());
-        if !abandoned && let Some(error) = self.respond_if_awaiting(turn, &cancel).await {
+            && slot.as_ref().is_some_and(|slot| slot.abandon());
+        let route_abandoned = matches!(&resolved.route, ModelRoute::Api { .. })
+            && slot.as_ref().is_some_and(|slot| {
+                slot.abandon_if_route_changed(&resolved.route, &resolved.provider)
+            });
+        if !abandoned
+            && !route_abandoned
+            && let Some(error) = self.respond_if_awaiting(turn, &cancel).await
+        {
             // Cover failure: the turn ends here without opening a second
             // server run beside the parked conversation. The owner ends now
             // (idempotent; the turn terminal repeats it harmlessly), and the

@@ -224,7 +224,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
     }
     let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color, binary);
-    let save_diagrams = diagram_saver(config.clone(), config_path);
+    let save_diagrams = diagram_saver(config.clone(), config_path.clone());
     if let Some(addr) = cli.connect.as_deref() {
         return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
     }
@@ -251,6 +251,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         Ok(host) => host,
         Err(error) => return host_exit(&error, &data_root),
     };
+    host.set_config_path(config_path);
     #[cfg(feature = "test-support")]
     if let Some(endpoints) = login_endpoints
         && let Err(error) = host.set_login_endpoints(endpoints)

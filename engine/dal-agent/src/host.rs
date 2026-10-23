@@ -311,6 +311,23 @@ pub(crate) struct HostShared {
     /// Where sign-in reads and writes: the credential file, the model cache,
     /// and the endpoints. Only tests replace the endpoints.
     pub(crate) login_site: std::sync::RwLock<dal_provider::LoginSite>,
+    /// The user's `dal.toml`, where default-persistence writes land; unset
+    /// until the process edge supplies it.
+    pub(crate) config_path: std::sync::RwLock<Option<PathBuf>>,
+    /// Serializes the whole read-edit-write of the config file.
+    pub(crate) config_write: tokio::sync::Mutex<()>,
+}
+
+impl Host {
+    /// Sets the user's `dal.toml` path for default-persistence writes.
+    pub fn set_config_path(&self, path: PathBuf) {
+        *self
+            .state
+            .shared
+            .config_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+    }
 }
 
 impl HostShared {

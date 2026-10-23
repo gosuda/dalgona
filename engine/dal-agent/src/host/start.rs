@@ -94,6 +94,8 @@ impl Host {
             generation: generation_tx,
             catalog: std::sync::RwLock::new(None),
             login_site: std::sync::RwLock::new(login_site),
+            config_path: std::sync::RwLock::new(None),
+            config_write: tokio::sync::Mutex::new(()),
             plugin_base,
         });
         let host = Self {

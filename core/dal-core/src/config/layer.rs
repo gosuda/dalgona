@@ -194,6 +194,184 @@ impl Config {
         Ok(document.to_string())
     }
 
+    /// Rewrites the user's default model in place, preserving decor.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidValue`] for an empty incoming model or a
+    /// non-string, empty existing value, and [`ConfigError::Syntax`] when the
+    /// user TOML does not parse.
+    pub fn update_default_model(
+        &mut self,
+        model: &str,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        if model.is_empty() {
+            return Err(invalid_value("model", model, "non-empty model id"));
+        }
+        let mut document = user_toml
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ConfigError::Syntax {
+                line: None,
+                message: error.to_string().into_boxed_str(),
+            })?;
+        match document.get_mut("model") {
+            Some(item) => {
+                let expected = item.to_string();
+                let Some(value) = item.as_value_mut() else {
+                    return Err(invalid_value("model", expected, "non-empty model id"));
+                };
+                if value.as_str().is_none_or(str::is_empty) {
+                    return Err(invalid_value("model", expected, "non-empty model id"));
+                }
+                let decor = value.decor().clone();
+                let mut replacement = toml_edit::Value::from(model);
+                *replacement.decor_mut() = decor;
+                *value = replacement;
+            }
+            None => {
+                document.insert("model", toml_edit::value(model));
+            }
+        }
+        self.model = Some(model.into());
+        Ok(document.to_string())
+    }
+
+    /// Rewrites the user's default thinking level in place, preserving decor.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Syntax`] when the user TOML does not parse.
+    pub fn update_default_thinking(
+        &mut self,
+        level: crate::model::ThinkingLevel,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = user_toml
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ConfigError::Syntax {
+                line: None,
+                message: error.to_string().into_boxed_str(),
+            })?;
+        match document.get_mut("thinking") {
+            Some(item) => {
+                let expected = item.to_string();
+                let Some(value) = item.as_value_mut() else {
+                    return Err(invalid_value(
+                        "thinking",
+                        expected,
+                        "off, minimal, low, medium, high, xhigh, max",
+                    ));
+                };
+                if value.as_str().is_none() {
+                    return Err(invalid_value(
+                        "thinking",
+                        expected,
+                        "off, minimal, low, medium, high, xhigh, max",
+                    ));
+                }
+                let decor = value.decor().clone();
+                let mut replacement = toml_edit::Value::from(level.name());
+                *replacement.decor_mut() = decor;
+                *value = replacement;
+            }
+            None => {
+                document.insert("thinking", toml_edit::value(level.name()));
+            }
+        }
+        self.thinking = level;
+        Ok(document.to_string())
+    }
+
+    /// Rewrites the user's default mode in place, preserving decor.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Syntax`] when the user TOML does not parse.
+    pub fn update_default_mode(
+        &mut self,
+        mode: Mode,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let mut document = user_toml
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ConfigError::Syntax {
+                line: None,
+                message: error.to_string().into_boxed_str(),
+            })?;
+        match document.get_mut("mode") {
+            Some(item) => {
+                let expected = item.to_string();
+                let Some(value) = item.as_value_mut() else {
+                    return Err(invalid_value(
+                        "mode",
+                        expected,
+                        "normal, eval-first, eval-only",
+                    ));
+                };
+                if value.as_str().is_none() {
+                    return Err(invalid_value(
+                        "mode",
+                        expected,
+                        "normal, eval-first, eval-only",
+                    ));
+                }
+                let decor = value.decor().clone();
+                let mut replacement = toml_edit::Value::from(mode.as_str());
+                *replacement.decor_mut() = decor;
+                *value = replacement;
+            }
+            None => {
+                document.insert("mode", toml_edit::value(mode.as_str()));
+            }
+        }
+        self.mode = mode;
+        Ok(document.to_string())
+    }
+
+    /// Rewrites the user's default approval policy in place, preserving decor.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Syntax`] when the user TOML does not parse.
+    pub fn update_default_approval(
+        &mut self,
+        mode: ApprovalMode,
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        let spelling = match mode {
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Edits => "edits",
+            ApprovalMode::All => "all",
+        };
+        let mut document = user_toml
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ConfigError::Syntax {
+                line: None,
+                message: error.to_string().into_boxed_str(),
+            })?;
+        match document.get_mut("approval") {
+            Some(item) => {
+                let expected = item.to_string();
+                let Some(value) = item.as_value_mut() else {
+                    return Err(invalid_value("approval", expected, "ask, edits, all"));
+                };
+                if value.as_str().is_none() {
+                    return Err(invalid_value("approval", expected, "ask, edits, all"));
+                }
+                let decor = value.decor().clone();
+                let mut replacement = toml_edit::Value::from(spelling);
+                *replacement.decor_mut() = decor;
+                *value = replacement;
+            }
+            None => {
+                document.insert("approval", toml_edit::value(spelling));
+            }
+        }
+        self.approval = mode;
+        Ok(document.to_string())
+    }
+
     /// Returns settings for the local control endpoint.
     #[must_use]
     pub fn serve(&self) -> &ServeConfig {

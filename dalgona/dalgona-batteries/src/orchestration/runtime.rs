@@ -3138,6 +3138,69 @@ fn salvage_has_hidden_flags(stdout: &[u8]) -> Option<bool> {
     Some(hidden)
 }
 
+fn salvage_argv_clean_filter(dir: &str, paths: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "git".to_owned(),
+        "-C".to_owned(),
+        dir.to_owned(),
+        "check-attr".to_owned(),
+        "-z".to_owned(),
+        "filter".to_owned(),
+        "--".to_owned(),
+    ];
+    argv.extend(paths.iter().cloned());
+    argv
+}
+
+fn salvage_tracked_paths(stdout: &[u8]) -> Option<Vec<String>> {
+    let mut paths = Vec::new();
+    for record in stdout.split(|byte| *byte == b'\0') {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 3 || record[1] != b' ' {
+            return None;
+        }
+        if !matches!(
+            record[0],
+            b'H' | b'M' | b'R' | b'C' | b'K' | b'?' | b'U' | b'h' | b'S'
+        ) {
+            return None;
+        }
+        let path = std::str::from_utf8(&record[2..]).ok()?;
+        paths.push(path.to_owned());
+    }
+    Some(paths)
+}
+
+fn salvage_has_clean_filter(stdout: &[u8]) -> Option<bool> {
+    if stdout.is_empty() {
+        return Some(false);
+    }
+    let mut parts: Vec<&[u8]> = stdout.split(|byte| *byte == b'\0').collect();
+    if parts.last().is_some_and(|part| part.is_empty()) {
+        parts.pop();
+    }
+    if parts.is_empty() {
+        return Some(false);
+    }
+    if !parts.len().is_multiple_of(3) {
+        return None;
+    }
+    let mut filtered = false;
+    for triple in parts.chunks(3) {
+        let attr = std::str::from_utf8(triple[1]).ok()?;
+        let value = std::str::from_utf8(triple[2]).ok()?;
+        if attr != "filter" {
+            return None;
+        }
+        if !matches!(value, "unspecified" | "$no_filter") {
+            filtered = true;
+        }
+    }
+    Some(filtered)
+}
+
 fn salvage_argv_net_diff(dir: &str, base: &str) -> Vec<String> {
     vec![
         "git".to_owned(),
@@ -3503,17 +3566,53 @@ async fn salvage_open_worktrees(
                 continue;
             }
         };
-        let Some(hidden) = salvage_has_hidden_flags(&hidden.stdout_prefix) else {
+        let Some(has_hidden) = salvage_has_hidden_flags(&hidden.stdout_prefix) else {
             left.push(format!(
                 "{task} left at {dir_text}: the worktree index flags were not valid; left in place"
             ));
             continue;
         };
-        if hidden {
+        if has_hidden {
             left.push(format!(
                 "{task} left at {dir_text}: the worktree holds assume-unchanged or skip-worktree files; left for hand recovery"
             ));
             continue;
+        }
+        let Some(tracked) = salvage_tracked_paths(&hidden.stdout_prefix) else {
+            left.push(format!(
+                "{task} left at {dir_text}: the worktree index flags were not valid; left in place"
+            ));
+            continue;
+        };
+        if !tracked.is_empty() {
+            let clean = git(
+                services,
+                caller,
+                &dir,
+                salvage_argv_clean_filter(&dir_text, &tracked),
+            )
+            .await;
+            let clean = match clean {
+                Ok(clean) if complete(&clean) => clean,
+                _ => {
+                    left.push(format!(
+                        "{task} left at {dir_text}: the worktree clean-filter attributes could not be read"
+                    ));
+                    continue;
+                }
+            };
+            let Some(filtered) = salvage_has_clean_filter(&clean.stdout_prefix) else {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree clean-filter attributes were not valid; left in place"
+                ));
+                continue;
+            };
+            if filtered {
+                left.push(format!(
+                    "{task} left at {dir_text}: the worktree holds files with a clean filter driver; left for hand recovery"
+                ));
+                continue;
+            }
         }
         // One net patch: `diff <base>` reads the working tree against the
         // commit the tree started from, so tracked work that is staged,

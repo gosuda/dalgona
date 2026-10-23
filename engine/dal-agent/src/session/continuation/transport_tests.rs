@@ -632,10 +632,14 @@ fn cursor_set(max_concurrent: u32, base_url: &str, dir: &Path) -> ProviderSet {
 
 /// The Cursor provider handle for [`MODEL`].
 fn cursor_provider(set: &ProviderSet) -> dal_provider::Provider {
+    cursor_provider_for(set, MODEL)
+}
+
+fn cursor_provider_for(set: &ProviderSet, model: &str) -> dal_provider::Provider {
     let entry = CatalogEntry {
         provider: PROVIDER.into(),
-        id: MODEL.into(),
-        display: MODEL.into(),
+        id: model.into(),
+        display: model.into(),
         listing: Listing::Listed,
         context_window: Some(32_000),
         max_output: Some(4_096),
@@ -658,7 +662,7 @@ fn cursor_provider(set: &ProviderSet) -> dal_provider::Provider {
         provider: PROVIDER.into(),
         route: ModelRoute::Api {
             family: Family::Cursor,
-            model: MODEL.into(),
+            model: model.into(),
             provider: None,
         },
         entry,
@@ -668,11 +672,15 @@ fn cursor_provider(set: &ProviderSet) -> dal_provider::Provider {
 
 /// A request advertising `tools` under their own names.
 fn cursor_request(tools: &[&str]) -> ModelRequest {
+    cursor_request_for(tools, MODEL)
+}
+
+fn cursor_request_for(tools: &[&str], model: &str) -> ModelRequest {
     ModelRequest {
         purpose: Purpose::Turn,
         model: ModelRoute::Api {
             family: Family::Cursor,
-            model: MODEL.into(),
+            model: model.into(),
             provider: None,
         },
         system: "You are a test assistant.".into(),
@@ -690,6 +698,18 @@ fn cursor_request(tools: &[&str]) -> ModelRequest {
         context: Vec::new().into(),
         params: RequestParams::default(),
         cache_key: None,
+    }
+}
+
+fn qualify(request: ModelRequest) -> ModelRequest {
+    let model = request.model.id().to_owned();
+    ModelRequest {
+        model: ModelRoute::Api {
+            family: Family::Cursor,
+            model: model.into(),
+            provider: Some(PROVIDER.into()),
+        },
+        ..request
     }
 }
 
@@ -1012,6 +1032,102 @@ async fn mixed_round_parks_the_full_cover_then_the_session_subset_and_delivers_e
     );
     assert_eq!(server.wire.run_count(), 1);
     assert!(server.wire.h2_only());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_change_abandons_the_parked_run_and_reopens_under_the_new_route() {
+    const NEXT: &str = "cursor-h2-model-b";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = CursorH2::start(vec![
+        RunScript::new(vec![
+            Step::Send(exec_frame("call-a1", "session_tool", 1)),
+            Step::Hold,
+        ]),
+        RunScript::new(vec![
+            Step::Send(text_frame("done")),
+            Step::Send(turn_ended_frame(1, 1)),
+        ]),
+    ])
+    .await;
+    let (state, _host) = host_state(dir.path()).await;
+    let set = cursor_set(4, &server.base_url(), dir.path());
+    let session = SessionId::new_v7();
+    let owner = ContinuationOwner::new(SessionTasks::new());
+    let slot = slot_of(&owner);
+    let cancel = CancellationToken::new();
+    let request = qualify(cursor_request(&["session_tool"]));
+
+    let first = drain(
+        open(
+            &state,
+            session,
+            &owner,
+            cursor_provider(&set),
+            &request,
+            &cancel,
+        )
+        .await,
+    )
+    .await;
+    assert!(ends_in_tool_use(&first), "round one parks: {first:?}");
+    let pending = announced(&first);
+    assert_eq!(pending.len(), 1, "round one announces one call");
+    slot.park(pending).expect("round one parks");
+    assert!(slot.is_awaiting());
+
+    let parked = slot
+        .parked_route()
+        .expect("the parked run stores its route");
+    assert_eq!(parked.id(), MODEL, "the parked route is the old model");
+    assert!(
+        !slot.abandon_if_route_changed(&request.model, PROVIDER),
+        "the same route keeps the parked run"
+    );
+    assert!(slot.is_awaiting());
+    let next = qualify(cursor_request_for(&["session_tool"], NEXT));
+    assert!(
+        slot.abandon_if_route_changed(&next.model, PROVIDER),
+        "the stale run is dropped before the resume"
+    );
+    assert!(!slot.is_awaiting());
+
+    let second = drain(
+        open(
+            &state,
+            session,
+            &owner,
+            cursor_provider_for(&set, NEXT),
+            &next,
+            &cancel,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        ends_in_turn(&second),
+        "the fresh run ends the turn: {second:?}"
+    );
+    assert!(owner.release_if_live());
+
+    assert_eq!(
+        server.wire.run_count(),
+        2,
+        "the model change opens a fresh run instead of resuming the old one"
+    );
+    assert_eq!(
+        uploaded_once_settled(&server.wire, 0, NEXT).await,
+        0,
+        "the old run never saw the new model"
+    );
+    assert!(
+        uploaded_once_settled(&server.wire, 0, MODEL).await >= 1,
+        "the old run requested the old model"
+    );
+    assert!(
+        uploaded_once_settled(&server.wire, 1, NEXT).await >= 1,
+        "the fresh run requests the new model"
+    );
     server.shutdown().await;
 }
 

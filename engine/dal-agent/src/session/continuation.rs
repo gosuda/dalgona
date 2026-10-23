@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use dal_core::{CallId, InferFailure, ModelRequest, Part};
+use dal_core::{CallId, InferFailure, ModelRequest, ModelRoute, Part};
 use dal_provider::{EventStream, HostToolResult, Provider, ProviderError, ProviderRun, RunState};
 use tokio_util::sync::CancellationToken;
 
@@ -231,6 +231,7 @@ enum SlotState {
 struct Conversation {
     run: ProviderRun,
     provider: Provider,
+    route: ModelRoute,
     pending: Vec<PendingCall>,
     stash: HashMap<CallId, StashedResult>,
     staged: Option<EventStream>,
@@ -538,6 +539,50 @@ impl ContinuationSlot {
         *state = SlotState::Idle;
         true
     }
+    pub(crate) fn parked_route(&self) -> Option<ModelRoute> {
+        let state = self.lock_state();
+        let SlotState::Live(conversation) = &*state else {
+            return None;
+        };
+        conversation.run.awaiting()?;
+        Some(conversation.route.clone())
+    }
+    pub(crate) fn abandon_live(&self) -> bool {
+        let mut state = self.lock_state();
+        let SlotState::Live(_) = &*state else {
+            return false;
+        };
+        *state = SlotState::Idle;
+        true
+    }
+    pub(crate) fn abandon_if_route_changed(&self, route: &ModelRoute, provider: &str) -> bool {
+        let changed = self
+            .parked_route()
+            .is_some_and(|parked| !route_matches(&parked, route, provider));
+        changed && self.abandon_live()
+    }
+}
+
+fn route_matches(parked: &ModelRoute, current: &ModelRoute, provider: &str) -> bool {
+    let ModelRoute::Api {
+        family,
+        model,
+        provider: parked_provider,
+    } = parked
+    else {
+        return false;
+    };
+    let ModelRoute::Api {
+        family: current_family,
+        model: current_model,
+        ..
+    } = current
+    else {
+        return false;
+    };
+    family == current_family
+        && model == current_model
+        && parked_provider.as_deref() == Some(provider)
 }
 
 /// Runs the taken conversation through cover validation and the provider
@@ -810,6 +855,7 @@ pub(crate) async fn open_step(
         *state = SlotState::Live(Box::new(Conversation {
             run,
             provider,
+            route: req.model.clone(),
             pending: Vec::new(),
             stash: HashMap::new(),
             staged: None,
