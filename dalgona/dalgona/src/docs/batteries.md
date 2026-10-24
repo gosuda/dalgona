@@ -17,4 +17,4 @@ Every battery is compiled Rust registered through the public extension API with 
 | web | tools `web_fetch`, `web_search` | dalgona://web |
 | work | plan and todo tools, `/plan`, `/todos` | dalgona://work |
 
-The `dalgona` product entry (`dalgona`/`dg`, eval-first defaults) is not a battery: see dalgona://philosophy.
+The `dalgona` product entry (`dalgona`/`dg`) is not a battery: see dalgona://philosophy.
