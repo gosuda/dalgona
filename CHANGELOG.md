@@ -8,6 +8,7 @@
 - Restore branch previews, labels, file changes, and measured usage from the
   selected history. Keep queued openings busy until they start or stop.
 - Keep scripted wire tests offline by serving model discovery on loopback.
+- Build sandbox helpers from Cargo's reported artifact paths.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.
