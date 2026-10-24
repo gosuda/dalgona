@@ -306,14 +306,24 @@ impl ReviewStatus {
         }
     }
 
+    /// The latest round `session` has in flight, read under one lock.
+    fn running_round(&self, session: SessionId) -> Option<u8> {
+        self.lock().get(&session)?.last().copied()
+    }
+
+    #[cfg(test)]
     fn payload(&self, session: SessionId) -> Option<String> {
+        self.running_round(session)
+            .and_then(|round| self.encode_payload(round))
+    }
+
+    fn encode_payload(&self, round: u8) -> Option<String> {
         #[derive(serde::Serialize)]
         struct Payload {
             state: &'static str,
             round: u8,
             max_rounds: u8,
         }
-        let round = *self.lock().get(&session)?.last()?;
         sonic_rs::to_string(&Payload {
             state: "running",
             round,
@@ -372,10 +382,15 @@ impl Drop for RunningGuard {
 }
 
 impl dal_agent::ext::StatusPoll for ReviewStatus {
+    /// Busy exactly while a round of the polling session is in flight; the
+    /// text describes that same observed round.
     fn snapshot(&self, cx: &StatusCx) -> StatusSnapshot {
+        let round = self.running_round(cx.session);
         StatusSnapshot {
-            quiet: true,
-            text: self.payload(cx.session).map(String::into_boxed_str),
+            quiet: round.is_none(),
+            text: round
+                .and_then(|round| self.encode_payload(round))
+                .map(String::into_boxed_str),
         }
     }
 }
