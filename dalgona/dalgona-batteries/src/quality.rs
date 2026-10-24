@@ -99,16 +99,25 @@ struct StoredFire {
 
 #[derive(Default)]
 struct TurnState {
-    session: Option<SessionId>,
     fires: Vec<StoredFire>,
     text: String,
     truncated: bool,
 }
 
+/// Open turns retained per session.
+const OPEN_TURNS_PER_SESSION: usize = 64;
+
+/// One session's open turns. Turn ids are session-local, so turn state is
+/// owned per session and capped per session.
 #[derive(Default)]
-struct Inner {
+struct SessionTurns {
     turns: HashMap<TurnId, TurnState>,
     order: VecDeque<TurnId>,
+}
+
+#[derive(Default)]
+struct Inner {
+    sessions: HashMap<SessionId, SessionTurns>,
     histories: HashMap<SessionId, repetitive_turns::TurnHistory>,
     lanes: HashMap<SessionId, LaneFlags>,
 }
@@ -174,49 +183,64 @@ impl Shared {
         self.lock().lanes.remove(&session);
     }
 
-    fn insert_turn(&self, turn: TurnId, session: SessionId) {
+    fn insert_turn(&self, session: SessionId, turn: TurnId) {
         let mut state = self.lock();
-        let entry = state.turns.entry(turn).or_default();
-        entry.session = Some(session);
-        if !state.order.contains(&turn) {
-            state.order.push_back(turn);
+        let owned = state.sessions.entry(session).or_default();
+        owned.turns.entry(turn).or_default();
+        if !owned.order.contains(&turn) {
+            owned.order.push_back(turn);
         }
-        while state.order.len() > 64 {
-            if let Some(oldest) = state.order.pop_front() {
-                state.turns.remove(&oldest);
+        while owned.order.len() > OPEN_TURNS_PER_SESSION {
+            if let Some(oldest) = owned.order.pop_front() {
+                owned.turns.remove(&oldest);
             }
         }
     }
 
-    fn push_fire(&self, turn: TurnId, fire: StoredFire) {
+    /// Runs `f` on an open turn; a turn never opened, already taken, or
+    /// evicted is left alone, so late writes leave no orphan entry.
+    fn with_turn(&self, session: SessionId, turn: TurnId, f: impl FnOnce(&mut TurnState)) {
         let mut state = self.lock();
-        let entry = state.turns.entry(turn).or_default();
-        if entry.fires.len() >= 32 {
-            entry.truncated = true;
-            return;
+        if let Some(entry) = state
+            .sessions
+            .get_mut(&session)
+            .and_then(|owned| owned.turns.get_mut(&turn))
+        {
+            f(entry);
         }
-        entry.fires.push(fire);
     }
 
-    fn push_text(&self, turn: TurnId, text: String) {
-        self.lock().turns.entry(turn).or_default().text = text;
+    fn push_fire(&self, session: SessionId, turn: TurnId, fire: StoredFire) {
+        self.with_turn(session, turn, |entry| {
+            if entry.fires.len() >= 32 {
+                entry.truncated = true;
+            } else {
+                entry.fires.push(fire);
+            }
+        });
     }
 
-    fn take_turn(&self, turn: TurnId, session: SessionId) -> Option<TurnState> {
+    fn push_text(&self, session: SessionId, turn: TurnId, text: String) {
+        self.with_turn(session, turn, |entry| entry.text = text);
+    }
+
+    fn take_turn(&self, session: SessionId, turn: TurnId) -> Option<TurnState> {
         let mut state = self.lock();
-        let mut entry = state.turns.remove(&turn)?;
-        entry.session = Some(session);
-        state.order.retain(|candidate| *candidate != turn);
+        let owned = state.sessions.get_mut(&session)?;
+        let entry = owned.turns.remove(&turn)?;
+        owned.order.retain(|candidate| *candidate != turn);
         Some(entry)
     }
 
     fn drop_session_turns(&self, session: SessionId) {
-        let mut state = self.lock();
-        state
-            .turns
-            .retain(|_, entry| entry.session != Some(session));
-        let Inner { turns, order, .. } = &mut *state;
-        order.retain(|turn| turns.contains_key(turn));
+        self.lock().sessions.remove(&session);
+    }
+
+    #[cfg(test)]
+    fn fire_count(&self, session: SessionId, turn: TurnId) -> Option<usize> {
+        let state = self.lock();
+        let entry = state.sessions.get(&session)?.turns.get(&turn)?;
+        Some(entry.fires.len())
     }
 
     fn insert_history(&self, session: SessionId, history: repetitive_turns::TurnHistory) {
@@ -237,6 +261,7 @@ impl Shared {
 }
 
 struct QualityWatcher {
+    session: SessionId,
     turn: TurnId,
     shared: Arc<Shared>,
     flags: LaneFlags,
@@ -292,6 +317,7 @@ impl StreamWatch for QualityWatcher {
                 ("collapse-repetition", collapse_fire.reason)
             };
             self.shared.push_fire(
+                self.session,
                 self.turn,
                 StoredFire {
                     rule: rule.to_owned(),
@@ -305,6 +331,7 @@ impl StreamWatch for QualityWatcher {
         }
         if leak_fired && !self.collapse_fired {
             self.shared.push_fire(
+                self.session,
                 self.turn,
                 StoredFire {
                     rule: "control-token-leak".to_owned(),
@@ -321,7 +348,7 @@ impl StreamWatch for QualityWatcher {
 
     fn finish(&mut self) -> StreamVerdict {
         self.shared
-            .push_text(self.turn, std::mem::take(&mut self.text));
+            .push_text(self.session, self.turn, std::mem::take(&mut self.text));
         StreamVerdict::Continue
     }
 }
@@ -350,6 +377,7 @@ impl WatchFactory for QualityWatcherFactory {
             .lane_flags(turn.session)
             .unwrap_or_else(|| self.default_flags());
         Some(Box::new(QualityWatcher {
+            session: turn.session,
             turn: turn.turn,
             shared: Arc::clone(&self.shared),
             flags,
@@ -494,7 +522,7 @@ impl dal_agent::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for BeforeT
         input: dal_core::ext::BeforeTurn,
         cx: HookCx,
     ) -> BoxFuture<'static, Result<Option<String>, HookError>> {
-        self.shared.insert_turn(input.turn, cx.session);
+        self.shared.insert_turn(cx.session, input.turn);
         Box::pin(async move { Ok(None) })
     }
 }
@@ -580,7 +608,7 @@ impl ObserveHook<dal_core::ext::TurnEnd> for TurnEndHook {
         input: dal_core::ext::TurnEnd,
         cx: HookCx,
     ) -> BoxFuture<'static, Result<(), HookError>> {
-        let taken = self.shared.take_turn(input.turn, cx.session);
+        let taken = self.shared.take_turn(cx.session, input.turn);
         // A held turns lane neither advances the streak nor reports: the
         // streaming lanes already stand down via their watcher flags, and the
         // turn-level lane must stand down the same way.
@@ -1134,8 +1162,8 @@ mod tests {
         text: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let turn = TurnId::new(std::num::NonZeroU64::MIN);
-        shared.insert_turn(turn, session);
-        shared.push_text(turn, text.to_owned());
+        shared.insert_turn(session, turn);
+        shared.push_text(session, turn, text.to_owned());
         shared.set_lane_flags(session, flags);
         let dynamic: Arc<dyn dal_agent::ext::Services> = services.clone();
         let guard = dal_tools::guard::guard_extension(dal_tools::guard::GuardConfig::disabled())?;
@@ -1238,6 +1266,89 @@ mod tests {
         Ok(())
     }
 
+    /// Turn ids are session-local: every session's first turn is
+    /// `TurnId::MIN`. Two live sessions on one battery must keep their turn
+    /// state apart, so a fire streamed in one session settles only there.
+    #[tokio::test]
+    async fn same_turn_id_in_two_sessions_keeps_fires_with_their_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shared = Arc::new(Shared::default());
+        let turn = TurnId::new(std::num::NonZeroU64::MIN);
+        let (first, second) = (SessionId::new_v7(), SessionId::new_v7());
+        let first_services = Arc::new(crate::work::support::FakeServices::default());
+        let second_services = Arc::new(crate::work::support::FakeServices::default());
+        let cx = |services: &Arc<crate::work::support::FakeServices>, session| {
+            let dynamic: Arc<dyn dal_agent::ext::Services> = services.clone();
+            HookCx::for_test(dynamic, session, Some(turn))
+        };
+        for session in [first, second] {
+            shared.set_lane_flags(session, LaneFlags::enabled());
+        }
+        let before = BeforeTurnHook {
+            shared: Arc::clone(&shared),
+        };
+        for (services, session) in [(&first_services, first), (&second_services, second)] {
+            dal_agent::ext::Hook::call(
+                &before,
+                dal_core::ext::BeforeTurn {
+                    turn,
+                    text: "go".into(),
+                },
+                cx(services, session),
+            )
+            .await?;
+        }
+        let factory = QualityWatcherFactory {
+            shared: Arc::clone(&shared),
+            detectors_enabled: true,
+        };
+        let mut streamed = factory
+            .start(&TurnInfo::new(first, turn))
+            .ok_or("the first session's watcher did not start")?;
+        let _ = streamed.feed(Channel::Text, &"!".repeat(300));
+        let _ = streamed.finish();
+        let mut quiet = factory
+            .start(&TurnInfo::new(second, turn))
+            .ok_or("the second session's watcher did not start")?;
+        let _ = quiet.feed(Channel::Text, "a plain answer");
+        let _ = quiet.finish();
+        let end = |shared: &Arc<Shared>| -> Result<TurnEndHook, Box<dyn std::error::Error>> {
+            let guard =
+                dal_tools::guard::guard_extension(dal_tools::guard::GuardConfig::disabled())?;
+            Ok(TurnEndHook {
+                shared: Arc::clone(shared),
+                findings: guard.findings,
+                detectors_enabled: true,
+            })
+        };
+        let event = dal_core::ext::TurnEnd {
+            turn,
+            stop: dal_core::Stop::EndTurn,
+            overflowed: false,
+        };
+        // The quiet session settles first: it must not take the other
+        // session's fire, and the other session must still settle its own.
+        end(&shared)?
+            .call(event.clone(), cx(&second_services, second))
+            .await?;
+        end(&shared)?
+            .call(event, cx(&first_services, first))
+            .await?;
+        let first_fires = first_services.all_bodies("rule_fired");
+        let second_fires = second_services.all_bodies("rule_fired");
+        assert!(
+            second_fires.is_empty(),
+            "the quiet session settled another session's fire: {second_fires:?}"
+        );
+        assert!(
+            first_fires
+                .iter()
+                .any(|body| body.contains("collapse-repetition")),
+            "the streaming session lost its own fire: {first_fires:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn unclaimed_lanes_all_run() {
         let flags = lane_flags_from(true, true, &[], [false; 3]);
@@ -1252,9 +1363,14 @@ mod watcher_tests {
 
     use super::*;
 
-    fn new_watcher(shared: &Arc<Shared>, flags: LaneFlags) -> (QualityWatcher, TurnId) {
+    /// Opens one turn of a fresh session, as the before-turn hook does, and
+    /// starts a watcher on it, so its writes land in owned state.
+    fn new_watcher(shared: &Arc<Shared>, flags: LaneFlags) -> (QualityWatcher, SessionId, TurnId) {
+        let session = SessionId::new_v7();
         let turn = TurnId::new(NonZeroU64::MIN);
+        shared.insert_turn(session, turn);
         let watcher = QualityWatcher {
+            session,
             turn,
             shared: Arc::clone(shared),
             flags,
@@ -1264,7 +1380,7 @@ mod watcher_tests {
             text_capped: false,
             collapse_fired: false,
         };
-        (watcher, turn)
+        (watcher, session, turn)
     }
 
     /// Feeds one megabyte in 8 KiB deltas and returns whether any delta
@@ -1283,28 +1399,27 @@ mod watcher_tests {
             "alpha beta\n\n".repeat(8192 / 12),
         ] {
             let shared = Arc::new(Shared::default());
-            let (mut watcher, turn) = new_watcher(&shared, LaneFlags::enabled());
+            let (mut watcher, session, turn) = new_watcher(&shared, LaneFlags::enabled());
             assert!(
                 !feed_megabyte(&mut watcher, &chunk),
                 "stopped on {chunk:.12?}"
             );
             assert!(watcher.text.len() <= 64 * 1024, "excerpt text is capped");
-            let fires = shared
-                .lock()
-                .turns
-                .get(&turn)
-                .map_or(0, |state| state.fires.len());
-            assert!(fires <= 32, "fires stay inside the per-turn cap: {fires}");
+            let fires = shared.fire_count(session, turn);
+            assert!(
+                fires.is_some_and(|count| count <= 32),
+                "the opened turn keeps its fires inside the per-turn cap: {fires:?}"
+            );
         }
     }
 
     #[test]
     fn held_lanes_feed_nothing_and_fire_nothing() {
         let shared = Arc::new(Shared::default());
-        let (mut watcher, turn) = new_watcher(&shared, LaneFlags::held());
+        let (mut watcher, session, turn) = new_watcher(&shared, LaneFlags::held());
         assert!(!feed_megabyte(&mut watcher, &"!".repeat(8192)));
         assert!(watcher.text.is_empty(), "a held watcher keeps no text");
-        assert!(!shared.lock().turns.contains_key(&turn));
+        assert_eq!(shared.fire_count(session, turn), Some(0));
     }
 
     #[test]
