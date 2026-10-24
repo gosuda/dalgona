@@ -37,6 +37,18 @@ pub(crate) struct TodoRecord {
     pub list: Vec<TodoItem>,
 }
 
+/// The `todo://terminal` document: whether every item is terminal, the open
+/// and total counts, and up to three open subjects. Other batteries decode
+/// this one shape instead of reading the work battery's records.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalPayload {
+    pub all_terminal: bool,
+    pub open: usize,
+    pub total: usize,
+    pub first_titles: Vec<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TodoArgs {
