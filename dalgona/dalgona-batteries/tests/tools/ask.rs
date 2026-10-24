@@ -856,7 +856,7 @@ fn test_model() -> dal_core::ModelInfo {
     }
 }
 
-/// Spec test `registration_literals` (36-REQ-01, 36-REQ-02): the extension
+/// Spec test `registration_literals`: the extension
 /// record pins the tool name, the description bytes, the parameter schema,
 /// the single prompt section, `inject = ["ask"]`, and origin `Bundled`.
 /// Every literal is typed again here, never read from the battery.
@@ -899,7 +899,7 @@ async fn registration_pins_the_tool_record_schema_and_policy_strings() -> TestRe
     Ok(())
 }
 
-/// Battery half of spec test `turn-cancel-mid-questionnaire` (36-REQ-10): a
+/// Battery half of spec test `turn-cancel-mid-questionnaire`: a
 /// `Cancelled` reply with the turn token cancelled is the documented
 /// `tool.interrupted` outcome; the same reply with no cancel requested fails
 /// closed to the literal. The broker broadcast half is loop-owned.
@@ -940,7 +940,7 @@ async fn a_cancelled_turn_maps_a_cancelled_reply_to_interrupted() -> TestResult 
 }
 
 /// Inputs the contract never issued fail closed with the documented
-/// `ask: <reason>` error before any question is raised (36-REQ-04): a
+/// `ask: <reason>` error before any question is raised: a
 /// Starlark-era spelling, a non-object root, and the two `snake_case` edges
 /// the table never named. An empty body is not valid JSON and never becomes
 /// a tool call, so the battery cannot see it; it is excluded here.
@@ -973,7 +973,7 @@ async fn drifted_and_non_object_inputs_fail_closed_before_any_raise() -> TestRes
 }
 
 /// The `dalgona://ask` page documents the timeout, clamp, answer-object,
-/// and never-answerer contract it owns in this surface (36-REQ-13). The
+/// and never-answerer contract it owns in this surface. The
 /// heading stays the reconciled Rust-carrier text, not the Starlark page.
 #[tokio::test]
 async fn ask_doc_documents_the_timeout_and_no_answer_contract() -> TestResult {

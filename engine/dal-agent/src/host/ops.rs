@@ -544,6 +544,13 @@ fn builtin_models(
         .collect();
     let catalog = Catalog::with_sources(Vec::new(), entries.to_vec());
     let mut models = Vec::new();
+    // Host default: this catalog surface lists host-wide rows with no
+    // session in scope, so the live host default is the intent here.
+    let thinking = shared
+        .config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .thinking();
     for entry in catalog.entries() {
         let reference = format!("{}/{}", entry.provider, entry.id);
         let Ok(resolved) = resolve(&catalog, &aliases, &reference) else {
@@ -558,11 +565,7 @@ fn builtin_models(
             &resolved.entry,
             &resolved.route,
             &resolved.provider,
-            shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .thinking(),
+            thinking,
         ));
     }
     models

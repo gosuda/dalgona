@@ -180,7 +180,7 @@ async fn answer_twice(agent: &Agent, id: RequestId) -> TestResult {
     Ok(())
 }
 
-/// 36-REQ-11: with no answering client the real broker fails the question
+/// With no answering client the real broker fails the question
 /// closed to the literal at once instead of waiting or reading stdin.
 #[tokio::test]
 async fn without_an_answerer_the_broker_fails_closed_to_the_literal() -> TestResult {
@@ -207,7 +207,7 @@ async fn without_an_answerer_the_broker_fails_closed_to_the_literal() -> TestRes
     Ok(())
 }
 
-/// 36-REQ-12: the broker fills each request deadline from `[ask] timeout`,
+/// The broker fills each request deadline from `[ask] timeout`,
 /// and the open question resolves to the merged no-answer literal there.
 #[tokio::test]
 async fn the_configured_deadline_fails_closed_to_the_literal() -> TestResult {
@@ -242,7 +242,7 @@ async fn the_configured_deadline_fails_closed_to_the_literal() -> TestResult {
     Ok(())
 }
 
-/// 36-REQ-07: a well-formed value answers through the real broker, and the
+/// A well-formed value answers through the real broker, and the
 /// first answer wins exactly once.
 #[tokio::test]
 async fn a_broker_answer_round_trip_resolves_exactly_once() -> TestResult {
@@ -280,7 +280,7 @@ async fn a_broker_answer_round_trip_resolves_exactly_once() -> TestResult {
     Ok(())
 }
 
-/// 36-REQ-08: the host passes client values through unvalidated, so a
+/// The host passes client values through unvalidated, so a
 /// wrong-shaped value for its kind still fails closed to the literal.
 #[tokio::test]
 async fn a_wrong_shaped_broker_value_fails_closed_to_the_literal() -> TestResult {

@@ -1192,7 +1192,7 @@ impl Host {
             .or_else(|| configured_model.clone());
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
-                model: requested_model,
+                model: requested_model.clone(),
                 thinking,
                 approval,
                 name: None,
@@ -1206,13 +1206,18 @@ impl Host {
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
         })?;
         let opening_texts: Arc<[String]> = super::history::opening_texts(&fold).into();
-        let model = replayed_model(journal.records(), &fold, configured_model);
+        let model = replayed_model(journal.records(), &fold, configured_model.clone());
         let model_id = model
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());
+        // The host read stays here as the open-time seed: later
+        // `persist_default` rewrites affect future sessions only. The
+        // seed is the resolved route, not the raw reference: an aliased
+        // default ("fast") must reach levels and requests expanded.
         let shared = Arc::new(Shared::new(
             resolved.child,
             generation,
+            requested_model,
             thinking,
             approval,
             mode,

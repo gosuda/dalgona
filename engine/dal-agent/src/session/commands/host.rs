@@ -647,22 +647,16 @@ impl CommandHost for DriverHost {
     ) -> Vec<ThinkingLevel> {
         let route = if let Some(route) = &self.route {
             route.clone()
+        } else if let Some(session_model) = self.shared.model() {
+            // The session's effective route: the folded `/model` selection,
+            // else the host default captured at open. A sibling's
+            // `persist_default` must not re-gate this picker mid-turn.
+            session_model
         } else {
-            let Some(default) = self
-                .host
-                .shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .model()
-                .map(str::to_owned)
-            else {
-                return Vec::new();
-            };
-            match self.resolve_model_inner(&default) {
-                Ok(resolved) => resolved.route,
-                Err(_) => return Vec::new(),
-            }
+            // No session route: render no levels. Re-reading the live host
+            // default here would let a sibling's `persist_default` re-gate
+            // this picker mid-turn; the open-time seed already decided.
+            return Vec::new();
         };
         if let Some(found) = crate::ext::synthetic::find_route(&self.host.shared, &route) {
             return dal_provider::levels_for(&found.entry().thinking).into_vec();
@@ -670,7 +664,19 @@ impl CommandHost for DriverHost {
         let Some(catalog) = self.host.shared.cached_catalog() else {
             return Vec::new();
         };
-        let aliases: Vec<(Box<str>, Box<str>)> = Vec::new();
+        // Aliases are host-global by design (no session fold exists), so
+        // the live map is the right source here: an offline-opened session
+        // whose seed kept the raw alias reference still resolves.
+        let aliases: Vec<(Box<str>, Box<str>)> = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aliases()
+            .iter()
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect();
         let Ok(resolved) = dal_provider::resolve_route(&catalog, &aliases, &route) else {
             return Vec::new();
         };

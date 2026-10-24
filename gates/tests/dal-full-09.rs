@@ -196,6 +196,72 @@ fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, conte
         !has_row_number(content),
         "planning citation in {display_path}"
     );
+    // Round-9 citations arrived through these extra tokens. Each check stays
+    // byte-oriented like `contains`/`has_row_number`, and every token literal
+    // here is split so this file never carries a live one.
+    let ignored_dir = [".out", "line/"].concat();
+    let lane_dir = ["sd", "d/"].concat();
+    // The ignored-dir rule itself lives in ignore files, so only they may
+    // carry it.
+    if !ends_with(path, b".gitignore") {
+        assert!(
+            !contains(path, ignored_dir.as_bytes()),
+            "private path in {display_path}"
+        );
+        assert!(
+            !contains(content, ignored_dir.as_bytes()),
+            "private path in {display_path}"
+        );
+    }
+    assert!(
+        !contains(path, lane_dir.as_bytes()),
+        "planning filename in {display_path}"
+    );
+    assert!(
+        !contains(content, lane_dir.as_bytes()),
+        "planning filename in {display_path}"
+    );
+    assert!(!has_report_doc(path), "planning filename in {display_path}");
+    assert!(
+        !has_report_doc(content),
+        "planning filename in {display_path}"
+    );
+    let word_tokens = [
+        ["PA", "DD"].concat(),
+        ["VO", "C"].concat(),
+        ["FL", "D"].concat(),
+    ];
+    for token in &word_tokens {
+        assert!(
+            !contains_word(path, token.as_bytes()),
+            "planning token in {display_path}"
+        );
+        assert!(
+            !contains_word(content, token.as_bytes()),
+            "planning token in {display_path}"
+        );
+    }
+    assert!(
+        !has_eng_citation(path),
+        "planning citation in {display_path}"
+    );
+    assert!(
+        !has_eng_citation(content),
+        "planning citation in {display_path}"
+    );
+    assert!(
+        !has_req_citation(path),
+        "planning citation in {display_path}"
+    );
+    assert!(
+        !has_req_citation(content),
+        "planning citation in {display_path}"
+    );
+    assert!(!has_part_token(path), "planning citation in {display_path}");
+    assert!(
+        !has_part_token(content),
+        "planning citation in {display_path}"
+    );
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -306,6 +372,96 @@ fn contains_word(haystack: &[u8], needle: &[u8]) -> bool {
         })
 }
 
+fn ends_with(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && &haystack[haystack.len() - needle.len()..] == needle
+}
+
+fn has_report_doc(bytes: &[u8]) -> bool {
+    // A report doc is the marker plus a lowercase dashed name ending in the
+    // doc suffix; bare prose without the suffix stays public.
+    let prefix: &[u8] = b"report-";
+    let suffix: &[u8] = b".md";
+    for (index, window) in bytes.windows(prefix.len()).enumerate() {
+        if window != prefix {
+            continue;
+        }
+        if index > 0 && bytes[index - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let mut end = index + prefix.len();
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_lowercase() || *byte == b'-')
+        {
+            end += 1;
+        }
+        if end == index + prefix.len() {
+            continue;
+        }
+        if bytes.get(end..end + suffix.len()) == Some(suffix) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_upper_tag(bytes: &[u8], tag: &[u8]) -> bool {
+    // Tags stay uppercase-only so lowercase product ids never match; the
+    // numbered-prefix shape shares the same tag core.
+    if tag.is_empty() || bytes.len() < tag.len() {
+        return false;
+    }
+    bytes.windows(tag.len()).enumerate().any(|(at, window)| {
+        window == tag
+            && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+            && bytes.get(at + tag.len()).is_some_and(u8::is_ascii_digit)
+    })
+}
+
+fn has_eng_citation(bytes: &[u8]) -> bool {
+    has_upper_tag(bytes, b"ENG-")
+}
+
+fn has_req_citation(bytes: &[u8]) -> bool {
+    has_upper_tag(bytes, b"REQ-")
+}
+
+fn has_part_token(bytes: &[u8]) -> bool {
+    let word: &[u8] = b"part";
+    if bytes.len() < word.len() {
+        return false;
+    }
+    bytes.windows(word.len()).enumerate().any(|(at, window)| {
+        window.eq_ignore_ascii_case(word)
+            && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+            && matches!(bytes.get(at + word.len()), Some(b' ' | b'-'))
+            && bytes
+                .get(at + word.len() + 1)
+                .is_some_and(u8::is_ascii_digit)
+            && !is_journal_coordinate(bytes, at + word.len() + 1)
+    })
+}
+
+fn is_journal_coordinate(bytes: &[u8], digits_at: usize) -> bool {
+    // Journal dumps render a count plus a byte range; those coordinates are
+    // public format, not plan citations.
+    let marker: &[u8] = b"bytes";
+    let mut end = digits_at;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    let mut rest = &bytes[end..];
+    if rest.first() == Some(&b',') {
+        rest = &rest[1..];
+    }
+    while rest.first() == Some(&b' ') {
+        rest = &rest[1..];
+    }
+    rest.len() >= marker.len() && rest[..marker.len()].eq_ignore_ascii_case(marker)
+}
+
 #[test]
 fn row_citation_check_tells_citations_from_terminal_coordinates() {
     let per = ["per row ", "128"].concat();
@@ -334,4 +490,94 @@ fn row_citation_check_tells_citations_from_terminal_coordinates() {
     assert!(!has_row_number(model.as_bytes()));
     let dims = ["a row ", "80x24 grid"].concat();
     assert!(!has_row_number(dims.as_bytes()));
+}
+
+#[test]
+fn private_token_checks_catch_each_leak_class() {
+    // Every literal stays split so this file never carries a live token.
+    let ignored = [".out", "line/notes"].concat();
+    assert!(contains(
+        ignored.as_bytes(),
+        [".out", "line/"].concat().as_bytes()
+    ));
+
+    let lane = ["merge sd", "d/plan"].concat();
+    assert!(contains(lane.as_bytes(), ["sd", "d/"].concat().as_bytes()));
+
+    let report_doc = ["nightly report-", "ops-summary.md"].concat();
+    assert!(has_report_doc(report_doc.as_bytes()));
+
+    let brief = ["uses PA", "DD here"].concat();
+    assert!(contains_word(
+        brief.as_bytes(),
+        ["PA", "DD"].concat().as_bytes()
+    ));
+    let spoken = ["says VO", "C aloud"].concat();
+    assert!(contains_word(
+        spoken.as_bytes(),
+        ["VO", "C"].concat().as_bytes()
+    ));
+    let field = ["marks FL", "D now"].concat();
+    assert!(contains_word(
+        field.as_bytes(),
+        ["FL", "D"].concat().as_bytes()
+    ));
+
+    let build = ["tracks EN", "G-12"].concat();
+    assert!(has_eng_citation(build.as_bytes()));
+    let requirement = ["pins RE", "Q-39-14"].concat();
+    assert!(has_req_citation(requirement.as_bytes()));
+    let numbered = ["spec 36-RE", "Q-11 done"].concat();
+    assert!(has_req_citation(numbered.as_bytes()));
+    let part_shape = ["see (part ", "39) below"].concat();
+    assert!(has_part_token(part_shape.as_bytes()));
+}
+
+#[test]
+fn private_token_checks_allow_public_prose() {
+    let padding = ["PAD", "DING"].concat();
+    let word_tokens = [
+        ["PA", "DD"].concat(),
+        ["VO", "C"].concat(),
+        ["FL", "D"].concat(),
+    ];
+    for token in &word_tokens {
+        assert!(!contains_word(padding.as_bytes(), token.as_bytes()));
+    }
+
+    let prose = "the broker holds the question open until the deadline";
+    assert!(!has_report_doc(prose.as_bytes()));
+    assert!(!has_eng_citation(prose.as_bytes()));
+    assert!(!has_req_citation(prose.as_bytes()));
+    assert!(!has_part_token(prose.as_bytes()));
+    assert!(!has_row_number(prose.as_bytes()));
+
+    // Lowercase product ids are not requirement tags.
+    let request_id = ["request id ", "req-1"].concat();
+    assert!(!has_req_citation(request_id.as_bytes()));
+
+    // Journal coordinates stay public.
+    let journal = ["entry 2, user, part ", "0, bytes 0-"].concat();
+    assert!(!has_part_token(journal.as_bytes()));
+
+    // The prose marker without a doc suffix stays public.
+    let report_only = "three report-only detectors";
+    assert!(!has_report_doc(report_only.as_bytes()));
+}
+
+#[test]
+fn ignore_files_may_carry_the_ignored_dir_rule() {
+    let rule = [".out", "line/"].concat();
+    assert_public_content_is_private_free(b".gitignore", Path::new(".gitignore"), rule.as_bytes());
+}
+
+#[test]
+#[should_panic(expected = "private path")]
+fn public_content_rejects_the_ignored_dir_elsewhere() {
+    let rule = [".out", "line/notes"].concat();
+    assert_public_content_is_private_free(
+        b"docs/notes.md",
+        Path::new("docs/notes.md"),
+        rule.as_bytes(),
+    );
 }

@@ -100,7 +100,7 @@ const KEPT_AUTH: &str = r#"{"anthropic":{"kind":"api_key","key":"secret-keep-tok
 #[test]
 fn logout_refuses_an_unknown_provider_without_touching_the_auth_file() -> Result<(), Box<dyn Error>>
 {
-    for provider in [
+    for (i, provider) in [
         "nobody",
         "Anthropic",
         "anthropic ",
@@ -108,32 +108,35 @@ fn logout_refuses_an_unknown_provider_without_touching_the_auth_file() -> Result
         "anthropi",
         "",
         "../auth",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let fixture = CliFixture::new()?;
         fixture.write_auth(KEPT_AUTH)?;
 
         let output = fixture.output(&["logout", provider])?;
 
-        assert_eq!(output.status.code(), Some(124), "{provider:?}");
-        assert_eq!(output.stdout, [] as [u8; 0], "{provider:?}");
+        assert_eq!(output.status.code(), Some(124), "case {i}");
+        assert_eq!(output.stdout, [] as [u8; 0], "case {i}");
         let stderr = String::from_utf8(output.stderr)?;
         let mut lines = stderr.lines();
         assert_eq!(
             lines.next(),
             Some(format!("dalgon: unknown provider \"{provider}\"").as_str()),
-            "{stderr}"
+            "case {i}"
         );
         assert!(
             lines
                 .next()
                 .is_some_and(|hint| hint.starts_with("Use one of ") && hint.contains("anthropic")),
-            "{stderr}"
+            "case {i}"
         );
-        assert_eq!(lines.next(), None, "{stderr}");
+        assert_eq!(lines.next(), None, "case {i}");
         assert_eq!(
             std::fs::read_to_string(fixture.auth_file())?,
             KEPT_AUTH,
-            "{provider:?} touched the credential file"
+            "case {i} touched the credential file"
         );
     }
     Ok(())
@@ -145,7 +148,7 @@ fn logout_refuses_an_unknown_provider_without_touching_the_auth_file() -> Result
 /// either stream.
 #[test]
 fn logout_refuses_a_corrupt_auth_file_and_leaves_it_untouched() -> Result<(), Box<dyn Error>> {
-    for body in [
+    for (i, body) in [
         "{not json",
         "",
         "[]",
@@ -153,37 +156,43 @@ fn logout_refuses_a_corrupt_auth_file_and_leaves_it_untouched() -> Result<(), Bo
         r#"{"anthropic":{"kind":"api_key","key":"secret-corrupt-token"}"#,
         r#"{"anthropic":"secret-corrupt-token"}"#,
         r#"{"anthropic":{"kind":"api_key","key":"secret-corrupt-token","extra":1}}"#,
-    ] {
-        for args in [&["logout", "anthropic"][..], &["logout"][..]] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (j, args) in [&["logout", "anthropic"][..], &["logout"][..]]
+            .into_iter()
+            .enumerate()
+        {
             let fixture = CliFixture::new()?;
             fixture.write_auth(body)?;
 
             let output = fixture.output(args)?;
 
-            assert_eq!(output.status.code(), Some(1), "{args:?} over {body:?}");
-            assert_eq!(output.stdout, [] as [u8; 0], "{args:?} over {body:?}");
+            assert_eq!(output.status.code(), Some(1), "case {i}/{j}");
+            assert_eq!(output.stdout, [] as [u8; 0], "case {i}/{j}");
             let stderr = String::from_utf8(output.stderr)?;
             let mut lines = stderr.lines();
             assert!(
                 lines
                     .next()
                     .is_some_and(|first| first.starts_with("dalgon: auth.json is not valid JSON: ")),
-                "{stderr}"
+                "case {i}/{j}"
             );
             assert_eq!(
                 lines.next(),
                 Some("Run dalgon login PROVIDER to write the file again."),
-                "{stderr}"
+                "case {i}/{j}"
             );
-            assert_eq!(lines.next(), None, "{stderr}");
+            assert_eq!(lines.next(), None, "case {i}/{j}");
             assert!(
                 !stderr.contains("secret-corrupt-token"),
-                "the diagnostic echoes a stored secret: {stderr}"
+                "case {i}/{j}: the diagnostic echoes a stored secret"
             );
             assert_eq!(
                 std::fs::read(fixture.auth_file())?,
                 body.as_bytes(),
-                "{args:?} rewrote the corrupt file {body:?}"
+                "case {i}/{j} rewrote the corrupt file"
             );
         }
     }
@@ -198,7 +207,10 @@ fn logout_refuses_an_auth_file_open_to_other_users_and_leaves_it_untouched()
 -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    for args in [&["logout", "anthropic"][..], &["logout"][..]] {
+    for (i, args) in [&["logout", "anthropic"][..], &["logout"][..]]
+        .into_iter()
+        .enumerate()
+    {
         let fixture = CliFixture::new()?;
         fixture.write_auth(KEPT_AUTH)?;
         let path = fixture.auth_file();
@@ -206,8 +218,8 @@ fn logout_refuses_an_auth_file_open_to_other_users_and_leaves_it_untouched()
 
         let output = fixture.output(args)?;
 
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
-        assert_eq!(output.stdout, [] as [u8; 0], "{args:?}");
+        assert_eq!(output.status.code(), Some(1), "case {i}");
+        assert_eq!(output.stdout, [] as [u8; 0], "case {i}");
         assert_eq!(
             output.stderr,
             format!(
@@ -215,13 +227,13 @@ fn logout_refuses_an_auth_file_open_to_other_users_and_leaves_it_untouched()
                 path.display()
             )
             .into_bytes(),
-            "{args:?}"
+            "case {i}"
         );
-        assert_eq!(std::fs::read_to_string(&path)?, KEPT_AUTH, "{args:?}");
+        assert_eq!(std::fs::read_to_string(&path)?, KEPT_AUTH, "case {i}");
         assert_eq!(
             std::fs::metadata(&path)?.permissions().mode() & 0o777,
             0o644,
-            "{args:?} changed the file mode"
+            "case {i} changed the file mode"
         );
     }
     Ok(())

@@ -864,6 +864,7 @@ mod tests {
         let shared = Arc::new(crate::session::shared::Shared::new(
             false,
             Gen::new(NonZeroU64::MIN),
+            None,
             ThinkingLevel::Medium,
             ApprovalMode::Ask,
             dal_core::Mode::Normal,

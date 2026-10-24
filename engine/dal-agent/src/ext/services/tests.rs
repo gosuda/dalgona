@@ -2816,6 +2816,7 @@ fn private_shared() -> Shared {
     Shared::new(
         false,
         Gen::new(std::num::NonZeroU64::MIN),
+        None,
         ThinkingLevel::Medium,
         ApprovalMode::Ask,
         Mode::Normal,

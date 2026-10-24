@@ -2431,8 +2431,8 @@ async fn input_required_stops_at_the_retry_cap_with_the_typed_error() {
     assert_retry_envelope(&run, &calls);
 }
 
-/// Every public [`McpError`] variant renders its exact boundary string
-/// (part 39, REQ-39-14). The seventeen variants are the whole public error
+/// Every public [`McpError`] variant renders its exact boundary string.
+/// The seventeen variants are the whole public error
 /// surface, so each display string is pinned here byte-for-byte, including
 /// both `Exited` renderings: with and without the stderr diagnostic suffix.
 #[test]
@@ -2441,8 +2441,8 @@ fn every_public_mcp_error_renders_its_exact_boundary_string() {
     assert_error_census(&cases);
 }
 
-/// Every public [`McpError`] variant with its exact boundary string
-/// (part 39, REQ-39-14): seventeen variants, with both `Exited` renderings.
+/// Every public [`McpError`] variant with its exact boundary string:
+/// seventeen variants, with both `Exited` renderings.
 fn mcp_error_boundary_cases(key: &str) -> Vec<(McpError, &'static str)> {
     vec![
         (

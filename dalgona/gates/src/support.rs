@@ -408,8 +408,14 @@ pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet
 /// `cargo metadata`: the profile path relative to the build directory joins
 /// onto the target directory. One intended binary, no fallback.
 ///
+/// Freshness is this resolver's own job, not the caller's: before the
+/// `is_file` check it runs `cargo build -p dalgona --bin dalgona --locked`
+/// once per test process, so a stale artifact from an older tree can never
+/// satisfy the check. Cargo's own fingerprinting keeps the rebuild cheap
+/// when the binary is already current.
+///
 /// # Errors
-/// Returns metadata, layout, or missing-binary failures.
+/// Returns metadata, layout, build, or missing-binary failures.
 pub fn dalgona_binary() -> TestResult<PathBuf> {
     let exe = std::env::current_exe()?;
     let profile_dir = test_profile_dir(&exe)?;
@@ -422,6 +428,18 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
             build_dir.display()
         )
     })?;
+    // The relative directory is `debug|release`, or `<target-triple>/debug`
+    // under an explicit `--target`; the profile is its final component and
+    // any preceding one is the triple, repeated on the build invocation.
+    let mut components = relative.components();
+    let profile = components
+        .next_back()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or("the test profile directory has no name")?;
+    let triple = components
+        .next_back()
+        .and_then(|component| component.as_os_str().to_str());
+    ensure_dalgona_binary_built(profile, triple)?;
     let binary = target_dir
         .join(relative)
         .join(format!("dalgona{}", std::env::consts::EXE_SUFFIX));
@@ -429,10 +447,95 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
         return Ok(binary);
     }
     Err(format!(
-        "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
+        "the Dalgona binary is still missing at {} after `cargo build -p dalgona --bin dalgona --locked`",
         binary.display()
     )
     .into())
+}
+
+/// Builds the `dalgona` binary once per test process, so every gate sees a
+/// binary from the current tree instead of a stale artifact.
+///
+/// The build runs in the workspace root with this process's environment, so
+/// a `CARGO_TARGET_DIR` override applies to the build exactly as it did to
+/// the `cargo metadata` layout above. Standard error is inherited so build
+/// failures surface in the gate output; standard output is captured and
+/// discarded. A plain build in the test process is fine: gates run as test
+/// executables, never inside a Cargo build script, so there is no nested
+/// Cargo to deadlock against.
+///
+/// # Errors
+/// Returns the spawn failure or the build's nonzero status; the first
+/// result is cached and replayed to later callers in this process.
+fn ensure_dalgona_binary_built(profile: &str, triple: Option<&str>) -> TestResult<()> {
+    static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    let owned = profile.to_owned();
+    let owned_triple = triple.map(str::to_owned);
+    let cached = BUILT.get_or_init(|| {
+        let mut command = std::process::Command::new(env!("CARGO"));
+        command.args(["build", "-p", "dalgona", "--bin", "dalgona", "--locked"]);
+        match owned.as_str() {
+            "debug" => {}
+            "release" => {
+                command.arg("--release");
+            }
+            custom => {
+                command.args(["--profile", custom]);
+            }
+        }
+        if let Some(triple) = &owned_triple {
+            command.args(["--target", triple]);
+        }
+        command
+            .current_dir(repo_root())
+            .stderr(std::process::Stdio::inherit());
+        match command.spawn() {
+            Err(error) => Err(format!(
+                "failed to run cargo build -p dalgona --bin dalgona --locked: {error}"
+            )),
+            Ok(mut child) => run_cargo_build_to_completion(&mut child),
+        }
+    });
+    match cached {
+        Ok(()) => Ok(()),
+        Err(message) => Err(message.clone().into()),
+    }
+}
+
+/// Upper bound on the gate's own binary build. A cold workspace build of
+/// the binary takes minutes, not a quarter hour; past this the build is
+/// hung, and surfacing it beats hanging every gate process.
+const CARGO_BUILD_DEADLINE: std::time::Duration = std::time::Duration::from_mins(15);
+
+/// Waits for the spawned build, killing it and failing the gate once the
+/// deadline passes instead of stalling the test process forever.
+fn run_cargo_build_to_completion(child: &mut std::process::Child) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "cargo build -p dalgona --bin dalgona --locked failed with status {status}"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed waiting for cargo build -p dalgona --bin dalgona --locked: {error}"
+                ));
+            }
+        }
+        if started.elapsed() >= CARGO_BUILD_DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "cargo build -p dalgona --bin dalgona --locked did not finish within 900 seconds"
+                    .to_owned(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Cargo's canonical `target_directory` and `build_directory` from
