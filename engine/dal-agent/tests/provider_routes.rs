@@ -18,15 +18,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_agent::ext::{
-    BoxFuture, Caller, Extension, ExtensionBuilder, HookCx, HookError, ModelCx, ModelError,
-    ModelHandler, ModelRecord, ObserveHook, Services, SessionCx, SessionInstalls,
+    BoxFuture, Caller, CommandCx, CommandHandler, Extension, ExtensionBuilder, HookCx, HookError,
+    ModelCx, ModelError, ModelHandler, ModelRecord, ObserveHook, Services, SessionCx,
+    SessionInstalls,
 };
-use dal_agent::{Agent, Delivery, Env, Host, HostError, Product, SessionRef, Subscription};
+use dal_agent::{
+    Agent, Delivery, Env, Host, HostError, Product, ServiceError, SessionRef, Subscription,
+};
 use dal_core::{
-    ApprovalMode, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, Entry, EntryId,
-    EntryKind, Expect, Family, JournalPart, ModelId, ModelRequest, ModelRoute, PageReq, Part,
-    Purpose, Record, Reply, RequestParams, Save, ServiceSet, SessionId, SessionStart, Stop,
-    ThinkingLevel, UpdateKind, Usage, Workspace,
+    ApprovalMode, Caps, ClientId, Command, CommandName, CommandSpec, Config, ConfigProduct,
+    ContextItem, Entry, EntryId, EntryKind, Expect, Family, JournalPart, ModelId, ModelRequest,
+    ModelRoute, Origin, Output, PageReq, Part, Purpose, Record, Reply, RequestParams, Save,
+    ServiceSet, SessionId, SessionStart, Stop, ThinkingLevel, UpdateKind, Usage, Workspace,
 };
 use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -982,10 +985,7 @@ async fn a_legacy_only_config_still_starts_and_resolves_by_its_reference() {
     let (alpha, beta) = rig
         .pair("model = \"alpha/gpt-4o\"\n\n", &[SHARED_ID], &[SHARED_ID])
         .await;
-    let captured: SetupCaptured = Arc::default();
-    let host = rig
-        .start(vec![setup_capture_extension(Arc::clone(&captured))])
-        .await;
+    let host = rig.start(Vec::new()).await;
     assert!(
         !rig.user_text().contains("model_route"),
         "the fixture is a legacy-only file"
@@ -996,18 +996,6 @@ async fn a_legacy_only_config_still_starts_and_resolves_by_its_reference() {
         "the legacy reference resolves through the catalog to its provider"
     );
     let agent = rig.open_new(&host).await;
-    let (seeded, ..) = captured
-        .lock()
-        .expect("setup capture lock")
-        .take()
-        .expect("setup ran at open");
-    assert_eq!(
-        seeded,
-        Some(ModelRoute::Synthetic {
-            id: "alpha/gpt-4o".into()
-        }),
-        "the legacy string seeds the session as a namespaced id, never with a provider"
-    );
     assert_eq!(
         settings_model(&agent),
         None,
@@ -1344,5 +1332,141 @@ async fn a_reopened_route_naming_an_unconfigured_provider_stays_visible_and_fail
         Some(missing),
         "the failed turn does not clear the restored selection"
     );
+    let _ = host.shutdown(CLOSE).await;
+}
+
+struct PersistModelHandler {
+    model: ModelRoute,
+}
+
+impl CommandHandler for PersistModelHandler {
+    fn run<'a>(
+        &'a self,
+        _args: &'a str,
+        cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
+        let model = self.model.clone();
+        Box::pin(async move {
+            cx.submit_wait(Command::SetModel {
+                model,
+                save: Save::SessionAndDefault,
+            })
+            .await
+            .map_err(|e| ServiceError::failed(None, e.to_string()))?;
+            Ok(Reply::Done(Output::Nothing))
+        })
+    }
+}
+
+fn persist_helper_extension(model: ModelRoute) -> Extension {
+    ExtensionBuilder::new("persist-helper", "0.1.0", ServiceSet::default())
+        .expect("builder")
+        .with_origin(Origin::Builtin, None)
+        .command(
+            CommandSpec {
+                name: CommandName::parse("persist_default").expect("command name"),
+                summary: "persist default route".into(),
+                args_hint: None,
+            },
+            Arc::new(PersistModelHandler { model }),
+        )
+        .build()
+        .expect("extension")
+}
+
+/// An aliased default route reaches extension setup and turn requests as the
+/// resolved provider-qualified route, not the raw alias; pre-existing session A
+/// retains M1 while sibling session B persists M2 as the new default; newly
+/// opened session C uses M2; and inherited defaults keep `SettingsView.model = None`.
+#[tokio::test]
+async fn an_aliased_default_route_reaches_extension_setup_and_requests_as_the_resolved_route() {
+    let rig = Rig::new();
+    let top = format!("model = \"fast\"\n\n[aliases]\nfast = \"beta/{SHARED_ID}\"\n\n");
+    let (alpha, beta) = rig.pair(&top, &[SHARED_ID], &[SHARED_ID]).await;
+    let m1 = chat_route(Some("beta"), SHARED_ID);
+    let m2 = chat_route(Some("alpha"), SHARED_ID);
+
+    let captured: SetupCaptured = Arc::default();
+    let host = rig
+        .start(vec![
+            setup_capture_extension(Arc::clone(&captured)),
+            persist_helper_extension(m2.clone()),
+        ])
+        .await;
+    host.set_config_path(rig.user_path());
+
+    let agent_a = rig.open_new(&host).await;
+    let (setup_route_a, _services, _caller) = captured
+        .lock()
+        .expect("setup capture lock")
+        .take()
+        .expect("setup ran on open for A");
+    assert_eq!(
+        setup_route_a,
+        Some(m1.clone()),
+        "extension setup for A receives the resolved default route, not the raw alias"
+    );
+    assert_eq!(
+        settings_model(&agent_a),
+        None,
+        "session A inherits the default and selects no explicit model"
+    );
+
+    let mut events_a = agent_a.subscribe(None).expect("subscribe A");
+    let turn_a = prompt(&agent_a, &mut events_a, "first-a").await;
+    assert_eq!(turn_a.stop, Stop::EndTurn, "{:?}", turn_a.failure);
+    assert_chats(&alpha, KEY_ALPHA, SHARED_ID, 0);
+    assert_chats(&beta, KEY_BETA, SHARED_ID, 1);
+
+    let agent_b = rig.open_new(&host).await;
+    let _ = captured.lock().expect("setup capture lock").take();
+    agent_b
+        .submit(Command::Run {
+            name: "persist_default".into(),
+            args: "".into(),
+            expected: None,
+        })
+        .await
+        .expect("persist M2 default");
+
+    let mut events_b = agent_b.subscribe(None).expect("subscribe B");
+    let turn_b = prompt(&agent_b, &mut events_b, "first-b").await;
+    assert_eq!(turn_b.stop, Stop::EndTurn, "{:?}", turn_b.failure);
+    assert_chats(&alpha, KEY_ALPHA, SHARED_ID, 1);
+    assert_chats(&beta, KEY_BETA, SHARED_ID, 1);
+
+    let turn_a2 = prompt(&agent_a, &mut events_a, "second-a").await;
+    assert_eq!(turn_a2.stop, Stop::EndTurn, "{:?}", turn_a2.failure);
+    assert_chats(&alpha, KEY_ALPHA, SHARED_ID, 1);
+    assert_chats(&beta, KEY_BETA, SHARED_ID, 2);
+    assert_eq!(
+        settings_model(&agent_a),
+        None,
+        "session A still has no explicit model selection"
+    );
+
+    let agent_c = rig.open_new(&host).await;
+    let (setup_route_c, _services, _caller) = captured
+        .lock()
+        .expect("setup capture lock")
+        .take()
+        .expect("setup ran on open for C");
+    assert_eq!(
+        setup_route_c,
+        Some(m2.clone()),
+        "extension setup for C receives the new resolved default route M2"
+    );
+    assert_eq!(
+        settings_model(&agent_c),
+        None,
+        "session C inherits the default and selects no explicit model"
+    );
+
+    let mut events_c = agent_c.subscribe(None).expect("subscribe C");
+    let turn_c = prompt(&agent_c, &mut events_c, "first-c").await;
+    assert_eq!(turn_c.stop, Stop::EndTurn, "{:?}", turn_c.failure);
+    assert_chats(&alpha, KEY_ALPHA, SHARED_ID, 2);
+    assert_chats(&beta, KEY_BETA, SHARED_ID, 2);
+
     let _ = host.shutdown(CLOSE).await;
 }

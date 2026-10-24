@@ -293,6 +293,22 @@ impl Session {
         }
     }
 
+    /// Releases an opening whose hooks could not admit a durable turn.
+    /// A stale opening completion cannot change another turn's phase.
+    pub fn abandon_opening(&mut self, turn: TurnId) {
+        let owned = match &self.phase {
+            Phase::Opening { turn: active, .. } => *active == turn,
+            Phase::Settling {
+                follow_up: Some((next, _)),
+                ..
+            } => *next == turn,
+            _ => false,
+        };
+        if owned {
+            self.phase = Phase::Idle;
+        }
+    }
+
     /// Takes the input of the turn a `before_turn` verdict opens, reserving its entry id.
     pub(super) fn take_opening_input(
         &mut self,

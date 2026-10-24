@@ -480,12 +480,25 @@ impl Shared {
 
     /// Applies one update kind, publishes it, and offers it to subscribers.
     pub(crate) fn publish(&self, kind: UpdateKind) {
+        self.publish_inner(kind, None);
+    }
+
+    /// Reconciles fold-owned state under the snapshot lock before delivery.
+    pub(crate) fn publish_fold(&self, kind: UpdateKind, fold: &Session) {
+        self.publish_inner(kind, Some(fold));
+    }
+
+    fn publish_inner(&self, kind: UpdateKind, fold: Option<&Session>) {
         let scoped = self.scoped_models();
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.projection.apply(&kind);
+        if let Some(fold) = fold {
+            inner.projection.apply_fold(&kind, fold);
+        } else {
+            inner.projection.apply(&kind);
+        }
         let kind = match kind {
             UpdateKind::Settings(_) => {
                 let mut settings = inner.projection.effective_settings();
@@ -655,6 +668,15 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .projection
             .set_fold_stats(steers, follow_ups, auto);
+    }
+
+    /// Refreshes transitions that emit no public update, including rejected openings.
+    pub(crate) fn sync_turn(&self, fold: &Session) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .sync_turn(fold);
     }
 
     /// Marks a manual compaction job as the active turn state.

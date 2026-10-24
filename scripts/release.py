@@ -17,7 +17,7 @@ from pathlib import Path
 
 PUBLISH_USAGE = (
     "usage: scripts/publish-crates.sh [--product dal|dalgona] [--dry-run] "
-    "[--check-registry-deps] [--check-dep-only <name> <req>] <workspace-root>"
+    "[--check-registry-deps] [--preflight] [--check-dep-only <name> <req>] <workspace-root>"
 )
 SEMVER_USAGE = "usage: scripts/semver-gate.sh [--product dal|dalgona] [--baseline-root <dir>] <workspace-root>"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,25 +56,25 @@ class Metadata:
 
 def mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError("cargo metadata returned an invalid metadata object")
+        raise TypeError("cargo metadata returned an invalid metadata object")
     result: dict[str, object] = {}
     for key, item in value.items():
         if not isinstance(key, str):
-            raise ValueError("cargo metadata returned a non-string object key")
+            raise TypeError("cargo metadata returned a non-string object key")
         result[key] = item
     return result
 
 
 def sequence(value: object) -> list[object]:
     if not isinstance(value, list):
-        raise ValueError("cargo metadata returned an invalid metadata list")
+        raise TypeError("cargo metadata returned an invalid metadata list")
     return [item for item in value]
 
 
 def string_field(fields: dict[str, object], name: str) -> str:
     value = fields.get(name)
     if not isinstance(value, str):
-        raise ValueError(f"cargo metadata returned an invalid {name} field")
+        raise TypeError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -83,7 +83,7 @@ def optional_string_field(fields: dict[str, object], name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"cargo metadata returned an invalid {name} field")
+        raise TypeError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -94,7 +94,7 @@ def metadata_value(value: object) -> Metadata:
         member = mapping(item)
         publishable = member.get("publishable")
         if not isinstance(publishable, bool):
-            raise ValueError("cargo metadata returned an invalid publishable field")
+            raise TypeError("cargo metadata returned an invalid publishable field")
         members.append(
             Member(
                 string_field(member, "name"),
@@ -150,7 +150,7 @@ def workspace_filter(raw: object) -> dict[str, object]:
     members: set[object] = set()
     for member in sequence(fields.get("workspace_members")):
         if not isinstance(member, str):
-            raise ValueError("cargo metadata returned a non-string workspace member")
+            raise TypeError("cargo metadata returned a non-string workspace member")
         members.add(member)
     packages = [
         mapping(item)
@@ -209,7 +209,7 @@ def run_metadata(root: Path, metadata_error: str) -> tuple[Metadata | None, int 
         return None, cargo.returncode
     try:
         return metadata_value(workspace_filter(json.loads(cargo.stdout))), None
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None, error(metadata_error, 2)
 
 
@@ -308,10 +308,11 @@ def dependency_target(
 
 
 def sparse_path(name: str) -> str:
-    if len(name) <= 3:
+    name = name.lower()
+    if len(name) <= 2:
+        return f"{len(name)}/{name}"
+    if len(name) == 3:
         return f"3/{name[0]}/{name}"
-    if len(name) == 4:
-        return f"2/{name[:2]}/{name}"
     return f"{name[:2]}/{name[2:4]}/{name}"
 
 
@@ -406,9 +407,10 @@ def publish_order(members: tuple[Member, ...], dependencies: tuple[Dependency, .
 
 def publish_args(
     arguments: list[str],
-) -> tuple[bool, bool, str | None, str | None, str | None, str] | None:
+) -> tuple[bool, bool, bool, str | None, str | None, str | None, str] | None:
     dry_run = False
     check_registry_deps = False
+    preflight = False
     dep_name: str | None = None
     dep_req: str | None = None
     product: str | None = None
@@ -427,6 +429,10 @@ def publish_args(
         elif argument == "--check-registry-deps":
             check_registry_deps = True
             index += 1
+        elif argument == "--preflight":
+            preflight = True
+            check_registry_deps = True
+            index += 1
         elif argument == "--check-dep-only":
             if dep_name is not None or index + 2 >= len(arguments):
                 return None
@@ -441,14 +447,14 @@ def publish_args(
             return None
     if root is None:
         return None
-    return dry_run, check_registry_deps, dep_name, dep_req, product, root
+    return dry_run, check_registry_deps, preflight, dep_name, dep_req, product, root
 
 
 def publish_main(arguments: list[str]) -> int:
     parsed = publish_args(arguments)
     if parsed is None:
         return usage_error(PUBLISH_USAGE)
-    dry_run, check_registry_deps, dep_name, dep_req, product, root_arg = parsed
+    dry_run, check_registry_deps, preflight, dep_name, dep_req, product, root_arg = parsed
     root, status = parse_root(root_arg)
     if status is not None or root is None:
         return status or 64
@@ -492,7 +498,7 @@ def publish_main(arguments: list[str]) -> int:
     if order is None:
         return error("dependency cycle among workspace members; no publish order exists", 2)
 
-    if check_registry_deps and not dry_run:
+    if check_registry_deps and (preflight or not dry_run):
         status = require_curl()
         if status is not None:
             return status
@@ -511,6 +517,8 @@ def publish_main(arguments: list[str]) -> int:
                     3,
                 )
 
+    if preflight:
+        return 0
     if dry_run:
         for name in order:
             print(f"cargo publish -p {name}")

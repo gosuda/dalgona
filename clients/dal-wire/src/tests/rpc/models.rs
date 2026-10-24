@@ -190,6 +190,7 @@ key_env = "OPENAI_API_KEY"
         host,
         workspace,
         gate: Arc::new(Semaphore::new(0)),
+        _tasks: JoinSet::new(),
     }
 }
 

@@ -1803,6 +1803,7 @@ impl Actor {
                     tracing::warn!(target: "dalgon.agent", session = %session, "turn opening outstanding");
                 }
             };
+            self.refresh_stats();
             let Some((more, carried)) = more else { break };
             opening = carried;
             queue.extend(more);
@@ -1939,6 +1940,7 @@ impl Actor {
             }
         }
         if self.control().opening_shutdown(turn) {
+            self.fold.abandon_opening(turn);
             self.control().cancel_opening();
             return None;
         }
@@ -1955,12 +1957,14 @@ impl Actor {
         let guard_ok =
             run_input && !cancel.is_cancelled() && self.guard_input(turn, content, &mut effects);
         if run_input && !cancel.is_cancelled() && !guard_ok {
+            self.fold.abandon_opening(turn);
             self.control().cancel_opening();
             return None;
         }
         let add = join_before_turn(&texts).map(Into::into);
         let Ok(outcome) = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(add))
         else {
+            self.fold.abandon_opening(turn);
             return None;
         };
         if self
@@ -1982,6 +1986,7 @@ impl Actor {
             }
             return Some((effects, opening.filter(|_| guard_ok)));
         }
+        self.fold.abandon_opening(turn);
         self.control().cancel_opening();
         None
     }
@@ -2278,7 +2283,7 @@ impl Actor {
 
     /// Publishes one update to the shared snapshot and its subscribers.
     fn publish(&self, kind: UpdateKind) {
-        self.shared.publish(kind);
+        self.shared.publish_fold(kind, &self.fold);
     }
 
     /// Journals one extension record on the current leaf, folds it, and
@@ -2471,6 +2476,7 @@ impl Actor {
 
     /// Refreshes fold-owned counters in the shared snapshot.
     fn refresh_stats(&self) {
+        self.shared.sync_turn(&self.fold);
         self.shared.sync_ext(&self.fold);
         self.shared.set_fold_stats(
             queue_count(self.fold.steers_queued()),

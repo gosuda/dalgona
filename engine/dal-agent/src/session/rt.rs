@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_core::{
-    ApprovalMode, BlobId, CallId, DenyReason, EntryId, EntryKind, EntryView, JobId, JournalPart,
-    Name, Policy, Preview, RunRequest, SessionId, ToolClass, Workspace,
+    BlobId, CallId, DenyReason, EntryId, EntryKind, EntryView, JobId, JournalPart, Name, Policy,
+    Preview, RunRequest, SessionId, ToolClass, Workspace,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
@@ -66,8 +66,6 @@ pub(crate) struct SessionRtDeps {
     /// The process launcher prepared at session start; the error side
     /// refuses every spawn with the exact sandbox setup text.
     pub(crate) launcher: Result<Launcher, crate::proc::sandbox::SandboxSetupError>,
-    /// The session approval mode.
-    pub(crate) approval: ApprovalMode,
     /// The session cancellation token.
     pub(crate) cancel: CancellationToken,
     /// The durable job witness directory.
@@ -87,7 +85,6 @@ pub(crate) struct SessionRt {
     procs: Arc<Mutex<HashMap<JobId, Proc>>>,
     env_snapshot: Vec<(OsString, OsString)>,
     launcher: Result<Launcher, crate::proc::sandbox::SandboxSetupError>,
-    approval: ApprovalMode,
     cancel: CancellationToken,
     proofs: std::sync::Mutex<HashMap<CallId, SpawnProof>>,
     jobs_dir: PathBuf,
@@ -107,7 +104,6 @@ impl SessionRt {
             procs,
             env_snapshot,
             launcher,
-            approval,
             cancel,
             jobs_dir,
             tasks,
@@ -122,7 +118,6 @@ impl SessionRt {
             procs,
             env_snapshot,
             launcher,
-            approval,
             cancel,
             proofs: std::sync::Mutex::new(HashMap::new()),
             jobs_dir,
@@ -219,7 +214,7 @@ impl SessionRt {
 impl ToolCxRuntime for SessionRt {
     fn decide_run(&self) -> dal_core::Decision {
         let policy = Policy {
-            mode: self.approval,
+            mode: self.shared.approval(),
             answerer_attached: self.shared.attached_approval(),
             allow_always: self.shared.allow_always().as_ref().clone(),
         };
@@ -796,7 +791,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use dal_core::{
-        Entry, EntryId, EntryKind, Gen, Product, RawJson, Record, Session, SessionId,
+        ApprovalMode, Entry, EntryId, EntryKind, Gen, Product, RawJson, Record, Session, SessionId,
         ThinkingLevel, Workspace,
     };
     use dal_store::Store;

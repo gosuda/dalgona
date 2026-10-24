@@ -1206,7 +1206,7 @@ impl Host {
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
         })?;
         let opening_texts: Arc<[String]> = super::history::opening_texts(&fold).into();
-        let model = replayed_model(journal.records(), &fold, configured_model.clone());
+        let model = replayed_model(journal.records(), &fold, requested_model.clone());
         let model_id = model
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());
@@ -1333,13 +1333,6 @@ impl Host {
             procs: Arc::clone(backend.procs()),
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: backend.launcher().clone(),
-            approval: self
-                .state
-                .shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .approval(),
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),

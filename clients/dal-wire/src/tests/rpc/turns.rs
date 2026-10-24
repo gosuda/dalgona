@@ -1,6 +1,4 @@
-use std::time::Duration;
-
-use dal_agent::SessionRef;
+use dal_agent::{SessionRef, Subscription};
 use dal_core::{BlobId, ClientId, Command, Expect, Part, Stop, TurnId, UpdateKind};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
@@ -279,6 +277,7 @@ async fn disconnect_keeps_turn() {
     let rig = rig(&[gate_step("c1"), text_step(&["after"], 1, 1)]).await;
     let ws = rig.ws();
     let mut ids = Vec::new();
+    let mut observer: Option<(dal_agent::Agent, Subscription)> = None;
     with_rpc(&rig, async |mut rpc| {
         initialize(&mut rpc).await;
         for id in 1..=3 {
@@ -291,6 +290,19 @@ async fn disconnect_keeps_turn() {
                 .await,
             );
         }
+        let agent = rig
+            .host
+            .open(
+                SessionRef::Resume {
+                    key: ids[0].as_str().into(),
+                    workspace: rig.core_workspace(),
+                },
+                ClientId::new("observer"),
+            )
+            .await
+            .expect("session opens for observation");
+        let subscription = agent.subscribe(None).expect("subscribe");
+        observer = Some((agent, subscription));
         let reply = rpc
             .call(
                 4,
@@ -301,41 +313,33 @@ async fn disconnect_keeps_turn() {
         assert_eq!(result(&reply)["type"].as_str(), Some("accepted"));
     })
     .await;
-    let agent = rig
-        .host
-        .open(
-            SessionRef::Resume {
-                key: ids[0].as_str().into(),
-                workspace: rig.core_workspace(),
-            },
-            ClientId::new("observer"),
-        )
-        .await
-        .expect("session stays open after disconnect");
-    // The accepted prompt dispatches the turn asynchronously, so the first
-    // view can still read Idle before the actor starts it; wait for Running
-    // rather than asserting on the first snapshot.
-    let deadline = tokio::time::Instant::now() + WAIT;
-    let head = loop {
-        let head = agent.view(dal_core::PageReq::default()).expect("view");
-        if matches!(head.turn, dal_core::TurnState::Running { .. }) {
-            break head;
+    let (_agent, mut subscription) = observer.expect("observer subscribed before submit");
+    loop {
+        let delivery = tokio::time::timeout(WAIT, subscription.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "waited {}s for event 'TurnStarted', never fired",
+                    WAIT.as_secs()
+                )
+            })
+            .expect("subscription open");
+        if let dal_agent::Delivery::Update(update) = delivery
+            && matches!(update.kind, UpdateKind::TurnStarted { .. })
+        {
+            break;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "disconnect cancelled the turn: {:?}",
-            head.turn
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    let mut subscription = agent
-        .subscribe(Some((head.r#gen, head.seq)))
-        .expect("subscribe");
+    }
     rig.gate.add_permits(1);
     let stop = loop {
         let delivery = tokio::time::timeout(WAIT, subscription.next())
             .await
-            .expect("update in time")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "waited {}s for event 'TurnEnded', never fired",
+                    WAIT.as_secs()
+                )
+            })
             .expect("subscription open");
         if let dal_agent::Delivery::Update(update) = delivery
             && let UpdateKind::TurnEnded { stop, .. } = update.kind

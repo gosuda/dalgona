@@ -220,3 +220,308 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
     assert!(stderr.ends_with("cargo publish failed for tiny; see the output above\n"));
     Ok(())
 }
+
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guard test needs the ambient PATH to locate the real cargo and isolate test binaries"
+)]
+fn setup_named_cross_product_fixture(
+    dep_name: &str,
+) -> Result<
+    (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        std::ffi::OsString,
+    ),
+    Box<dyn Error>,
+> {
+    use std::{fs, io};
+    let workspace = tempfile::tempdir()?;
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\"core/dep\", \"dalgona/product\"]\n",
+    )?;
+    let dep_dir = workspace.path().join("core/dep");
+    fs::create_dir_all(dep_dir.join("src"))?;
+    fs::write(dep_dir.join("src/lib.rs"), "")?;
+    fs::write(
+        dep_dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+    )?;
+
+    let prod_dir = workspace.path().join("dalgona/product");
+    fs::create_dir_all(prod_dir.join("src"))?;
+    fs::write(prod_dir.join("src/lib.rs"), "")?;
+    fs::write(
+        prod_dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"product\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{dep_name} = {{ path = \"../../core/dep\", version = \"=0.1.0\" }}\n"
+        ),
+    )?;
+
+    let real_path = std::env::var_os("PATH").ok_or_else(|| io::Error::other("PATH is not set"))?;
+    let real_cargo = executable_in_path(&real_path, "cargo")
+        .ok_or_else(|| io::Error::other("cargo is not on PATH"))?;
+
+    let scratch = tempfile::tempdir()?;
+    let fake_cargo = scratch.path().join("cargo");
+    write_executable(
+        &fake_cargo,
+        "#!/bin/sh\nif [ \"$1\" = metadata ]; then exec \"$RELEASE_TEST_REAL_CARGO\" \"$@\"; fi\nprintf 'cargo publish should not be invoked: %s\\n' \"$*\" >&2\nexit 99\n",
+    )?;
+
+    let fake_curl = scratch.path().join("curl");
+    write_executable(
+        &fake_curl,
+        "#!/bin/sh\nif [ \"$RELEASE_TEST_CURL_FORBIDDEN\" = \"1\" ]; then\n  printf 'curl should not be invoked during offline dry-run\\n' >&2\n  exit 98\nfi\nif [ -n \"$RELEASE_TEST_CURL_LOG\" ]; then\n  printf '%s\\n' \"$*\" >> \"$RELEASE_TEST_CURL_LOG\"\nfi\nif [ -n \"$RELEASE_TEST_INDEX_RESPONSE\" ]; then\n  printf '%s' \"$RELEASE_TEST_INDEX_RESPONSE\"\n  exit 0\nfi\nexit 22\n",
+    )?;
+
+    let path = std::env::join_paths(
+        std::iter::once(scratch.path().to_path_buf()).chain(std::env::split_paths(&real_path)),
+    )?;
+
+    Ok((workspace, scratch, real_cargo, path))
+}
+
+#[cfg(unix)]
+fn setup_cross_product_fixture() -> Result<
+    (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        std::ffi::OsString,
+    ),
+    Box<dyn Error>,
+> {
+    setup_named_cross_product_fixture("base")
+}
+
+#[cfg(unix)]
+#[test]
+fn release_preflight_validates_dependencies_without_publishing() -> Result<(), Box<dyn Error>> {
+    let (workspace, scratch, real_cargo, path) = setup_cross_product_fixture()?;
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+    let curl_log = scratch.path().join("curl.log");
+
+    let output = support::shell()
+        .arg(&script)
+        .args(["--product", "dalgona", "--preflight", "."])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .env("RELEASE_TEST_INDEX_RESPONSE", "{\"vers\":\"0.1.0\"}\n")
+        .env("RELEASE_TEST_CURL_LOG", &curl_log)
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "");
+
+    let logged_curl = std::fs::read_to_string(&curl_log)?;
+    assert!(
+        logged_curl.contains("https://index.crates.io/ba/se/base"),
+        "curl must query the sparse index URL for base, got: {logged_curl}"
+    );
+
+    let publish_attempt = support::shell()
+        .arg(&script)
+        .args(["--product", "dalgona", "--check-registry-deps", "."])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .env("RELEASE_TEST_INDEX_RESPONSE", "{\"vers\":\"0.1.0\"}\n")
+        .output()?;
+    let publish_stderr = String::from_utf8(publish_attempt.stderr)?;
+    assert_eq!(publish_attempt.status.code(), Some(5));
+    assert!(publish_stderr.contains("cargo publish should not be invoked"));
+    assert!(publish_stderr.ends_with("cargo publish failed for product; see the output above\n"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_preflight_sparse_index_url_boundaries() -> Result<(), Box<dyn Error>> {
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+
+    for (dep_name, expected_url) in [
+        ("a", "https://index.crates.io/1/a"),
+        ("ab", "https://index.crates.io/2/ab"),
+        ("abc", "https://index.crates.io/3/a/abc"),
+        ("base", "https://index.crates.io/ba/se/base"),
+        ("Foo-Bar", "https://index.crates.io/fo/o-/foo-bar"),
+        ("A", "https://index.crates.io/1/a"),
+        ("Ab", "https://index.crates.io/2/ab"),
+        ("AbC", "https://index.crates.io/3/a/abc"),
+        ("BaSe", "https://index.crates.io/ba/se/base"),
+    ] {
+        let (workspace, scratch, real_cargo, path) = setup_named_cross_product_fixture(dep_name)?;
+        let curl_log = scratch.path().join("curl.log");
+        let output = support::shell()
+            .arg(&script)
+            .args(["--product", "dalgona", "--preflight", "."])
+            .current_dir(workspace.path())
+            .env("PATH", &path)
+            .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+            .env("RELEASE_TEST_INDEX_RESPONSE", "{\"vers\":\"0.1.0\"}\n")
+            .env("RELEASE_TEST_CURL_LOG", &curl_log)
+            .output()?;
+
+        let stderr = String::from_utf8(output.stderr)?;
+        assert_eq!(output.status.code(), Some(0), "{dep_name} stderr: {stderr}");
+        assert!(!stderr.contains("cargo publish should not be invoked"));
+
+        let logged_curl = std::fs::read_to_string(&curl_log)?;
+        assert!(
+            logged_curl.contains(expected_url),
+            "expected {dep_name} to query {expected_url}, got: {logged_curl}"
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_preflight_rejects_missing_dependency_before_publishing() -> Result<(), Box<dyn Error>> {
+    let (workspace, _scratch, real_cargo, path) = setup_cross_product_fixture()?;
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+
+    let output_mismatch = support::shell()
+        .arg(&script)
+        .args(["--product", "dalgona", "--preflight", "."])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .env("RELEASE_TEST_INDEX_RESPONSE", "{\"vers\":\"0.2.0\"}\n")
+        .output()?;
+    let stderr_mismatch = String::from_utf8(output_mismatch.stderr)?;
+    let stdout_mismatch = String::from_utf8(output_mismatch.stdout)?;
+    assert_eq!(output_mismatch.status.code(), Some(3));
+    assert_eq!(stdout_mismatch, "");
+    assert!(
+        stderr_mismatch
+            .contains("dalgon dependency base \"=0.1.0\" not on crates.io; release dal first"),
+        "stderr: {stderr_mismatch}"
+    );
+    assert!(
+        !stderr_mismatch.contains("cargo publish should not be invoked"),
+        "mismatched dependency must not attempt publication"
+    );
+
+    let output_missing = support::shell()
+        .arg(&script)
+        .args(["--product", "dalgona", "--preflight", "."])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .output()?;
+    let stderr_missing = String::from_utf8(output_missing.stderr)?;
+    let stdout_missing = String::from_utf8(output_missing.stdout)?;
+    assert_eq!(output_missing.status.code(), Some(3));
+    assert_eq!(stdout_missing, "");
+    assert!(
+        stderr_missing
+            .contains("dalgon dependency base \"=0.1.0\" not on crates.io; release dal first"),
+        "stderr: {stderr_missing}"
+    );
+    assert!(
+        !stderr_missing.contains("cargo publish should not be invoked"),
+        "missing dependency must not attempt publication"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_dry_run_remains_offline() -> Result<(), Box<dyn Error>> {
+    let (workspace, scratch, real_cargo, path) = setup_cross_product_fixture()?;
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+    let curl_log = scratch.path().join("curl-dry-run.log");
+
+    let output = support::shell()
+        .arg(&script)
+        .args(["--product", "dalgona", "--dry-run", "."])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .env("RELEASE_TEST_CURL_FORBIDDEN", "1")
+        .env("RELEASE_TEST_CURL_LOG", &curl_log)
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "cargo publish -p product\n");
+    assert_eq!(stderr, "");
+    assert!(
+        !curl_log.exists(),
+        "curl must not be invoked during ordinary dry-run"
+    );
+
+    let output_check_dry = support::shell()
+        .arg(&script)
+        .args([
+            "--product",
+            "dalgona",
+            "--check-registry-deps",
+            "--dry-run",
+            ".",
+        ])
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .env("RELEASE_TEST_CURL_FORBIDDEN", "1")
+        .env("RELEASE_TEST_CURL_LOG", &curl_log)
+        .output()?;
+    let stderr_check = String::from_utf8(output_check_dry.stderr)?;
+    let stdout_check = String::from_utf8(output_check_dry.stdout)?;
+    assert_eq!(
+        output_check_dry.status.code(),
+        Some(0),
+        "stderr: {stderr_check}"
+    );
+    assert_eq!(stdout_check, "cargo publish -p product\n");
+    assert_eq!(stderr_check, "");
+    assert!(
+        !curl_log.exists(),
+        "curl must not be invoked during check-registry-deps dry-run"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_rejects_malformed_metadata_shape() -> Result<(), Box<dyn Error>> {
+    let (workspace, scratch, real_cargo, path) = setup_cross_product_fixture()?;
+    let fake_cargo = scratch.path().join("cargo");
+    write_executable(
+        &fake_cargo,
+        "#!/bin/sh\nif [ \"$1\" = metadata ]; then printf '%s\\n' '{\"workspace_members\": [123], \"packages\": []}'; exit 0; fi\nexec \"$RELEASE_TEST_REAL_CARGO\" \"$@\"\n",
+    )?;
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+    let output = support::shell()
+        .arg(&script)
+        .arg(".")
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "the cargo metadata shape is invalid for the publish order\n"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "malformed metadata must produce diagnostic, not traceback"
+    );
+    Ok(())
+}

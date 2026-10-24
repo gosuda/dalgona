@@ -409,7 +409,7 @@ pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet
 /// onto the target directory. One intended binary, no fallback.
 ///
 /// Freshness is this resolver's own job, not the caller's: before the
-/// `is_file` check it runs `cargo build -p dalgona --bin dalgona --locked`
+/// `is_file` check it runs `cargo build -p dalgona --bins --locked`
 /// once per test process, so a stale artifact from an older tree can never
 /// satisfy the check. Cargo's own fingerprinting keeps the rebuild cheap
 /// when the binary is already current.
@@ -447,7 +447,7 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
         return Ok(binary);
     }
     Err(format!(
-        "the Dalgona binary is still missing at {} after `cargo build -p dalgona --bin dalgona --locked`",
+        "the Dalgona binary is still missing at {} after `cargo build -p dalgona --bins --locked`",
         binary.display()
     )
     .into())
@@ -473,7 +473,7 @@ fn ensure_dalgona_binary_built(profile: &str, triple: Option<&str>) -> TestResul
     let owned_triple = triple.map(str::to_owned);
     let cached = BUILT.get_or_init(|| {
         let mut command = std::process::Command::new(env!("CARGO"));
-        command.args(["build", "-p", "dalgona", "--bin", "dalgona", "--locked"]);
+        command.args(["build", "-p", "dalgona", "--bins", "--locked"]);
         match owned.as_str() {
             "debug" => {}
             "release" => {
@@ -491,7 +491,7 @@ fn ensure_dalgona_binary_built(profile: &str, triple: Option<&str>) -> TestResul
             .stderr(std::process::Stdio::inherit());
         match command.spawn() {
             Err(error) => Err(format!(
-                "failed to run cargo build -p dalgona --bin dalgona --locked: {error}"
+                "failed to run cargo build -p dalgona --bins --locked: {error}"
             )),
             Ok(mut child) => run_cargo_build_to_completion(&mut child),
         }
@@ -516,13 +516,13 @@ fn run_cargo_build_to_completion(child: &mut std::process::Child) -> Result<(), 
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
                 return Err(format!(
-                    "cargo build -p dalgona --bin dalgona --locked failed with status {status}"
+                    "cargo build -p dalgona --bins --locked failed with status {status}"
                 ));
             }
             Ok(None) => {}
             Err(error) => {
                 return Err(format!(
-                    "failed waiting for cargo build -p dalgona --bin dalgona --locked: {error}"
+                    "failed waiting for cargo build -p dalgona --bins --locked: {error}"
                 ));
             }
         }
@@ -530,7 +530,7 @@ fn run_cargo_build_to_completion(child: &mut std::process::Child) -> Result<(), 
             let _ = child.kill();
             let _ = child.wait();
             return Err(
-                "cargo build -p dalgona --bin dalgona --locked did not finish within 900 seconds"
+                "cargo build -p dalgona --bins --locked did not finish within 900 seconds"
                     .to_owned(),
             );
         }

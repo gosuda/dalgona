@@ -1,6 +1,18 @@
 # Changelog
 
 ## Unreleased
+- Keep wire reply identifiers out of test timeout diagnostics.
+- Apply the session's current approval policy to extension process runs,
+  including after reopening a session.
+- Give extension setup the same resolved default model route used by turns.
+  Existing sessions keep their default when another session saves a new one.
+- Restore branch previews, labels, file changes, and measured usage from the
+  selected history. Keep queued openings busy until they start or stop.
+- Keep scripted wire tests offline by serving model discovery on loopback.
+- Build sandbox helpers from Cargo's reported artifact paths.
+- Prevent PTY test harnesses from acquiring their children's controlling terminal.
+- Add a non-publishing release preflight before package rehearsals. Resolve
+  short and mixed-case crate names using Cargo's sparse-index path rules.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.

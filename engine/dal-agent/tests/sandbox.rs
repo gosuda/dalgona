@@ -1,11 +1,11 @@
 //! Live Linux sandbox proofs: the dal-agent launcher admits and refuses
 //! through the real `dalgon __sandbox` Landlock helper.
 //!
-//! The helper binary is the sibling `dalgon` binary built from this
-//! workspace (`cargo build -p dalgon --bin dalgon`); the test locates it
-//! next to the test binary's target directory. Sync filesystem and process
-//! setup stays outside the async runtime; the runtime only drives the
-//! Host/agent calls.
+//! The helper binary is the workspace `dalgon` binary built on demand
+//! via Cargo (`cargo build -p dalgon --bin dalgon --locked`); the test
+//! captures the executable path directly from Cargo's artifact stream.
+//! Sync filesystem and process setup stays outside the async runtime;
+//! the runtime only drives the Host/agent calls.
 
 #![expect(
     clippy::expect_used,
@@ -14,8 +14,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dal_agent::ext::{
@@ -33,16 +34,59 @@ const STEP_CALL: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_
 
 const STEP_END: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"done\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
 
+/// Upper bound on the test's helper binary build. A cold workspace build of
+/// the binary takes minutes, not a quarter hour; past this the build is
+/// hung, and surfacing it beats stalling the test process forever.
+const CARGO_BUILD_DEADLINE: Duration = Duration::from_mins(15);
+
+static HELPER_BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Terminates the spawned build and its process tree, then reaps the leader
+/// so the test run leaves no orphaned processes or zombies behind.
+fn terminate_and_reap(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Rewinds and reads a temporary spool file into memory.
+fn read_spool(mut file: std::fs::File, name: &str) -> Result<Vec<u8>, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("failed to rewind {name} spool: {error}"))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {name} spool: {error}"))?;
+    Ok(bytes)
+}
+
+#[derive(serde::Deserialize)]
+struct CargoMessage {
+    reason: Option<String>,
+    target: Option<CargoTarget>,
+    executable: Option<PathBuf>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoTarget {
+    name: String,
+    kind: Vec<String>,
+}
+
 /// Locates the `dalgon` binary that serves as the sandbox helper.
 ///
 /// The helper is the workspace `dalgon` binary. When the caller supplies
 /// `DAL_SANDBOX_HELPER`, that explicit path identifies the helper alone: an
 /// invalid path fails the run instead of silently falling back, so one
 /// explicit input names exactly one binary. Without the variable the test
-/// uses the sibling of this test binary `<target>/debug/dalgon`; Cargo keeps
-/// intermediate dep binaries in `deps/` and the exported bin at
-/// `<target>/debug/dalgon`, so the sibling is the normal build-layout
-/// answer. Panics with the exact build command otherwise.
+/// builds the helper via Cargo once per process and captures the resulting
+/// executable path from Cargo's compiler-artifact stream. Panics if the
+/// build fails.
 fn helper_binary() -> PathBuf {
     let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     if let Some(exe) = environment.remove(std::ffi::OsStr::new("DAL_SANDBOX_HELPER")) {
@@ -54,19 +98,99 @@ fn helper_binary() -> PathBuf {
         );
         return path;
     }
-    let exe = std::env::current_exe().expect("test binary path");
-    let debug = exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("target debug dir");
-    let candidate = debug.join("dalgon");
-    assert!(
-        candidate.is_file(),
-        "build the sandbox helper first: cargo build -p dalgon --bin dalgon (looked in {}; \
-         set DAL_SANDBOX_HELPER to an explicit dalgon path to override)",
-        candidate.display(),
-    );
-    candidate
+    let binary = HELPER_BINARY
+        .get_or_init(build_helper_binary)
+        .as_ref()
+        .expect("failed to build dalgon sandbox helper binary");
+    binary.clone()
+}
+
+/// Builds the `dalgon` sandbox helper binary via Cargo and resolves its path
+/// from the compiler artifact stream. Output is spooled to temporary files to
+/// avoid pipe-fill deadlock while bounded by [`CARGO_BUILD_DEADLINE`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness: the test builds its helper binary through Cargo"
+)]
+fn build_helper_binary() -> Result<PathBuf, String> {
+    let stdout_file = tempfile::tempfile()
+        .map_err(|error| format!("failed to create stdout spool file: {error}"))?;
+    let stderr_file = tempfile::tempfile()
+        .map_err(|error| format!("failed to create stderr spool file: {error}"))?;
+    let stdout_writer = stdout_file
+        .try_clone()
+        .map_err(|error| format!("failed to clone stdout spool handle: {error}"))?;
+    let stderr_writer = stderr_file
+        .try_clone()
+        .map_err(|error| format!("failed to clone stderr spool handle: {error}"))?;
+
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command
+        .args([
+            "build",
+            "-p",
+            "dalgon",
+            "--bin",
+            "dalgon",
+            "--locked",
+            "--message-format=json",
+        ])
+        .current_dir(workspace)
+        .stdout(stdout_writer)
+        .stderr(stderr_writer);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start cargo: {error}"))?;
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                terminate_and_reap(&mut child);
+                return Err(format!("failed waiting for cargo: {error}"));
+            }
+        }
+        if started.elapsed() >= CARGO_BUILD_DEADLINE {
+            terminate_and_reap(&mut child);
+            return Err(format!(
+                "cargo build -p dalgon --bin dalgon --locked did not finish within {} seconds",
+                CARGO_BUILD_DEADLINE.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let stdout_bytes = read_spool(stdout_file, "stdout")?;
+    let stderr_bytes = read_spool(stderr_file, "stderr")?;
+
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr_bytes).into_owned());
+    }
+    for line in stdout_bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let text = std::str::from_utf8(line).map_err(|error| error.to_string())?;
+        let message: CargoMessage = sonic_rs::from_str(text).map_err(|error| error.to_string())?;
+        if message.reason.as_deref() != Some("compiler-artifact") {
+            continue;
+        }
+        let (Some(target), Some(executable)) = (message.target, message.executable) else {
+            continue;
+        };
+        if target.name == "dalgon" && target.kind.iter().any(|kind| kind == "bin") {
+            return Ok(executable);
+        }
+    }
+    Err("cargo build did not produce the dalgon binary executable".to_owned())
 }
 
 /// A model-visible tool that runs one shell script through the same checked

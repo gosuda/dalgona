@@ -6,7 +6,7 @@
 
 use std::{
     fmt::Write as _,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{self, Read, Write},
     path::Path,
     process::{Child, Command, Stdio},
@@ -45,7 +45,14 @@ impl PtyProcess {
         unlockpt(&master_fd).map_err(io::Error::from)?;
         let slave_name = ptsname(&master_fd, Vec::new()).map_err(io::Error::from)?;
         let slave_path = Path::new(slave_name.to_str().map_err(io::Error::other)?);
-        let slave = OpenOptions::new().read(true).write(true).open(slave_path)?;
+        let slave = File::from(
+            rustix::fs::open(
+                slave_path,
+                OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(io::Error::from)?,
+        );
         tcsetwinsize(
             &slave,
             Winsize {
