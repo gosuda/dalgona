@@ -383,8 +383,12 @@ pub fn product() -> ProductFactory {
         binary: BINARY,
         version: env!("CARGO_PKG_VERSION"),
         defaults: DEFAULTS,
+        config_product: dal_core::ConfigProduct::Dalgon,
         build,
         docs: builtin_manuals,
+        // dal owns no battery sections: `Config::load` already validated
+        // every dal key, so there are no product rows to list.
+        settings: |_| Ok(Vec::new()),
     }
 }
 

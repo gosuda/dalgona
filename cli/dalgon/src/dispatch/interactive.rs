@@ -14,9 +14,10 @@ use dal_wire::{RemoteEndpoint, RemoteHost};
 use crate::cli::{self, ColorArg};
 use crate::edge;
 use crate::exit;
-use crate::{Startup, VarsMap, host_exit, session_ref, two_lines};
+use crate::{ProductFactory, Startup, VarsMap, host_exit, session_ref, two_lines};
 
 mod remote;
+mod settings;
 mod signal;
 
 /// Guards the interactive path on a usable terminal; returns the failure
@@ -118,40 +119,35 @@ fn build_opts(
     }
 }
 
-/// Persists a TUI diagrams toggle back into dal.toml.
-fn diagram_saver(
-    mut config: Config,
-    config_path: PathBuf,
-) -> impl FnMut(bool) -> Result<(), TuiError> {
-    let save_config_path = config_path;
-    move |enabled| -> Result<(), TuiError> {
-        let user_toml = edge::read_user_config(&save_config_path).map_err(|error| {
-            TuiError::Terminal(format!("dalgon: cannot read dal.toml: {error}"))
-        })?;
-        let updated = config
-            .update_tui_diagrams(enabled, user_toml.as_deref())
-            .map_err(|error| {
-                TuiError::Terminal(format!("dalgon: cannot update dal.toml: {error}"))
-            })?;
-        let config_dir = save_config_path.parent().ok_or_else(|| {
-            TuiError::Terminal("dalgon: config path has no parent directory".to_owned())
-        })?;
-        dal_store::create_private_dir_all(config_dir).map_err(|error| {
-            TuiError::Terminal(format!("dalgon: cannot create config directory: {error}"))
-        })?;
-        dal_store::write_atomic(
-            &save_config_path,
-            updated.as_bytes(),
-            dal_store::FileMode::Mode0600,
-        )
-        .map_err(|error| {
-            TuiError::Terminal(format!(
-                "dalgon: cannot save {}: {error}",
-                save_config_path.display()
-            ))
-        })?;
-        Ok(())
-    }
+/// The diagram writer and the product settings editor the TUI saves through.
+type SettingsWriters = (
+    Box<dyn FnMut(bool) -> Result<(), TuiError> + Send>,
+    dal_tui::ProductSettings<
+        Box<dyn FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError> + Send>,
+        Box<dyn FnMut(&dal_core::SettingEdit) -> Result<(), TuiError> + Send>,
+    >,
+);
+
+/// Builds the `dal.toml` writers over one editor.
+fn settings_writers(editor: settings::ConfigEditor, config: Config) -> SettingsWriters {
+    let editor = std::sync::Arc::new(editor);
+    let diagrams = {
+        let editor = std::sync::Arc::clone(&editor);
+        let mut config = config;
+        move |enabled| editor.save_diagrams(&mut config, enabled)
+    };
+    let catalog = {
+        let editor = std::sync::Arc::clone(&editor);
+        move || editor.catalog()
+    };
+    let edit = move |edit: &dal_core::SettingEdit| editor.edit(edit);
+    (
+        Box::new(diagrams),
+        dal_tui::ProductSettings {
+            catalog: Box::new(catalog),
+            edit: Box::new(edit),
+        },
+    )
 }
 
 /// Connects the TUI to a remote host and runs it.
@@ -160,7 +156,7 @@ async fn connect_remote(
     addr: &str,
     cwd: &Path,
     opts: TuiOptions,
-    save_diagrams: impl FnMut(bool) -> Result<(), TuiError> + Send + 'static,
+    writers: SettingsWriters,
 ) -> ExitCode {
     let endpoint = match endpoint(addr) {
         Ok(endpoint) => endpoint,
@@ -189,17 +185,17 @@ async fn connect_remote(
             .map_err(|error| TuiError::Backend(Box::new(error)))?;
         Ok(remote_model_options(models))
     };
-    let (code, _shutdown) = run_blocking(
-        remote::RemoteBackend(host),
-        opts,
-        model_source,
-        save_diagrams,
-    )
-    .await;
+    let (code, _shutdown) =
+        run_blocking(remote::RemoteBackend(host), opts, model_source, writers).await;
     code
 }
 /// Starts the interactive client after the process edge has resolved all inputs.
-pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
+pub(crate) async fn interactive(
+    cli: &cli::Cli,
+    startup: Startup,
+    factory: ProductFactory,
+    product: Product,
+) -> ExitCode {
     let t0 = std::time::Instant::now();
     let snapshot = edge::terminal_snapshot();
     let term = captured(&startup.vars, "TERM");
@@ -215,7 +211,6 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         config,
         config_path,
         data_root,
-        binary,
         helper,
         ..
     } = startup;
@@ -223,11 +218,33 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if vars.contains_key(OsStr::new("DAL_DEBUG")) {
         eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
     }
-    let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color, binary);
-    let save_diagrams = diagram_saver(config.clone(), config_path.clone());
+    let opts = build_opts(
+        cli,
+        workspace,
+        &config,
+        &vars,
+        &snapshot,
+        no_color,
+        factory.binary,
+    );
+    let editor =
+        settings::ConfigEditor::new(factory, &config, data_root.clone(), config_path.clone());
     if let Some(addr) = cli.connect.as_deref() {
-        return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
+        let binary = factory.binary;
+        let (diagrams, mut product) = settings_writers(editor, config);
+        // Local product rows would not describe what a remote host runs, and
+        // a local `dal.toml` edit never changes it: the remote session lists
+        // no product rows and refuses any product edit. Only the local
+        // diagram preference is saved here.
+        product.catalog = Box::new(|| Ok(Vec::new()));
+        product.edit = Box::new(move |_: &dal_core::SettingEdit| {
+            Err(TuiError::Terminal(format!(
+                "{binary}: product settings belong to the host process; edit its dal.toml and restart it"
+            )))
+        });
+        return connect_remote(cli, addr, &cwd, opts, (diagrams, product)).await;
     }
+    let writers = settings_writers(editor, config.clone());
     let dal_debug = vars.contains_key(OsStr::new("DAL_DEBUG"));
     if dal_debug {
         eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
@@ -269,7 +286,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     if dal_debug {
         eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
     }
-    let (code, mut signals) = run_blocking(host, opts, model_source, save_diagrams).await;
+    let (code, mut signals) = run_blocking(host, opts, model_source, writers).await;
     // The terminal is already restored here; the ladder closes the host.
     let closed = exit::Ladder::begin()
         .close_host(shutdown, &mut signals)
@@ -277,16 +294,15 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
     closed.skipped_by.map_or(code, ExitCode::from)
 }
 
-async fn run_blocking<H, M, S>(
+async fn run_blocking<H, M>(
     host: H,
     opts: TuiOptions,
     model_source: M,
-    save_diagrams: S,
+    (save_diagrams, product): SettingsWriters,
 ) -> (ExitCode, edge::ShutdownSignals)
 where
     H: dal_tui::backend::TuiHost,
     M: FnMut() -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> + Send + 'static,
-    S: FnMut(bool) -> Result<(), TuiError> + Send + 'static,
 {
     let mut signals = signal::Signals::start();
     #[expect(
@@ -295,7 +311,14 @@ where
     )]
     let io = signals.terminal(std::io::stdin());
     let mut task = tokio::task::spawn_blocking(move || {
-        dal_tui::run_backend_with_settings_save(&host, &opts, &io, model_source, save_diagrams)
+        dal_tui::run_backend_with_product_settings(
+            &host,
+            &opts,
+            &io,
+            model_source,
+            save_diagrams,
+            product,
+        )
     });
     let polled = tokio::select! {
         biased;

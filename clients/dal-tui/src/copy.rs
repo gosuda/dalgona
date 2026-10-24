@@ -353,7 +353,7 @@ pub mod ids {
     /// Key guide after a failure.
     pub const LOGIN_FAILED_KEYS: &str = "any key closes";
     /// Settings title.
-    pub const SETTINGS_TITLE: &str = "Settings · changes are session-only until saved";
+    pub const SETTINGS_TITLE: &str = "Settings";
     /// Model settings label.
     pub const SETTINGS_MODEL: &str = "model";
     /// Screen settings label.
@@ -380,6 +380,25 @@ pub mod ids {
     pub const SETTINGS_EDITOR: &str = "editor";
     /// Settings hint.
     pub const SETTINGS_HINT: &str = "arrows select · enter toggles or saves · esc close";
+    /// Settings row that opens the existing `/model` chooser.
+    pub const SETTINGS_MODEL_OPEN: &str = "model · open the model picker";
+    /// Product setting row: the saved value the next start reads.
+    pub const SETTINGS_PRODUCT_ROW: &str =
+        "{group} · {label}: {value} · saved in dal.toml · restart required";
+    /// Product setting row whose saved value differs from the running one.
+    pub const SETTINGS_PRODUCT_ROW_CHANGED: &str =
+        "{group} · {label}: {value} (running: {running}) · saved in dal.toml · restart required";
+    /// Settings row shown when the product rows cannot be read.
+    pub const SETTINGS_PRODUCT_ERROR: &str = "product settings unavailable: {error}";
+    /// Value editor title for one product setting.
+    pub const SETTINGS_VALUE_TITLE: &str = "{key} = {value} · saved to dal.toml · restart required";
+    /// Value-editor row that saves an empty text value.
+    pub const SETTINGS_VALUE_CLEAR: &str = "clear · save an empty value (the default)";
+    /// Typed-entry row of a value editor.
+    pub const SETTINGS_VALUE_ENTRY: &str = "set {key} = {value}";
+    /// Notice after a product setting edit was written.
+    pub const SETTINGS_SAVED: &str =
+        "saved {key} = {value} to dal.toml · restart required: the running session is unchanged";
     /// Persisted-session exit line.
     pub const EXIT_SAVED: &str =
         "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {token} to resume";
@@ -657,6 +676,17 @@ pub const DECK: &[(&str, &str)] = &[
     ("settings.approval", ids::SETTINGS_APPROVAL),
     ("settings.diagrams", ids::SETTINGS_DIAGRAMS),
     ("settings.diagrams.save", ids::SETTINGS_DIAGRAMS_SAVE),
+    ("settings.model.open", ids::SETTINGS_MODEL_OPEN),
+    ("settings.product.row", ids::SETTINGS_PRODUCT_ROW),
+    (
+        "settings.product.row.changed",
+        ids::SETTINGS_PRODUCT_ROW_CHANGED,
+    ),
+    ("settings.product.error", ids::SETTINGS_PRODUCT_ERROR),
+    ("settings.value.title", ids::SETTINGS_VALUE_TITLE),
+    ("settings.value.entry", ids::SETTINGS_VALUE_ENTRY),
+    ("settings.value.clear", ids::SETTINGS_VALUE_CLEAR),
+    ("settings.saved", ids::SETTINGS_SAVED),
     ("settings.approval.ask", ids::SETTINGS_APPROVAL_ASK),
     ("settings.approval.edits", ids::SETTINGS_APPROVAL_EDITS),
     ("settings.approval.all", ids::SETTINGS_APPROVAL_ALL),

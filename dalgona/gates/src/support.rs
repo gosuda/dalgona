@@ -781,9 +781,10 @@ pub struct Pane {
 
 #[cfg(unix)]
 impl Pane {
-    /// Starts `dalgona --screen inline` in a 110 by 32 pane over a fresh
-    /// config, data root, and workspace, with a scripted provider and
-    /// approval mode `ask`.
+    /// Starts a bare `dalgona`, with no command-line arguments, in a 110 by
+    /// 32 pane over a fresh config, data root, and workspace, with a scripted
+    /// provider and approval mode `ask`. The screen is the config default,
+    /// inline.
     ///
     /// # Errors
     /// Returns setup failures, a missing binary, or a missing tmux.
@@ -847,8 +848,6 @@ impl Pane {
             "TERM=tmux-256color",
             &format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
             &dalgona_binary()?.to_string_lossy(),
-            "--screen",
-            "inline",
         ])?;
         if !output.status.success() {
             return Err(format!(

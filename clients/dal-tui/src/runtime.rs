@@ -83,6 +83,11 @@ struct Session {
     pending_copies: Vec<Box<str>>,
     pending_answers: Vec<(RequestId, Answer)>,
     pending_diagram_settings: Vec<(bool, dal_core::command::Save)>,
+    /// Product setting edits awaiting the process-edge `dal.toml` writer.
+    pending_setting_edits: Vec<dal_core::SettingEdit>,
+    /// Set when a settings picker opened; the next tick appends the
+    /// product's rows read from the latest `dal.toml`.
+    settings_catalog_due: bool,
     /// Set when the failed model picker saw `r`; the next tick reruns the
     /// real model source and rebuilds the picker, query/filter intact.
     pending_model_retry: bool,
@@ -558,17 +563,20 @@ fn start_blob_load<A: TuiAgent>(
     }
 }
 
-pub(super) fn run<H, M, S>(
+pub(super) fn run<H, M, S, C, E>(
     host: &H,
     opts: &TuiOptions,
     io: &impl TermIo,
     model_source: M,
     save_diagrams: S,
+    product: crate::ProductSettings<C, E>,
 ) -> Result<TuiExit, TuiError>
 where
     H: TuiHost,
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
+    C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+    E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
 {
     crate::keys::validate(crate::keys::BINDINGS)?;
     if !opts.env.stdin_tty {
@@ -579,7 +587,10 @@ where
     }
 
     let mut model_source = model_source;
-    let mut save_diagrams = save_diagrams;
+    let mut settings = SettingsEdge {
+        diagrams: save_diagrams,
+        product,
+    };
     // Resume loop. A resume is attempted INSIDE the live loop (`run_loop`):
     // the replacement session is opened while this one is still open and
     // untouched, with its Surfaces, Painter and pump alive. A target that
@@ -617,7 +628,7 @@ where
                 host: host.clone(),
             },
             &mut model_source,
-            &mut save_diagrams,
+            &mut settings,
             view,
             ephemeral,
         );
@@ -985,7 +996,7 @@ fn boot<A: TuiAgent>(
             ..Session::default()
         },
         dialog: DialogUi::default(),
-        live: Live::default(),
+        live: Live::for_binary(opts.binary),
         transcript: Transcript::default(),
         diagram_settings: crate::diagram::DiagramSettings {
             enabled: opts.diagrams,
@@ -1087,7 +1098,14 @@ fn enter_interface_modes(
 
 type RunLoopOutcome<H> = (TuiExit, Option<TurnId>, Vec<String>, Option<H>);
 
-fn run_loop<A, H, M, S>(
+/// The process-edge settings writers: the diagram preference saver and the
+/// product's editable startup settings.
+struct SettingsEdge<S, C, E> {
+    diagrams: S,
+    product: crate::ProductSettings<C, E>,
+}
+
+fn run_loop<A, H, M, S, C, E>(
     io: &dyn TermIo,
     opts: &TuiOptions,
     state: &Arc<Mutex<TermState>>,
@@ -1095,7 +1113,7 @@ fn run_loop<A, H, M, S>(
     pump: &mut Pump<A::Subscription>,
     commands: CommandContext<H>,
     model_source: &mut M,
-    save_diagrams: &mut S,
+    settings: &mut SettingsEdge<S, C, E>,
     view: dal_core::View,
     ephemeral: bool,
 ) -> Result<RunLoopOutcome<H::Agent>, TuiError>
@@ -1104,6 +1122,8 @@ where
     H: TuiHost,
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
+    C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+    E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
 {
     let CommandContext { specs, host } = commands;
     enter_interface_modes(io, opts, state)?;
@@ -1161,7 +1181,8 @@ where
             repaint_live_region(io, state, opts, &theme, &mut painter, &mut surfaces)?;
         }
         surfaces.write_copies(io);
-        surfaces.apply_diagram_updates(opts, &mut painter, &probe, save_diagrams);
+        surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut settings.diagrams);
+        surfaces.apply_product_settings(&mut settings.product);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
@@ -1572,8 +1593,13 @@ impl Surfaces {
                 // before a snapshot dropped it) announces the outcome; queued
                 // requests the user never saw stay silent.
                 if let Some(title) = self.dialog.resolved(&id.to_string()) {
-                    self.live
-                        .notice(resolution_notice(crate::copy::identity(opts.binary), *cause, by, answer, &title));
+                    self.live.notice(resolution_notice(
+                        crate::copy::identity(opts.binary),
+                        *cause,
+                        by,
+                        answer,
+                        &title,
+                    ));
                 }
                 self.view.open.retain(|request| request.id != *id);
             }
@@ -1758,10 +1784,13 @@ impl Surfaces {
                             Some(crate::picker::model_picker_failed(&filter))
                         }
                     }
-                    Chooser::Settings => Some(crate::picker::settings_picker(
-                        self.diagram_settings.enabled,
-                        &filter,
-                    )),
+                    Chooser::Settings => {
+                        self.session.settings_catalog_due = true;
+                        Some(crate::picker::settings_picker(
+                            self.diagram_settings.enabled,
+                            &filter,
+                        ))
+                    }
                     Chooser::Login => Some(signin::login_picker(&filter)),
                     Chooser::Logout => {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
@@ -2121,6 +2150,43 @@ impl Surfaces {
                     "diagram rendering disabled for this session"
                 });
             }
+        }
+    }
+
+    /// Appends the product rows to a freshly opened settings picker and runs
+    /// queued product setting edits through the process-edge writer.
+    ///
+    /// A saved edit reopens the settings picker over the reread `dal.toml`
+    /// and says the change applies after a restart; nothing reloads live. A
+    /// refused edit names the field and keeps the value picker open.
+    fn apply_product_settings<C, E>(&mut self, product: &mut crate::ProductSettings<C, E>)
+    where
+        C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+        E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
+    {
+        for edit in std::mem::take(&mut self.session.pending_setting_edits) {
+            match (product.edit)(&edit) {
+                Ok(()) => {
+                    self.live.notice(crate::copy::render(
+                        crate::copy::ids::SETTINGS_SAVED,
+                        &[("key", &edit.key), ("value", &edit.value.to_string())],
+                        1,
+                    ));
+                    self.session.picker = Some(crate::picker::settings_picker(
+                        self.diagram_settings.enabled,
+                        "",
+                    ));
+                    self.session.settings_catalog_due = true;
+                }
+                Err(error) => self
+                    .live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}")),
+            }
+        }
+        if std::mem::take(&mut self.session.settings_catalog_due)
+            && let Some(picker) = self.session.picker.as_mut()
+        {
+            picker.add_product_settings((product.catalog)().map_err(|error| error.to_string()));
         }
     }
 
@@ -3000,6 +3066,15 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
     let Some(picker) = session.picker.as_mut() else {
         return;
     };
+    // A typed setting value is free text from its first character: `j`,
+    // `k`, `d`, and Space are value text there, never moves or deletes.
+    if picker.takes_typed_value()
+        && let KeyCode::Char(character) = key.code
+        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+    {
+        picker.add_filter_char(character);
+        return;
+    }
     let table_action = resolve_in(key, false, &[Owner::Picker]);
     // The empty filter admits the documented plain-letter keys before the
     // filter-text arm; a non-empty filter sends every unmodified character
@@ -3018,57 +3093,7 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
 
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => session.picker = None,
-        (KeyCode::Enter, _) => {
-            match session
-                .picker
-                .as_mut()
-                .and_then(PickerUi::activate_selected)
-            {
-                Some(PickerAction::Command(command)) => {
-                    session.pending_commands.push(command);
-                    session.picker = None;
-                }
-                Some(PickerAction::ConfirmLogoutAll) => {
-                    session.signin = Some(SignIn::confirm_all());
-                    session.picker = None;
-                }
-                Some(PickerAction::Login { provider, method }) => {
-                    session
-                        .front
-                        .push(FrontRequest::StartMethod { provider, method });
-                    session.picker = None;
-                }
-                Some(PickerAction::SetDraft(text)) => {
-                    // History recall: the row's message becomes the draft.
-                    session.composer.set(&text);
-                    session.popup_base = None;
-                    session.popup_index = 0;
-                    session.picker = None;
-                    session.update_popup();
-                }
-                Some(PickerAction::ResumeSession(target)) => {
-                    if Some(target.id) == session.own {
-                        live.notice_as(
-                            crate::theme::Role::Error,
-                            "note: this is the current session",
-                        );
-                    } else {
-                        session.resume_target = Some(ResumeRequest {
-                            id: target.id,
-                            workspace: Some(target.workspace),
-                        });
-                    }
-                    session.picker = None;
-                }
-                Some(PickerAction::SetDiagrams { enabled, save }) => {
-                    session.pending_diagram_settings.push((enabled, save));
-                }
-                // The failed model picker's instruction row activates
-                // nothing and keeps the failure surface open.
-                Some(PickerAction::Noop) => {}
-                Some(_) | None => session.picker = None,
-            }
-        }
+        (KeyCode::Enter, _) => activate_picker_selection(session, live),
         (KeyCode::Up, _) => picker.move_selection(false),
         (KeyCode::Down, _) => picker.move_selection(true),
         (KeyCode::Backspace, _) => picker.remove_filter_char(),
@@ -3092,6 +3117,72 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
             picker.add_filter_char(character);
         }
         _ => {}
+    }
+}
+
+/// Enter on the focused picker row runs the row's action. The `Noop`
+/// instruction row keeps the picker open; a row with no action, or one this
+/// picker does not handle, closes it.
+fn activate_picker_selection(session: &mut Session, live: &mut Live) {
+    match session
+        .picker
+        .as_mut()
+        .and_then(PickerUi::activate_selected)
+    {
+        Some(PickerAction::Command(command)) => {
+            session.pending_commands.push(command);
+            session.picker = None;
+        }
+        Some(PickerAction::ConfirmLogoutAll) => {
+            session.signin = Some(SignIn::confirm_all());
+            session.picker = None;
+        }
+        Some(PickerAction::Login { provider, method }) => {
+            session
+                .front
+                .push(FrontRequest::StartMethod { provider, method });
+            session.picker = None;
+        }
+        Some(PickerAction::SetDraft(text)) => {
+            // History recall: the row's message becomes the draft.
+            session.composer.set(&text);
+            session.popup_base = None;
+            session.popup_index = 0;
+            session.picker = None;
+            session.update_popup();
+        }
+        Some(PickerAction::ResumeSession(target)) => {
+            if Some(target.id) == session.own {
+                live.notice_as(
+                    crate::theme::Role::Error,
+                    "note: this is the current session",
+                );
+            } else {
+                session.resume_target = Some(ResumeRequest {
+                    id: target.id,
+                    workspace: Some(target.workspace),
+                });
+            }
+            session.picker = None;
+        }
+        Some(PickerAction::SetDiagrams { enabled, save }) => {
+            session.pending_diagram_settings.push((enabled, save));
+        }
+        Some(PickerAction::EditSetting(setting)) => {
+            session.picker = Some(crate::picker::setting_value_picker(setting));
+        }
+        // The picker stays until the writer answers: a refused edit
+        // keeps the value picker open for a corrected value.
+        Some(PickerAction::SaveSetting(edit)) => {
+            session.pending_setting_edits.push(edit);
+        }
+        Some(PickerAction::RejectSetting(reason)) => {
+            live.notice_as(crate::theme::Role::Error, format!("note: {reason}"));
+        }
+        // The failed model picker's instruction row activates
+        // nothing and keeps the failure surface open.
+        Some(PickerAction::Noop) => {}
+        Some(_) | None => session.picker = None,
     }
 }
 
@@ -4399,6 +4490,39 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_setting_value_keeps_plain_letters_as_text() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue};
+
+        let mut session = Session {
+            picker: Some(crate::picker::setting_value_picker(ProductSetting {
+                key: "plugin.review.diff_base".into(),
+                group: "review".into(),
+                label: "diff base".into(),
+                value: SettingValue::Text("".into()),
+                running: None,
+                control: SettingControl::Text,
+            })),
+            ..Session::default()
+        };
+        for character in "kj dev".chars() {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            session.pending_setting_edits,
+            [SettingEdit {
+                key: "plugin.review.diff_base".into(),
+                value: SettingValue::Text("kj dev".into()),
+            }]
+        );
+    }
+
+    #[test]
     fn settings_picker_updates_local_state_and_queues_config_saves() {
         use crate::keys::Key;
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -5606,7 +5730,7 @@ mod run_command_tests {
     };
     use tokio::sync::Notify;
 
-    use super::{InflightRun, Session, run, start_run};
+    use super::{InflightRun, Session, start_run};
     use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
     use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions};
 
@@ -5748,7 +5872,8 @@ mod run_command_tests {
         };
         let io = crate::term::fake_term_io(Vec::new());
 
-        let outcome = run(&host, &opts, &io, || Ok(Vec::new()), |_| Ok(()));
+        let outcome =
+            crate::run_backend_with_settings_save(&host, &opts, &io, || Ok(Vec::new()), |_| Ok(()));
 
         assert!(
             matches!(outcome, Err(TuiError::Terminal(_))),
@@ -6851,8 +6976,14 @@ mod loop_tests {
         let terminal = ScriptedTerminal {
             chunks: Mutex::new(script.into()),
         };
-        super::run(&host, &opts, &terminal, || Ok(Vec::new()), |_| Ok(()))
-            .expect("the loop exits cleanly");
+        crate::run_backend_with_settings_save(
+            &host,
+            &opts,
+            &terminal,
+            || Ok(Vec::new()),
+            |_| Ok(()),
+        )
+        .expect("the loop exits cleanly");
         log.events()
     }
 
@@ -7830,6 +7961,94 @@ mod loop_tests {
             roles,
             [Role::Error, Role::Dim, Role::Error],
             "the session-only diagram toggle stays informational: {tail:?}"
+        );
+    }
+
+    /// A saved product edit says it needs a restart and reopens the settings
+    /// over the reread rows; a refused edit is an error note that keeps the
+    /// value picker open and claims nothing was saved.
+    #[test]
+    fn product_setting_saves_need_a_restart_and_refusals_keep_the_editor() {
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue};
+
+        let row = |value: i64| ProductSetting {
+            key: "plugin.web.timeout_secs".into(),
+            group: "web".into(),
+            label: "timeout secs".into(),
+            value: SettingValue::Integer(value),
+            running: None,
+            control: SettingControl::Integer,
+        };
+        let saved = std::cell::RefCell::new(30_i64);
+        let mut product = crate::ProductSettings {
+            catalog: || Ok(vec![row(*saved.borrow())]),
+            edit: |edit: &SettingEdit| match edit.value {
+                SettingValue::Integer(value) if (1..=300).contains(&value) => {
+                    *saved.borrow_mut() = value;
+                    Ok(())
+                }
+                _ => Err(TuiError::Terminal(
+                    "dalgona: dal.toml: timeout_secs must be 1 to 300".to_owned(),
+                )),
+            },
+        };
+        let mut rig = Rig::new();
+
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(row(30)));
+        rig.surfaces.session.pending_setting_edits = vec![SettingEdit {
+            key: "plugin.web.timeout_secs".into(),
+            value: SettingValue::Integer(301),
+        }];
+        rig.surfaces.apply_product_settings(&mut product);
+        let (role, text) = rig
+            .surfaces
+            .live
+            .notices()
+            .last()
+            .map(|row| (row.role, row.text.clone()))
+            .expect("a notice");
+        assert_eq!(role, crate::theme::Role::Error);
+        assert!(text.contains("timeout_secs must be 1 to 300"), "{text}");
+        assert!(!text.contains("saved"), "{text}");
+        assert_eq!(*saved.borrow(), 30);
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| !picker.is_settings()),
+            "the value editor stays open for a corrected value"
+        );
+
+        rig.surfaces.session.pending_setting_edits = vec![SettingEdit {
+            key: "plugin.web.timeout_secs".into(),
+            value: SettingValue::Integer(45),
+        }];
+        rig.surfaces.apply_product_settings(&mut product);
+        let text = rig
+            .surfaces
+            .live
+            .notices()
+            .last()
+            .map(|row| row.text.clone())
+            .expect("a notice");
+        assert_eq!(
+            text,
+            "saved plugin.web.timeout_secs = 45 to dal.toml · restart required: the running session is unchanged"
+        );
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("settings reopen");
+        assert!(picker.is_settings());
+        assert!(
+            (0..picker.visible_len())
+                .filter_map(|index| picker.visible_option(index))
+                .any(|option| option.label
+                    == "web · timeout secs: 45 · saved in dal.toml · restart required"),
+            "the reopened settings show the reread value"
         );
     }
 

@@ -518,10 +518,10 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
     };
     let mut middle: Vec<RenderRow> = Vec::new();
     let mut selected_pos = 0;
-    if let Some(id) = picker.model_filter_fallback() {
+    if let Some(entry) = picker.typed_entry_row() {
         let selected = picker.is_selected(picker.selected_fallback_index());
         middle.push(option_row(
-            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
+            format!("{} {}", if selected { ">" } else { " " }, escape(&entry)),
             selected,
         ));
     } else {
@@ -2786,6 +2786,28 @@ mod tests {
             rows.iter().any(|row| row.text.contains("model-")),
             "the picker stays painted at shrunk sizes: {:?}",
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn settings_value_titles_cannot_emit_terminal_control_sequences() {
+        let picker = crate::picker::setting_value_picker(dal_core::ProductSetting {
+            key: "plugin.review.reviewer_model".into(),
+            group: "review".into(),
+            label: "reviewer model".into(),
+            value: dal_core::SettingValue::Text("unsafe-title\x1b]0;spoof\x07".into()),
+            running: None,
+            control: dal_core::SettingControl::Text,
+        });
+        let rows = super::picker_overlay_rows(&picker, 8);
+        assert!(
+            rows[0].text.contains("unsafe-title"),
+            "the value stays visible"
+        );
+        assert!(
+            !rows[0].text.chars().any(char::is_control),
+            "the title must escape terminal controls: {:?}",
+            rows[0].text
         );
     }
 

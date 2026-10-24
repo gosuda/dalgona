@@ -158,40 +158,19 @@ impl Config {
         enabled: bool,
         user_toml: Option<&str>,
     ) -> Result<String, ConfigError> {
-        let mut document = user_toml
-            .unwrap_or_default()
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|error| ConfigError::Syntax {
-                line: None,
-                message: error.to_string().into_boxed_str(),
-            })?;
-        if !document.contains_key("tui") {
-            document.insert("tui", toml_edit::Item::Table(toml_edit::Table::new()));
-        }
-        let tui = document
-            .get_mut("tui")
-            .and_then(toml_edit::Item::as_table_like_mut)
-            .ok_or_else(|| invalid_value("tui", "non-table", "table"))?;
-        match tui.get_mut("diagrams") {
-            Some(item) => {
-                let expected = item.to_string();
-                let Some(value) = item.as_value_mut() else {
-                    return Err(invalid_value("tui.diagrams", expected, "boolean"));
-                };
-                if value.as_bool().is_none() {
-                    return Err(invalid_value("tui.diagrams", expected, "boolean"));
-                }
-                let decor = value.decor().clone();
-                let mut replacement = toml_edit::Value::from(enabled);
-                *replacement.decor_mut() = decor;
-                *value = replacement;
-            }
-            None => {
-                tui.insert("diagrams", toml_edit::value(enabled));
-            }
-        }
+        let document =
+            super::settings::edit_user_value(
+                user_toml,
+                "tui.diagrams",
+                |existing| match existing {
+                    Some(value) if value.as_bool().is_none() => {
+                        Err(invalid_value("tui.diagrams", value.to_string(), "boolean"))
+                    }
+                    _ => Ok(enabled.into()),
+                },
+            )?;
         self.tui.diagrams = enabled;
-        Ok(document.to_string())
+        Ok(document)
     }
 
     /// Rewrites the user's default model in place, preserving decor.

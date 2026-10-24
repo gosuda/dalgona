@@ -245,7 +245,58 @@ where
     M: FnMut() -> Result<Vec<picker::ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
 {
-    runtime::run(host, opts, io, models, save_diagrams)
+    runtime::run(
+        host,
+        opts,
+        io,
+        models,
+        save_diagrams,
+        ProductSettings {
+            catalog: || Ok(Vec::new()),
+            edit: |_: &dal_core::SettingEdit| {
+                Err(TuiError::Terminal(
+                    "dal-tui: this host cannot save product configuration".to_owned(),
+                ))
+            },
+        },
+    )
+}
+
+/// The product's editable `dal.toml` settings, supplied by the process edge.
+///
+/// Every row is startup-only: a saved edit applies when the product next
+/// starts, and the settings picker says so. Neither callback changes the
+/// running host.
+pub struct ProductSettings<C, E> {
+    /// Reads the latest user `dal.toml` and returns the product's rows.
+    pub catalog: C,
+    /// Validates one edit against the latest `dal.toml` and writes it.
+    /// A refused edit leaves the file unchanged and returns the reason.
+    pub edit: E,
+}
+
+/// Runs the terminal client with the diagram writer and the product's
+/// editable startup settings in the settings picker.
+///
+/// # Errors
+/// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
+/// A settings-writer error is shown in the TUI and changes nothing.
+pub fn run_backend_with_product_settings<H, M, S, C, E>(
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl term::TermIo,
+    models: M,
+    save_diagrams: S,
+    product: ProductSettings<C, E>,
+) -> Result<TuiExit, TuiError>
+where
+    H: backend::TuiHost,
+    M: FnMut() -> Result<Vec<picker::ModelOption>, TuiError>,
+    S: FnMut(bool) -> Result<(), TuiError>,
+    C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+    E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
+{
+    runtime::run(host, opts, io, models, save_diagrams, product)
 }
 
 mod help;
