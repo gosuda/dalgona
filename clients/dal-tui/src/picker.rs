@@ -412,6 +412,12 @@ impl PickerUi {
         (self.model_fallback && self.visible.is_empty() && !self.filter.trim().is_empty())
             .then_some(self.filter.trim())
     }
+    /// The key of the product setting this value picker edits; `None` on
+    /// every other picker.
+    pub(crate) fn setting_key(&self) -> Option<&str> {
+        self.setting.as_ref().map(|setting| &*setting.key)
+    }
+
     pub(crate) fn is_settings(&self) -> bool {
         self.diagram_enabled.is_some()
     }

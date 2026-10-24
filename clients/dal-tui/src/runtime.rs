@@ -61,6 +61,24 @@ fn resolution_notice(
     )
 }
 
+/// The admitted value-editor save held until `apply_product_settings` drains
+/// it. `reopen` ends on Esc: a dismissed editor is never resurrected by the
+/// save it admitted.
+#[derive(Debug)]
+struct PendingSettingEdit {
+    edit: dal_core::SettingEdit,
+    reopen: bool,
+}
+
+/// Whether an admitted save still pends while `picker` is a value editor. The
+/// editor then takes only Esc, and paste waits, until the drain settles it.
+fn value_editor_pends(
+    pending: Option<&PendingSettingEdit>,
+    picker: &crate::picker::PickerUi,
+) -> bool {
+    pending.is_some() && picker.setting_key().is_some()
+}
+
 /// Local composer and exit state; transport to `Agent::submit` lands with `Host::open`.
 #[derive(Debug, Default)]
 #[expect(
@@ -83,8 +101,9 @@ struct Session {
     pending_copies: Vec<Box<str>>,
     pending_answers: Vec<(RequestId, Answer)>,
     pending_diagram_settings: Vec<(bool, dal_core::command::Save)>,
-    /// Product setting edits awaiting the process-edge `dal.toml` writer.
-    pending_setting_edits: Vec<dal_core::SettingEdit>,
+    /// The one admitted product setting save, awaiting the process-edge
+    /// `dal.toml` writer. A second admission waits for it to settle.
+    pending_setting_edit: Option<PendingSettingEdit>,
     /// Set when a settings picker opened; the next tick appends the
     /// product's rows read from the latest `dal.toml`.
     settings_catalog_due: bool,
@@ -2170,31 +2189,46 @@ impl Surfaces {
         }
     }
 
+    /// Reopens the settings list after an admitted save, but only over the
+    /// editor that admitted it and only while Esc has not dismissed it.
+    fn reopen_settings_after(&mut self, pending: &PendingSettingEdit) {
+        let same_editor = self.session.picker.as_ref().is_some_and(|picker| {
+            picker.is_settings() || picker.setting_key() == Some(&*pending.edit.key)
+        });
+        if !pending.reopen || !same_editor {
+            return;
+        }
+        self.session.picker = Some(crate::picker::settings_picker(
+            self.diagram_settings.enabled,
+            self.view.settings.thinking,
+            "",
+        ));
+        self.session.settings_catalog_due = true;
+    }
+
     /// Appends the product rows to a freshly opened settings picker and runs
     /// queued product setting edits through the process-edge writer.
     ///
     /// A saved edit reopens the settings picker over the reread `dal.toml`
     /// and says the change applies after a restart; nothing reloads live. A
-    /// refused edit names the field and keeps the value picker open.
+    /// refused edit names the field and keeps the value picker open. The
+    /// reopen happens only while the editor that admitted the save is still
+    /// open; Esc ends it, and a dismissed editor never comes back this way.
     fn apply_product_settings<C, E>(&mut self, product: &mut crate::ProductSettings<C, E>)
     where
         C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
         E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
     {
-        for edit in std::mem::take(&mut self.session.pending_setting_edits) {
-            match (product.edit)(&edit) {
+        if let Some(pending) = self.session.pending_setting_edit.take() {
+            let edit = &pending.edit;
+            match (product.edit)(edit) {
                 Ok(()) => {
                     self.live.notice(crate::copy::render(
                         crate::copy::ids::SETTINGS_SAVED,
                         &[("key", &edit.key), ("value", &edit.value.to_string())],
                         1,
                     ));
-                    self.session.picker = Some(crate::picker::settings_picker(
-                        self.diagram_settings.enabled,
-                        self.view.settings.thinking,
-                        "",
-                    ));
-                    self.session.settings_catalog_due = true;
+                    self.reopen_settings_after(&pending);
                 }
                 Err(error) => self
                     .live
@@ -2571,6 +2605,10 @@ fn apply_paste(session: &mut Session, dialog: &mut DialogUi, live: &Live, bytes:
     if let Some(picker) = session.picker.as_mut() {
         // The picker's one-line filter is a text field: paste filters like
         // typed characters and never submits.
+        // An admitted save pends in its value editor: paste waits for the drain.
+        if value_editor_pends(session.pending_setting_edit.as_ref(), picker) {
+            return;
+        }
         picker.paste(&String::from_utf8_lossy(bytes));
         return;
     }
@@ -3084,6 +3122,17 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
     let Some(picker) = session.picker.as_mut() else {
         return;
     };
+    // An admitted save pends until the drain settles it: its value editor
+    // takes only Esc, which dismisses the editor and ends that save's reopen.
+    if value_editor_pends(session.pending_setting_edit.as_ref(), picker) {
+        if key.code == KeyCode::Esc {
+            session.picker = None;
+            if let Some(pending) = session.pending_setting_edit.as_mut() {
+                pending.reopen = false;
+            }
+        }
+        return;
+    }
     // A typed setting value is free text from its first character: `j`,
     // `k`, `d`, and Space are value text there, never moves or deletes.
     if picker.takes_typed_value()
@@ -3110,7 +3159,12 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => session.picker = None,
+        (KeyCode::Esc, _) => {
+            session.picker = None;
+            if let Some(pending) = session.pending_setting_edit.as_mut() {
+                pending.reopen = false;
+            }
+        }
         (KeyCode::Enter, _) => activate_picker_selection(session, live),
         (KeyCode::Up, _) => picker.move_selection(false),
         (KeyCode::Down, _) => picker.move_selection(true),
@@ -3192,7 +3246,10 @@ fn activate_picker_selection(session: &mut Session, live: &mut Live) {
         // The picker stays until the writer answers: a refused edit
         // keeps the value picker open for a corrected value.
         Some(PickerAction::SaveSetting(edit)) => {
-            session.pending_setting_edits.push(edit);
+            // One save pends at a time; a save already admitted keeps the slot.
+            if session.pending_setting_edit.is_none() {
+                session.pending_setting_edit = Some(PendingSettingEdit { edit, reopen: true });
+            }
         }
         Some(PickerAction::RejectSetting(reason)) => {
             live.notice_as(crate::theme::Role::Error, format!("note: {reason}"));
@@ -4533,11 +4590,14 @@ mod tests {
         }
         apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            session.pending_setting_edits,
-            [SettingEdit {
+            session
+                .pending_setting_edit
+                .as_ref()
+                .map(|pending| &pending.edit),
+            Some(&SettingEdit {
                 key: "plugin.review.diff_base".into(),
                 value: SettingValue::Text("kj dev".into()),
-            }]
+            })
         );
     }
 
@@ -6230,6 +6290,7 @@ mod loop_tests {
         ThinkingLevel, TreeOutline, TurnState, Usage, UsageView, View, Workspace,
     };
 
+    use super::PendingSettingEdit;
     use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
     use crate::term::TermIo;
     use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -8181,10 +8242,13 @@ mod loop_tests {
         let mut rig = Rig::new();
 
         rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(row(30)));
-        rig.surfaces.session.pending_setting_edits = vec![SettingEdit {
-            key: "plugin.web.timeout_secs".into(),
-            value: SettingValue::Integer(301),
-        }];
+        rig.surfaces.session.pending_setting_edit = Some(PendingSettingEdit {
+            edit: SettingEdit {
+                key: "plugin.web.timeout_secs".into(),
+                value: SettingValue::Integer(301),
+            },
+            reopen: true,
+        });
         rig.surfaces.apply_product_settings(&mut product);
         let (role, text) = rig
             .surfaces
@@ -8206,10 +8270,13 @@ mod loop_tests {
             "the value editor stays open for a corrected value"
         );
 
-        rig.surfaces.session.pending_setting_edits = vec![SettingEdit {
-            key: "plugin.web.timeout_secs".into(),
-            value: SettingValue::Integer(45),
-        }];
+        rig.surfaces.session.pending_setting_edit = Some(PendingSettingEdit {
+            edit: SettingEdit {
+                key: "plugin.web.timeout_secs".into(),
+                value: SettingValue::Integer(45),
+            },
+            reopen: true,
+        });
         rig.surfaces.apply_product_settings(&mut product);
         let text = rig
             .surfaces
@@ -8235,6 +8302,319 @@ mod loop_tests {
                 .any(|option| option.label
                     == "web · timeout secs: 45 · saved in dal.toml · restart required"),
             "the reopened settings show the reread value"
+        );
+    }
+
+    /// Toggling a boolean setting directly from the settings list saves the
+    /// flipped value to dal.toml and refreshes the settings list over the
+    /// updated catalog, displaying the saved-vs-running row.
+    #[test]
+    fn direct_settings_list_boolean_toggle_saves_and_refreshes_catalog_row() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue, ThinkingLevel};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saved = std::cell::RefCell::new(false);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+
+        let row = |is_saved: bool| ProductSetting {
+            key: "plugin.web.enabled".into(),
+            group: "web".into(),
+            label: "enabled".into(),
+            value: SettingValue::Bool(is_saved),
+            running: is_saved.then_some(SettingValue::Bool(false)),
+            control: SettingControl::Toggle,
+        };
+
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![row(*saved.borrow())])
+            },
+            edit: |edit: &SettingEdit| -> Result<(), TuiError> {
+                if let SettingValue::Bool(value) = edit.value {
+                    *saved.borrow_mut() = value;
+                }
+                Ok(())
+            },
+        };
+
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::settings_picker(
+            false,
+            ThinkingLevel::Off,
+            "",
+        ));
+        rig.surfaces.session.settings_catalog_due = true;
+        rig.surfaces.apply_product_settings(&mut product);
+        assert_eq!(catalog_calls.get(), 1);
+
+        for _ in 0..4 {
+            press(&mut rig, plain(KeyCode::Down));
+        }
+        press(&mut rig, plain(KeyCode::Enter));
+
+        assert_eq!(
+            rig.surfaces
+                .session
+                .pending_setting_edit
+                .as_ref()
+                .map(|pending| &pending.edit),
+            Some(&SettingEdit {
+                key: "plugin.web.enabled".into(),
+                value: SettingValue::Bool(true),
+            })
+        );
+
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert!(*saved.borrow(), "the toggle saves the flipped value");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.enabled"), 1);
+        assert_eq!(
+            catalog_calls.get(),
+            2,
+            "saving refreshes the catalog to reread product settings"
+        );
+
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("settings list remains open / refreshes");
+        assert!(picker.is_settings());
+        assert!(
+            (0..picker.visible_len())
+                .filter_map(|index| picker.visible_option(index))
+                .any(|option| option.label
+                    == "web · enabled: on (running: off) · saved in dal.toml · restart required"),
+            "the reopened settings show the reread value"
+        );
+    }
+
+    /// The provider choice row the ordering regressions below edit.
+    fn provider_choice() -> dal_core::ProductSetting {
+        use dal_core::{ProductSetting, SettingControl, SettingValue};
+
+        ProductSetting {
+            key: "plugin.web.provider".into(),
+            group: "web".into(),
+            label: "provider".into(),
+            value: SettingValue::Text("brave".into()),
+            running: None,
+            control: SettingControl::Choice(vec!["brave".into(), "tavily".into()]),
+        }
+    }
+
+    /// Saved-setting notices for `key`: one per successful edit that
+    /// `apply_product_settings` drains.
+    fn saved_notices_for(rig: &Rig, key: &str) -> usize {
+        let prefix = format!("saved {key} ");
+        rig.surfaces
+            .live
+            .notices()
+            .iter()
+            .filter(|row| row.text.starts_with(prefix.as_str()))
+            .count()
+    }
+
+    /// Enter then Esc in one input batch: Enter queues the save, Esc dismisses
+    /// the editor, and the drained save runs once. The dismissed picker stays
+    /// closed and its catalog is not refetched behind the user's Esc.
+    #[test]
+    fn a_save_queued_before_esc_in_one_batch_keeps_the_picker_closed() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![provider_choice()])
+            },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the queued Enter saves exactly once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "Esc dismissed the editor; the drained save must not reopen it"
+        );
+        assert_eq!(
+            catalog_calls.get(),
+            0,
+            "no catalog refetch behind a dismissed picker"
+        );
+    }
+
+    /// Two Enter presses in one input batch on one choice editor queue the
+    /// same save twice. The drained batch runs it once and notices it once.
+    #[test]
+    fn a_duplicate_enter_in_one_batch_saves_the_choice_once() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Enter));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "two Enters in one batch save once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+    }
+
+    /// A second submit in the same batch as an admitted save is refused while
+    /// that save pends: the first applies once, the second is never admitted,
+    /// and the drain reopens the list over the same editor.
+    #[test]
+    fn a_second_submit_while_a_save_pends_is_refused_not_queued() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit, SettingValue};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let written = std::cell::RefCell::new(Vec::<String>::new());
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |edit: &SettingEdit| -> Result<(), TuiError> {
+                if let SettingValue::Text(value) = &edit.value {
+                    written.borrow_mut().push(value.to_string());
+                }
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Up));
+        press(&mut rig, plain(KeyCode::Enter));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(
+            written.borrow().to_vec(),
+            vec!["tavily".to_owned()],
+            "the admitted save applies once; the second submit is refused while it pends"
+        );
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(crate::picker::PickerUi::is_settings),
+            "the successful save reopens the list over the same editor"
+        );
+    }
+
+    /// Esc after an admitted save dismisses the editor without cancelling the
+    /// save: the save applies once, nothing reopens, and the composer takes the
+    /// next keys.
+    #[test]
+    fn esc_after_an_admitted_save_keeps_the_save_and_frees_the_composer() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        press(&mut rig, plain(KeyCode::Char('x')));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the admitted save applies once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "Esc dismissed the editor; nothing reopens"
+        );
+        assert_eq!(rig.surfaces.session.composer.text(), "x");
+    }
+
+    /// A save admitted before Esc never reopens: an editor for the same key
+    /// opened again before the drain stays open, and no catalog is fetched.
+    #[test]
+    fn a_save_admitted_before_esc_never_reopens_a_reopened_editor() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![provider_choice()])
+            },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the admitted save applies once");
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| !picker.is_settings()),
+            "the reopened editor stays; the save never reopens the list"
+        );
+        assert_eq!(
+            catalog_calls.get(),
+            0,
+            "no catalog fetch for a dismissed save"
         );
     }
 
