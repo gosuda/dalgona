@@ -10,6 +10,8 @@
 - Keep scripted wire tests offline by serving model discovery on loopback.
 - Build sandbox helpers from Cargo's reported artifact paths.
 - Prevent PTY test harnesses from acquiring their children's controlling terminal.
+- Add a non-publishing release preflight before package rehearsals. Resolve
+  short and mixed-case crate names using Cargo's sparse-index path rules.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.

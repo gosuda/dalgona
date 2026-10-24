@@ -18,6 +18,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - run: rustup update stable --no-self-update
+      - name: Require the Dal release on crates.io
+        run: bash scripts/publish-crates.sh --product dalgona --preflight .
       - name: Rehearse each package in dependency order
         shell: bash
         run: |

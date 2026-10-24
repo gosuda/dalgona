@@ -17,7 +17,7 @@ from pathlib import Path
 
 PUBLISH_USAGE = (
     "usage: scripts/publish-crates.sh [--product dal|dalgona] [--dry-run] "
-    "[--check-registry-deps] [--check-dep-only <name> <req>] <workspace-root>"
+    "[--check-registry-deps] [--preflight] [--check-dep-only <name> <req>] <workspace-root>"
 )
 SEMVER_USAGE = "usage: scripts/semver-gate.sh [--product dal|dalgona] [--baseline-root <dir>] <workspace-root>"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,10 +308,11 @@ def dependency_target(
 
 
 def sparse_path(name: str) -> str:
-    if len(name) <= 3:
+    name = name.lower()
+    if len(name) <= 2:
+        return f"{len(name)}/{name}"
+    if len(name) == 3:
         return f"3/{name[0]}/{name}"
-    if len(name) == 4:
-        return f"2/{name[:2]}/{name}"
     return f"{name[:2]}/{name[2:4]}/{name}"
 
 
@@ -406,9 +407,10 @@ def publish_order(members: tuple[Member, ...], dependencies: tuple[Dependency, .
 
 def publish_args(
     arguments: list[str],
-) -> tuple[bool, bool, str | None, str | None, str | None, str] | None:
+) -> tuple[bool, bool, bool, str | None, str | None, str | None, str] | None:
     dry_run = False
     check_registry_deps = False
+    preflight = False
     dep_name: str | None = None
     dep_req: str | None = None
     product: str | None = None
@@ -427,6 +429,10 @@ def publish_args(
         elif argument == "--check-registry-deps":
             check_registry_deps = True
             index += 1
+        elif argument == "--preflight":
+            preflight = True
+            check_registry_deps = True
+            index += 1
         elif argument == "--check-dep-only":
             if dep_name is not None or index + 2 >= len(arguments):
                 return None
@@ -441,14 +447,14 @@ def publish_args(
             return None
     if root is None:
         return None
-    return dry_run, check_registry_deps, dep_name, dep_req, product, root
+    return dry_run, check_registry_deps, preflight, dep_name, dep_req, product, root
 
 
 def publish_main(arguments: list[str]) -> int:
     parsed = publish_args(arguments)
     if parsed is None:
         return usage_error(PUBLISH_USAGE)
-    dry_run, check_registry_deps, dep_name, dep_req, product, root_arg = parsed
+    dry_run, check_registry_deps, preflight, dep_name, dep_req, product, root_arg = parsed
     root, status = parse_root(root_arg)
     if status is not None or root is None:
         return status or 64
@@ -492,7 +498,7 @@ def publish_main(arguments: list[str]) -> int:
     if order is None:
         return error("dependency cycle among workspace members; no publish order exists", 2)
 
-    if check_registry_deps and not dry_run:
+    if check_registry_deps and (preflight or not dry_run):
         status = require_curl()
         if status is not None:
             return status
@@ -511,6 +517,8 @@ def publish_main(arguments: list[str]) -> int:
                     3,
                 )
 
+    if preflight:
+        return 0
     if dry_run:
         for name in order:
             print(f"cargo publish -p {name}")
