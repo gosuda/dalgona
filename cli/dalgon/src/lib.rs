@@ -84,6 +84,7 @@ mod dispatch;
 
 /// Process-edge snapshots, lexical paths, and platform identity.
 mod edge;
+pub use edge::{EdgeError, RootPaths, config_file_path, resolve_roots};
 
 /// Exit-code mapping for command and signal outcomes.
 mod exit;

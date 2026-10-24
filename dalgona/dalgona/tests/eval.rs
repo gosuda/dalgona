@@ -416,6 +416,40 @@ evalpack.pack(name = "layer", cases = [evalpack.case(id = "c", prompt = "p", che
 }
 
 #[test]
+fn an_against_edit_style_changes_the_patch_dialect_of_its_arm_only() {
+    let create = tool_step(
+        "create-1",
+        "patch",
+        r#"{"input":"[scripts/new.sh#NEW]\nPUT >$:\n+#!/bin/sh\n+echo ok"}"#,
+    );
+    let rig = Rig::new(&[create, text_step("done")], "");
+    rig.pack(
+        "dialect",
+        r##"def created(result, workspace):
+    return workspace.read("scripts/new.sh").startswith("#!/bin/sh")
+
+evalpack.pack(name = "dialect", cases = [evalpack.case(id = "c", prompt = "p", check = created, repeats = 1)])
+"##,
+    );
+    let layered = rig.root.join("against.toml");
+    fs::write(&layered, "edit_style = \"anchor\"\n").expect("against file");
+    let run = rig.run(&["dialect", "--against", &layered.to_string_lossy()]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
+    // The same scripted hashline patch lands under dalgona's default
+    // `edit_style` and is refused once the layered file selects anchor, so
+    // only the against arm's check raises on the missing file.
+    let lines = rig.lines("dialect");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    contains(
+        &lines[0],
+        r#""arm":"defaults","repeat":1,"status":"passed""#,
+    );
+    contains(&lines[1], r#""arm":"against","repeat":1,"status":"failed""#);
+    contains(&lines[1], r#"dialect: case \"c\": starlark error at line"#);
+}
+
+#[test]
 fn a_missing_against_file_fails_the_against_arm_and_not_the_report() {
     let rig = Rig::new(&[text_step("hello")], "");
     rig.pack(
