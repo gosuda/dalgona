@@ -9,6 +9,7 @@
   selected history. Keep queued openings busy until they start or stop.
 - Keep scripted wire tests offline by serving model discovery on loopback.
 - Build sandbox helpers from Cargo's reported artifact paths.
+- Prevent PTY test harnesses from acquiring their children's controlling terminal.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.

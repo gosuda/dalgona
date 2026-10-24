@@ -328,3 +328,65 @@ async fn required_oauth_prompt_blank_then_valid_paste_completes_exchange() -> Te
     );
     Ok(())
 }
+
+const SESSION_LEADER_HARNESS_ENV: &str = "DAL_TEST_SESSION_LEADER_HARNESS";
+
+fn assert_no_controlling_terminal(context: &str) {
+    let result = rustix::fs::open(
+        "/dev/tty",
+        rustix::fs::OFlags::RDWR,
+        rustix::fs::Mode::empty(),
+    );
+    assert!(
+        matches!(result, Err(rustix::io::Errno::NXIO)),
+        "{context}: expected Errno::NXIO without controlling terminal, got {result:?}"
+    );
+}
+
+fn run_session_leader_harness() -> TestResult {
+    rustix::process::setsid().map_err(io::Error::other)?;
+    assert_no_controlling_terminal("precondition: after setsid");
+    let mut command = Command::new(std::env::current_exe()?);
+    command.arg("--list");
+    let mut pty = PtyProcess::spawn(&mut command, 80, 24)?;
+    assert_no_controlling_terminal(
+        "postcondition: opening PtyProcess slave must not acquire controlling terminal",
+    );
+    let status = pty.wait_for_exit(SETTLE)?;
+    assert!(
+        status.success(),
+        "the PTY child must exit successfully: {status}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_leader_harness_does_not_acquire_pty_slave() -> TestResult {
+    if std::env::var_os(SESSION_LEADER_HARNESS_ENV).is_some() {
+        return run_session_leader_harness();
+    }
+    let exe = std::env::current_exe()?;
+    let mut command = tokio::process::Command::new(exe);
+    command
+        .kill_on_drop(true)
+        .args([
+            "--exact",
+            "session_leader_harness_does_not_acquire_pty_slave",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(SESSION_LEADER_HARNESS_ENV, "1");
+    let output = tokio::time::timeout(Duration::from_secs(90), command.output())
+        .await
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "session-leader harness timed out")
+        })??;
+    assert!(
+        output.status.success(),
+        "session-leader harness failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
