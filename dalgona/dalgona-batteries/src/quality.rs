@@ -102,6 +102,9 @@ struct TurnState {
     fires: Vec<StoredFire>,
     text: String,
     truncated: bool,
+    /// What the turn's `before_turn` scan settled and where it stopped;
+    /// journaled when the turn ends. `None` when the scan saw no candidate.
+    shown: Option<ShownOffers>,
 }
 
 /// Open turns retained per session.
@@ -222,6 +225,10 @@ impl Shared {
 
     fn push_text(&self, session: SessionId, turn: TurnId, text: String) {
         self.with_turn(session, turn, |entry| entry.text = text);
+    }
+
+    fn set_shown(&self, session: SessionId, turn: TurnId, shown: Option<ShownOffers>) {
+        self.with_turn(session, turn, |entry| entry.shown = shown);
     }
 
     fn take_turn(&self, session: SessionId, turn: TurnId) -> Option<TurnState> {
@@ -523,8 +530,100 @@ impl dal_agent::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for BeforeT
         cx: HookCx,
     ) -> BoxFuture<'static, Result<Option<String>, HookError>> {
         self.shared.insert_turn(cx.session, input.turn);
-        Box::pin(async move { Ok(None) })
+        let shared = Arc::clone(&self.shared);
+        Box::pin(async move {
+            let (text, shown) = offer_notice(&cx, input.turn).await;
+            // Replaced, not merged: a reopened turn id carries only what its
+            // own scan settled.
+            shared.set_shown(cx.session, input.turn, shown);
+            Ok(text)
+        })
     }
+}
+
+/// Offer candidates one turn's notice scan reads: the turn summary's
+/// ten-row bound.
+const NOTICE_OFFERS: usize = 10;
+
+/// A `quality_offers_shown` record, journaled when a turn whose
+/// `before_turn` scan saw a candidate ends: the ids it listed or found
+/// stale, and the id of the last candidate it scanned.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ShownOffers {
+    turn: u64,
+    ids: Vec<String>,
+    cursor: String,
+}
+
+/// Builds the one bounded model notice for the caller's recorded offers.
+///
+/// The scan starts after the latest record's cursor, located in the full
+/// record order, wraps once, and reads at most [`NOTICE_OFFERS`] offers no
+/// ended turn settled. A fresh offer is listed and settled; a missing file
+/// or changed span settles it as stale, unlisted; a failed read settles
+/// nothing, so the offer stays pending and a later wrap retries it. Both
+/// record kinds are the caller's own on the current leaf path.
+async fn offer_notice(cx: &HookCx, turn: TurnId) -> (Option<String>, Option<ShownOffers>) {
+    let services = &cx.services;
+    let Ok(records) = services.records(&cx.caller, "quality_offers_shown").await else {
+        return (None, None);
+    };
+    let mut shown = std::collections::HashSet::new();
+    let mut cursor = None;
+    for record in records
+        .into_iter()
+        .filter_map(|record| record.decode_as::<ShownOffers>().ok())
+    {
+        shown.extend(record.ids);
+        cursor = Some(record.cursor);
+    }
+    let Ok(recorded) = services.records(&cx.caller, "quality_offers").await else {
+        return (None, None);
+    };
+    let mut all: Vec<offers::Offer> = recorded
+        .into_iter()
+        .filter_map(|record| record.decode_as::<StoredOffers>().ok())
+        .flat_map(|record| record.offers)
+        .collect();
+    // The offer after the cursor comes first; a cursor at the end, or one
+    // absent from this leaf, starts at the first offer.
+    let start = cursor
+        .as_ref()
+        .and_then(|id| all.iter().position(|offer| &offer.id == id))
+        .map_or(0, |index| index + 1);
+    all.rotate_left(start);
+    let unshown = all
+        .iter()
+        .filter(|offer| !shown.contains(&offer.id))
+        .count();
+    let mut cursor = None;
+    let mut fresh = Vec::new();
+    let mut settled = Vec::new();
+    for offer in all
+        .into_iter()
+        .filter(|offer| !shown.contains(&offer.id))
+        .take(NOTICE_OFFERS)
+    {
+        cursor = Some(offer.id.clone());
+        let Ok(current) = services.fs_read(&cx.caller, &offer.path).await else {
+            continue;
+        };
+        settled.push(offer.id.clone());
+        if current.is_some_and(|bytes| offers::is_fresh(&offer, &bytes)) {
+            fresh.push(offer);
+        }
+    }
+    let Some(cursor) = cursor else {
+        return (None, None);
+    };
+    let pending = unshown - settled.len();
+    let text = (!fresh.is_empty()).then(|| offers::notice_panel(fresh, pending));
+    let record = ShownOffers {
+        turn: turn.get(),
+        ids: settled,
+        cursor,
+    };
+    (text, Some(record))
 }
 
 struct SessionStartHook {
@@ -620,14 +719,32 @@ impl ObserveHook<dal_core::ext::TurnEnd> for TurnEndHook {
         } else {
             None
         };
-        let (fires, truncated) = taken
-            .map(|state| (state.fires, state.truncated))
+        let (fires, truncated, shown) = taken
+            .map(|state| (state.fires, state.truncated, state.shown))
             .unwrap_or_default();
         let findings = self.findings.clone();
         Box::pin(async move {
+            record_shown(&cx, shown).await;
             settle_turn(&cx, input.turn, fires, truncated, commit_fire, &findings).await;
             Ok(())
         })
+    }
+}
+
+/// Journals what an ended turn's notice scan settled and where it stopped,
+/// even when it settled nothing, so the next scan continues past failed
+/// reads. Only an ended turn records it: its `before_turn` reminder is
+/// journaled with the turn, so an opening that never began leaves its
+/// offers unlisted for the next turn.
+async fn record_shown(cx: &HookCx, shown: Option<ShownOffers>) {
+    let Some(shown) = shown else {
+        return;
+    };
+    if let Some(body) = raw_body(&shown) {
+        let _ = cx
+            .services
+            .append_record(&cx.caller, "quality_offers_shown", Box::new(body))
+            .await;
     }
 }
 
@@ -829,7 +946,12 @@ fn is_rust_path(path: &str) -> bool {
 async fn build_offers(cx: &HookCx, turn: TurnId, findings: &FindingsHandle) -> TurnOffers {
     let mut offers: Vec<offers::Offer> = Vec::new();
     let mut gaps: Vec<(String, &'static str)> = Vec::new();
-    let Some(snapshot) = findings.last(&cx.session) else {
+    // Only this turn's findings make offers: an earlier turn's snapshot
+    // would re-offer the same span under a new `q-<turn>-<index>` id.
+    let Some(snapshot) = findings
+        .last(&cx.session)
+        .filter(|snapshot| snapshot.turn == turn)
+    else {
         return TurnOffers { offers, gaps };
     };
     let turn_label = turn.get().to_string();
