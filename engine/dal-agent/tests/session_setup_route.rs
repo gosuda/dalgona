@@ -215,16 +215,14 @@ async fn setup_keeps_explicit_model_selection_ahead_of_assistant_route() {
 
 #[tokio::test]
 async fn setup_does_not_resurrect_route_before_latest_unknown_assistant() {
+    let configured = resumed_setup(Vec::new()).await;
     assert_eq!(
         resumed_setup(vec![
             assistant(2, Some(AssistantRoute::Synthetic)),
             assistant(3, None),
         ])
         .await,
-        SetupRoute {
-            model: Some(ModelRoute::from_id(CONFIGURED_MODEL)),
-            model_id: ModelRoute::from_id(CONFIGURED_MODEL).id().into(),
-        },
+        configured,
     );
 }
 

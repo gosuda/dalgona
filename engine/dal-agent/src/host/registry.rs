@@ -1206,7 +1206,7 @@ impl Host {
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
         })?;
         let opening_texts: Arc<[String]> = super::history::opening_texts(&fold).into();
-        let model = replayed_model(journal.records(), &fold, configured_model.clone());
+        let model = replayed_model(journal.records(), &fold, requested_model.clone());
         let model_id = model
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());
