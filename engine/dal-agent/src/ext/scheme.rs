@@ -98,10 +98,14 @@ pub(crate) struct SchemeResolveContext<'a> {
 ///
 /// The host owns the caller identity, the session address, and the
 /// runtime that backs [`SchemeCx::blob_get`] and [`SchemeCx::letter_index`].
-/// Resolvers read through this context only; they never mint a [`Caller`]
-/// or open the store directly.
+/// The caller is minted for the extension that registered the scheme, so a
+/// resolver reads its own records with its own services whoever requests
+/// the URI; it never inherits the requester's identity, injected services,
+/// or cell approval. Resolvers read through this context only; they never
+/// mint a [`Caller`] or open the store directly.
 pub struct SchemeCx<'a> {
-    /// Host-minted caller; resolvers never forge one.
+    /// Host-minted handler caller for the scheme's registering extension;
+    /// resolvers never forge one.
     pub caller: Caller,
     /// Capability-scoped service handle for this call.
     pub services: Arc<dyn Services>,
@@ -134,7 +138,7 @@ impl SchemeCx<'_> {
         }
     }
 
-    /// Borrows the host-minted caller needed for [`Services`] scoping.
+    /// Borrows the scheme owner's host-minted caller for [`Services`] scoping.
     #[must_use]
     pub fn caller(&self) -> &Caller {
         &self.caller
