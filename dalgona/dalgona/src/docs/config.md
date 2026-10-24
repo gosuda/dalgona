@@ -27,7 +27,7 @@ Dalgona configures opinionated defaults for the dal platform (`search_symbols = 
 
 ## Interactive /settings picker
 
-The `/settings` picker in interactive sessions displays allowlisted, non-secret product settings alongside client appearance controls.
+The `/settings` picker in interactive sessions displays allowlisted, non-secret product settings alongside client live controls (model selection, thinking level, and diagram rendering).
 
 ### Allowlisted settings rows
 
@@ -83,7 +83,13 @@ Product settings are startup-only. When you confirm a valid value in the picker,
 
 When the saved value differs from the value the host started with, the picker shows both values and a restart notice. The saved file is read on the next start. Command-line flags still take precedence over the file.
 
-Battery changes require a restart. Because batteries are compiled extensions registered during host initialization, enabling or disabling a battery (via `disabled_batteries` or `[plugin.<name>].enabled`) takes effect only when dalgona restarts. In contrast, diagram rendering (`[tui].diagrams`) can be toggled live in-session, with an explicit picker action to save the preference to `dal.toml`.
+Battery changes require a restart. Because batteries are compiled extensions registered during host initialization, enabling or disabling a battery (via `disabled_batteries` or `[plugin.<name>].enabled`) takes effect only when dalgona restarts.
+
+In contrast, live controls take effect immediately in the active session:
+
+- Diagram rendering (`[tui].diagrams`) can be toggled live in-session, with an explicit picker action to save the preference to `dal.toml`.
+- The model row opens the model picker, updating the active model for subsequent turns.
+- The thinking row (`thinking · <current level>`) opens the thinking level picker populated with the host's supported levels for the current model. Choosing a level submits `/thinking <level>`, letting the host validate the selection before updating session state and default configuration.
 
 ### Atomic persistence and comment preservation
 

@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Support host-filtered reasoning levels in `/thinking` and the live settings
+  thinking row. Default, alias, and remote model routes supply their supported
+  levels to the picker, choices revalidate through the `/thinking` command, and
+  the current saved value is preserved if a selection is refused.
 - Show dalgona's name in terminal headers, prompts, and session notices.
 - Edit documented, non-secret product settings through `/settings`. Valid
   edits save immediately to `dal.toml` with owner-only permissions and preserve

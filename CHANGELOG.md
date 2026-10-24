@@ -1,6 +1,21 @@
 # Changelog
 
 ## Unreleased
+- Filter thinking choices by host-supported levels: `/thinking` and the live
+  settings row query the model route (default, alias, or remote) for its
+  supported levels before opening the picker. Submitted choices revalidate
+  through the `/thinking` command, preserving the saved choice and current
+  value if a selection is refused.
+- Wire compatibility for reasoning levels: the wire protocol encodes optional
+  `thinkingLevels` on `choose` replies only when present and omits the field
+  for other choosers. Older or missing metadata is accepted and defaults to `None`.
+- Breaking Rust API: `Reply::Choose` gains
+  `thinking_levels: Option<Box<[ThinkingLevel]>>`. Callers constructing the
+  variant must provide the new field, and pattern matches must account for it
+  or use the `..` pattern.
+- Breaking Rust API: `ProductFactory` gains `config_product` and `settings`.
+  Callers constructing a factory must provide the new fields, and pattern
+  matches must handle them or use `..`.
 - Add typed product settings to interactive TUI sessions: products declare
   allowlisted startup-only rows. Confirmed edits update `dal.toml` atomically
   with owner-only permissions and preserve comments and formatting; invalid
