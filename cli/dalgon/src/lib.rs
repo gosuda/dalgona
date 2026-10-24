@@ -130,8 +130,7 @@ pub(crate) struct Startup {
     pub(crate) workspace_path: PathBuf,
     pub(crate) workspace: Workspace,
     pub(crate) config: Config,
-    /// The user `dal.toml` path; only the interactive UI persists to it.
-    #[cfg(feature = "tui")]
+    /// The user `dal.toml` path; default-setting persistence writes to it.
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
     pub(crate) helper: Option<PathBuf>,
@@ -895,7 +894,6 @@ fn assemble_startup(
         workspace_path,
         workspace,
         config,
-        #[cfg(feature = "tui")]
         config_path,
         data_root: roots.data,
         helper: edge::current_exe(),

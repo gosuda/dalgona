@@ -136,6 +136,7 @@ pub(crate) async fn serve(
         workspace_path,
         workspace: _,
         config,
+        config_path,
         data_root,
         helper,
         serve_bind_explicit,
@@ -180,6 +181,7 @@ pub(crate) async fn serve(
         Ok(host) => host,
         Err(error) => return host_exit(&error, &data_root),
     };
+    host.set_config_path(config_path);
     let stop = CancellationToken::new();
     let mut signals = edge::ShutdownSignals::register();
     let snapshot = edge::terminal_snapshot();
