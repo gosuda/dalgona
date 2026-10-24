@@ -518,7 +518,7 @@ async fn an_a2a_session_defaults_an_extension_question_at_once() {
 mod heartbeat {
     use std::time::Duration;
 
-    use dal_agent::SessionRef;
+    use dal_agent::{SessionRef, Subscription};
     use dal_core::{ClientId, Command, Expect, Part, Stop, UpdateKind};
     use futures::{SinkExt, StreamExt};
     use sonic_rs::{JsonValueTrait, Value};
@@ -528,7 +528,7 @@ mod heartbeat {
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
     use tokio_tungstenite::tungstenite::{Bytes, Message};
 
-    use super::super::support::{Rig, WAIT, gate_step, result, rig, text_step};
+    use super::super::support::{WAIT, gate_step, result, rig, text_step};
     use crate::transport::{ReadFrameError, Transport, WebSocketTransport};
 
     type Client = WebSocketStream<DuplexStream>;
@@ -545,7 +545,12 @@ mod heartbeat {
     async fn next_frame(client: &mut Client, limit: Duration) -> Message {
         tokio::time::timeout(limit, client.next())
             .await
-            .expect("a frame arrives within the limit")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "waited {}s for the next frame from the server, never fired",
+                    limit.as_secs()
+                )
+            })
             .expect("the socket stays open")
             .expect("the frame is well formed")
     }
@@ -569,31 +574,23 @@ mod heartbeat {
         }
     }
 
-    /// Waits until the session's turn runs, through a short-lived second client.
-    async fn await_running(rig: &Rig, session: &str) {
-        let agent = rig
-            .host
-            .open(
-                SessionRef::Resume {
-                    key: session.into(),
-                    workspace: rig.core_workspace(),
-                },
-                ClientId::new("observer"),
-            )
-            .await
-            .expect("the session opens for observation");
-        let deadline = tokio::time::Instant::now() + WAIT;
+    /// Waits until the session's turn runs, through a subscription taken before the trigger.
+    async fn await_running(subscription: &mut Subscription) {
         loop {
-            let head = agent.view(dal_core::PageReq::default()).expect("view");
-            if matches!(head.turn, dal_core::TurnState::Running { .. }) {
-                return;
+            let delivery = tokio::time::timeout(WAIT, subscription.next())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "waited {}s for event 'TurnStarted', never fired",
+                        WAIT.as_secs()
+                    )
+                })
+                .expect("subscription open");
+            if let dal_agent::Delivery::Update(update) = delivery
+                && matches!(update.kind, UpdateKind::TurnStarted { .. })
+            {
+                break;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the turn never started: {:?}",
-                head.turn
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -828,6 +825,18 @@ mod heartbeat {
                 .as_str()
                 .expect("session id")
                 .to_owned();
+            let agent = rig
+                .host
+                .open(
+                    SessionRef::Resume {
+                        key: session.as_str().into(),
+                        workspace: rig.core_workspace(),
+                    },
+                    ClientId::new("observer"),
+                )
+                .await
+                .expect("the session opens for observation");
+            let mut subscription = agent.subscribe(None).expect("subscribe");
             let command = sonic_rs::to_value(&Command::Prompt {
                 expect: Expect::Idle,
                 content: vec![Part::Text {
@@ -843,14 +852,14 @@ mod heartbeat {
             )
             .await;
             assert_eq!(result(&accepted)["type"].as_str(), Some("accepted"));
-            await_running(&rig, &session).await;
+            await_running(&mut subscription).await;
             // The peer goes silent: it reads nothing and answers no ping.
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(46)).await;
             tokio::time::resume();
-            session
+            agent
         };
-        let (outcome, session) = Box::pin(tokio::time::timeout(Duration::from_secs(120), async {
+        let (outcome, agent) = Box::pin(tokio::time::timeout(Duration::from_secs(120), async {
             tokio::join!(serving, script)
         }))
         .await
@@ -867,17 +876,6 @@ mod heartbeat {
         .await
         .expect("the socket ends after the heartbeat close");
 
-        let agent = rig
-            .host
-            .open(
-                SessionRef::Resume {
-                    key: session.as_str().into(),
-                    workspace: rig.core_workspace(),
-                },
-                ClientId::new("observer"),
-            )
-            .await
-            .expect("the session stays open after the heartbeat close");
         let head = agent.view(dal_core::PageReq::default()).expect("view");
         assert!(
             matches!(head.turn, dal_core::TurnState::Running { .. }),

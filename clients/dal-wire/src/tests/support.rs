@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,10 @@ use dal_core::{
     Visibility, Workspace,
 };
 use sonic_rs::{JsonValueTrait, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::transport::MemoryPeer;
 
@@ -34,6 +37,8 @@ pub(super) struct Rig {
     pub(super) workspace: PathBuf,
     /// Permits released to the `gate` tool; each permit ends one call.
     pub(super) gate: Arc<Semaphore>,
+    /// Background tasks bound to the rig's lifetime; aborted on drop.
+    pub(super) _tasks: JoinSet<()>,
 }
 
 impl Rig {
@@ -71,6 +76,7 @@ pub(super) async fn rig_with_env(
     extra: &str,
     extra_vars: &[(&str, &str)],
 ) -> Rig {
+    let (catalog_addr, catalog_tasks) = CatalogServer::start(Some(model)).await;
     let dir = tempfile::tempdir().expect("temporary root");
     let data = dir.path().join("data");
     let workspace = dir.path().join("w");
@@ -78,12 +84,13 @@ pub(super) async fn rig_with_env(
     std::fs::create_dir_all(&workspace).expect("workspace");
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, steps.join("\n")).expect("script fixture");
+    let defaults = format!("[providers.openai]\nbase_url = \"http://{catalog_addr}/v1\"\n");
     let user = format!(
         "model = \"{model}\"\n{extra}\n[providers.scripted]\nfixture = \"{}\"\n",
         fixture.to_string_lossy().replace('\\', "\\\\")
     );
-    let config =
-        Config::load(ConfigProduct::Dalgon, &data, "", Some(&user)).expect("test config loads");
+    let config = Config::load(ConfigProduct::Dalgon, &data, &defaults, Some(&user))
+        .expect("test config loads");
     let gate = Arc::new(Semaphore::new(0));
     let no_reload: Arc<dyn dal_ext::commands::PluginReload> = Arc::new(NoReload);
     let extensions = vec![
@@ -115,6 +122,7 @@ pub(super) async fn rig_with_env(
         host,
         workspace,
         gate,
+        _tasks: catalog_tasks,
     }
 }
 
@@ -124,6 +132,7 @@ pub(super) async fn rig_with_extensions(
     extra: &str,
     more: Vec<dal_agent::ext::Extension>,
 ) -> Rig {
+    let (catalog_addr, catalog_tasks) = CatalogServer::start(Some("gpt-6-luna")).await;
     let dir = tempfile::tempdir().expect("temporary root");
     let data = dir.path().join("data");
     let workspace = dir.path().join("w");
@@ -131,12 +140,13 @@ pub(super) async fn rig_with_extensions(
     std::fs::create_dir_all(&workspace).expect("workspace");
     let fixture = data.join("script.jsonl");
     std::fs::write(&fixture, steps.join("\n")).expect("script fixture");
+    let defaults = format!("[providers.openai]\nbase_url = \"http://{catalog_addr}/v1\"\n");
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n{extra}\n[providers.scripted]\nfixture = \"{}\"\n",
         fixture.to_string_lossy().replace('\\', "\\\\")
     );
-    let config =
-        Config::load(ConfigProduct::Dalgon, &data, "", Some(&user)).expect("test config loads");
+    let config = Config::load(ConfigProduct::Dalgon, &data, &defaults, Some(&user))
+        .expect("test config loads");
     let gate = Arc::new(Semaphore::new(0));
     let no_reload: Arc<dyn dal_ext::commands::PluginReload> = Arc::new(NoReload);
     let mut extensions = vec![
@@ -167,7 +177,86 @@ pub(super) async fn rig_with_extensions(
         host,
         workspace,
         gate,
+        _tasks: catalog_tasks,
     }
+}
+
+/// A loopback OpenAI-compatible catalog server on `127.0.0.1`.
+struct CatalogServer;
+
+impl CatalogServer {
+    async fn start(extra_model: Option<&str>) -> (SocketAddr, JoinSet<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("catalog loopback listener");
+        let address = listener.local_addr().expect("catalog loopback address");
+        let model = extra_model.map(|m| Arc::from(m.strip_prefix("openai/").unwrap_or(m)));
+        let mut server = JoinSet::new();
+        server.spawn(accept_catalog(listener, model));
+        (address, server)
+    }
+}
+
+async fn accept_catalog(listener: TcpListener, extra_model: Option<Arc<str>>) {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((socket, _)) = accepted else {
+                    break;
+                };
+                connections.spawn(serve_catalog(socket, extra_model.clone()));
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+}
+
+async fn serve_catalog(socket: TcpStream, extra_model: Option<Arc<str>>) {
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+        return;
+    }
+    let target = line.split_whitespace().nth(1).unwrap_or_default();
+    let path = target.split('?').next().unwrap_or_default().to_owned();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+            return;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    let (status, body) = if path.ends_with("/models") || path == "/models" {
+        let mut rows = vec![
+            sonic_rs::json!({"id": "gpt-6-luna"}),
+            sonic_rs::json!({"id": "gpt-6"}),
+            sonic_rs::json!({"id": "gpt-4o"}),
+            sonic_rs::json!({"id": "gpt-4o-mini"}),
+        ];
+        if let Some(extra) = extra_model.as_deref()
+            && !extra.is_empty()
+            && !rows.iter().any(|r| r["id"].as_str() == Some(extra))
+        {
+            rows.push(sonic_rs::json!({"id": extra}));
+        }
+        let payload = sonic_rs::json!({
+            "object": "list",
+            "data": rows,
+        });
+        let body = sonic_rs::to_string(&payload).expect("catalog payload serializes");
+        ("200 OK", body)
+    } else {
+        ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = reader.get_mut().write_all(response.as_bytes()).await;
+    let _ = reader.get_mut().shutdown().await;
 }
 
 /// Plugin reload is not part of the wire tests; the command reports that.
@@ -391,7 +480,12 @@ impl Rpc {
     pub(super) async fn raw(&mut self) -> String {
         tokio::time::timeout(WAIT, self.peer.read_frame())
             .await
-            .expect("frame in time")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "waited {}s for the next frame from the peer, never fired",
+                    WAIT.as_secs()
+                )
+            })
             .expect("server transport open")
     }
 
@@ -413,8 +507,14 @@ impl Rpc {
         {
             return self.stash.remove(index).expect("stashed reply");
         }
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
-            let frame = self.raw().await;
+            let frame = tokio::time::timeout_at(deadline, self.peer.read_frame())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("waited {}s for reply {id}, never fired", WAIT.as_secs())
+                })
+                .expect("server transport open");
             let value: Value = sonic_rs::from_str(&frame).expect("server frame is JSON");
             if value.get("id").and_then(Value::as_i64) == Some(id) {
                 return value;
@@ -436,6 +536,13 @@ impl Rpc {
 
     /// Asserts that nothing is waiting to be read.
     pub(super) async fn assert_quiet(&mut self, wait: Duration) {
+        let probe = self
+            .call(i64::MAX, "session/list", sonic_rs::json!({}))
+            .await;
+        assert!(
+            probe.get("error").is_none(),
+            "quiet probe round-trip failed: {probe}"
+        );
         assert!(self.stash.is_empty(), "unexpected frames: {:?}", self.stash);
         let pending = tokio::time::timeout(wait, self.peer.read_frame()).await;
         assert!(pending.is_err(), "unexpected frame: {pending:?}");
@@ -534,7 +641,12 @@ pub(super) async fn http(addr: std::net::SocketAddr, head: &str, body: &str) -> 
     let mut bytes = Vec::new();
     tokio::time::timeout(WAIT, stream.read_to_end(&mut bytes))
         .await
-        .expect("response in time")
+        .unwrap_or_else(|_| {
+            panic!(
+                "waited {}s for HTTP response EOF, never fired",
+                WAIT.as_secs()
+            )
+        })
         .expect("response read");
     parse_reply(&bytes)
 }
