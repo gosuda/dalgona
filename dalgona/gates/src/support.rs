@@ -428,12 +428,18 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
             build_dir.display()
         )
     })?;
-    let profile = relative
-        .components()
-        .next()
+    // The relative directory is `debug|release`, or `<target-triple>/debug`
+    // under an explicit `--target`; the profile is its final component and
+    // any preceding one is the triple, repeated on the build invocation.
+    let mut components = relative.components();
+    let profile = components
+        .next_back()
         .and_then(|component| component.as_os_str().to_str())
         .ok_or("the test profile directory has no name")?;
-    ensure_dalgona_binary_built(profile)?;
+    let triple = components
+        .next_back()
+        .and_then(|component| component.as_os_str().to_str());
+    ensure_dalgona_binary_built(profile, triple)?;
     let binary = target_dir
         .join(relative)
         .join(format!("dalgona{}", std::env::consts::EXE_SUFFIX));
@@ -461,9 +467,10 @@ pub fn dalgona_binary() -> TestResult<PathBuf> {
 /// # Errors
 /// Returns the spawn failure or the build's nonzero status; the first
 /// result is cached and replayed to later callers in this process.
-fn ensure_dalgona_binary_built(profile: &str) -> TestResult<()> {
+fn ensure_dalgona_binary_built(profile: &str, triple: Option<&str>) -> TestResult<()> {
     static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     let owned = profile.to_owned();
+    let owned_triple = triple.map(str::to_owned);
     let cached = BUILT.get_or_init(|| {
         let mut command = std::process::Command::new(env!("CARGO"));
         command.args(["build", "-p", "dalgona", "--bin", "dalgona", "--locked"]);
@@ -475,6 +482,9 @@ fn ensure_dalgona_binary_built(profile: &str) -> TestResult<()> {
             custom => {
                 command.args(["--profile", custom]);
             }
+        }
+        if let Some(triple) = &owned_triple {
+            command.args(["--target", triple]);
         }
         command
             .current_dir(repo_root())
