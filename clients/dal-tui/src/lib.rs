@@ -135,7 +135,9 @@ pub struct TuiOptions {
     pub editor: Box<str>,
     /// The terminal color capability.
     pub color: ColorMode,
-    /// Binary-family name used in user-facing copy (`dal` or `dalgona`).
+    /// Binary name selecting the product copy. `dalgon`, `dal`, and `dl` keep
+    /// the dal wording while `dalgona` and `dg` take the dalgona wording; the
+    /// value itself still fills the exit line's `{bin}` slot.
     pub binary: &'static str,
     /// Environment facts captured once by the process edge.
     pub env: EnvFacts,
@@ -285,7 +287,7 @@ pub fn draw_frame(
     }
     let mut dialog = dialog::DialogUi::default();
     dialog.resync(view.open.clone());
-    let live = live::Live::default();
+    let live = live::Live::for_binary(opts.binary);
     let viewport = screen::fullscreen::Viewport::following();
     let theme = theme::load(
         &opts.theme_request,

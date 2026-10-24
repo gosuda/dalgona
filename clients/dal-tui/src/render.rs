@@ -175,9 +175,10 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         })
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
+    let product = crate::copy::identity(input.opts.binary);
     let floor = (height < crate::copy::ids::MIN_ROWS)
-        .then_some(crate::copy::ids::NARROW_ROWS)
-        .or((width < crate::copy::ids::MIN_COLS).then_some(crate::copy::ids::NARROW_COLS));
+        .then_some(product.narrow_rows)
+        .or((width < crate::copy::ids::MIN_COLS).then_some(product.narrow_cols));
     debug_assert_eq!(floor.is_some(), below_floor(width, height));
     if let Some(warning) = floor {
         return resolve_colors(
@@ -593,6 +594,7 @@ fn overlay_rows(
     mode: WidthMode,
     bottom: &mut Vec<RenderRow>,
 ) {
+    let product = crate::copy::identity(input.opts.binary);
     if input.dialog.is_open() {
         // DESIGN.md dialog boundary: one blank row above and below the
         // dialog. The blanks come out of the overlay budget — rows outside
@@ -652,7 +654,7 @@ fn overlay_rows(
     } else {
         if input.composer.is_empty() {
             let mut row = RenderRow::new(
-                format!("> {}", escape(crate::copy::ids::COMPOSER_PLACEHOLDER)),
+                format!("> {}", escape(product.composer_placeholder)),
                 Role::Text,
             );
             row.cursor = Some(2);
@@ -697,6 +699,7 @@ fn fullscreen_rows(
 ) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
+    let product = crate::copy::identity(input.opts.binary);
     let header = crate::screen::fullscreen::header_rows(width, height);
     let search_rows = usize::from(input.viewport.search_text().is_some());
     let above = header + notices.len() + search_rows;
@@ -709,7 +712,8 @@ fn fullscreen_rows(
     if header > 0 {
         rows.push(RenderRow::new(
             format!(
-                "dal · {} · {}",
+                "{} · {} · {}",
+                product.header,
                 escape(input.view.session.name.as_deref().unwrap_or("session")),
                 model.unwrap_or("no model")
             ),
@@ -1032,6 +1036,7 @@ fn expand_view_rows(
 ) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
+    let product = crate::copy::identity(input.opts.binary);
     let header = crate::screen::fullscreen::header_rows(width, height);
     let above = header + notice_rows.len();
     let available = h.saturating_sub(above + bottom.len());
@@ -1055,7 +1060,8 @@ fn expand_view_rows(
     if header > 0 {
         rows.push(RenderRow::new(
             format!(
-                "dal · {} · {}",
+                "{} · {} · {}",
+                product.header,
                 escape(input.view.session.name.as_deref().unwrap_or("session")),
                 model.unwrap_or("no model")
             ),
@@ -1242,7 +1248,7 @@ fn activity_rows(input: &FrameInput<'_>, assistant: Vec<RenderRow>) -> Vec<Rende
     let mut activity = Vec::new();
     if input.view.settings.model.is_none() && input.opts.default_model.is_none() {
         activity.push(RenderRow::new(
-            crate::copy::ids::FIRST_RUN_TITLE,
+            crate::copy::identity(input.opts.binary).first_run_title,
             Role::Accent,
         ));
         activity.push(RenderRow::new(

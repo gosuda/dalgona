@@ -416,6 +416,73 @@ pub mod ids {
         "note: usage is blocked. Luna Reserve is available: type /model gpt-reserve to switch.";
 }
 
+/// Product-facing wording resolved from `TuiOptions::binary` at each render
+/// seam.
+///
+/// The dal family keeps the shipped `dal` deck, including the compatibility
+/// `dalgon` inside the narrow-terminal warnings; the dalgona family names
+/// `dalgona`. Every product-named row reads through this one table, so no UI
+/// branch compares product names itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Identity {
+    /// Product word opening the fullscreen header row.
+    pub(crate) header: &'static str,
+    /// Empty-composer placeholder.
+    pub(crate) composer_placeholder: &'static str,
+    /// First-run model prompt.
+    pub(crate) first_run_title: &'static str,
+    /// Length-limited turn notice.
+    pub(crate) turn_length: &'static str,
+    /// Timed-out request notice template.
+    pub(crate) request_timed_out: &'static str,
+    /// Unanswered request notice template.
+    pub(crate) request_no_controller: &'static str,
+    /// Warning painted below [`ids::MIN_ROWS`].
+    pub(crate) narrow_rows: &'static str,
+    /// Warning painted below [`ids::MIN_COLS`].
+    pub(crate) narrow_cols: &'static str,
+}
+
+impl Default for Identity {
+    fn default() -> Self {
+        DAL
+    }
+}
+
+const DAL: Identity = Identity {
+    header: "dal",
+    composer_placeholder: ids::COMPOSER_PLACEHOLDER,
+    first_run_title: ids::FIRST_RUN_TITLE,
+    turn_length: ids::TURN_LENGTH,
+    request_timed_out: ids::REQUEST_TIMED_OUT,
+    request_no_controller: ids::REQUEST_NO_CONTROLLER,
+    narrow_rows: ids::NARROW_ROWS,
+    narrow_cols: ids::NARROW_COLS,
+};
+
+const DALGONA: Identity = Identity {
+    header: "dalgona",
+    composer_placeholder: "Ask dalgona to change code. / for commands.",
+    first_run_title: "No model selected yet. dalgona needs a model before it can answer.",
+    turn_length: "The reply hit the length limit. Ask dalgona to continue.",
+    request_timed_out: r#"note: "{title}" timed out. dalgona used the default: {answer}."#,
+    request_no_controller: r#"note: no one was attached to answer "{title}"; dalgona used the default: {answer}."#,
+    narrow_rows: "dalgona needs at least 8 rows",
+    narrow_cols: "dalgona needs at least 12 columns",
+};
+
+/// Resolves the product identity for a `TuiOptions::binary` value.
+///
+/// `dalgona` and its `dg` alias take the dalgona wording; `dalgon`, `dal`,
+/// `dl`, and any unknown name keep the base `dal` wording.
+#[must_use]
+pub(crate) fn identity(binary: &str) -> Identity {
+    match binary {
+        "dalgona" | "dg" => DALGONA,
+        _ => DAL,
+    }
+}
+
 /// Stable copy-deck IDs and their complete templates.
 pub const DECK: &[(&str, &str)] = &[
     ("app.tagline", ids::APP_TAGLINE),

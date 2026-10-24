@@ -34,6 +34,7 @@ const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// journal) or one this build does not know reads as a neutral "resolved"
 /// note and is never guessed from the answering client, the answer or time.
 fn resolution_notice(
+    product: crate::copy::Identity,
     cause: Option<ResolutionCause>,
     by: &ClientId,
     answer: &Answer,
@@ -43,10 +44,10 @@ fn resolution_notice(
 
     let template = match cause {
         Some(ResolutionCause::Answered) => ids::REQUEST_RESOLVED_BY,
-        Some(ResolutionCause::TimedOut) => ids::REQUEST_TIMED_OUT,
+        Some(ResolutionCause::TimedOut) => product.request_timed_out,
         Some(ResolutionCause::Cancelled) => ids::REQUEST_CANCELLED,
         Some(ResolutionCause::Withdrawn) => ids::REQUEST_WITHDRAWN,
-        Some(ResolutionCause::NoController) => ids::REQUEST_NO_CONTROLLER,
+        Some(ResolutionCause::NoController) => product.request_no_controller,
         None | Some(_) => ids::REQUEST_RESOLVED,
     };
     crate::copy::render(
@@ -1572,7 +1573,7 @@ impl Surfaces {
                 // requests the user never saw stay silent.
                 if let Some(title) = self.dialog.resolved(&id.to_string()) {
                     self.live
-                        .notice(resolution_notice(*cause, by, answer, &title));
+                        .notice(resolution_notice(crate::copy::identity(opts.binary), *cause, by, answer, &title));
                 }
                 self.view.open.retain(|request| request.id != *id);
             }
@@ -3400,7 +3401,13 @@ mod tests {
         use dal_core::{Answer, ClientId, ResolutionCause};
 
         let notice = |cause| {
-            super::resolution_notice(cause, &ClientId::new("core"), &Answer::Decline, "ship it")
+            super::resolution_notice(
+                crate::copy::identity("dal"),
+                cause,
+                &ClientId::new("core"),
+                &Answer::Decline,
+                "ship it",
+            )
         };
         let default_word = crate::copy::answer_word(&Answer::Decline);
         let causes = [
@@ -8235,4 +8242,85 @@ mod loop_tests {
         );
     }
 
+    #[test]
+    fn turn_length_and_request_resolution_notices_follow_the_product_identity() {
+        use dal_core::{
+            Answer, ClientId, Owner, Question, Request, RequestId, ResolutionCause, Stop, TurnId,
+            UpdateKind,
+        };
+
+        let request_for = |title: &str| Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Confirm { text: title.into() },
+            timeout: Duration::from_secs(5),
+            default: Answer::Decline,
+        };
+
+        for (binary, expected_length, expected_timeout, expected_no_controller) in [
+            (
+                "dalgon",
+                "The reply hit the length limit. Ask dal to continue.",
+                r#"note: "ship it" timed out. dal used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dal used the default: deny."#,
+            ),
+            (
+                "dalgona",
+                "The reply hit the length limit. Ask dalgona to continue.",
+                r#"note: "ship it" timed out. dalgona used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dalgona used the default: deny."#,
+            ),
+            (
+                "dg",
+                "The reply hit the length limit. Ask dalgona to continue.",
+                r#"note: "ship it" timed out. dalgona used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dalgona used the default: deny."#,
+            ),
+        ] {
+            let mut rig = Rig::new();
+            rig.opts.binary = binary;
+            rig.surfaces.live = crate::live::Live::for_binary(binary);
+
+            rig.feed(UpdateKind::TurnEnded {
+                turn: TurnId::new(std::num::NonZeroU64::MIN),
+                stop: Stop::Length,
+            });
+            assert!(
+                shows(&rig, expected_length),
+                "{binary}: turn-length notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+
+            let timed_out = request_for("ship it");
+            let timed_out_id = timed_out.id;
+            rig.feed(UpdateKind::RequestOpened(timed_out));
+            rig.feed(UpdateKind::RequestResolved {
+                id: timed_out_id,
+                answer: Answer::Decline,
+                by: ClientId::new("core"),
+                cause: Some(ResolutionCause::TimedOut),
+            });
+            assert!(
+                shows(&rig, expected_timeout),
+                "{binary}: timed-out notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+
+            let unattached = request_for("ship it");
+            let unattached_id = unattached.id;
+            rig.feed(UpdateKind::RequestOpened(unattached));
+            rig.feed(UpdateKind::RequestResolved {
+                id: unattached_id,
+                answer: Answer::Decline,
+                by: ClientId::new("core"),
+                cause: Some(ResolutionCause::NoController),
+            });
+            assert!(
+                shows(&rig, expected_no_controller),
+                "{binary}: no-controller notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+        }
+    }
 }

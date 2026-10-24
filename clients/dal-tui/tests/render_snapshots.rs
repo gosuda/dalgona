@@ -81,12 +81,17 @@ fn empty_view() -> Result<View, Box<dyn std::error::Error>> {
     })
 }
 
-fn drawn_frame(width: u16, height: u16) -> Result<String, Box<dyn std::error::Error>> {
+fn drawn_frame(
+    width: u16,
+    height: u16,
+    screen: dal_tui::Screen,
+    binary: &'static str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     let workspace = Workspace::new(std::env::temp_dir())?;
     let opts = dal_tui::TuiOptions {
         session: dal_agent::SessionRef::Ephemeral { workspace },
-        screen: dal_tui::Screen::Inline,
+        screen,
         theme_request: dal_tui::ThemeRequest::Palette,
         default_model: None,
         images: false,
@@ -94,7 +99,7 @@ fn drawn_frame(width: u16, height: u16) -> Result<String, Box<dyn std::error::Er
         motion: false,
         editor: "true".into(),
         color: dal_tui::ColorMode::Never,
-        binary: "dal",
+        binary,
         env: dal_tui::EnvFacts {
             stdin_tty: true,
             ..dal_tui::EnvFacts::default()
@@ -104,7 +109,7 @@ fn drawn_frame(width: u16, height: u16) -> Result<String, Box<dyn std::error::Er
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend)?;
     let view = empty_view()?;
-    dal_tui::draw_frame(&mut terminal, dal_tui::Screen::Inline, &view, &opts)?;
+    dal_tui::draw_frame(&mut terminal, screen, &view, &opts)?;
     Ok(terminal
         .backend()
         .buffer()
@@ -125,7 +130,7 @@ fn idle_state_inline_widths() {
 
 #[test]
 fn short_terminal_renders_the_rows_warning() {
-    let text = drawn_frame(80, 7).expect("frame draws");
+    let text = drawn_frame(80, 7, dal_tui::Screen::Inline, "dal").expect("frame draws");
     assert!(
         text.contains("dalgon needs at least 8 rows"),
         "rows floor shows the rows copy: {text:?}"
@@ -138,7 +143,7 @@ fn short_terminal_renders_the_rows_warning() {
 
 #[test]
 fn narrow_terminal_renders_the_columns_warning() {
-    let text = drawn_frame(11, 24).expect("frame draws");
+    let text = drawn_frame(11, 24, dal_tui::Screen::Inline, "dal").expect("frame draws");
     assert!(
         text.contains("dalgon need"),
         "columns floor clips the columns copy to 11 cells: {text:?}"
@@ -151,12 +156,70 @@ fn narrow_terminal_renders_the_columns_warning() {
 
 #[test]
 fn healthy_terminal_shows_no_narrow_warning() {
-    let text = drawn_frame(80, 24).expect("frame draws");
+    let text = drawn_frame(80, 24, dal_tui::Screen::Inline, "dal").expect("frame draws");
     assert!(
         !text.contains("needs at least"),
         "no floor warning at healthy dimensions"
     );
     let _ = RegionBudget::allocate(80, 24, RegionRequest::default());
+}
+
+/// The empty view exercises every product-named surface through the real
+/// options/frame path: the fullscreen header, the first-run block, the
+/// composer placeholder, and the below-floor warnings. Each `TuiOptions.binary`
+/// family must name itself consistently while `dal`/`dalgon` keep the shipped
+/// wording, and the `dg` alias renders the dalgona wording.
+#[test]
+fn tui_options_binary_selects_the_product_identity_in_the_frame() {
+    for binary in ["dalgon", "dal"] {
+        let frame = drawn_frame(80, 24, dal_tui::Screen::Fullscreen, binary).expect("frame draws");
+        assert!(
+            frame.contains("dal · session · no model"),
+            "{binary}: header keeps the dal wording: {frame:?}"
+        );
+        assert!(
+            frame.contains("No model selected yet. dal needs a model"),
+            "{binary}: first-run keeps the dal wording: {frame:?}"
+        );
+        assert!(
+            frame.contains("> Ask dal to change code"),
+            "{binary}: composer keeps the dal wording: {frame:?}"
+        );
+        assert!(
+            !frame.contains("dalgona"),
+            "{binary}: no dalgona wording leaks into a dal frame"
+        );
+        let rows = drawn_frame(80, 7, dal_tui::Screen::Inline, binary).expect("frame draws");
+        assert!(
+            rows.contains("dalgon needs at least 8 rows"),
+            "{binary}: narrow warning keeps the compatibility wording: {rows:?}"
+        );
+    }
+    for binary in ["dalgona", "dg"] {
+        let frame = drawn_frame(80, 24, dal_tui::Screen::Fullscreen, binary).expect("frame draws");
+        assert!(
+            frame.contains("dalgona · session · no model"),
+            "{binary}: header names dalgona: {frame:?}"
+        );
+        assert!(
+            frame.contains("No model selected yet. dalgona needs a model"),
+            "{binary}: first-run names dalgona: {frame:?}"
+        );
+        assert!(
+            frame.contains("> Ask dalgona to change code"),
+            "{binary}: composer names dalgona: {frame:?}"
+        );
+        let rows = drawn_frame(80, 7, dal_tui::Screen::Inline, binary).expect("frame draws");
+        assert!(
+            rows.contains("dalgona needs at least 8 rows"),
+            "{binary}: rows warning names dalgona: {rows:?}"
+        );
+        let cols = drawn_frame(11, 24, dal_tui::Screen::Inline, binary).expect("frame draws");
+        assert!(
+            cols.contains("dalgona nee"),
+            "{binary}: clipped columns warning names dalgona: {cols:?}"
+        );
+    }
 }
 
 #[test]
