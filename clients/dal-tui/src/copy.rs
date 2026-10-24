@@ -297,6 +297,15 @@ pub mod ids {
     /// Unsupported picker notice.
     pub const PICKER_UNSUPPORTED: &str =
         "This picker is not available in the terminal client. Use another client.";
+    /// Thinking picker title.
+    pub const THINKING_PICKER_TITLE: &str = "Thinking level";
+    /// Notice when the current model does not support reasoning levels.
+    pub const PICKER_THINKING_UNSUPPORTED: &str =
+        "No thinking levels are supported for the current model. Choose another model with /model.";
+    /// Active thinking level marker in the picker row.
+    pub const THINKING_ROW_CURRENT: &str = "{level} (current)";
+    /// Thinking row in settings.
+    pub const SETTINGS_THINKING_ROW: &str = "thinking · {level}";
     /// Login picker title.
     pub const LOGIN_PICKER_TITLE: &str = "Pick a provider to sign in to · type to filter";
     /// Logout picker title.
@@ -642,6 +651,13 @@ pub const DECK: &[(&str, &str)] = &[
     ("picker.history.title", ids::HISTORY_PICKER_TITLE),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
+    ("picker.thinking.title", ids::THINKING_PICKER_TITLE),
+    (
+        "picker.thinking.unsupported",
+        ids::PICKER_THINKING_UNSUPPORTED,
+    ),
+    ("picker.thinking.current", ids::THINKING_ROW_CURRENT),
+    ("settings.thinking.row", ids::SETTINGS_THINKING_ROW),
     ("picker.login.title", ids::LOGIN_PICKER_TITLE),
     ("picker.logout.title", ids::LOGOUT_PICKER_TITLE),
     ("logout.row", ids::LOGOUT_ROW),

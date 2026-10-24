@@ -61,6 +61,18 @@ Seven methods decode their params strictly: `auth/login`, `auth/cancel`, `auth/l
 
 `session/submit` takes every command type the `Command` decoder knows. An unknown `type` is refused with `-32602`. `session/submit` refuses an `export` command whose path is absolute or climbs with `..`. It answers `-32602` and writes no file. Relative paths inside the workspace and the default target stay valid.
 
+### Chooser replies
+
+A command may reply with `choose` (`{"type":"choose","chooser":<name>,"filter":<string>}`) asking the client to display an interactive picker. For `chooser` `"thinking"`, the reply carries an optional `thinkingLevels` array listing the canonical level names supported by the active model:
+
+```json
+{"type":"choose","chooser":"thinking","filter":"","thinkingLevels":["off","minimal","low","medium","high","xhigh","max"]}
+```
+
+`thinkingLevels` is included only when `chooser` is `"thinking"`. For all other choosers (`model`, `settings`, `scoped_models`, `session`, `tree`, `fork_point`, `login`, `logout`), `thinkingLevels` is omitted.
+
+When `thinkingLevels` is omitted from the wire, the deserializer preserves the field as absent, treating capability information as unsupported rather than guessing supported levels. When `thinkingLevels` is present as an explicit empty array (`[]`), the active model supports no thinking levels. When the user selects a level, the client submits that selection as a `/thinking <level>` command rather than setting the level directly, allowing the host to validate the choice against its model capabilities.
+
 ## Updates
 
 Updates carry `seq` and `gen`. Clients resync on gaps.

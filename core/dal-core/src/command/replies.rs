@@ -1,6 +1,6 @@
 use super::{
     Chooser, DenyReason, Deserialize, EntryId, Expect, FrontAction, JobId, Output, Serialize,
-    Tagged, TurnId, de,
+    Tagged, ThinkingLevel, TurnId, de,
 };
 
 /// A successful response to a command.
@@ -29,6 +29,8 @@ pub enum Reply {
         chooser: Chooser,
         /// The initial filter text.
         filter: Box<str>,
+        /// Supported thinking levels when the chooser configures thinking.
+        thinking_levels: Option<Box<[ThinkingLevel]>>,
     },
     /// The client must run a front-end action.
     Front(FrontAction),
@@ -57,6 +59,8 @@ pub(super) enum ReplyShape<'a> {
     Choose {
         chooser: &'a Chooser,
         filter: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking_levels: Option<&'a [ThinkingLevel]>,
     },
     Front {
         action: &'a FrontAction,
@@ -74,7 +78,15 @@ impl Serialize for Reply {
                 turn: turn.as_ref(),
             },
             Self::Done(output) => ReplyShape::Done { output },
-            Self::Choose { chooser, filter } => ReplyShape::Choose { chooser, filter },
+            Self::Choose {
+                chooser,
+                filter,
+                thinking_levels,
+            } => ReplyShape::Choose {
+                chooser,
+                filter,
+                thinking_levels: thinking_levels.as_deref(),
+            },
             Self::Front(action) => ReplyShape::Front { action },
             Self::Started(job) => ReplyShape::Started { job },
         };
@@ -93,6 +105,8 @@ pub(super) struct AcceptedReplyFields {
 pub(super) struct ChooseReplyFields {
     pub(super) chooser: Chooser,
     pub(super) filter: Box<str>,
+    #[serde(rename = "thinkingLevels", default)]
+    pub(super) thinking_levels: Option<Box<[ThinkingLevel]>>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +163,7 @@ impl<'de> Deserialize<'de> for Reply {
                 Ok(Self::Choose {
                     chooser: wire.chooser,
                     filter: wire.filter,
+                    thinking_levels: wire.thinking_levels,
                 })
             }
             "front" => {
@@ -194,6 +209,8 @@ pub(super) enum ReplyFields {
     Choose {
         chooser: Chooser,
         filter: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_levels: Option<Box<[ThinkingLevel]>>,
     },
     Front {
         action: FrontAction,

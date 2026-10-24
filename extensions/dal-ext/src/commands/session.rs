@@ -387,6 +387,7 @@ pub(super) fn resume(cx: &CommandCx<'_>, raw: &str) -> Result<Reply, ErrorTriple
         return Ok(Reply::Choose {
             chooser: dal_core::command::Chooser::Session,
             filter: "".into(),
+            thinking_levels: None,
         });
     }
     match cx.resolve_session(word) {

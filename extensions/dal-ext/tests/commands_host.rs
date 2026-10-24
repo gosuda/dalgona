@@ -193,6 +193,7 @@ async fn bare_model_and_settings_open_their_choosers() -> Outcome<()> {
         Reply::Choose {
             chooser: Chooser::Model,
             filter: "".into(),
+            thinking_levels: None,
         }
     );
     assert_eq!(
@@ -200,6 +201,26 @@ async fn bare_model_and_settings_open_their_choosers() -> Outcome<()> {
         Reply::Choose {
             chooser: Chooser::Settings,
             filter: "".into(),
+            thinking_levels: None,
+        }
+    );
+    Ok(())
+}
+
+/// Bare `/thinking` opens the thinking chooser populated with the exact
+/// host-supported levels for the session's active route (here the configured
+/// default model).
+#[tokio::test]
+async fn bare_thinking_opens_chooser_with_host_supported_levels() -> Outcome<()> {
+    use dal_core::command::Chooser;
+
+    let (agent, _root) = agent().await?;
+    assert_eq!(
+        run(&agent, "thinking").await?,
+        Reply::Choose {
+            chooser: Chooser::Thinking,
+            filter: "".into(),
+            thinking_levels: Some(Box::new([ThinkingLevel::Off])),
         }
     );
     Ok(())

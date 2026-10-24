@@ -1769,7 +1769,11 @@ impl Surfaces {
         };
         let queued = matches!(&submit_reply, Reply::Queued { .. });
         let reply_rows = match submit_reply {
-            Reply::Choose { chooser, filter } => {
+            Reply::Choose {
+                chooser,
+                filter,
+                thinking_levels,
+            } => {
                 self.session.picker = None;
                 let picker = match chooser {
                     Chooser::Tree => Some(crate::picker::tree_picker(&self.view, &filter)),
@@ -1788,6 +1792,7 @@ impl Surfaces {
                         self.session.settings_catalog_due = true;
                         Some(crate::picker::settings_picker(
                             self.diagram_settings.enabled,
+                            self.view.settings.thinking,
                             &filter,
                         ))
                     }
@@ -1797,11 +1802,23 @@ impl Surfaces {
                         None
                     }
                     Chooser::ScopedModels => self.scoped_models_choice(model_source, &filter),
-                    Chooser::Thinking => {
-                        self.live
-                            .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
-                        None
-                    }
+                    Chooser::Thinking => match thinking_levels {
+                        Some(levels) if !levels.is_empty() => Some(crate::picker::thinking_picker(
+                            &levels,
+                            self.view.settings.thinking,
+                            &filter,
+                        )),
+                        Some(_) => {
+                            self.live
+                                .notice(crate::copy::ids::PICKER_THINKING_UNSUPPORTED.to_owned());
+                            None
+                        }
+                        None => {
+                            self.live
+                                .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
+                            None
+                        }
+                    },
                     Chooser::Session => self.session_choice(opts, host, &filter),
                 };
                 self.session.picker = picker;
@@ -2174,6 +2191,7 @@ impl Surfaces {
                     ));
                     self.session.picker = Some(crate::picker::settings_picker(
                         self.diagram_settings.enabled,
+                        self.view.settings.thinking,
                         "",
                     ));
                     self.session.settings_catalog_due = true;
@@ -3603,6 +3621,7 @@ mod tests {
                 session.accept_reply(dal_core::Reply::Choose {
                     chooser,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
                 [] as [String; 0],
                 "{chooser:?} must render no rows"
@@ -4528,7 +4547,11 @@ mod tests {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut session = Session {
-            picker: Some(crate::picker::settings_picker(false, "")),
+            picker: Some(crate::picker::settings_picker(
+                false,
+                dal_core::ThinkingLevel::Off,
+                "",
+            )),
             ..Session::default()
         };
         apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -7479,6 +7502,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7592,6 +7616,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7644,6 +7669,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7654,6 +7680,165 @@ mod loop_tests {
         let notices = rig.surfaces.live.notices();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].text.contains("not available"), "{notices:?}");
+    }
+
+    #[test]
+    fn thinking_chooser_with_supplied_levels_opens_picker() {
+        let mut rig = Rig::new();
+        rig.surfaces.view.settings.thinking = dal_core::ThinkingLevel::Low;
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        let levels = vec![
+            dal_core::ThinkingLevel::Off,
+            dal_core::ThinkingLevel::Low,
+            dal_core::ThinkingLevel::High,
+        ]
+        .into_boxed_slice();
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: Some(levels),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_mut()
+            .expect("thinking picker opens");
+        assert_eq!(picker.title, "Thinking level");
+        assert_eq!(picker.visible_len(), 3);
+        assert_eq!(
+            picker.visible_option(0).map(|o| o.label.as_str()),
+            Some("off")
+        );
+        assert_eq!(
+            picker.visible_option(1).map(|o| o.label.as_str()),
+            Some("low (current)")
+        );
+        assert_eq!(
+            picker.visible_option(2).map(|o| o.label.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(crate::picker::PickerAction::Command(
+                dal_core::Command::Run {
+                    name: "thinking".into(),
+                    args: "low".into(),
+                    expected: None,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn thinking_chooser_with_empty_levels_gives_unsupported_notice() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: Some(Box::new([])),
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "empty levels must not open a picker"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(
+            notices[0].text,
+            crate::copy::ids::PICKER_THINKING_UNSUPPORTED
+        );
+    }
+
+    #[test]
+    fn thinking_chooser_legacy_without_levels_gives_legacy_unsupported_notice() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: None,
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "legacy missing levels must not open a picker"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].text, crate::copy::ids::PICKER_UNSUPPORTED);
+    }
+
+    #[test]
+    fn thinking_stale_level_refusal_handled_as_existing_host() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Done(dal_core::Output::Text(
+                    "Thinking: off. Not changed to max: not supported.".into(),
+                ))),
+            )
+            .expect("done reply folds");
+        assert!(
+            rig.rows()
+                .iter()
+                .any(|row| row.contains("Thinking: off. Not changed to max")),
+            "refusal is recorded in transcript as returned by host: {:?}",
+            rig.rows()
+        );
     }
 
     /// The plain text of every row one frame paints over the rig's surfaces,
@@ -7851,6 +8036,7 @@ mod loop_tests {
                         Ok(Reply::Choose {
                             chooser: dal_core::Chooser::Settings,
                             filter: "".into(),
+                            thinking_levels: None,
                         }),
                     )
                     .expect("the chooser reply folds");

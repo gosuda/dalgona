@@ -3,7 +3,7 @@
 use dal_agent::login::Method;
 use dal_core::{
     Command, EntryKind, EntryView, Family, JournalPart, ModelInfo, ModelRoute, ProductSetting,
-    SettingControl, SettingEdit, SettingValue, View,
+    SettingControl, SettingEdit, SettingValue, ThinkingLevel, View,
 };
 
 use crate::copy::ids;
@@ -609,7 +609,11 @@ fn settings_diagram_label(enabled: bool) -> String {
     )
 }
 
-pub(crate) fn settings_picker(diagrams: bool, filter: &str) -> PickerUi {
+fn settings_thinking_label(thinking: ThinkingLevel) -> String {
+    crate::copy::render(ids::SETTINGS_THINKING_ROW, &[("level", thinking.name())], 1)
+}
+
+pub(crate) fn settings_picker(diagrams: bool, thinking: ThinkingLevel, filter: &str) -> PickerUi {
     let mut picker = PickerUi::new(
         ids::SETTINGS_TITLE,
         filter,
@@ -631,9 +635,52 @@ pub(crate) fn settings_picker(diagrams: bool, filter: &str) -> PickerUi {
                     expected: None,
                 }),
             },
+            PickerOption {
+                label: settings_thinking_label(thinking),
+                action: PickerAction::Command(Command::Run {
+                    name: "thinking".into(),
+                    args: "".into(),
+                    expected: None,
+                }),
+            },
         ],
     );
     picker.diagram_enabled = Some(diagrams);
+    picker
+}
+
+/// The `/thinking` picker: rows are the host-supported reasoning levels in
+/// exact host order, with canonical name and current marker/preselection.
+/// Selecting a row runs `/thinking <level.name>`.
+pub(crate) fn thinking_picker(
+    levels: &[ThinkingLevel],
+    current: ThinkingLevel,
+    filter: &str,
+) -> PickerUi {
+    let options = levels
+        .iter()
+        .map(|level| {
+            let label = if *level == current {
+                crate::copy::render(ids::THINKING_ROW_CURRENT, &[("level", level.name())], 1)
+            } else {
+                level.name().to_string()
+            };
+            PickerOption {
+                label,
+                action: PickerAction::Command(Command::Run {
+                    name: "thinking".into(),
+                    args: level.name().into(),
+                    expected: None,
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut picker = PickerUi::new(ids::THINKING_PICKER_TITLE, filter, options);
+    if let Some(cur_idx) = levels.iter().position(|l| *l == current)
+        && let Some(pos) = picker.visible.iter().position(|&idx| idx == cur_idx)
+    {
+        picker.selected = pos;
+    }
     picker
 }
 
@@ -1239,7 +1286,7 @@ mod picker_tests {
 
     #[test]
     fn settings_toggle_is_session_only_and_save_uses_default_semantics() {
-        let mut picker = super::settings_picker(false, "");
+        let mut picker = super::settings_picker(false, dal_core::ThinkingLevel::Off, "");
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::SetDiagrams {
@@ -1286,9 +1333,9 @@ mod picker_tests {
 
     #[test]
     fn product_rows_show_saved_values_and_require_a_restart() {
-        use dal_core::{SettingControl, SettingValue};
+        use dal_core::{SettingControl, SettingValue, ThinkingLevel};
 
-        let mut picker = super::settings_picker(false, "");
+        let mut picker = super::settings_picker(false, ThinkingLevel::Off, "");
         let mut changed = product_row(
             "plugin.web.timeout_secs",
             SettingValue::Integer(60),
@@ -1311,6 +1358,7 @@ mod picker_tests {
             labels[2..],
             [
                 "model · open the model picker",
+                "thinking · off",
                 "web · label: on · saved in dal.toml · restart required",
                 "web · label: 60 (running: 30) · saved in dal.toml · restart required",
             ]
@@ -1320,15 +1368,15 @@ mod picker_tests {
 
     #[test]
     fn a_toggle_row_saves_its_flipped_value_and_a_catalog_error_is_inert() {
-        use dal_core::{SettingControl, SettingValue};
+        use dal_core::{SettingControl, SettingValue, ThinkingLevel};
 
-        let mut picker = super::settings_picker(false, "");
+        let mut picker = super::settings_picker(false, ThinkingLevel::Off, "");
         picker.add_product_settings(Ok(vec![product_row(
             "plugin.web.enabled",
             SettingValue::Bool(true),
             SettingControl::Toggle,
         )]));
-        for _ in 0..3 {
+        for _ in 0..4 {
             picker.move_selection(true);
         }
         assert_eq!(
@@ -1336,12 +1384,82 @@ mod picker_tests {
             Some(save("plugin.web.enabled", SettingValue::Bool(false)))
         );
 
-        let mut failed = super::settings_picker(false, "");
+        let mut failed = super::settings_picker(false, ThinkingLevel::Off, "");
         failed.add_product_settings(Err("dalgona: dal.toml: bad".to_owned()));
-        for _ in 0..3 {
+        for _ in 0..4 {
             failed.move_selection(true);
         }
         assert_eq!(failed.activate_selected(), Some(PickerAction::Noop));
+    }
+
+    #[test]
+    fn thinking_picker_preserves_host_order_and_marks_current() {
+        use dal_core::{Command, ThinkingLevel};
+
+        let levels = [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ];
+        let mut picker = super::thinking_picker(&levels, ThinkingLevel::Medium, "");
+        assert_eq!(picker.title, "Thinking level");
+        assert_eq!(picker.visible_len(), 4);
+        assert_eq!(
+            picker.visible_option(0).map(|o| o.label.as_str()),
+            Some("off")
+        );
+        assert_eq!(
+            picker.visible_option(1).map(|o| o.label.as_str()),
+            Some("low")
+        );
+        assert_eq!(
+            picker.visible_option(2).map(|o| o.label.as_str()),
+            Some("medium (current)")
+        );
+        assert_eq!(
+            picker.visible_option(3).map(|o| o.label.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "medium".into(),
+                expected: None,
+            }))
+        );
+        picker.move_selection(true);
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "high".into(),
+                expected: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn settings_picker_includes_thinking_row_opening_empty_args() {
+        use dal_core::{Command, ThinkingLevel};
+
+        let mut picker = super::settings_picker(false, ThinkingLevel::High, "");
+        for _ in 0..3 {
+            picker.move_selection(true);
+        }
+        assert_eq!(
+            picker.visible_option(3).map(|o| o.label.as_str()),
+            Some("thinking · high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "".into(),
+                expected: None,
+            }))
+        );
     }
 
     #[test]
