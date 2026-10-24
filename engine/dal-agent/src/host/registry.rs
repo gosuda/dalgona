@@ -1192,7 +1192,7 @@ impl Host {
             .or_else(|| configured_model.clone());
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
-                model: requested_model,
+                model: requested_model.clone(),
                 thinking,
                 approval,
                 name: None,
@@ -1211,11 +1211,13 @@ impl Host {
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());
         // The host read stays here as the open-time seed: later
-        // `persist_default` rewrites affect future sessions only.
+        // `persist_default` rewrites affect future sessions only. The
+        // seed is the resolved route, not the raw reference: an aliased
+        // default ("fast") must reach levels and requests expanded.
         let shared = Arc::new(Shared::new(
             resolved.child,
             generation,
-            configured_model.clone(),
+            requested_model,
             thinking,
             approval,
             mode,

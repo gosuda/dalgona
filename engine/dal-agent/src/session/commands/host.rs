@@ -664,7 +664,19 @@ impl CommandHost for DriverHost {
         let Some(catalog) = self.host.shared.cached_catalog() else {
             return Vec::new();
         };
-        let aliases: Vec<(Box<str>, Box<str>)> = Vec::new();
+        // Aliases are host-global by design (no session fold exists), so
+        // the live map is the right source here: an offline-opened session
+        // whose seed kept the raw alias reference still resolves.
+        let aliases: Vec<(Box<str>, Box<str>)> = self
+            .host
+            .shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aliases()
+            .iter()
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect();
         let Ok(resolved) = dal_provider::resolve_route(&catalog, &aliases, &route) else {
             return Vec::new();
         };
