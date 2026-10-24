@@ -1055,7 +1055,7 @@ async fn remote_thinking_command_wire_roundtrip() {
         thinking_levels,
     } = reply
     else {
-        panic!("bare /thinking must return Reply::Choose, got: {reply:?}");
+        panic!("bare /thinking must return a chooser reply");
     };
     assert_eq!(chooser, Chooser::Thinking);
     assert_eq!(&*filter, "");
@@ -1105,11 +1105,11 @@ async fn remote_thinking_command_wire_roundtrip() {
         })
         .await;
     let Err(WireError::Protocol { message, .. }) = &rejected_result else {
-        panic!("unsupported thinking level must yield Protocol error: {rejected_result:?}");
+        panic!("unsupported thinking level must yield a protocol error");
     };
     assert!(
         message.contains("not available"),
-        "rejection must state the level is not available: {message}"
+        "rejection must state the level is not available"
     );
 
     let unchanged_view = agent
