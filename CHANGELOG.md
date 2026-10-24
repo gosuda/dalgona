@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Apply the session's current approval policy to extension process runs,
+  including after reopening a session.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.

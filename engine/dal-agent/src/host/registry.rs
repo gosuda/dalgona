@@ -1333,13 +1333,6 @@ impl Host {
             procs: Arc::clone(backend.procs()),
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: backend.launcher().clone(),
-            approval: self
-                .state
-                .shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .approval(),
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),

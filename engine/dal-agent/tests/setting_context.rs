@@ -9,17 +9,20 @@ use std::{
 };
 
 use dal_agent::ext::{
-    ArgError, BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExportSpec,
-    ExtensionBuilder, ModelCx, ModelError, ModelHandler, ModelRecord, RawValue, Services, Tool,
-    ToolCall, ToolCx, ToolOutcome, ToolOutput,
+    ArgError, BoxFuture, Caller, CommandCx, CommandHandler, CompactError, CompactInput, Compaction,
+    Compactor, ExportSpec, ExtensionBuilder, HookError, ModelCx, ModelError, ModelHandler,
+    ModelRecord, RawValue, Services, SessionCx, SessionInstalls, Tool, ToolCall, ToolCx,
+    ToolOutcome, ToolOutput,
 };
-use dal_agent::{Delivery, Env, Host, Product, SessionRef};
+use dal_agent::{Delivery, Env, Host, Product, ServiceError, SessionRef};
 use dal_core::ext::{ExportId, ExportKind};
 use dal_core::{
-    ApprovalMode, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, Entry, EntryId,
-    EntryKind, Expect, JournalPart, Mode, ModelId, ModelInfo, ModelRequest, ModelRoute, Name,
-    Origin, PageReq, Part, Product as JournalProduct, RawJson, Record, ServiceSet, SessionId,
+    ApprovalMode, Caps, ClientId, Command, CommandName, CommandSpec, Config, ConfigProduct,
+    ContextItem, DenyReason, Entry, EntryId, EntryKind, Expect, JournalPart, Mode, ModelId,
+    ModelInfo, ModelRequest, ModelRoute, Name, Origin, Output, PageReq, Part,
+    Product as JournalProduct, RawJson, Record, RunRequest, Rung, Save, ServiceSet, SessionId,
     ThinkingLevel, ToolClass, ToolSpec, UpdateKind, Usage, View, Visibility, Workspace, ext::OpSet,
+    headless_denial_text,
 };
 use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent};
 use dal_store::Store;
@@ -652,5 +655,232 @@ async fn a_live_sessions_folded_thinking_ignores_the_host_default() {
         seen,
         ThinkingLevel::Off,
         "a session folded to Off must not compact at the host default"
+    );
+}
+
+type ApprovalSetupSlot = Arc<Mutex<Option<(Arc<dyn Services>, Caller)>>>;
+
+struct ApprovalRig {
+    _tmp: tempfile::TempDir,
+    host: Host,
+    workspace_dir: std::path::PathBuf,
+    slot: ApprovalSetupSlot,
+}
+
+struct PersistApprovalHandler;
+
+impl CommandHandler for PersistApprovalHandler {
+    fn run<'a>(
+        &'a self,
+        _args: &'a str,
+        cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<dal_core::Reply, ServiceError>> {
+        Box::pin(async move {
+            cx.submit_wait(Command::SetApproval {
+                mode: ApprovalMode::All,
+                save: Save::SessionAndDefault,
+            })
+            .await
+            .map_err(|e| ServiceError::failed(None, e.to_string()))?;
+            Ok(dal_core::Reply::Done(Output::Nothing))
+        })
+    }
+}
+
+fn approval_run_request() -> RunRequest {
+    RunRequest {
+        argv: vec![
+            std::ffi::OsString::from("echo"),
+            std::ffi::OsString::from("probe"),
+        ],
+        cwd: None,
+        stdin: None,
+        timeout: None,
+        env: Vec::new(),
+        stdout_prefix_limit: 1024,
+    }
+}
+
+async fn approval_rig() -> ApprovalRig {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let workspace_dir = tmp.path().join("w");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        &data,
+        "",
+        Some("model = \"dalgona/capture\"\napproval = \"all\"\n"),
+    )
+    .expect("config");
+
+    let slot: ApprovalSetupSlot = Arc::default();
+    let slot_clone = Arc::clone(&slot);
+
+    let extension = ExtensionBuilder::new(
+        "run-probe",
+        "0.1.0",
+        ServiceSet::from_names(["run"]).expect("run service"),
+    )
+    .expect("builder")
+    .with_origin(Origin::Builtin, None)
+    .command(
+        CommandSpec {
+            name: CommandName::parse("persist_approval").expect("command name"),
+            summary: "persist approval default".into(),
+            args_hint: None,
+        },
+        Arc::new(PersistApprovalHandler),
+    )
+    .model(ModelRecord {
+        id: ModelId::parse("dalgona/capture").expect("model id"),
+        caps: Caps {
+            context_window: Some(4096),
+            thinking: Box::new([ThinkingLevel::Off, ThinkingLevel::Low]),
+            tool_use: false,
+            image_input: false,
+            custom_grammar: false,
+        },
+        handler: Arc::new(Capture {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }),
+        export: None,
+    })
+    .session_setup(
+        move |cx: SessionCx| -> BoxFuture<'static, Result<SessionInstalls, HookError>> {
+            let slot = Arc::clone(&slot_clone);
+            Box::pin(async move {
+                *slot.lock().expect("slot lock") = Some((cx.services, cx.caller));
+                Ok(SessionInstalls::default())
+            })
+        },
+    )
+    .build()
+    .expect("extension");
+
+    let product = Product {
+        name: "dal",
+        data_root: data.clone(),
+        defaults: "",
+        extensions: vec![extension],
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::new(),
+        cwd: workspace_dir.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("host");
+    host.set_config_path(data.join("dal.toml"));
+
+    ApprovalRig {
+        _tmp: tmp,
+        host,
+        workspace_dir,
+        slot,
+    }
+}
+
+/// The session's approval mode governs `services.run`, not the host default:
+/// a live session tightened to `Ask` denies `services.run` even when the
+/// host default stays `All`; a replayed session restores its approval mode;
+/// and sibling host-default updates do not override the session's policy.
+#[tokio::test]
+async fn a_sessions_approval_governs_service_run_and_ignores_the_host_default() {
+    let rig = approval_rig().await;
+    let host = rig.host;
+    let workspace_dir = rig.workspace_dir;
+    let slot = rig.slot;
+    let expected_denial = DenyReason::out_of_scope(headless_denial_text("run", Rung::All));
+
+    let (settled, mut settled_stream) = open_session(&host, &workspace_dir, "settled").await;
+    let (services, caller) = slot
+        .lock()
+        .expect("slot lock")
+        .take()
+        .expect("session setup ran for settled");
+
+    prompt(&settled, "durable").await;
+    assert!(
+        await_turn_end(&mut settled_stream).await,
+        "the turn for durable never ended"
+    );
+
+    let initial_run = services.run(&caller, approval_run_request()).await;
+    assert!(
+        initial_run.is_ok(),
+        "services.run should succeed under All approval: {initial_run:?}"
+    );
+
+    let tightened = settled
+        .submit(Command::SetApproval {
+            mode: ApprovalMode::Ask,
+            save: Save::SessionOnly,
+        })
+        .await
+        .expect("tighten approval");
+    assert!(matches!(tightened, dal_core::Reply::Done { .. }));
+
+    let tightened_run = services.run(&caller, approval_run_request()).await;
+    assert_eq!(
+        tightened_run,
+        Err(ServiceError::Denied(expected_denial.clone())),
+        "tightened Ask session approval must deny services.run with headless guidance"
+    );
+
+    let (sibling, _) = open_session(&host, &workspace_dir, "sibling").await;
+    let _ = slot.lock().expect("slot lock").take();
+    let sibling_update = sibling
+        .submit(Command::Run {
+            name: "persist_approval".into(),
+            args: "".into(),
+            expected: None,
+        })
+        .await
+        .expect("sibling update host default");
+    assert!(matches!(sibling_update, dal_core::Reply::Done { .. }));
+
+    let post_sibling_run = services.run(&caller, approval_run_request()).await;
+    assert_eq!(
+        post_sibling_run,
+        Err(ServiceError::Denied(expected_denial.clone())),
+        "sibling host-default update to All must not override tightened session policy"
+    );
+
+    let session_id = settled.session();
+    host.close(session_id).await.expect("close settled session");
+    let reopened = host
+        .open(
+            SessionRef::Resume {
+                workspace: Workspace::new(workspace_dir).expect("workspace"),
+                key: session_id.to_string().into(),
+            },
+            ClientId::new("reopened"),
+        )
+        .await
+        .expect("reopen session");
+    assert_eq!(
+        reopened
+            .view(PageReq::default())
+            .expect("reopened view")
+            .settings
+            .approval,
+        ApprovalMode::Ask,
+        "the reopened session must restore its folded Ask approval"
+    );
+    let (reopened_services, reopened_caller) = slot
+        .lock()
+        .expect("slot lock")
+        .take()
+        .expect("session setup ran on reopen");
+
+    let replayed_run = reopened_services
+        .run(&reopened_caller, approval_run_request())
+        .await;
+    assert_eq!(
+        replayed_run,
+        Err(ServiceError::Denied(expected_denial)),
+        "replayed Ask approval must apply to services.run on reopen"
     );
 }

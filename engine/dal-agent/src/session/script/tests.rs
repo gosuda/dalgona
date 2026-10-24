@@ -205,7 +205,6 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
-    let approval = config.approval();
     let data_root = data.clone();
     let runs = Arc::new(AtomicUsize::new(0));
     let slow = Arc::new(SlowTool {
@@ -365,7 +364,6 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
             procs,
             env_snapshot: backend.env_snapshot().to_vec(),
             launcher: Ok(crate::proc::Launcher::Direct),
-            approval,
             cancel: cancel.clone(),
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks,
