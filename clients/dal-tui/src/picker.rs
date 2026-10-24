@@ -730,12 +730,25 @@ pub(crate) fn setting_value_picker(setting: ProductSetting) -> PickerUi {
             Vec::new(),
         ),
     };
+    let selected = match &setting.control {
+        SettingControl::Choice(_) | SettingControl::Toggle => options
+            .iter()
+            .position(|option| {
+                matches!(
+                    &option.action,
+                    PickerAction::SaveSetting(edit) if edit.value == setting.value
+                )
+            })
+            .unwrap_or(0),
+        _ => 0,
+    };
     let title = crate::copy::render(
         ids::SETTINGS_VALUE_TITLE,
         &[("key", &setting.key), ("value", &setting.value.to_string())],
         1,
     );
     let mut picker = PickerUi::new(title, "", options);
+    picker.selected = selected;
     if let SettingControl::Subset(_) = setting.control {
         picker.with_multi(checked);
     }
@@ -1373,6 +1386,32 @@ mod picker_tests {
             Some(save(
                 "plugin.web.provider",
                 SettingValue::Text("tavily".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_choice_editor_preselects_saved_value_and_submits_without_navigation() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "plugin.web.provider",
+            SettingValue::Text("tavily".into()),
+            SettingControl::Choice(vec!["brave".into(), "tavily".into()]),
+        ));
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.web.provider",
+                SettingValue::Text("tavily".into())
+            ))
+        );
+        picker.move_selection(false);
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.web.provider",
+                SettingValue::Text("brave".into())
             ))
         );
     }
