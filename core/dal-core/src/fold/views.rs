@@ -7,6 +7,12 @@ use super::{
 };
 
 impl Session {
+    /// Returns the durable label attached to a branch entry, when present.
+    #[must_use]
+    pub fn branch_label(&self, leaf: EntryId) -> Option<&str> {
+        self.tree.labels.get(&leaf).map(AsRef::as_ref)
+    }
+
     /// Whether the active stream can accept a legacy watcher interrupt.
     #[must_use]
     pub fn can_interrupt_stream(&self) -> bool {

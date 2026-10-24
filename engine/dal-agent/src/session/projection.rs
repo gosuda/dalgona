@@ -174,9 +174,9 @@ impl Projection {
                 self.turn = TurnState::Running { turn: *turn };
             }
             UpdateKind::TurnEnded { turn, stop } => {
+                self.last_stop = Some(*stop);
                 if matches!(self.turn, TurnState::Running { turn: held } if held == *turn) {
                     self.turn = TurnState::Idle;
-                    self.last_stop = Some(*stop);
                 }
             }
             UpdateKind::JobSettled { job } => {
@@ -270,21 +270,96 @@ impl Projection {
     }
 
     pub(crate) fn restore_fold(&mut self, fold: &dal_core::Session) {
-        let added = fold
-            .leaf_entries()
-            .into_iter()
-            .map(|entry| EntryView {
-                id: entry.id,
-                parent: entry.parent,
-                kind: entry.kind.clone(),
-            })
-            .collect();
-        self.apply(&UpdateKind::Tree(TreeDelta {
-            added,
-            leaf: fold.leaf_entry(),
-        }));
-        self.apply(&UpdateKind::Settings(fold.settings_view()));
+        self.preview = Box::default();
+        self.changes.clear();
+        self.leaf = fold.leaf_entry();
+        let mut usage = None;
+        for entry in fold.leaf_entries() {
+            if matches!(entry.kind, EntryKind::User { .. }) {
+                self.preview = user_preview(&entry.kind);
+            }
+            if let EntryKind::ToolResult { changes, .. } = &entry.kind {
+                self.changes.extend(changes.iter().cloned());
+            }
+            if let EntryKind::Assistant {
+                usage: reported, ..
+            } = &entry.kind
+            {
+                usage = Some(*reported);
+            }
+            self.entries.insert(
+                entry.id,
+                EntryView {
+                    id: entry.id,
+                    parent: entry.parent,
+                    kind: entry.kind.clone(),
+                },
+            );
+        }
+        self.settings = fold.settings_view();
+        self.usage.usage = usage.unwrap_or(Usage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            premium_requests: None,
+        });
         self.usage.context_tokens = fold.tokens_since_last_compaction();
+        self.usage.context_window = fold.limits().map_or(0, |limits| limits.window);
+        if let Some(leaf) = self.leaf {
+            self.branches.retain(|branch| branch.leaf != leaf);
+            self.branches.insert(
+                0,
+                TreeBranch {
+                    leaf,
+                    label: fold.branch_label(leaf).map(Into::into),
+                    preview: self.preview.clone(),
+                },
+            );
+            self.branches.truncate(OUTLINE_CAP);
+        }
+        self.sync_turn(fold);
+    }
+
+    /// Applies linear appends incrementally; a leaf jump hydrates its path
+    /// from the owner, including branches never materialized since reopen.
+    pub(crate) fn apply_fold(&mut self, kind: &UpdateKind, fold: &dal_core::Session) {
+        let hydrate = if let UpdateKind::Tree(TreeDelta { added, leaf }) = kind {
+            let mut cursor = self.leaf;
+            let mut linear = true;
+            for entry in added {
+                linear &= entry.parent == cursor;
+                cursor = Some(entry.id);
+            }
+            !linear || cursor != *leaf
+        } else {
+            false
+        };
+        self.apply(kind);
+        if hydrate {
+            self.restore_fold(fold);
+        }
+        if let UpdateKind::Tree(_) = kind
+            && let Some(leaf) = self.leaf
+            && let Some(branch) = self.branches.iter_mut().find(|branch| branch.leaf == leaf)
+        {
+            branch.label = fold.branch_label(leaf).map(Into::into);
+        }
+        self.sync_turn(fold);
+    }
+
+    /// Opening hooks own the admission lane even before `TurnStarted` exists.
+    pub(crate) fn sync_turn(&mut self, fold: &dal_core::Session) {
+        self.turn = match fold.phase() {
+            dal_core::Phase::Opening { turn, .. } | dal_core::Phase::Settling { turn, .. } => {
+                TurnState::Settling { turn: *turn }
+            }
+            dal_core::Phase::Running { turn, .. } => TurnState::Running { turn: *turn },
+            dal_core::Phase::Compacting { job: Some(job) } => TurnState::Compacting { job: *job },
+            _ => TurnState::Idle,
+        };
     }
 
     fn leaf_path(&self) -> Vec<&EntryView> {

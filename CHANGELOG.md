@@ -5,6 +5,8 @@
   including after reopening a session.
 - Give extension setup the same resolved default model route used by turns.
   Existing sessions keep their default when another session saves a new one.
+- Restore branch previews, labels, file changes, and measured usage from the
+  selected history. Keep queued openings busy until they start or stop.
 - Preserve cache-write prices when regenerating the model catalog.
 - Count assistant replay payloads toward session-page byte limits so large
   replay records cannot bypass pagination.
