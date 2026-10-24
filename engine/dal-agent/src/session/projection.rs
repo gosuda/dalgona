@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use dal_core::{
     ApprovalMode, AutoCompaction, EntryId, EntryKind, EntryView, ExtStatus, FileChange, Gen,
-    JournalPart, Mode, Page, PageReq, Request, Seq, SessionId, SessionInfo, SettingsView, Stats,
-    ThinkingLevel, Timestamp, TreeBranch, TreeDelta, TreeOutline, TurnState, UpdateKind, Usage,
-    UsageView, View, Workspace,
+    JournalPart, Mode, ModelRoute, Page, PageReq, Request, Seq, SessionId, SessionInfo,
+    SettingsView, Stats, ThinkingLevel, Timestamp, TreeBranch, TreeDelta, TreeOutline, TurnState,
+    UpdateKind, Usage, UsageView, View, Workspace,
 };
 
 /// Maximum branches retained in the outline, nearest the leaf first.
@@ -46,6 +46,10 @@ pub(crate) struct Projection {
     leaf: Option<EntryId>,
     branches: Vec<TreeBranch>,
     settings: SettingsView,
+    /// The host default model captured at open; the session's effective
+    /// route while no `/model` selection has folded. Kept out of
+    /// `settings.model`, which carries explicit selections only.
+    open_time_model: Option<ModelRoute>,
     usage: UsageView,
     changes: Vec<FileChange>,
     preview: Box<str>,
@@ -63,12 +67,21 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
-    /// Seeds settings from the host configuration; updates refine it.
-    pub(crate) fn seed(thinking: ThinkingLevel, approval: ApprovalMode, mode: Mode) -> Self {
+    /// Seeds settings from the host configuration captured at open; updates
+    /// refine it. The model argument is the open-time host default, held
+    /// apart from `settings.model`: that field means an explicit session
+    /// selection and stays `None` until a `/model` entry folds.
+    pub(crate) fn seed(
+        model: Option<ModelRoute>,
+        thinking: ThinkingLevel,
+        approval: ApprovalMode,
+        mode: Mode,
+    ) -> Self {
         Self {
             entries: HashMap::new(),
             leaf: None,
             branches: Vec::new(),
+            open_time_model: model,
             settings: SettingsView {
                 model: None,
                 thinking,
@@ -196,6 +209,16 @@ impl Projection {
     /// settings, returned unchanged.
     pub(crate) fn effective_settings(&self) -> SettingsView {
         self.settings.clone()
+    }
+
+    /// The route the session runs under: the folded explicit selection,
+    /// else the open-time host default. Views keep reporting the
+    /// selection only; turn code wants the route.
+    pub(crate) fn effective_model(&self) -> Option<ModelRoute> {
+        self.settings
+            .model
+            .clone()
+            .or_else(|| self.open_time_model.clone())
     }
 
     /// Builds the client-facing snapshot with leaf paging applied.
@@ -449,7 +472,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut projection =
-            Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+            Projection::seed(None, ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
         projection.apply(&UpdateKind::Tree(TreeDelta {
             added: entries,
             leaf: Some(entry_id(2)),
@@ -513,7 +536,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut projection =
-            Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+            Projection::seed(None, ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
         let entry_count = entries.len();
         projection.apply(&UpdateKind::Tree(TreeDelta {
             added: entries,
@@ -591,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_fold_reports_journaled_settings_and_no_inherited_model() {
+    fn restore_fold_keeps_open_time_seed_until_explicit_selection() {
         let default = ModelRoute::Api {
             family: Family::Chat,
             model: "default-model".into(),
@@ -607,10 +630,16 @@ mod tests {
         let restored = |records: Vec<Record>| {
             let (fold, _) = Session::replay_with(seed.clone(), records, Timestamp::now())
                 .expect("fixture journal replays");
-            let mut projection =
-                Projection::seed(ThinkingLevel::Medium, ApprovalMode::Ask, Mode::Normal);
+            // The open-time host default seeds the projection, the way the
+            // registry seeds `Shared` at open.
+            let mut projection = Projection::seed(
+                Some(default.clone()),
+                ThinkingLevel::Medium,
+                ApprovalMode::Ask,
+                Mode::Normal,
+            );
             projection.restore_fold(&fold);
-            projection.effective_settings()
+            projection
         };
 
         let inheriting = restored(vec![
@@ -622,11 +651,17 @@ mod tests {
                 },
             )),
         ]);
+        let inheriting_settings = inheriting.effective_settings();
         assert_eq!(
-            inheriting.model, None,
+            inheriting_settings.model, None,
             "an inherited default is not a selection"
         );
-        assert_eq!(inheriting.thinking, ThinkingLevel::Low);
+        assert_eq!(
+            inheriting.effective_model(),
+            Some(default.clone()),
+            "a journal without a Model entry keeps the open-time seed as the route"
+        );
+        assert_eq!(inheriting_settings.thinking, ThinkingLevel::Low);
 
         let selecting = restored(vec![
             user_record(),
@@ -653,7 +688,10 @@ mod tests {
                 name: Some("kept".into()),
             },
         ]);
-        assert_eq!(selecting.model, Some(default));
+        let selecting_settings = selecting.effective_settings();
+        assert_eq!(selecting_settings.model, Some(default.clone()));
+        assert_eq!(selecting.effective_model(), Some(default));
+        let selecting = selecting_settings;
         assert_eq!(selecting.thinking, ThinkingLevel::Medium);
         assert_eq!(selecting.approval, ApprovalMode::All);
         assert_eq!(selecting.mode, Mode::EvalOnly);

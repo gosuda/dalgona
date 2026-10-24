@@ -2081,22 +2081,21 @@ impl Actor {
         let opening = if hooked {
             let shared = Arc::clone(&self.host.shared);
             let requested = self.requested_route();
+            // Cloned before any await: the opening resolves the session's
+            // own route, not a host default rewritten mid-turn.
+            let session_model = self.shared.model();
             // Boxed: the resolution future would otherwise push this fold
             // (and its `drive_opening` caller) over the `large_future` cap.
-            Box::pin(
-                self.pump_opening(async move { opening_model(&shared, turn, requested).await }),
-            )
+            Box::pin(self.pump_opening(async move {
+                opening_model(&shared, session_model, turn, requested).await
+            }))
             .await
         } else {
             None
         };
-        let thinking = self
-            .host
-            .shared
-            .config
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .thinking();
+        // The session's folded thinking: input hooks see the same level the
+        // turn's request uses, never a sibling's rewritten host default.
+        let thinking = self.shared.thinking();
         let model = opening.as_ref().map(|opening| opening.info(thinking));
         let mut event = InputEvent { content, model };
         for (index, extension, caller) in hook_fanout(generation, Some(turn)) {

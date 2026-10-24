@@ -9,18 +9,20 @@ use std::{
 };
 
 use dal_agent::ext::{
-    ArgError, BoxFuture, ExportSpec, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
-    ModelRecord, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
+    ArgError, BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExportSpec,
+    ExtensionBuilder, ModelCx, ModelError, ModelHandler, ModelRecord, RawValue, Services, Tool,
+    ToolCall, ToolCx, ToolOutcome, ToolOutput,
 };
 use dal_agent::{Delivery, Env, Host, Product, SessionRef};
 use dal_core::ext::{ExportId, ExportKind};
 use dal_core::{
-    ApprovalMode, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, EntryKind, Expect,
-    Mode, ModelId, ModelInfo, ModelRequest, ModelRoute, Name, Origin, PageReq, Part, RawJson,
-    ServiceSet, ThinkingLevel, ToolClass, ToolSpec, UpdateKind, Usage, View, Visibility, Workspace,
-    ext::OpSet,
+    ApprovalMode, Caps, ClientId, Command, Config, ConfigProduct, ContextItem, Entry, EntryId,
+    EntryKind, Expect, JournalPart, Mode, ModelId, ModelInfo, ModelRequest, ModelRoute, Name,
+    Origin, PageReq, Part, Product as JournalProduct, RawJson, Record, ServiceSet, SessionId,
+    ThinkingLevel, ToolClass, ToolSpec, UpdateKind, Usage, View, Visibility, Workspace, ext::OpSet,
 };
 use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent};
+use dal_store::Store;
 use futures::stream;
 
 fn scripted_stream() -> EventStream {
@@ -454,5 +456,201 @@ async fn a_live_sessions_folded_mode_ignores_the_host_default() {
     assert!(
         advertises_eval(fresh_index),
         "a new session advertises the eval-only tool"
+    );
+}
+/// Records the thinking level the driver hands to compaction.
+struct ThinkingCompactor {
+    seen: Arc<Mutex<Option<ThinkingLevel>>>,
+}
+
+impl Compactor for ThinkingCompactor {
+    fn compact<'a>(
+        &'a self,
+        input: CompactInput<'a>,
+        _services: Arc<dyn Services>,
+    ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
+        *self.seen.lock().expect("thinking level lock") = Some(input.params.thinking);
+        // Refuse the chain: the recorded level is the whole assertion.
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// One host with a capture model and a thinking-recording compactor.
+struct ThinkingRig {
+    _tmp: tempfile::TempDir,
+    host: Host,
+    data_dir: std::path::PathBuf,
+    workspace_dir: std::path::PathBuf,
+    compacted: Arc<Mutex<Option<ThinkingLevel>>>,
+}
+
+fn entry_id(value: u64) -> EntryId {
+    EntryId::new(std::num::NonZeroU64::new(value).expect("entry id is nonzero"))
+}
+
+fn seed_record(id: u64, parent: Option<EntryId>, text: String) -> Record {
+    Record::User(Entry {
+        id: entry_id(id),
+        parent,
+        at: jiff::Timestamp::UNIX_EPOCH,
+        kind: EntryKind::User {
+            parts: vec![JournalPart::Text { text: text.into() }],
+        },
+    })
+}
+
+async fn thinking_rig() -> ThinkingRig {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let workspace_dir = tmp.path().join("w");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        &data,
+        "",
+        Some("model = \"dalgona/capture\"\nthinking = \"high\"\n"),
+    )
+    .expect("config");
+    let compacted = Arc::new(Mutex::new(None));
+    let extension = ExtensionBuilder::new("capture", "0.1.0", ServiceSet::EMPTY)
+        .expect("builder")
+        .with_origin(Origin::Builtin, None)
+        .model(ModelRecord {
+            id: ModelId::parse("dalgona/capture").expect("model id"),
+            caps: Caps {
+                // Wide enough to hold the seeded span without tripping
+                // automatic compaction during the warm turn below.
+                context_window: Some(100_000),
+                thinking: Box::new([ThinkingLevel::Off, ThinkingLevel::Low]),
+                tool_use: true,
+                image_input: false,
+                custom_grammar: false,
+            },
+            handler: Arc::new(Capture {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }),
+            export: None,
+        })
+        .compactor(
+            "thinking-probe",
+            Arc::new(ThinkingCompactor {
+                seen: Arc::clone(&compacted),
+            }),
+        )
+        .build()
+        .expect("extension");
+    let product = Product {
+        name: "dal",
+        data_root: data.clone(),
+        defaults: "",
+        extensions: vec![extension],
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::new(),
+        cwd: workspace_dir.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("host");
+    // Pins where `SessionAndDefault` persists, so the sibling below can
+    // rewrite the host default mid-test.
+    host.set_config_path(data.join("dal.toml"));
+    ThinkingRig {
+        _tmp: tmp,
+        host,
+        data_dir: data.clone(),
+        workspace_dir,
+        compacted,
+    }
+}
+
+/// The compaction turn path reads the owning session's folded thinking, not
+/// the live host default: a session folded to `Off` keeps compacting at
+/// `Off` while the host-wide default stays `High`, mirroring the mode
+/// regression's shape (`EvalModeRig` plus a thinking-recording compactor).
+///
+/// The normal request path cannot show this end to end: the synthetic
+/// capture model reports `ToolSupport::Any`, which makes its `ModelInfo`
+/// thinking-independent, and `RequestParams.thinking` is fold-derived, so a
+/// request-level assertion would pass with or without the fix. Compaction
+/// parameters come straight from the repointed host read, so the compactor
+/// record is the discriminating proof.
+#[tokio::test]
+async fn a_live_sessions_folded_thinking_ignores_the_host_default() {
+    let rig = thinking_rig().await;
+    let compacted = Arc::clone(&rig.compacted);
+    let workspace_dir = rig.workspace_dir.clone();
+    let host = rig.host;
+
+    // Seed a large journal directly: the manual compaction below needs a
+    // nonzero-token span. A short warm turn installs the fold's compaction
+    // limits first; the probe is cleared after it so only the manual pass
+    // counts.
+    let session_id = SessionId::new_v7();
+    let workspace = Workspace::new(workspace_dir.clone()).expect("workspace");
+    let store = Store::new(rig.data_dir.clone(), workspace.clone(), JournalProduct::Dal);
+    let mut journal = store.create_session(session_id);
+    journal
+        .append(vec![
+            seed_record(1, None, "old prefix".into()),
+            seed_record(2, Some(entry_id(1)), "retained ".repeat(20_000)),
+            seed_record(3, Some(entry_id(2)), "tail".into()),
+        ])
+        .await
+        .expect("seed session journal");
+    journal.close().await.expect("close seeded session");
+    let settled = host
+        .open(
+            SessionRef::Resume {
+                workspace: workspace.clone(),
+                key: session_id.to_string().into(),
+            },
+            ClientId::new("settled"),
+        )
+        .await
+        .expect("resume seeded session");
+    let mut settled_stream = settled.subscribe(None).expect("subscribe");
+
+    let folded = settled
+        .submit(Command::SetThinking {
+            level: ThinkingLevel::Off,
+            save: dal_core::Save::SessionOnly,
+        })
+        .await
+        .expect("fold thinking");
+    assert!(
+        matches!(folded, dal_core::Reply::Done { .. }),
+        "folding the session thinking failed: {folded:?}"
+    );
+
+    prompt(&settled, "settled-warm").await;
+    assert!(
+        await_turn_end(&mut settled_stream).await,
+        "the warm turn never ended"
+    );
+    // Discard any automatic pass so the manual compaction below is the only
+    // recorded one.
+    compacted.lock().expect("thinking level lock").take();
+
+    // The reply fails closed when every compactor refuses; the recorded
+    // level is the assertion, polled until the chain runs.
+    let compact_reply = settled.submit(Command::Compact { focus: None }).await;
+    let polled = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(level) = compacted.lock().expect("thinking level lock").take() {
+                return level;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let Ok(seen) = polled else {
+        panic!("compactor never ran; compact reply: {compact_reply:?}")
+    };
+    assert_eq!(
+        seen,
+        ThinkingLevel::Off,
+        "a session folded to Off must not compact at the host default"
     );
 }

@@ -1206,13 +1206,16 @@ impl Host {
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()),
         })?;
         let opening_texts: Arc<[String]> = super::history::opening_texts(&fold).into();
-        let model = replayed_model(journal.records(), &fold, configured_model);
+        let model = replayed_model(journal.records(), &fold, configured_model.clone());
         let model_id = model
             .as_ref()
             .map_or_else(Box::default, |route| route.id().into());
+        // The host read stays here as the open-time seed: later
+        // `persist_default` rewrites affect future sessions only.
         let shared = Arc::new(Shared::new(
             resolved.child,
             generation,
+            configured_model.clone(),
             thinking,
             approval,
             mode,

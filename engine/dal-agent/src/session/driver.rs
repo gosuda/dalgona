@@ -1161,16 +1161,18 @@ async fn resolve_requested(
     }
 }
 
-/// Resolves the configured default model.
-async fn resolve_default(shared: &HostShared) -> Result<ResolvedRequest, Box<str>> {
-    let reference: String = shared
-        .config
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .model()
-        .unwrap_or("")
-        .to_owned();
-    resolve_reference(shared, &reference, None).await
+/// Resolves the session's effective model: the folded `/model` selection,
+/// else the host default captured at open. A session that never had a route
+/// keeps failing closed instead of adopting a host default a sibling
+/// persisted after open.
+async fn resolve_default(
+    shared: &HostShared,
+    session_model: Option<&ModelRoute>,
+) -> Result<ResolvedRequest, Box<str>> {
+    let Some(route) = session_model else {
+        return Err("no model configured: set dal.toml [models] default.".into());
+    };
+    resolve_requested(shared, route, None).await
 }
 
 /// Resolves `reference`, or the model `route` names when one is given.
@@ -1249,12 +1251,17 @@ fn synthetic(shared: &HostShared, reference: &str) -> Option<crate::ext::synthet
 /// first request while `requested` still names the requested route.
 pub(crate) async fn opening_model(
     shared: &HostShared,
+    session_model: Option<ModelRoute>,
     turn: TurnId,
     requested: Option<ModelRoute>,
 ) -> Option<OpeningModel> {
     let resolved = match requested.as_ref() {
         Some(route) => resolve_requested(shared, route, None).await,
-        None => resolve_default(shared).await,
+        // `requested` is `None` only when the fold names no route, in which
+        // case the session owns no route either, so the default resolution
+        // fails closed instead of reading a host default a sibling may have
+        // rewritten.
+        None => resolve_default(shared, session_model.as_ref()).await,
     }
     .ok()?;
     Some(OpeningModel {
@@ -1267,8 +1274,11 @@ pub(crate) async fn opening_model(
 impl Driver {
     /// Resolves the request route through the catalog, caching it for commands.
     async fn resolve_model(&self, turn: TurnId) -> Result<ResolvedRequest, Box<str>> {
+        // Cloned before any await: the session's effective route, never the
+        // live host default a sibling's `persist_default` may have rewritten.
+        let session_model = self.deps.shared.model();
         let Some(route) = self.turn_model(turn) else {
-            return resolve_default(&self.deps.host.shared).await;
+            return resolve_default(&self.deps.host.shared, session_model.as_ref()).await;
         };
         let provider = self
             .turns
@@ -1283,6 +1293,13 @@ impl Driver {
     /// `persist_default` rewrites for future sessions.
     fn session_mode(&self) -> dal_core::Mode {
         self.deps.shared.mode()
+    }
+    /// The thinking level this session runs under: the folded session
+    /// setting, seeded from the host config at open and refined by
+    /// `SetThinking` folds. Never the live host-wide config, which
+    /// `persist_default` rewrites for future sessions.
+    fn session_thinking(&self) -> dal_core::ThinkingLevel {
+        self.deps.shared.thinking()
     }
 
     /// Returns the turn's active route, when the actor snapshotted one.
@@ -1302,14 +1319,7 @@ impl Driver {
         params: RequestParams,
     ) -> ModelRequest {
         let mode = self.session_mode();
-        let thinking = self
-            .deps
-            .host
-            .shared
-            .config
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .thinking();
+        let thinking = self.session_thinking();
         let generation = self.turn(turn).generation.clone();
         let turn_tools = self.turn(turn).tools.clone();
         let info = model_info_for(
@@ -2074,7 +2084,10 @@ impl Driver {
                 entry.context_window.map(u64::from),
             ));
         }
-        let resolved = resolve_default(&self.deps.host.shared).await?;
+        // Cloned before any await: compaction resolves the session's own
+        // model, not a host default rewritten mid-turn.
+        let session_model = self.deps.shared.model();
+        let resolved = resolve_default(&self.deps.host.shared, session_model.as_ref()).await?;
         Ok((
             resolved.route,
             resolved.entry.image_profile,
@@ -2107,15 +2120,10 @@ impl Driver {
             None => CancellationToken::new(),
             Some(turn) => self.compaction_cancel(turn)?,
         };
+        // The session's folded thinking: a sibling's `persist_default`
+        // must not re-tune this session's compaction mid-turn.
         let params = RequestParams {
-            thinking: self
-                .deps
-                .host
-                .shared
-                .config
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .thinking(),
+            thinking: self.deps.shared.thinking(),
             ..RequestParams::default()
         };
         let mut refused: Option<Box<str>> = None;
@@ -3119,6 +3127,7 @@ mod tests {
             Shared::new(
                 false,
                 Gen::new(std::num::NonZeroU64::MIN),
+                None,
                 dal_core::ThinkingLevel::Medium,
                 dal_core::ApprovalMode::Ask,
                 mode,

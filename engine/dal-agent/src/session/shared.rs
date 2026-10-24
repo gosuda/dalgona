@@ -14,8 +14,8 @@ use std::sync::{
 };
 
 use dal_core::{
-    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, Name, Notice, PrivateTerminal,
-    Seq, Session, ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
+    ApprovalMode, CallId, EntryId, EntryKind, EntryView, Gen, Mode, ModelRoute, Name, Notice,
+    PrivateTerminal, Seq, Session, ThinkingLevel, Update, UpdateKind, View, ext::GateSeed,
 };
 
 use super::projection::{Projection, SnapshotArgs};
@@ -103,10 +103,13 @@ impl Shared {
             .saturating_sub(1)
     }
 
-    /// An empty snapshot at the given generation.
+    /// An empty snapshot at the given generation. The model seed is the
+    /// host default captured at open; a folded `/model` selection replaces
+    /// it later.
     pub(crate) fn new(
         child: bool,
         generation: Gen,
+        model: Option<ModelRoute>,
         thinking: ThinkingLevel,
         approval: ApprovalMode,
         mode: Mode,
@@ -119,7 +122,7 @@ impl Shared {
         Self {
             inner: Mutex::new(SharedInner {
                 generation,
-                projection: Projection::seed(thinking, approval, mode),
+                projection: Projection::seed(model, thinking, approval, mode),
                 ring: ReplayRing::new(caps, generation, None),
                 next_seq: 2,
                 subscribers: Vec::new(),
@@ -233,6 +236,30 @@ impl Shared {
             .projection
             .effective_settings()
             .mode
+    }
+    /// The thinking level the session runs under now: the folded session
+    /// setting, seeded from the host config at open. Never the live
+    /// host-wide config, which `persist_default` rewrites for future
+    /// sessions.
+    pub(crate) fn thinking(&self) -> ThinkingLevel {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .effective_settings()
+            .thinking
+    }
+    /// The model route the session runs under now: the folded `/model`
+    /// selection, else the host default captured at open. Never the live
+    /// host-wide config, which `persist_default` rewrites for future
+    /// sessions. Unlike `SettingsView.model`, which is the selection
+    /// only, this is the effective route turn code resolves.
+    pub(crate) fn model(&self) -> Option<ModelRoute> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .effective_model()
     }
 
     pub(crate) fn set_scoped(&self, scoped: Option<Vec<Box<str>>>) {
@@ -683,6 +710,7 @@ mod tests {
         let shared = Shared::new(
             false,
             Gen::new(std::num::NonZeroU64::MIN),
+            None,
             ThinkingLevel::Medium,
             ApprovalMode::Ask,
             Mode::Normal,
