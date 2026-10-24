@@ -220,3 +220,48 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
     assert!(stderr.ends_with("cargo publish failed for tiny; see the output above\n"));
     Ok(())
 }
+
+#[cfg(unix)]
+fn setup_cross_product_fixture() -> Result<
+    (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        std::ffi::OsString,
+    ),
+    Box<dyn Error>,
+> {
+    setup_named_cross_product_fixture("base")
+}
+
+#[cfg(unix)]
+#[test]
+fn release_rejects_malformed_metadata_shape() -> Result<(), Box<dyn Error>> {
+    let (workspace, scratch, real_cargo, path) = setup_cross_product_fixture()?;
+    let fake_cargo = scratch.path().join("cargo");
+    write_executable(
+        &fake_cargo,
+        "#!/bin/sh\nif [ \"$1\" = metadata ]; then printf '%s\\n' '{\"workspace_members\": [123], \"packages\": []}'; exit 0; fi\nexec \"$RELEASE_TEST_REAL_CARGO\" \"$@\"\n",
+    )?;
+    let script = support::repo_root().join("scripts/publish-crates.sh");
+    let output = support::shell()
+        .arg(&script)
+        .arg(".")
+        .current_dir(workspace.path())
+        .env("PATH", &path)
+        .env("RELEASE_TEST_REAL_CARGO", &real_cargo)
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "the cargo metadata shape is invalid for the publish order\n"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "malformed metadata must produce diagnostic, not traceback"
+    );
+    Ok(())
+}

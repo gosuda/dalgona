@@ -56,25 +56,25 @@ class Metadata:
 
 def mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError("cargo metadata returned an invalid metadata object")
+        raise TypeError("cargo metadata returned an invalid metadata object")
     result: dict[str, object] = {}
     for key, item in value.items():
         if not isinstance(key, str):
-            raise ValueError("cargo metadata returned a non-string object key")
+            raise TypeError("cargo metadata returned a non-string object key")
         result[key] = item
     return result
 
 
 def sequence(value: object) -> list[object]:
     if not isinstance(value, list):
-        raise ValueError("cargo metadata returned an invalid metadata list")
+        raise TypeError("cargo metadata returned an invalid metadata list")
     return [item for item in value]
 
 
 def string_field(fields: dict[str, object], name: str) -> str:
     value = fields.get(name)
     if not isinstance(value, str):
-        raise ValueError(f"cargo metadata returned an invalid {name} field")
+        raise TypeError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -83,7 +83,7 @@ def optional_string_field(fields: dict[str, object], name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"cargo metadata returned an invalid {name} field")
+        raise TypeError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -94,7 +94,7 @@ def metadata_value(value: object) -> Metadata:
         member = mapping(item)
         publishable = member.get("publishable")
         if not isinstance(publishable, bool):
-            raise ValueError("cargo metadata returned an invalid publishable field")
+            raise TypeError("cargo metadata returned an invalid publishable field")
         members.append(
             Member(
                 string_field(member, "name"),
@@ -150,7 +150,7 @@ def workspace_filter(raw: object) -> dict[str, object]:
     members: set[object] = set()
     for member in sequence(fields.get("workspace_members")):
         if not isinstance(member, str):
-            raise ValueError("cargo metadata returned a non-string workspace member")
+            raise TypeError("cargo metadata returned a non-string workspace member")
         members.add(member)
     packages = [
         mapping(item)
@@ -209,7 +209,7 @@ def run_metadata(root: Path, metadata_error: str) -> tuple[Metadata | None, int 
         return None, cargo.returncode
     try:
         return metadata_value(workspace_filter(json.loads(cargo.stdout))), None
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None, error(metadata_error, 2)
 
 
