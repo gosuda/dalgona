@@ -135,6 +135,7 @@ impl std::error::Error for DevError {
 /// Runs one `dalgon dev` subcommand, rendering failures to their exit codes.
 pub(crate) async fn run(
     args: &cli::DevArgs,
+    factory: crate::ProductFactory,
     vars: crate::VarsMap,
     cwd: std::path::PathBuf,
     helper: Option<std::path::PathBuf>,
@@ -142,7 +143,7 @@ pub(crate) async fn run(
     let result = match &args.command {
         cli::DevSubcommand::Journal(args) => journal::run(args),
         cli::DevSubcommand::Fold(args) => fold::run(&args.file),
-        cli::DevSubcommand::Run(args) => run::run(args, vars, cwd, helper).await,
+        cli::DevSubcommand::Run(args) => run::run(args, factory, vars, cwd, helper).await,
     };
     match result {
         Ok(code) => code,

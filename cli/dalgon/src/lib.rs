@@ -180,7 +180,7 @@ pub fn run(factory: ProductFactory) -> ExitCode {
             Ok(runtime) => runtime,
             Err(code) => return code,
         };
-        let code = runtime.block_on(dispatch::dev(args, vars, cwd, edge::current_exe()));
+        let code = runtime.block_on(dispatch::dev(args, factory, vars, cwd, edge::current_exe()));
         runtime.shutdown_timeout(Duration::from_millis(500));
         return code;
     }
