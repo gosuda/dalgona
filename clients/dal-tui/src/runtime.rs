@@ -8145,25 +8145,14 @@ mod loop_tests {
     /// stays mid-line, if undo cannot restore the pre-edit draft, or if the
     /// stale completion ring outlives the replaced draft.
     #[test]
+    #[cfg(unix)]
     fn external_editor_success_replaces_the_draft_and_moves_the_caret_to_the_end() {
-        let dir = tempfile::tempdir().expect("editor scratch");
-        let script = dir.path().join("dal-test-editor");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'edited by the editor' > \"$1\"\n",
-        )
-        .expect("editor script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("executable editor");
-        }
+        let original = "printf 'edited by the editor' > \"$0.new\" && mv \"$0.new\" \"$0\"";
         let mut rig = Rig::new();
-        rig.opts.editor = script.to_string_lossy().into_owned().into_boxed_str();
-        rig.surfaces.session.composer.set("original draft");
-        rig.surfaces.session.popup_base = Some("original draft".into());
-        rig.surfaces.session.popup_last = "original draft".into();
+        rig.opts.editor = "/bin/sh".into();
+        rig.surfaces.session.composer.set(original);
+        rig.surfaces.session.popup_base = Some(original.into());
+        rig.surfaces.session.popup_last = original.into();
 
         let io = ModeProbe::new();
         let state = Arc::new(Mutex::new(crate::term::TermState::new()));
@@ -8172,7 +8161,8 @@ mod loop_tests {
         assert_eq!(
             rig.surfaces.session.composer.text(),
             "edited by the editor",
-            "a successful edit replaces the draft with the file contents"
+            "a successful edit replaces the draft with the file contents; notices: {:?}",
+            rig.surfaces.live.notices()
         );
         assert_eq!(
             rig.surfaces.session.composer.cursor(),
@@ -8186,7 +8176,7 @@ mod loop_tests {
         rig.surfaces.session.composer.undo();
         assert_eq!(
             rig.surfaces.session.composer.text(),
-            "original draft",
+            original,
             "the edit checkpoints, so undo restores the pre-edit draft"
         );
         assert!(
@@ -8244,4 +8234,5 @@ mod loop_tests {
             "a spawn failure is an error, not a dim note"
         );
     }
+
 }
