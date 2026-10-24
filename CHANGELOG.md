@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Keep wire reply identifiers out of test timeout diagnostics.
 - Apply the session's current approval policy to extension process runs,
   including after reopening a session.
 - Give extension setup the same resolved default model route used by turns.

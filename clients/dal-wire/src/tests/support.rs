@@ -512,7 +512,10 @@ impl Rpc {
             let frame = tokio::time::timeout_at(deadline, self.peer.read_frame())
                 .await
                 .unwrap_or_else(|_| {
-                    panic!("waited {}s for reply {id}, never fired", WAIT.as_secs())
+                    panic!(
+                        "waited {}s for the requested reply, never fired",
+                        WAIT.as_secs()
+                    )
                 })
                 .expect("server transport open");
             let value: Value = sonic_rs::from_str(&frame).expect("server frame is JSON");
