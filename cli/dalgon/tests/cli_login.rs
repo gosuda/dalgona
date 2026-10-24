@@ -296,7 +296,7 @@ fn bedrock_status(
 /// can never write a credential under a name no one meant.
 #[test]
 fn login_refuses_an_unknown_provider_and_stores_nothing() -> Result<(), Box<dyn Error>> {
-    for provider in [
+    for (i, provider) in [
         "nobody",
         "Anthropic",
         "anthropic ",
@@ -304,29 +304,32 @@ fn login_refuses_an_unknown_provider_and_stores_nothing() -> Result<(), Box<dyn 
         "anthropi",
         "",
         "../auth",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let fixture = CliFixture::new()?;
         let output = fixture.output(&["login", provider, "--api-key"])?;
 
-        assert_eq!(output.status.code(), Some(124), "{provider:?}");
-        assert_eq!(output.stdout, [] as [u8; 0], "{provider:?}");
+        assert_eq!(output.status.code(), Some(124), "case {i}");
+        assert_eq!(output.stdout, [] as [u8; 0], "case {i}");
         let stderr = String::from_utf8(output.stderr)?;
         let mut lines = stderr.lines();
         assert_eq!(
             lines.next(),
             Some(format!("dalgon: unknown provider \"{provider}\"").as_str()),
-            "{stderr}"
+            "case {i}"
         );
         assert!(
             lines
                 .next()
                 .is_some_and(|hint| hint.starts_with("Use one of ") && hint.contains("anthropic")),
-            "{stderr}"
+            "case {i}"
         );
-        assert_eq!(lines.next(), None, "{stderr}");
+        assert_eq!(lines.next(), None, "case {i}");
         assert!(
             !fixture.auth_file().exists(),
-            "{provider:?} wrote a credential file"
+            "case {i} wrote a credential file"
         );
     }
     Ok(())
@@ -339,24 +342,32 @@ fn login_refuses_an_unknown_provider_and_stores_nothing() -> Result<(), Box<dyn 
 fn piped_blank_input_is_refused_and_stores_nothing() -> Result<(), Box<dyn Error>> {
     const NOTHING_PIPED: &str = "dalgon: no API key was piped: standard input is empty\nPipe the key: printf %s \"$KEY\" | dalgon login PROVIDER --api-key\n";
     const BLANK_KEY: &str = "dalgon: login failed: sign-in failed: the API key is empty.\nRun dalgon login PROVIDER and try again.\n";
-    for (input, message) in [
+    for (i, (input, message)) in [
         ("", NOTHING_PIPED),
         ("\n", NOTHING_PIPED),
         ("\r\n", NOTHING_PIPED),
         ("\n\n", NOTHING_PIPED),
         ("   \n", BLANK_KEY),
         ("\t\n", BLANK_KEY),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let fixture = CliFixture::new()?;
+        let len = input.len();
         let output =
             fixture.output_with_stdin(&["login", "anthropic", "--api-key"], input.as_bytes())?;
 
-        assert_eq!(output.status.code(), Some(1), "{input:?}");
-        assert_eq!(output.stdout, [] as [u8; 0], "{input:?}");
-        assert_eq!(String::from_utf8(output.stderr)?, message, "{input:?}");
+        assert_eq!(output.status.code(), Some(1), "case {i} len={len}");
+        assert_eq!(output.stdout, [] as [u8; 0], "case {i} len={len}");
+        assert_eq!(
+            String::from_utf8(output.stderr)?,
+            message,
+            "case {i} len={len}"
+        );
         assert!(
             !fixture.auth_file().exists(),
-            "{input:?} wrote a credential file"
+            "case {i} len={len} wrote a credential file"
         );
     }
     Ok(())
@@ -369,40 +380,52 @@ fn piped_blank_input_is_refused_and_stores_nothing() -> Result<(), Box<dyn Error
 /// the refusal never echoes the key.
 #[test]
 fn piped_key_forgives_only_its_trailing_line_ending() -> Result<(), Box<dyn Error>> {
-    for input in ["sk-key", "sk-key\n", "sk-key\r\n", "sk-key\n\n"] {
+    for (i, input) in ["sk-key", "sk-key\n", "sk-key\r\n", "sk-key\n\n"]
+        .into_iter()
+        .enumerate()
+    {
         let fixture = CliFixture::new()?;
+        let len = input.len();
         let output =
             fixture.output_with_stdin(&["login", "anthropic", "--api-key"], input.as_bytes())?;
-        assert_eq!(output.status.code(), Some(0), "{input:?}");
+        assert_eq!(output.status.code(), Some(0), "case {i} len={len}");
         let saved: Value = sonic_rs::from_str(&fs::read_to_string(fixture.auth_file())?)?;
         assert_eq!(
             saved["anthropic"]["key"].as_str(),
             Some("sk-key"),
-            "{input:?}"
+            "case {i} len={len}"
         );
     }
-    for input in [
+    for (i, input) in [
         "sk-line1\nsk-line2\n",
         "sk-line1\r\nsk-line2",
         "sk-line1\nsk-line2",
         "sk-nul\u{0}key\n",
         "\u{1b}[31msk-esc\n",
         "sk-del\u{7f}key\n",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let fixture = CliFixture::new()?;
+        let len = input.len();
         let output =
             fixture.output_with_stdin(&["login", "anthropic", "--api-key"], input.as_bytes())?;
 
-        assert_eq!(output.status.code(), Some(1), "{input:?} was accepted");
-        assert_eq!(output.stdout, [] as [u8; 0], "{input:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "case {i} len={len} was accepted"
+        );
+        assert_eq!(output.stdout, [] as [u8; 0], "case {i} len={len}");
         assert_eq!(
             String::from_utf8(output.stderr)?,
             "dalgon: cannot read standard input: the key holds a line break or control character\nPipe the key: printf %s \"$KEY\" | dalgon login PROVIDER --api-key\n",
-            "{input:?}"
+            "case {i} len={len}"
         );
         assert!(
             !fixture.auth_file().exists(),
-            "{input:?} wrote a credential file"
+            "case {i} len={len} wrote a credential file"
         );
     }
     Ok(())
@@ -457,7 +480,7 @@ fn configured_bedrock_with_static_env_keys_reports_ready() -> Result<(), Box<dyn
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("dalgon login my-bedrock"),
-        "Bedrock has no interactive login: {stderr:?}"
+        "Bedrock has no interactive login"
     );
     Ok(())
 }
@@ -482,11 +505,11 @@ fn configured_bedrock_without_credentials_reports_not_configured_with_aws_hint()
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("AWS"),
-        "absent Bedrock must hint AWS environment/shared-config/SSO setup: {stderr:?}"
+        "absent Bedrock must hint AWS environment/shared-config/SSO setup"
     );
     assert!(
         !stderr.contains("dalgon login my-bedrock"),
-        "absent Bedrock must never suggest an interactive login: {stderr:?}"
+        "absent Bedrock must never suggest an interactive login"
     );
     Ok(())
 }
@@ -523,7 +546,7 @@ fn configured_bedrock_with_bearer_env_reports_ready() -> Result<(), Box<dyn Erro
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("dalgon login my-bedrock"),
-        "Bedrock has no interactive login: {stderr:?}"
+        "Bedrock has no interactive login"
     );
     Ok(())
 }

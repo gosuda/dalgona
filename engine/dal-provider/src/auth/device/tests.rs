@@ -246,8 +246,10 @@ async fn workos_direct_tokens_complete_without_exchange() {
     let Ok(DeviceOutcome::Tokens(credential)) = outcome else {
         panic!("WorkOS poll must deliver tokens directly");
     };
-    assert_eq!(credential.access_token.expose(), "ws-access-1");
-    assert_eq!(credential.refresh_token.expose(), "ws-refresh-1");
+    let access_ok = credential.access_token.expose() == "ws-access-1";
+    assert!(access_ok);
+    let refresh_ok = credential.refresh_token.expose() == "ws-refresh-1";
+    assert!(refresh_ok);
     assert!(
         credential
             .expires_at
