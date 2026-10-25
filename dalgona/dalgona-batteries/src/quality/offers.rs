@@ -46,6 +46,18 @@ pub struct Offer {
     pub after: String,
 }
 
+/// Whether `bytes` still hold the offer's `before` span byte for byte.
+#[must_use]
+pub fn is_fresh(offer: &Offer, bytes: &[u8]) -> bool {
+    let (Ok(start), Ok(end)) = (
+        usize::try_from(offer.byte_start),
+        usize::try_from(offer.byte_end),
+    ) else {
+        return false;
+    };
+    bytes.get(start..end) == Some(offer.before.as_bytes())
+}
+
 /// Builds the id of the `index`th offer of `turn`.
 #[must_use]
 pub fn offer_id(turn: &str, index: usize) -> String {
@@ -201,6 +213,28 @@ pub fn panel(offers: &[Offer], gaps: &[(&str, &str)]) -> String {
             text.push_str(&rust_gap_line(path));
             text.push('\n');
         }
+    }
+    text
+}
+
+/// Display bytes of one offer path in the model notice, ellipsis included.
+pub(crate) const NOTICE_PATH_BYTES: usize = 256;
+
+/// Renders the bounded model notice: [`panel`] over display copies whose
+/// paths longer than [`NOTICE_PATH_BYTES`] are shortened, then a count of
+/// offers left pending. Ids, codemods, and line ranges stay whole; stored
+/// offers are never changed.
+pub(crate) fn notice_panel(mut fresh: Vec<Offer>, pending: usize) -> String {
+    const ELLIPSIS: char = '…';
+    for offer in &mut fresh {
+        if offer.path.len() > NOTICE_PATH_BYTES {
+            let keep = NOTICE_PATH_BYTES - ELLIPSIS.len_utf8();
+            offer.path = format!("{}{ELLIPSIS}", crate::text::byte_prefix(&offer.path, keep));
+        }
+    }
+    let mut text = panel(&fresh, &[]);
+    if pending > 0 {
+        let _ = writeln!(text, "{pending} more offer(s) remain for later turns.");
     }
     text
 }

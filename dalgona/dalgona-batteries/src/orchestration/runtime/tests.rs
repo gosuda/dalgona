@@ -721,8 +721,10 @@ impl Services for Host {
         unavailable()
     }
 
+    /// No battery registers a scheme on this host, so `todo://terminal`
+    /// is absent exactly as when the work battery is disabled.
     fn scheme(&self, _who: &Caller, _uri: &str) -> ServiceFuture<'_, Option<Doc>> {
-        unavailable()
+        Box::pin(async { Ok(None) })
     }
 
     fn turn(&self, _who: &Caller, op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
@@ -8815,6 +8817,195 @@ mod git_prefix_admission {
             "output past the cap must be refused, not admitted as success"
         );
         let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+}
+
+/// The goal gate reads the work battery's todo list through the real host:
+/// work and orchestration register as separate extensions, the model writes
+/// an open todo with the work tool, and `update_goal` must see it.
+mod real_todo_progress {
+    use std::collections::BTreeMap;
+    use std::error::Error;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use dal_agent::ext::grants::{GrantKey, GrantStore};
+    use dal_agent::{Delivery, Env, Host, Product, SessionRef};
+    use dal_core::{
+        ClientId, Command, Config, ConfigProduct, EntryKind, Expect, JournalPart, Part, Reply,
+        SessionId, Timestamp, UpdateKind, Workspace,
+    };
+
+    use super::TestResult;
+    use crate::orchestration::{
+        BatteryConfig, OrchestrationAgentsConfig, OrchestrationConfig, OrchestrationMonitorConfig,
+        orchestration,
+    };
+    use crate::work::{PlanConfig, work};
+
+    const WAIT: Duration = Duration::from_secs(30);
+    const USAGE: &str = r#"{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}}"#;
+    const READY_STEP: &str = r#"{"kind":"events","events":[{"type":"text_delta","text":"ready"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#;
+
+    fn call_step(tool: &str, args: &str) -> String {
+        format!(
+            "{{\"kind\":\"events\",\"events\":[{{\"type\":\"tool_call_started\",\"id\":\"c-{tool}\",\"name\":\"{tool}\"}},{{\"type\":\"tool_calls_done\",\"calls\":[{{\"id\":\"c-{tool}\",\"name\":\"{tool}\",\"args\":{{\"kind\":\"parsed\",\"value\":{args}}}}}]}},{USAGE},{{\"type\":\"stop\",\"reason\":\"tool_use\"}}]}}"
+        )
+    }
+
+    fn goal_config(data: std::path::PathBuf) -> OrchestrationConfig {
+        OrchestrationConfig {
+            loop_guard: BatteryConfig { enabled: false },
+            sleep: BatteryConfig { enabled: false },
+            monitor: OrchestrationMonitorConfig::default(),
+            inflight: BatteryConfig { enabled: false },
+            goal: BatteryConfig { enabled: true },
+            arbiter: BatteryConfig { enabled: false },
+            agents: OrchestrationAgentsConfig::default(),
+            isolation: BatteryConfig { enabled: true },
+            workflows: None,
+            data_root: Some(data),
+        }
+    }
+
+    struct TestRoot(std::path::PathBuf);
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One tool result: whether it failed, and its text.
+    type Outcome = (bool, String);
+
+    /// Starts a dalgona host configured with the work battery, goal-enabled
+    /// orchestration, and a scripted-provider fixture from `steps`.
+    async fn start_scripted_host(
+        data: &Path,
+        workspace: &Path,
+        steps: &[String],
+    ) -> Result<Host, Box<dyn Error>> {
+        let fixture = data.join("script.jsonl");
+        std::fs::write(&fixture, steps.join("\n"))?;
+        let user = format!(
+            "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+            fixture.to_string_lossy().replace('\\', "\\\\")
+        );
+        let config = Config::load(ConfigProduct::Dalgona, data, "", Some(&user))?;
+        let built = orchestration(goal_config(data.to_path_buf()))?;
+        GrantStore::new(data.to_path_buf())
+            .grant(
+                GrantKey::for_extension(&built.extension, workspace)
+                    .ok_or("orchestration extension has no code identity")?,
+                ClientId::new("todo-progress"),
+                Timestamp::now(),
+            )
+            .await?;
+        let product = Product {
+            name: "dalgona",
+            data_root: data.to_path_buf(),
+            defaults: "",
+            extensions: vec![work(PlanConfig { enabled: true })?, built.extension],
+            bundled: Vec::new(),
+        };
+        let env = Env {
+            vars: BTreeMap::new(),
+            cwd: workspace.to_path_buf(),
+            sandbox_helper: None,
+        };
+        Ok(Host::start(product, config, env).await?)
+    }
+
+    /// Runs one scripted prompt turn on a host with the work and
+    /// orchestration batteries and returns the `todo` and `update_goal`
+    /// results.
+    async fn update_goal_after_open_todo() -> Result<(Outcome, Outcome), Box<dyn Error>> {
+        let root = TestRoot(
+            std::env::temp_dir().join(format!("dalgona-todo-progress-{}", SessionId::new_v7())),
+        );
+        let data = root.0.join("data");
+        let workspace = root.0.join("workspace");
+        std::fs::create_dir_all(&data)?;
+        std::fs::create_dir_all(&workspace)?;
+        let steps = [
+            call_step(
+                "todo",
+                r#"{"action":"write","todos":[{"subject":"parse","state":"pending"}]}"#,
+            ),
+            call_step("create_goal", r#"{"objective":"write the parser"}"#),
+            call_step("update_goal", r#"{"status":"complete"}"#),
+            READY_STEP.to_owned(),
+        ];
+        let host = start_scripted_host(&data, &workspace, &steps).await?;
+        let agent = host
+            .open(
+                SessionRef::New {
+                    workspace: Workspace::new(workspace)?,
+                    name: None,
+                },
+                ClientId::new("todo-progress"),
+            )
+            .await?;
+        let mut subscription = agent.subscribe(None)?;
+        let reply = agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "finish the parser".into(),
+                }],
+            })
+            .await?;
+        if !matches!(reply, Reply::Accepted { .. }) {
+            return Err(format!("prompt was not accepted: {reply:?}").into());
+        }
+        let ended = tokio::time::timeout(WAIT, async {
+            while let Some(delivery) = subscription.next().await {
+                if let Delivery::Update(update) = delivery
+                    && matches!(update.kind, UpdateKind::TurnEnded { .. })
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .map_err(|_| "the scripted turn never ended")?;
+        if !ended {
+            return Err("the subscription closed before the turn ended".into());
+        }
+        drop(subscription);
+        let view = agent.view(dal_core::PageReq::default())?;
+        let result = |tool: &str| {
+            view.entries
+                .items
+                .iter()
+                .find_map(|entry| match &entry.kind {
+                    EntryKind::ToolResult {
+                        name, error, parts, ..
+                    } if name.as_ref() == tool => parts.iter().find_map(|part| match part {
+                        JournalPart::Text { text } => Some((*error, text.to_string())),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .ok_or(format!("{tool} produced no text result"))
+        };
+        let todo = result("todo")?;
+        let update = result("update_goal")?;
+        host.close(agent.session()).await?;
+        Ok((todo, update))
+    }
+
+    #[tokio::test]
+    async fn update_goal_complete_sees_the_work_battery_open_todo() -> TestResult {
+        let (todo, (error, text)) = update_goal_after_open_todo().await?;
+        assert!(!todo.0, "the work todo write must succeed: {}", todo.1);
+        assert!(
+            error && text.contains("update_goal: 1 todo tasks are still open: parse."),
+            "the goal gate must see the work battery's open todo; got error={error}: {text}"
+        );
         Ok(())
     }
 }

@@ -117,40 +117,139 @@ fn vars(pairs: &[(&str, &str)]) -> Vars {
         .collect()
 }
 
+/// Absolute on the platform under test, so the same cases run on POSIX and
+/// Windows.
+#[cfg(windows)]
+const HOME: &str = "C:\\home\\u";
+#[cfg(not(windows))]
+const HOME: &str = "/home/u";
+#[cfg(windows)]
+const XDG_CONFIG: &str = "C:\\c";
+#[cfg(not(windows))]
+const XDG_CONFIG: &str = "/c";
+#[cfg(windows)]
+const XDG_DATA: &str = "C:\\d";
+#[cfg(not(windows))]
+const XDG_DATA: &str = "/d";
+
+fn home() -> PathBuf {
+    PathBuf::from(HOME)
+}
+
 #[test]
 fn roots_follow_the_xdg_variables_then_home() {
-    let from_home = roots(&vars(&[("HOME", "/home/u")])).expect("home resolves");
+    let from_home = roots(&vars(&[("HOME", HOME)])).expect("home resolves");
     assert_eq!(
         from_home.config_file,
-        Path::new("/home/u/.config/dalgona/dal.toml")
+        home().join(".config").join("dalgona").join("dal.toml")
     );
-    assert_eq!(from_home.data, Path::new("/home/u/.local/share/dalgona"));
+    assert_eq!(
+        from_home.data,
+        home().join(".local").join("share").join("dalgona")
+    );
 
     let overridden = roots(&vars(&[
-        ("HOME", "/home/u"),
-        ("XDG_CONFIG_HOME", "/c"),
-        ("XDG_DATA_HOME", "/d"),
+        ("HOME", HOME),
+        ("XDG_CONFIG_HOME", XDG_CONFIG),
+        ("XDG_DATA_HOME", XDG_DATA),
     ]))
     .expect("xdg resolves");
-    assert_eq!(overridden.config_file, Path::new("/c/dalgona/dal.toml"));
-    assert_eq!(overridden.data, Path::new("/d/dalgona"));
+    assert_eq!(
+        overridden.config_file,
+        Path::new(XDG_CONFIG).join("dalgona").join("dal.toml")
+    );
+    assert_eq!(overridden.data, Path::new(XDG_DATA).join("dalgona"));
 }
 
 #[test]
 fn a_relative_or_empty_root_is_not_a_root() {
-    assert!(roots(&vars(&[("HOME", "relative/home")])).is_none());
-    assert!(roots(&vars(&[("HOME", "")])).is_none());
-    assert!(roots(&vars(&[])).is_none());
+    let refused: [&[(&str, &str)]; 3] = [&[("HOME", "relative/home")], &[("HOME", "")], &[]];
+    for env in refused {
+        assert!(
+            matches!(roots(&vars(env)), Err(dalgon::EdgeError::HomeMissing)),
+            "{env:?}"
+        );
+    }
     let fallback = roots(&vars(&[
-        ("HOME", "/home/u"),
+        ("HOME", HOME),
         ("XDG_DATA_HOME", "relative"),
         ("XDG_CONFIG_HOME", ""),
     ]))
     .expect("falls back to home");
-    assert_eq!(fallback.data, Path::new("/home/u/.local/share/dalgona"));
+    assert_eq!(
+        fallback.data,
+        home().join(".local").join("share").join("dalgona")
+    );
     assert_eq!(
         fallback.config_file,
-        Path::new("/home/u/.config/dalgona/dal.toml")
+        home().join(".config").join("dalgona").join("dal.toml")
+    );
+}
+
+/// Windows takes an absolute `HOME` first, then `USERPROFILE`, then the
+/// `HOMEDRIVE`+`HOMEPATH` pair.
+#[cfg(windows)]
+#[test]
+fn windows_home_falls_back_to_userprofile_then_homedrive_pair() {
+    let profile = roots(&vars(&[("USERPROFILE", "C:\\Users\\bob")])).expect("profile");
+    assert_eq!(
+        profile.data,
+        Path::new("C:\\Users\\bob\\.local\\share\\dalgona")
+    );
+
+    let pair = roots(&vars(&[
+        ("HOMEDRIVE", "C:"),
+        ("HOMEPATH", "\\Users\\carol"),
+    ]))
+    .expect("drive pair");
+    assert_eq!(
+        pair.config_file,
+        Path::new("C:\\Users\\carol\\.config\\dalgona\\dal.toml")
+    );
+    assert_eq!(
+        pair.data,
+        Path::new("C:\\Users\\carol\\.local\\share\\dalgona")
+    );
+
+    let home_first = roots(&vars(&[
+        ("HOME", "C:\\Users\\alice"),
+        ("USERPROFILE", "C:\\Users\\bob"),
+        ("HOMEDRIVE", "C:"),
+        ("HOMEPATH", "\\Users\\carol"),
+    ]))
+    .expect("home wins");
+    assert_eq!(
+        home_first.data,
+        Path::new("C:\\Users\\alice\\.local\\share\\dalgona")
+    );
+
+    let profile_first = roots(&vars(&[
+        ("HOME", "relative"),
+        ("USERPROFILE", "C:\\Users\\bob"),
+        ("HOMEDRIVE", "C:"),
+        ("HOMEPATH", "\\Users\\carol"),
+    ]))
+    .expect("profile wins over the pair");
+    assert_eq!(
+        profile_first.data,
+        Path::new("C:\\Users\\bob\\.local\\share\\dalgona")
+    );
+}
+
+/// POSIX reads only `HOME`; the Windows fallbacks name no home here.
+#[cfg(not(windows))]
+#[test]
+fn posix_home_ignores_the_windows_fallbacks() {
+    let env = vars(&[
+        ("USERPROFILE", "/home/bob"),
+        ("HOMEDRIVE", "/"),
+        ("HOMEPATH", "home/carol"),
+    ]);
+    let error = roots(&env).err().expect("no HOME");
+    assert!(matches!(error, dalgon::EdgeError::HomeMissing));
+    assert_eq!(
+        root_failure(&error),
+        "cannot find your home directory: set HOME to an absolute path"
     );
 }
 

@@ -36,6 +36,17 @@ Built-in commands, in registry order. Plugin commands appear after these with th
 
 `/share`, `/bug`, and `/trust` never upload. `/share` directs you to `/export`, which writes a file you can send yourself. A conflicting command name is an error `command "<name>" is already registered by plugin "<first>"; plugin "<second>" cannot register it`. The numeric-suffix form `/review:1` is rejected. Completion matches name prefixes and orders them by name.
 
+## Thinking and settings
+
+`/thinking <level>` sets the model reasoning level when `<level>` is supported by the active model. The command saves the level to the session and default configuration. Passing an unsupported or unrecognized level returns an error listing valid options.
+
+Without arguments, `/thinking` opens the thinking chooser. The host returns the active model's supported levels in `thinkingLevels`. An explicit empty array indicates the model supports no levels. When `thinkingLevels` is missing, the client treats the picker as unsupported rather than guessing levels. Selecting a level submits `/thinking <level>`, ensuring the host validates the requested level against its current capabilities.
+
+`/settings` opens an interactive picker that pairs live controls with startup product rows:
+
+- Live controls change runtime behavior immediately. The diagram setting toggles rendering in the current session, accompanied by a row to save the preference to `dal.toml`. `/model` opens the model chooser. `/thinking` displays `thinking · <current level>` and opens the thinking level chooser.
+- Startup product rows configure extensions and defaults, including disabled batteries, rule sets, and web search options. Edits write atomically to `dal.toml`. When a saved value differs from the running value, the row displays both values with a restart notice, and changes take effect on the next launch.
+
 ## Remote sign-in
 
 Esc cancels a remote API-key sign-in only before you submit the key. After submission, wait for the server's result. If it succeeds, use `/logout` to remove the stored credential.

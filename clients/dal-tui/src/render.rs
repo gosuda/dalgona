@@ -175,9 +175,10 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         })
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
+    let product = crate::copy::identity(input.opts.binary);
     let floor = (height < crate::copy::ids::MIN_ROWS)
-        .then_some(crate::copy::ids::NARROW_ROWS)
-        .or((width < crate::copy::ids::MIN_COLS).then_some(crate::copy::ids::NARROW_COLS));
+        .then_some(product.narrow_rows)
+        .or((width < crate::copy::ids::MIN_COLS).then_some(product.narrow_cols));
     debug_assert_eq!(floor.is_some(), below_floor(width, height));
     if let Some(warning) = floor {
         return resolve_colors(
@@ -517,10 +518,10 @@ fn picker_overlay_rows(picker: &PickerUi, overlay_budget: usize) -> Vec<RenderRo
     };
     let mut middle: Vec<RenderRow> = Vec::new();
     let mut selected_pos = 0;
-    if let Some(id) = picker.model_filter_fallback() {
+    if let Some(entry) = picker.typed_entry_row() {
         let selected = picker.is_selected(picker.selected_fallback_index());
         middle.push(option_row(
-            format!("{} /model {}", if selected { ">" } else { " " }, escape(id)),
+            format!("{} {}", if selected { ">" } else { " " }, escape(&entry)),
             selected,
         ));
     } else {
@@ -593,6 +594,7 @@ fn overlay_rows(
     mode: WidthMode,
     bottom: &mut Vec<RenderRow>,
 ) {
+    let product = crate::copy::identity(input.opts.binary);
     if input.dialog.is_open() {
         // DESIGN.md dialog boundary: one blank row above and below the
         // dialog. The blanks come out of the overlay budget — rows outside
@@ -652,7 +654,7 @@ fn overlay_rows(
     } else {
         if input.composer.is_empty() {
             let mut row = RenderRow::new(
-                format!("> {}", escape(crate::copy::ids::COMPOSER_PLACEHOLDER)),
+                format!("> {}", escape(product.composer_placeholder)),
                 Role::Text,
             );
             row.cursor = Some(2);
@@ -697,6 +699,7 @@ fn fullscreen_rows(
 ) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
+    let product = crate::copy::identity(input.opts.binary);
     let header = crate::screen::fullscreen::header_rows(width, height);
     let search_rows = usize::from(input.viewport.search_text().is_some());
     let above = header + notices.len() + search_rows;
@@ -709,7 +712,8 @@ fn fullscreen_rows(
     if header > 0 {
         rows.push(RenderRow::new(
             format!(
-                "dal · {} · {}",
+                "{} · {} · {}",
+                product.header,
                 escape(input.view.session.name.as_deref().unwrap_or("session")),
                 model.unwrap_or("no model")
             ),
@@ -1032,6 +1036,7 @@ fn expand_view_rows(
 ) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
+    let product = crate::copy::identity(input.opts.binary);
     let header = crate::screen::fullscreen::header_rows(width, height);
     let above = header + notice_rows.len();
     let available = h.saturating_sub(above + bottom.len());
@@ -1055,7 +1060,8 @@ fn expand_view_rows(
     if header > 0 {
         rows.push(RenderRow::new(
             format!(
-                "dal · {} · {}",
+                "{} · {} · {}",
+                product.header,
                 escape(input.view.session.name.as_deref().unwrap_or("session")),
                 model.unwrap_or("no model")
             ),
@@ -1242,7 +1248,7 @@ fn activity_rows(input: &FrameInput<'_>, assistant: Vec<RenderRow>) -> Vec<Rende
     let mut activity = Vec::new();
     if input.view.settings.model.is_none() && input.opts.default_model.is_none() {
         activity.push(RenderRow::new(
-            crate::copy::ids::FIRST_RUN_TITLE,
+            crate::copy::identity(input.opts.binary).first_run_title,
             Role::Accent,
         ));
         activity.push(RenderRow::new(
@@ -2780,6 +2786,28 @@ mod tests {
             rows.iter().any(|row| row.text.contains("model-")),
             "the picker stays painted at shrunk sizes: {:?}",
             rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn settings_value_titles_cannot_emit_terminal_control_sequences() {
+        let picker = crate::picker::setting_value_picker(dal_core::ProductSetting {
+            key: "plugin.review.reviewer_model".into(),
+            group: "review".into(),
+            label: "reviewer model".into(),
+            value: dal_core::SettingValue::Text("unsafe-title\x1b]0;spoof\x07".into()),
+            running: None,
+            control: dal_core::SettingControl::Text,
+        });
+        let rows = super::picker_overlay_rows(&picker, 8);
+        assert!(
+            rows[0].text.contains("unsafe-title"),
+            "the value stays visible"
+        );
+        assert!(
+            !rows[0].text.chars().any(char::is_control),
+            "the title must escape terminal controls: {:?}",
+            rows[0].text
         );
     }
 

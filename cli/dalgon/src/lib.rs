@@ -70,10 +70,18 @@ pub struct ProductFactory {
     pub version: &'static str,
     /// Embedded product-default TOML layered after dal code defaults.
     pub defaults: &'static str,
+    /// Configuration kind deciding the built-in layer and accepted keys.
+    pub config_product: ConfigProduct,
     /// Builds the architecture product from the captured edge context.
     pub build: fn(&BuildCx<'_>) -> Result<dal_agent::Product, BuildError>,
     /// Returns every first-party manual, without loading user plugins.
     pub docs: fn() -> Vec<ProductManual>,
+    /// Strictly decodes the product-owned sections of a loaded [`Config`] and
+    /// returns its documented, non-secret, startup-only editable settings.
+    ///
+    /// The interactive settings picker lists these rows and validates every
+    /// candidate `dal.toml` edit through this same decoder before writing.
+    pub settings: fn(&Config) -> Result<Vec<dal_core::ProductSetting>, BuildError>,
 }
 
 /// The single Clap command tree shared by parsing, help, completion, and man pages.
@@ -84,6 +92,7 @@ mod dispatch;
 
 /// Process-edge snapshots, lexical paths, and platform identity.
 mod edge;
+pub use edge::{EdgeError, RootPaths, config_file_path, resolve_roots};
 
 /// Exit-code mapping for command and signal outcomes.
 mod exit;
@@ -121,12 +130,9 @@ pub(crate) struct Startup {
     pub(crate) workspace_path: PathBuf,
     pub(crate) workspace: Workspace,
     pub(crate) config: Config,
-    /// The user `dal.toml` path; only the interactive UI persists to it.
-    #[cfg(feature = "tui")]
+    /// The user `dal.toml` path; default-setting persistence writes to it.
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
-    #[cfg(feature = "tui")]
-    pub(crate) binary: &'static str,
     pub(crate) helper: Option<PathBuf>,
     /// Whether the user `dal.toml` sets `[serve] bind`. Only a user-set bind
     /// outranks `--public`'s wildcard default; the compiled default does not.
@@ -173,7 +179,7 @@ pub fn run(factory: ProductFactory) -> ExitCode {
             Ok(runtime) => runtime,
             Err(code) => return code,
         };
-        let code = runtime.block_on(dispatch::dev(args, vars, cwd, edge::current_exe()));
+        let code = runtime.block_on(dispatch::dev(args, factory, vars, cwd, edge::current_exe()));
         runtime.shutdown_timeout(Duration::from_millis(500));
         return code;
     }
@@ -266,7 +272,7 @@ async fn run_command(
             .await
         }
         #[cfg(feature = "tui")]
-        None => Box::pin(dispatch::interactive(&cli, startup, product)).await,
+        None => Box::pin(dispatch::interactive(&cli, startup, factory, product)).await,
         #[cfg(not(feature = "tui"))]
         None => two_lines(
             [
@@ -858,12 +864,12 @@ fn assemble_startup(
             ));
         }
     };
-    let kind = if factory.binary == "dalgona" {
-        ConfigProduct::Dalgona
-    } else {
-        ConfigProduct::Dalgon
-    };
-    let base = match Config::load(kind, &roots.data, factory.defaults, user_toml.as_deref()) {
+    let base = match Config::load(
+        factory.config_product,
+        &roots.data,
+        factory.defaults,
+        user_toml.as_deref(),
+    ) {
         Ok(config) => config,
         Err(error) => {
             return Err(config_exit(
@@ -888,11 +894,8 @@ fn assemble_startup(
         workspace_path,
         workspace,
         config,
-        #[cfg(feature = "tui")]
         config_path,
         data_root: roots.data,
-        #[cfg(feature = "tui")]
-        binary: factory.binary,
         helper: edge::current_exe(),
         serve_bind_explicit: user_sets_serve_bind(user_toml.as_deref()),
     };
@@ -1029,7 +1032,15 @@ fn build_once(
         )),
         Err(error) => Err(two_lines(
             [
-                format!("dalgon: {error}"),
+                {
+                    // Some product decoders already name the product.
+                    let text = error.to_string();
+                    if text.starts_with(&format!("{}: ", factory.binary)) {
+                        text
+                    } else {
+                        format!("{}: {text}", factory.binary)
+                    }
+                },
                 cli::texts::CONFIG_FIX_HINT.into(),
             ],
             exit::ExitKind::RequestedFailure,

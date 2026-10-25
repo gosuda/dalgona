@@ -31,6 +31,7 @@ pub enum BlockState {
 /// Live region owned by the paint thread.
 #[derive(Debug, Default)]
 pub struct Live {
+    product: crate::copy::Identity,
     assistant_text: String,
     stream: RefCell<crate::markdown::MarkdownStream>,
     assistant_open: bool,
@@ -210,6 +211,16 @@ struct ToolCard {
 }
 
 impl Live {
+    /// Builds an empty live region whose turn-end notices name `binary`'s
+    /// product family.
+    #[must_use]
+    pub(crate) fn for_binary(binary: &str) -> Self {
+        Self {
+            product: crate::copy::identity(binary),
+            ..Self::default()
+        }
+    }
+
     /// Advances the braille spinner one frame per tick interval; the loop
     /// drives it, and `DAL_NO_MOTION` simply stops calling it.
     pub fn spin(&mut self, now: Instant) {
@@ -300,7 +311,7 @@ impl Live {
                         crate::theme::Role::Dim,
                         crate::copy::ids::TURN_CANCELLED.to_owned(),
                     );
-                } else if let Some(line) = turn_end_line(*stop) {
+                } else if let Some(line) = turn_end_line(*stop, self.product) {
                     self.push_notice(crate::theme::Role::Dim, line);
                 }
                 self.assistant_open = false;
@@ -545,10 +556,10 @@ impl Live {
     }
 }
 
-fn turn_end_line(stop: Stop) -> Option<String> {
+fn turn_end_line(stop: Stop, product: crate::copy::Identity) -> Option<String> {
     match stop {
         Stop::EndTurn | Stop::Cancelled | Stop::MaxSteps | Stop::Failed => None,
-        Stop::Length => Some(crate::copy::ids::TURN_LENGTH.to_owned()),
+        Stop::Length => Some(product.turn_length.to_owned()),
         Stop::Filter => Some(crate::copy::ids::TURN_FILTER.to_owned()),
     }
 }
@@ -707,15 +718,25 @@ mod tests {
     #[test]
     fn turn_end_line_maps_every_stop() {
         use dal_core::Stop;
+        let dal = crate::copy::identity("dal");
+        let dalgona = crate::copy::identity("dalgona");
         for stop in [Stop::EndTurn, Stop::Cancelled, Stop::MaxSteps, Stop::Failed] {
-            assert_eq!(super::turn_end_line(stop), None, "{stop:?} leaves no row");
+            assert_eq!(
+                super::turn_end_line(stop, dal),
+                None,
+                "{stop:?} leaves no row"
+            );
         }
         assert_eq!(
-            super::turn_end_line(Stop::Length),
+            super::turn_end_line(Stop::Length, dal),
             Some(crate::copy::ids::TURN_LENGTH.to_owned())
         );
         assert_eq!(
-            super::turn_end_line(Stop::Filter),
+            super::turn_end_line(Stop::Length, dalgona),
+            Some("The reply hit the length limit. Ask dalgona to continue.".to_owned())
+        );
+        assert_eq!(
+            super::turn_end_line(Stop::Filter, dal),
             Some(crate::copy::ids::TURN_FILTER.to_owned())
         );
     }

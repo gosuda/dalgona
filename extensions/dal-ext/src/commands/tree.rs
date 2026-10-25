@@ -18,6 +18,7 @@ pub(super) fn tree(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     Ok(Reply::Choose {
         chooser: Chooser::Tree,
         filter: "".into(),
+        thinking_levels: None,
     })
 }
 
@@ -46,6 +47,7 @@ pub(super) fn fork(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     Ok(Reply::Choose {
         chooser: Chooser::ForkPoint,
         filter: "".into(),
+        thinking_levels: None,
     })
 }
 

@@ -120,26 +120,29 @@ struct Roots {
     data: PathBuf,
 }
 
-fn absolute(vars: &Vars, name: &str) -> Option<PathBuf> {
-    let value = vars.get(std::ffi::OsStr::new(name))?;
-    let path = PathBuf::from(value);
-    (!value.is_empty() && path.is_absolute()).then_some(path)
+/// Projects the shared process-edge roots for the `dalgona` binary, so eval
+/// accepts exactly the environments normal startup accepts and reads the same
+/// config file and data root.
+fn roots(vars: &Vars) -> Result<Roots, dalgon::EdgeError> {
+    let shared = dalgon::resolve_roots(vars, crate::NAME)?;
+    Ok(Roots {
+        config_file: dalgon::config_file_path(&shared),
+        data: shared.data,
+    })
 }
 
-/// Resolves the config file and data root the way the shared process edge does
-/// for the `dalgona` family.
-fn roots(vars: &Vars) -> Option<Roots> {
-    let home = absolute(vars, "HOME").or_else(|| {
-        cfg!(windows)
-            .then(|| absolute(vars, "USERPROFILE"))
-            .flatten()
-    })?;
-    let config = absolute(vars, "XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-    let data = absolute(vars, "XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share"));
-    Some(Roots {
-        config_file: config.join("dalgona").join("dal.toml"),
-        data: data.join("dalgona"),
-    })
+/// Names what to fix when the roots do not resolve; the home hint lists the
+/// variables the shared resolver reads on this platform.
+fn root_failure(error: &dalgon::EdgeError) -> String {
+    match error {
+        dalgon::EdgeError::HomeMissing if cfg!(windows) => "cannot find your home directory: \
+             set HOME, USERPROFILE, or HOMEDRIVE and HOMEPATH to an absolute path"
+            .to_owned(),
+        dalgon::EdgeError::HomeMissing => {
+            "cannot find your home directory: set HOME to an absolute path".to_owned()
+        }
+        other => format!("cannot resolve the dalgona directories: {other}"),
+    }
 }
 
 fn fail(who: &str, reason: impl Display) -> ExitCode {
@@ -172,11 +175,9 @@ pub(crate) fn run(args: &[OsString]) -> ExitCode {
         }
     };
     let vars: Vars = std::env::vars_os().collect();
-    let Some(roots) = roots(&vars) else {
-        return fail(
-            &args.pack,
-            "cannot find your home directory: set HOME to an absolute path",
-        );
+    let roots = match roots(&vars) {
+        Ok(roots) => roots,
+        Err(error) => return fail(&args.pack, root_failure(&error)),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

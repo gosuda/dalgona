@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use dal_agent::SessionRef;
 use dal_core::{
-    Family, Gen, ModelRequest, ModelRoute, Purpose, RequestParams, Seq, SessionId, View, Workspace,
+    Chooser, Command, Family, Gen, ModelRequest, ModelRoute, PageReq, Purpose, Reply,
+    RequestParams, Seq, SessionId, ThinkingLevel, View, Workspace,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1001,4 +1002,121 @@ fn gen_of(value: u64) -> Gen {
 
 fn seq_of(value: u64) -> Seq {
     Seq::new(std::num::NonZeroU64::new(value).expect("nonzero"))
+}
+
+async fn open_remote_agent(rig: &super::support::Rig) -> (LocalEndpoint, RemoteAgent) {
+    let endpoint = LocalEndpoint::start(rig.host.clone()).await;
+    let remote = RemoteHost::connect(RemoteEndpoint::LocalSocket(endpoint.socket.clone()))
+        .await
+        .expect("connect to remote host");
+    let agent = remote
+        .open(SessionRef::New {
+            workspace: rig.core_workspace(),
+            name: None,
+        })
+        .await
+        .expect("open remote agent");
+    (endpoint, agent)
+}
+
+#[tokio::test]
+async fn remote_thinking_command_wire_roundtrip() {
+    let rig = super::support::rig(&[]).await;
+    let (mut endpoint, agent) = open_remote_agent(&rig).await;
+
+    let initial_view = agent.view(PageReq::default()).await.expect("initial view");
+    assert_eq!(initial_view.settings.thinking, ThinkingLevel::Medium);
+
+    let route = rig
+        .host
+        .default_route()
+        .await
+        .expect("configured default route");
+    assert_eq!(route.id(), "gpt-6-luna");
+    let builtins = dal_provider::built_in_entries();
+    let row = builtins
+        .iter()
+        .find(|entry| entry.provider.as_ref() == "openai" && entry.id.as_ref() == "gpt-6-luna")
+        .expect("built-in openai gpt-6-luna row");
+    let expected_levels = dal_provider::levels_for(&row.thinking);
+
+    let reply = agent
+        .submit(Command::Run {
+            name: "thinking".into(),
+            args: "".into(),
+            expected: None,
+        })
+        .await
+        .expect("submit bare /thinking");
+
+    let Reply::Choose {
+        chooser,
+        filter,
+        thinking_levels,
+    } = reply
+    else {
+        panic!("bare /thinking must return a chooser reply");
+    };
+    assert_eq!(chooser, Chooser::Thinking);
+    assert_eq!(&*filter, "");
+
+    let supported = thinking_levels.expect("thinking_levels on Reply::Choose");
+    assert_eq!(supported.as_ref(), expected_levels.as_ref());
+
+    let all_levels = [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::Xhigh,
+        ThinkingLevel::Max,
+    ];
+    let unsupported_level = all_levels
+        .into_iter()
+        .find(|level| !supported.contains(level))
+        .expect("unsupported thinking level");
+
+    let chosen_level = supported
+        .iter()
+        .copied()
+        .find(|level| *level != initial_view.settings.thinking)
+        .or_else(|| supported.first().copied())
+        .expect("selectable thinking level");
+
+    let select_reply = agent
+        .submit(Command::Run {
+            name: "thinking".into(),
+            args: chosen_level.name().into(),
+            expected: None,
+        })
+        .await
+        .expect("select thinking level");
+    assert!(matches!(select_reply, Reply::Done(_)));
+
+    let updated_view = agent.view(PageReq::default()).await.expect("updated view");
+    assert_eq!(updated_view.settings.thinking, chosen_level);
+
+    let rejected_result = agent
+        .submit(Command::Run {
+            name: "thinking".into(),
+            args: unsupported_level.name().into(),
+            expected: None,
+        })
+        .await;
+    let Err(WireError::Protocol { message, .. }) = &rejected_result else {
+        panic!("unsupported thinking level must yield a protocol error");
+    };
+    assert!(
+        message.contains("not available"),
+        "rejection must state the level is not available"
+    );
+
+    let unchanged_view = agent
+        .view(PageReq::default())
+        .await
+        .expect("view after rejected submit");
+    assert_eq!(unchanged_view.settings.thinking, chosen_level);
+
+    endpoint.server.abort_all();
 }

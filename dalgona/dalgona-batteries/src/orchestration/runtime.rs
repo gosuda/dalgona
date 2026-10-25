@@ -50,6 +50,8 @@ use super::{JobsView, OrchestrationConfig, StopKind};
 /// Maximum number of list-and-cancel passes during descendant shutdown.
 pub(crate) const CANCEL_SWEEP_PASS_LIMIT: usize = 64;
 
+/// The work battery's open-todo summary document.
+const TODO_TERMINAL: &str = "todo://terminal";
 /// Name the jobs service records one workflow run under.
 const RUN_JOB_NAME: &str = "agents-run";
 
@@ -1850,47 +1852,29 @@ impl SessionState {
         Ok(jobs)
     }
 
+    /// Reads the work battery's open-todo summary through its
+    /// `todo://terminal` scheme. No registered scheme (work disabled)
+    /// means no todos; an undecodable payload is a typed failure.
     async fn todo_summary(&self) -> Result<TodoSummary, ServiceError> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct TodoRecord {
-            list: Vec<TodoItem>,
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct TodoItem {
-            subject: String,
-            state: String,
-        }
-        let records = self.services.records(&self.caller, "todo").await?;
-        let Some(record) = records.last() else {
+        let Some(doc) = self.services.scheme(&self.caller, TODO_TERMINAL).await? else {
             return Ok(TodoSummary {
                 open: 0,
                 total: 0,
                 first_titles: Vec::new(),
             });
         };
-        let decoded: TodoRecord = sonic_rs::from_str(record.as_str())
-            .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-        let mut first_titles = Vec::with_capacity(3);
-        let mut open = 0;
-        for item in &decoded.list {
-            if matches!(item.state.as_str(), "pending" | "in_progress") {
-                open += 1;
-                if first_titles.len() < 3 {
-                    first_titles.push(item.subject.clone().into_boxed_str());
-                }
-            } else if !matches!(item.state.as_str(), "done" | "cancelled") {
-                return Err(ServiceError::failed(
-                    None,
-                    "todo record has an unknown state",
-                ));
-            }
-        }
+        let payload: crate::work::TerminalPayload =
+            sonic_rs::from_str(&doc.text).map_err(|error| {
+                ServiceError::failed(None, format!("{TODO_TERMINAL} is malformed: {error}"))
+            })?;
         Ok(TodoSummary {
-            open,
-            total: decoded.list.len(),
-            first_titles,
+            open: payload.open,
+            total: payload.total,
+            first_titles: payload
+                .first_titles
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
         })
     }
 

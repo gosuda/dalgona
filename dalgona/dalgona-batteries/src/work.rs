@@ -24,7 +24,9 @@ pub(crate) mod support;
 mod todo;
 
 pub use plan::PlanArgs;
-pub(crate) use todo::{TodoItem, load as load_todos, open_todos, todo_all_terminal};
+pub(crate) use todo::{
+    TerminalPayload, TodoItem, load as load_todos, open_todos, todo_all_terminal,
+};
 
 const EXTENSION_NAME: &str = "work";
 const TODO_TOOL: &str = "todo";
@@ -460,14 +462,6 @@ pub fn work(_config: PlanConfig) -> Result<Extension, RegistrationError> {
 
 /// Upper bound of the one-line status text shown in the activity row.
 const STATUS_LINE_LIMIT: usize = 120;
-
-#[derive(serde::Serialize)]
-struct TerminalPayload {
-    all_terminal: bool,
-    open: usize,
-    total: usize,
-    first_titles: Vec<String>,
-}
 
 pub(crate) fn todo_terminal_json(items: &[TodoItem]) -> Result<String, sonic_rs::Error> {
     let (open, total, first_titles) = open_todos(items);

@@ -1,7 +1,10 @@
 //! Pickers and settings rows: model, resume, tree, settings, help.
 
 use dal_agent::login::Method;
-use dal_core::{Command, EntryKind, EntryView, Family, JournalPart, ModelInfo, ModelRoute, View};
+use dal_core::{
+    Command, EntryKind, EntryView, Family, JournalPart, ModelInfo, ModelRoute, ProductSetting,
+    SettingControl, SettingEdit, SettingValue, ThinkingLevel, View,
+};
 
 use crate::copy::ids;
 
@@ -124,6 +127,16 @@ pub(crate) enum PickerAction {
     /// Resume the stored session. Handled by the runtime's resume-target path
     /// through public host ownership, never by guessing.
     ResumeSession(ResumeTarget),
+    /// A product setting row of the settings picker. A toggle saves its
+    /// flipped value; every other control opens its value picker.
+    EditSetting(ProductSetting),
+    /// Persist one product setting edit through the product's validated
+    /// `dal.toml` writer; the picker stays open until the writer answers.
+    SaveSetting(SettingEdit),
+    /// Typed text a value picker could not parse; the picker stays open.
+    RejectSetting(Box<str>),
+    /// One member row of a subset value picker; Enter submits the checked set.
+    SettingMember(Box<str>),
     /// Activate nothing: the failed model picker keeps its instruction row
     /// selectable without running a command or dismissing the failure state.
     Noop,
@@ -169,6 +182,8 @@ pub(crate) struct PickerUi {
     /// any move or filter edit drops it, so a delete is only ever confirmed
     /// by a second `d` on the same row in the same, unchanged opening.
     armed_delete: Option<dal_core::SessionId>,
+    /// The product setting this value picker edits; `None` elsewhere.
+    setting: Option<ProductSetting>,
 }
 
 impl PickerUi {
@@ -185,6 +200,7 @@ impl PickerUi {
             multi: false,
             checked: std::collections::BTreeSet::new(),
             armed_delete: None,
+            setting: None,
         };
         picker.refilter();
         picker
@@ -297,6 +313,37 @@ impl PickerUi {
                 expected: None,
             }));
         }
+        if let Some(text) = self.setting_entry() {
+            let setting = self.setting.as_ref()?;
+            return Some(match setting.control.parse(text) {
+                Ok(value) => PickerAction::SaveSetting(SettingEdit {
+                    key: setting.key.clone(),
+                    value,
+                }),
+                Err(expected) => {
+                    PickerAction::RejectSetting(format!("{}: {expected}", setting.key).into())
+                }
+            });
+        }
+        if self.multi
+            && let Some(setting) = &self.setting
+        {
+            // A subset edit replaces the whole list: the checked members in
+            // the product's listed order, nothing checked saving an empty list.
+            let members = self
+                .checked
+                .iter()
+                .filter_map(|index| self.options.get(*index))
+                .filter_map(|option| match &option.action {
+                    PickerAction::SettingMember(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            return Some(PickerAction::SaveSetting(SettingEdit {
+                key: setting.key.clone(),
+                value: SettingValue::List(members),
+            }));
+        }
         if self.multi {
             // The checked rows are the whole answer. A committed id the model
             // list no longer names is a row of its own (see
@@ -340,6 +387,15 @@ impl PickerUi {
                 enabled: self.diagram_enabled?,
                 save: dal_core::command::Save::SessionAndDefault,
             }),
+            PickerAction::EditSetting(ProductSetting {
+                key,
+                value: SettingValue::Bool(value),
+                control: SettingControl::Toggle,
+                ..
+            }) => Some(PickerAction::SaveSetting(SettingEdit {
+                key,
+                value: SettingValue::Bool(!value),
+            })),
             action => Some(action),
         }
     }
@@ -356,8 +412,66 @@ impl PickerUi {
         (self.model_fallback && self.visible.is_empty() && !self.filter.trim().is_empty())
             .then_some(self.filter.trim())
     }
+    /// The key of the product setting this value picker edits; `None` on
+    /// every other picker.
+    pub(crate) fn setting_key(&self) -> Option<&str> {
+        self.setting.as_ref().map(|setting| &*setting.key)
+    }
+
     pub(crate) fn is_settings(&self) -> bool {
         self.diagram_enabled.is_some()
+    }
+
+    /// Whether this is the value picker of an integer, number, or text
+    /// setting, whose plain characters are always value text.
+    pub(crate) fn takes_typed_value(&self) -> bool {
+        self.setting.as_ref().is_some_and(|setting| {
+            matches!(
+                setting.control,
+                SettingControl::Integer | SettingControl::Number | SettingControl::Text
+            )
+        })
+    }
+
+    /// Text typed into the value picker of an integer, number, or text setting.
+    pub(crate) fn setting_entry(&self) -> Option<&str> {
+        (self.takes_typed_value() && !self.filter.trim().is_empty()).then_some(self.filter.trim())
+    }
+
+    /// The row a typed entry submits: `/model <id>` or `set <key> = <value>`.
+    pub(crate) fn typed_entry_row(&self) -> Option<String> {
+        if let Some(id) = self.model_filter_fallback() {
+            return Some(format!("/model {id}"));
+        }
+        let text = self.setting_entry()?;
+        let key = &self.setting.as_ref()?.key;
+        Some(crate::copy::render(
+            ids::SETTINGS_VALUE_ENTRY,
+            &[("key", key), ("value", text)],
+            1,
+        ))
+    }
+
+    /// Appends the product rows, or the reason they could not be read, to
+    /// an open settings picker. Any other picker is left unchanged.
+    pub(crate) fn add_product_settings(&mut self, catalog: Result<Vec<ProductSetting>, String>) {
+        if !self.is_settings() {
+            return;
+        }
+        match catalog {
+            Ok(settings) => {
+                self.options
+                    .extend(settings.into_iter().map(|setting| PickerOption {
+                        label: product_setting_label(&setting),
+                        action: PickerAction::EditSetting(setting),
+                    }));
+            }
+            Err(error) => self.options.push(PickerOption {
+                label: crate::copy::render(ids::SETTINGS_PRODUCT_ERROR, &[("error", &error)], 1),
+                action: PickerAction::Noop,
+            }),
+        }
+        self.refilter();
     }
 
     /// Whether the model list failed to load and this picker is the
@@ -398,7 +512,8 @@ impl PickerUi {
     }
 
     pub(crate) fn visible_len(&self) -> usize {
-        self.visible.len() + usize::from(self.model_filter_fallback().is_some())
+        let typed = self.model_filter_fallback().is_some() || self.setting_entry().is_some();
+        self.visible.len() + usize::from(typed)
     }
 
     pub(crate) fn visible_option(&self, index: usize) -> Option<&PickerOption> {
@@ -419,6 +534,11 @@ impl PickerUi {
     fn refilter(&mut self) {
         let needle = self.filter.to_lowercase();
         self.visible.clear();
+        // Typed value text is the answer itself, never a query over rows.
+        if self.takes_typed_value() && !needle.trim().is_empty() {
+            self.selected = 0;
+            return;
+        }
         self.visible.extend(
             self.options
                 .iter()
@@ -495,7 +615,11 @@ fn settings_diagram_label(enabled: bool) -> String {
     )
 }
 
-pub(crate) fn settings_picker(diagrams: bool, filter: &str) -> PickerUi {
+fn settings_thinking_label(thinking: ThinkingLevel) -> String {
+    crate::copy::render(ids::SETTINGS_THINKING_ROW, &[("level", thinking.name())], 1)
+}
+
+pub(crate) fn settings_picker(diagrams: bool, thinking: ThinkingLevel, filter: &str) -> PickerUi {
     let mut picker = PickerUi::new(
         ids::SETTINGS_TITLE,
         filter,
@@ -508,9 +632,180 @@ pub(crate) fn settings_picker(diagrams: bool, filter: &str) -> PickerUi {
                 label: ids::SETTINGS_DIAGRAMS_SAVE.to_owned(),
                 action: PickerAction::SaveDiagrams,
             },
+            // The live model control is the existing `/model` chooser.
+            PickerOption {
+                label: ids::SETTINGS_MODEL_OPEN.to_owned(),
+                action: PickerAction::Command(Command::Run {
+                    name: "model".into(),
+                    args: "".into(),
+                    expected: None,
+                }),
+            },
+            PickerOption {
+                label: settings_thinking_label(thinking),
+                action: PickerAction::Command(Command::Run {
+                    name: "thinking".into(),
+                    args: "".into(),
+                    expected: None,
+                }),
+            },
         ],
     );
     picker.diagram_enabled = Some(diagrams);
+    picker
+}
+
+/// The `/thinking` picker: rows are the host-supported reasoning levels in
+/// exact host order, with canonical name and current marker/preselection.
+/// Selecting a row runs `/thinking <level.name>`.
+pub(crate) fn thinking_picker(
+    levels: &[ThinkingLevel],
+    current: ThinkingLevel,
+    filter: &str,
+) -> PickerUi {
+    let options = levels
+        .iter()
+        .map(|level| {
+            let label = if *level == current {
+                crate::copy::render(ids::THINKING_ROW_CURRENT, &[("level", level.name())], 1)
+            } else {
+                level.name().to_string()
+            };
+            PickerOption {
+                label,
+                action: PickerAction::Command(Command::Run {
+                    name: "thinking".into(),
+                    args: level.name().into(),
+                    expected: None,
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut picker = PickerUi::new(ids::THINKING_PICKER_TITLE, filter, options);
+    if let Some(cur_idx) = levels.iter().position(|l| *l == current)
+        && let Some(pos) = picker.visible.iter().position(|&idx| idx == cur_idx)
+    {
+        picker.selected = pos;
+    }
+    picker
+}
+
+/// One product row: its saved next-start value, the value the running host
+/// started with when that differs, and the restart notice.
+fn product_setting_label(setting: &ProductSetting) -> String {
+    let value = setting.value.to_string();
+    match &setting.running {
+        Some(running) => crate::copy::render(
+            ids::SETTINGS_PRODUCT_ROW_CHANGED,
+            &[
+                ("group", &setting.group),
+                ("label", &setting.label),
+                ("value", &value),
+                ("running", &running.to_string()),
+            ],
+            1,
+        ),
+        None => crate::copy::render(
+            ids::SETTINGS_PRODUCT_ROW,
+            &[
+                ("group", &setting.group),
+                ("label", &setting.label),
+                ("value", &value),
+            ],
+            1,
+        ),
+    }
+}
+
+/// The value editor of one product setting.
+///
+/// Toggles and choices list their values; a subset is a multi-select whose
+/// checked members replace the whole list; integers, numbers, and text take
+/// typed input that the product validates when it is saved.
+pub(crate) fn setting_value_picker(setting: ProductSetting) -> PickerUi {
+    let save = |value: SettingValue| {
+        PickerAction::SaveSetting(SettingEdit {
+            key: setting.key.clone(),
+            value,
+        })
+    };
+    let (options, checked): (Vec<PickerOption>, Vec<usize>) = match &setting.control {
+        SettingControl::Toggle => (
+            [true, false]
+                .into_iter()
+                .map(|value| PickerOption {
+                    label: SettingValue::Bool(value).to_string(),
+                    action: save(SettingValue::Bool(value)),
+                })
+                .collect(),
+            Vec::new(),
+        ),
+        SettingControl::Choice(choices) => (
+            choices
+                .iter()
+                .map(|choice| PickerOption {
+                    label: choice.to_string(),
+                    action: save(SettingValue::Text(choice.clone())),
+                })
+                .collect(),
+            Vec::new(),
+        ),
+        SettingControl::Subset(members) => {
+            let current: &[Box<str>] = match &setting.value {
+                SettingValue::List(current) => current,
+                _ => &[],
+            };
+            (
+                members
+                    .iter()
+                    .map(|member| PickerOption {
+                        label: member.to_string(),
+                        action: PickerAction::SettingMember(member.clone()),
+                    })
+                    .collect(),
+                members
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, member)| current.contains(member))
+                    .map(|(index, _)| index)
+                    .collect(),
+            )
+        }
+        SettingControl::Integer | SettingControl::Number => (Vec::new(), Vec::new()),
+        // A text setting can also be cleared: the empty value is the
+        // product's documented default for its text settings, and the
+        // product still validates it on save.
+        SettingControl::Text => (
+            vec![PickerOption {
+                label: ids::SETTINGS_VALUE_CLEAR.to_owned(),
+                action: save(SettingValue::Text("".into())),
+            }],
+            Vec::new(),
+        ),
+    };
+    let selected = match &setting.control {
+        SettingControl::Choice(_) | SettingControl::Toggle => options
+            .iter()
+            .position(|option| {
+                matches!(
+                    &option.action,
+                    PickerAction::SaveSetting(edit) if edit.value == setting.value
+                )
+            })
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let title = crate::copy::render(
+        ids::SETTINGS_VALUE_TITLE,
+        &[("key", &setting.key), ("value", &setting.value.to_string())],
+        1,
+    );
+    let mut picker = PickerUi::new(title, "", options);
+    picker.selected = selected;
+    if let SettingControl::Subset(_) = setting.control {
+        picker.with_multi(checked);
+    }
+    picker.setting = Some(setting);
     picker
 }
 
@@ -997,7 +1292,7 @@ mod picker_tests {
 
     #[test]
     fn settings_toggle_is_session_only_and_save_uses_default_semantics() {
-        let mut picker = super::settings_picker(false, "");
+        let mut picker = super::settings_picker(false, dal_core::ThinkingLevel::Off, "");
         assert!(matches!(
             picker.activate_selected(),
             Some(PickerAction::SetDiagrams {
@@ -1018,6 +1313,286 @@ mod picker_tests {
                 save: dal_core::command::Save::SessionAndDefault,
             })
         ));
+    }
+
+    fn product_row(
+        key: &str,
+        value: dal_core::SettingValue,
+        control: dal_core::SettingControl,
+    ) -> dal_core::ProductSetting {
+        dal_core::ProductSetting {
+            key: key.into(),
+            group: "web".into(),
+            label: "label".into(),
+            value,
+            running: None,
+            control,
+        }
+    }
+
+    fn save(key: &str, value: dal_core::SettingValue) -> PickerAction {
+        PickerAction::SaveSetting(dal_core::SettingEdit {
+            key: key.into(),
+            value,
+        })
+    }
+
+    #[test]
+    fn product_rows_show_saved_values_and_require_a_restart() {
+        use dal_core::{SettingControl, SettingValue, ThinkingLevel};
+
+        let mut picker = super::settings_picker(false, ThinkingLevel::Off, "");
+        let mut changed = product_row(
+            "plugin.web.timeout_secs",
+            SettingValue::Integer(60),
+            SettingControl::Integer,
+        );
+        changed.running = Some(SettingValue::Integer(30));
+        picker.add_product_settings(Ok(vec![
+            product_row(
+                "plugin.web.enabled",
+                SettingValue::Bool(true),
+                SettingControl::Toggle,
+            ),
+            changed,
+        ]));
+        let labels: Vec<&str> = (0..picker.visible_len())
+            .filter_map(|index| picker.visible_option(index))
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(
+            labels[2..],
+            [
+                "model · open the model picker",
+                "thinking · off",
+                "web · label: on · saved in dal.toml · restart required",
+                "web · label: 60 (running: 30) · saved in dal.toml · restart required",
+            ]
+        );
+        assert!(labels.iter().all(|label| !label.contains("now active")));
+    }
+
+    #[test]
+    fn a_toggle_row_saves_its_flipped_value_and_a_catalog_error_is_inert() {
+        use dal_core::{SettingControl, SettingValue, ThinkingLevel};
+
+        let mut picker = super::settings_picker(false, ThinkingLevel::Off, "");
+        picker.add_product_settings(Ok(vec![product_row(
+            "plugin.web.enabled",
+            SettingValue::Bool(true),
+            SettingControl::Toggle,
+        )]));
+        for _ in 0..4 {
+            picker.move_selection(true);
+        }
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save("plugin.web.enabled", SettingValue::Bool(false)))
+        );
+
+        let mut failed = super::settings_picker(false, ThinkingLevel::Off, "");
+        failed.add_product_settings(Err("dalgona: dal.toml: bad".to_owned()));
+        for _ in 0..4 {
+            failed.move_selection(true);
+        }
+        assert_eq!(failed.activate_selected(), Some(PickerAction::Noop));
+    }
+
+    #[test]
+    fn thinking_picker_preserves_host_order_and_marks_current() {
+        use dal_core::{Command, ThinkingLevel};
+
+        let levels = [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ];
+        let mut picker = super::thinking_picker(&levels, ThinkingLevel::Medium, "");
+        assert_eq!(picker.title, "Thinking level");
+        assert_eq!(picker.visible_len(), 4);
+        assert_eq!(
+            picker.visible_option(0).map(|o| o.label.as_str()),
+            Some("off")
+        );
+        assert_eq!(
+            picker.visible_option(1).map(|o| o.label.as_str()),
+            Some("low")
+        );
+        assert_eq!(
+            picker.visible_option(2).map(|o| o.label.as_str()),
+            Some("medium (current)")
+        );
+        assert_eq!(
+            picker.visible_option(3).map(|o| o.label.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "medium".into(),
+                expected: None,
+            }))
+        );
+        picker.move_selection(true);
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "high".into(),
+                expected: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn settings_picker_includes_thinking_row_opening_empty_args() {
+        use dal_core::{Command, ThinkingLevel};
+
+        let mut picker = super::settings_picker(false, ThinkingLevel::High, "");
+        for _ in 0..3 {
+            picker.move_selection(true);
+        }
+        assert_eq!(
+            picker.visible_option(3).map(|o| o.label.as_str()),
+            Some("thinking · high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(PickerAction::Command(Command::Run {
+                name: "thinking".into(),
+                args: "".into(),
+                expected: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_typed_value_is_parsed_before_it_is_saved() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "plugin.web.timeout_secs",
+            SettingValue::Integer(30),
+            SettingControl::Integer,
+        ));
+        assert!(picker.title.contains("restart required"));
+        picker.paste("45");
+        assert_eq!(
+            picker.typed_entry_row().as_deref(),
+            Some("set plugin.web.timeout_secs = 45")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save("plugin.web.timeout_secs", SettingValue::Integer(45)))
+        );
+        picker.paste("x");
+        assert!(matches!(
+            picker.activate_selected(),
+            Some(PickerAction::RejectSetting(reason))
+                if reason.as_ref() == "plugin.web.timeout_secs: expected a whole number"
+        ));
+    }
+
+    #[test]
+    fn a_choice_row_saves_the_picked_value() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "plugin.web.provider",
+            SettingValue::Text("brave".into()),
+            SettingControl::Choice(vec!["brave".into(), "tavily".into()]),
+        ));
+        picker.move_selection(true);
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.web.provider",
+                SettingValue::Text("tavily".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_choice_editor_preselects_saved_value_and_submits_without_navigation() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "plugin.web.provider",
+            SettingValue::Text("tavily".into()),
+            SettingControl::Choice(vec!["brave".into(), "tavily".into()]),
+        ));
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.web.provider",
+                SettingValue::Text("tavily".into())
+            ))
+        );
+        picker.move_selection(false);
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.web.provider",
+                SettingValue::Text("brave".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_text_value_can_be_cleared_or_typed() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "plugin.review.diff_base",
+            SettingValue::Text("main".into()),
+            SettingControl::Text,
+        ));
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.review.diff_base",
+                SettingValue::Text("".into())
+            ))
+        );
+        picker.paste("cle");
+        assert_eq!(picker.visible_len(), 1, "only the typed row shows");
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "plugin.review.diff_base",
+                SettingValue::Text("cle".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_subset_saves_the_whole_checked_list() {
+        use dal_core::{SettingControl, SettingValue};
+
+        let mut picker = super::setting_value_picker(product_row(
+            "disabled_batteries",
+            SettingValue::List(vec!["web".into()]),
+            SettingControl::Subset(vec!["mcp".into(), "web".into(), "work".into()]),
+        ));
+        assert!(picker.is_multi());
+        assert!(picker.is_checked(1));
+        picker.toggle_selected();
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save(
+                "disabled_batteries",
+                SettingValue::List(vec!["mcp".into(), "web".into()])
+            ))
+        );
+        picker.toggle_selected();
+        picker.move_selection(true);
+        picker.toggle_selected();
+        assert_eq!(
+            picker.activate_selected(),
+            Some(save("disabled_batteries", SettingValue::List(Vec::new())))
+        );
     }
 
     #[test]

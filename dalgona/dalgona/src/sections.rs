@@ -56,7 +56,10 @@ pub(crate) struct Sections {
     pub(crate) rule_sets: Vec<String>,
 }
 
-fn section_error(section: &str, source: impl Error + Send + Sync + 'static) -> dalgon::BuildError {
+pub(crate) fn section_error(
+    section: &str,
+    source: impl Error + Send + Sync + 'static,
+) -> dalgon::BuildError {
     dalgon::BuildError::Section {
         section: section.into(),
         source: Box::new(source),
@@ -89,7 +92,7 @@ impl Sections {
         Self::decode_with(config, &mut std::io::stderr().lock())
     }
 
-    fn decode_with(
+    pub(crate) fn decode_with(
         config: &dalgon::Config,
         warnings: &mut dyn Write,
     ) -> Result<Self, dalgon::BuildError> {

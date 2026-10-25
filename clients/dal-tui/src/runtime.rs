@@ -34,6 +34,7 @@ const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// journal) or one this build does not know reads as a neutral "resolved"
 /// note and is never guessed from the answering client, the answer or time.
 fn resolution_notice(
+    product: crate::copy::Identity,
     cause: Option<ResolutionCause>,
     by: &ClientId,
     answer: &Answer,
@@ -43,10 +44,10 @@ fn resolution_notice(
 
     let template = match cause {
         Some(ResolutionCause::Answered) => ids::REQUEST_RESOLVED_BY,
-        Some(ResolutionCause::TimedOut) => ids::REQUEST_TIMED_OUT,
+        Some(ResolutionCause::TimedOut) => product.request_timed_out,
         Some(ResolutionCause::Cancelled) => ids::REQUEST_CANCELLED,
         Some(ResolutionCause::Withdrawn) => ids::REQUEST_WITHDRAWN,
-        Some(ResolutionCause::NoController) => ids::REQUEST_NO_CONTROLLER,
+        Some(ResolutionCause::NoController) => product.request_no_controller,
         None | Some(_) => ids::REQUEST_RESOLVED,
     };
     crate::copy::render(
@@ -58,6 +59,24 @@ fn resolution_notice(
         ],
         1,
     )
+}
+
+/// The admitted value-editor save held until `apply_product_settings` drains
+/// it. `reopen` ends on Esc: a dismissed editor is never resurrected by the
+/// save it admitted.
+#[derive(Debug)]
+struct PendingSettingEdit {
+    edit: dal_core::SettingEdit,
+    reopen: bool,
+}
+
+/// Whether an admitted save still pends while `picker` is a value editor. The
+/// editor then takes only Esc, and paste waits, until the drain settles it.
+fn value_editor_pends(
+    pending: Option<&PendingSettingEdit>,
+    picker: &crate::picker::PickerUi,
+) -> bool {
+    pending.is_some() && picker.setting_key().is_some()
 }
 
 /// Local composer and exit state; transport to `Agent::submit` lands with `Host::open`.
@@ -82,6 +101,12 @@ struct Session {
     pending_copies: Vec<Box<str>>,
     pending_answers: Vec<(RequestId, Answer)>,
     pending_diagram_settings: Vec<(bool, dal_core::command::Save)>,
+    /// The one admitted product setting save, awaiting the process-edge
+    /// `dal.toml` writer. A second admission waits for it to settle.
+    pending_setting_edit: Option<PendingSettingEdit>,
+    /// Set when a settings picker opened; the next tick appends the
+    /// product's rows read from the latest `dal.toml`.
+    settings_catalog_due: bool,
     /// Set when the failed model picker saw `r`; the next tick reruns the
     /// real model source and rebuilds the picker, query/filter intact.
     pending_model_retry: bool,
@@ -557,17 +582,20 @@ fn start_blob_load<A: TuiAgent>(
     }
 }
 
-pub(super) fn run<H, M, S>(
+pub(super) fn run<H, M, S, C, E>(
     host: &H,
     opts: &TuiOptions,
     io: &impl TermIo,
     model_source: M,
     save_diagrams: S,
+    product: crate::ProductSettings<C, E>,
 ) -> Result<TuiExit, TuiError>
 where
     H: TuiHost,
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
+    C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+    E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
 {
     crate::keys::validate(crate::keys::BINDINGS)?;
     if !opts.env.stdin_tty {
@@ -578,7 +606,10 @@ where
     }
 
     let mut model_source = model_source;
-    let mut save_diagrams = save_diagrams;
+    let mut settings = SettingsEdge {
+        diagrams: save_diagrams,
+        product,
+    };
     // Resume loop. A resume is attempted INSIDE the live loop (`run_loop`):
     // the replacement session is opened while this one is still open and
     // untouched, with its Surfaces, Painter and pump alive. A target that
@@ -616,7 +647,7 @@ where
                 host: host.clone(),
             },
             &mut model_source,
-            &mut save_diagrams,
+            &mut settings,
             view,
             ephemeral,
         );
@@ -984,7 +1015,7 @@ fn boot<A: TuiAgent>(
             ..Session::default()
         },
         dialog: DialogUi::default(),
-        live: Live::default(),
+        live: Live::for_binary(opts.binary),
         transcript: Transcript::default(),
         diagram_settings: crate::diagram::DiagramSettings {
             enabled: opts.diagrams,
@@ -1086,7 +1117,14 @@ fn enter_interface_modes(
 
 type RunLoopOutcome<H> = (TuiExit, Option<TurnId>, Vec<String>, Option<H>);
 
-fn run_loop<A, H, M, S>(
+/// The process-edge settings writers: the diagram preference saver and the
+/// product's editable startup settings.
+struct SettingsEdge<S, C, E> {
+    diagrams: S,
+    product: crate::ProductSettings<C, E>,
+}
+
+fn run_loop<A, H, M, S, C, E>(
     io: &dyn TermIo,
     opts: &TuiOptions,
     state: &Arc<Mutex<TermState>>,
@@ -1094,7 +1132,7 @@ fn run_loop<A, H, M, S>(
     pump: &mut Pump<A::Subscription>,
     commands: CommandContext<H>,
     model_source: &mut M,
-    save_diagrams: &mut S,
+    settings: &mut SettingsEdge<S, C, E>,
     view: dal_core::View,
     ephemeral: bool,
 ) -> Result<RunLoopOutcome<H::Agent>, TuiError>
@@ -1103,6 +1141,8 @@ where
     H: TuiHost,
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
+    C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+    E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
 {
     let CommandContext { specs, host } = commands;
     enter_interface_modes(io, opts, state)?;
@@ -1160,7 +1200,8 @@ where
             repaint_live_region(io, state, opts, &theme, &mut painter, &mut surfaces)?;
         }
         surfaces.write_copies(io);
-        surfaces.apply_diagram_updates(opts, &mut painter, &probe, save_diagrams);
+        surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut settings.diagrams);
+        surfaces.apply_product_settings(&mut settings.product);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll);
         surfaces.reseed_diagrams(opts);
@@ -1571,8 +1612,13 @@ impl Surfaces {
                 // before a snapshot dropped it) announces the outcome; queued
                 // requests the user never saw stay silent.
                 if let Some(title) = self.dialog.resolved(&id.to_string()) {
-                    self.live
-                        .notice(resolution_notice(*cause, by, answer, &title));
+                    self.live.notice(resolution_notice(
+                        crate::copy::identity(opts.binary),
+                        *cause,
+                        by,
+                        answer,
+                        &title,
+                    ));
                 }
                 self.view.open.retain(|request| request.id != *id);
             }
@@ -1742,7 +1788,11 @@ impl Surfaces {
         };
         let queued = matches!(&submit_reply, Reply::Queued { .. });
         let reply_rows = match submit_reply {
-            Reply::Choose { chooser, filter } => {
+            Reply::Choose {
+                chooser,
+                filter,
+                thinking_levels,
+            } => {
                 self.session.picker = None;
                 let picker = match chooser {
                     Chooser::Tree => Some(crate::picker::tree_picker(&self.view, &filter)),
@@ -1757,21 +1807,37 @@ impl Surfaces {
                             Some(crate::picker::model_picker_failed(&filter))
                         }
                     }
-                    Chooser::Settings => Some(crate::picker::settings_picker(
-                        self.diagram_settings.enabled,
-                        &filter,
-                    )),
+                    Chooser::Settings => {
+                        self.session.settings_catalog_due = true;
+                        Some(crate::picker::settings_picker(
+                            self.diagram_settings.enabled,
+                            self.view.settings.thinking,
+                            &filter,
+                        ))
+                    }
                     Chooser::Login => Some(signin::login_picker(&filter)),
                     Chooser::Logout => {
                         self.session.front.push(FrontRequest::LogoutPicker(filter));
                         None
                     }
                     Chooser::ScopedModels => self.scoped_models_choice(model_source, &filter),
-                    Chooser::Thinking => {
-                        self.live
-                            .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
-                        None
-                    }
+                    Chooser::Thinking => match thinking_levels {
+                        Some(levels) if !levels.is_empty() => Some(crate::picker::thinking_picker(
+                            &levels,
+                            self.view.settings.thinking,
+                            &filter,
+                        )),
+                        Some(_) => {
+                            self.live
+                                .notice(crate::copy::ids::PICKER_THINKING_UNSUPPORTED.to_owned());
+                            None
+                        }
+                        None => {
+                            self.live
+                                .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
+                            None
+                        }
+                    },
                     Chooser::Session => self.session_choice(opts, host, &filter),
                 };
                 self.session.picker = picker;
@@ -2120,6 +2186,59 @@ impl Surfaces {
                     "diagram rendering disabled for this session"
                 });
             }
+        }
+    }
+
+    /// Reopens the settings list after an admitted save, but only over the
+    /// editor that admitted it and only while Esc has not dismissed it.
+    fn reopen_settings_after(&mut self, pending: &PendingSettingEdit) {
+        let same_editor = self.session.picker.as_ref().is_some_and(|picker| {
+            picker.is_settings() || picker.setting_key() == Some(&*pending.edit.key)
+        });
+        if !pending.reopen || !same_editor {
+            return;
+        }
+        self.session.picker = Some(crate::picker::settings_picker(
+            self.diagram_settings.enabled,
+            self.view.settings.thinking,
+            "",
+        ));
+        self.session.settings_catalog_due = true;
+    }
+
+    /// Appends the product rows to a freshly opened settings picker and runs
+    /// queued product setting edits through the process-edge writer.
+    ///
+    /// A saved edit reopens the settings picker over the reread `dal.toml`
+    /// and says the change applies after a restart; nothing reloads live. A
+    /// refused edit names the field and keeps the value picker open. The
+    /// reopen happens only while the editor that admitted the save is still
+    /// open; Esc ends it, and a dismissed editor never comes back this way.
+    fn apply_product_settings<C, E>(&mut self, product: &mut crate::ProductSettings<C, E>)
+    where
+        C: FnMut() -> Result<Vec<dal_core::ProductSetting>, TuiError>,
+        E: FnMut(&dal_core::SettingEdit) -> Result<(), TuiError>,
+    {
+        if let Some(pending) = self.session.pending_setting_edit.take() {
+            let edit = &pending.edit;
+            match (product.edit)(edit) {
+                Ok(()) => {
+                    self.live.notice(crate::copy::render(
+                        crate::copy::ids::SETTINGS_SAVED,
+                        &[("key", &edit.key), ("value", &edit.value.to_string())],
+                        1,
+                    ));
+                    self.reopen_settings_after(&pending);
+                }
+                Err(error) => self
+                    .live
+                    .notice_as(crate::theme::Role::Error, format!("note: {error}")),
+            }
+        }
+        if std::mem::take(&mut self.session.settings_catalog_due)
+            && let Some(picker) = self.session.picker.as_mut()
+        {
+            picker.add_product_settings((product.catalog)().map_err(|error| error.to_string()));
         }
     }
 
@@ -2486,6 +2605,10 @@ fn apply_paste(session: &mut Session, dialog: &mut DialogUi, live: &Live, bytes:
     if let Some(picker) = session.picker.as_mut() {
         // The picker's one-line filter is a text field: paste filters like
         // typed characters and never submits.
+        // An admitted save pends in its value editor: paste waits for the drain.
+        if value_editor_pends(session.pending_setting_edit.as_ref(), picker) {
+            return;
+        }
         picker.paste(&String::from_utf8_lossy(bytes));
         return;
     }
@@ -2999,6 +3122,26 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
     let Some(picker) = session.picker.as_mut() else {
         return;
     };
+    // An admitted save pends until the drain settles it: its value editor
+    // takes only Esc, which dismisses the editor and ends that save's reopen.
+    if value_editor_pends(session.pending_setting_edit.as_ref(), picker) {
+        if key.code == KeyCode::Esc {
+            session.picker = None;
+            if let Some(pending) = session.pending_setting_edit.as_mut() {
+                pending.reopen = false;
+            }
+        }
+        return;
+    }
+    // A typed setting value is free text from its first character: `j`,
+    // `k`, `d`, and Space are value text there, never moves or deletes.
+    if picker.takes_typed_value()
+        && let KeyCode::Char(character) = key.code
+        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+    {
+        picker.add_filter_char(character);
+        return;
+    }
     let table_action = resolve_in(key, false, &[Owner::Picker]);
     // The empty filter admits the documented plain-letter keys before the
     // filter-text arm; a non-empty filter sends every unmodified character
@@ -3016,58 +3159,13 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => session.picker = None,
-        (KeyCode::Enter, _) => {
-            match session
-                .picker
-                .as_mut()
-                .and_then(PickerUi::activate_selected)
-            {
-                Some(PickerAction::Command(command)) => {
-                    session.pending_commands.push(command);
-                    session.picker = None;
-                }
-                Some(PickerAction::ConfirmLogoutAll) => {
-                    session.signin = Some(SignIn::confirm_all());
-                    session.picker = None;
-                }
-                Some(PickerAction::Login { provider, method }) => {
-                    session
-                        .front
-                        .push(FrontRequest::StartMethod { provider, method });
-                    session.picker = None;
-                }
-                Some(PickerAction::SetDraft(text)) => {
-                    // History recall: the row's message becomes the draft.
-                    session.composer.set(&text);
-                    session.popup_base = None;
-                    session.popup_index = 0;
-                    session.picker = None;
-                    session.update_popup();
-                }
-                Some(PickerAction::ResumeSession(target)) => {
-                    if Some(target.id) == session.own {
-                        live.notice_as(
-                            crate::theme::Role::Error,
-                            "note: this is the current session",
-                        );
-                    } else {
-                        session.resume_target = Some(ResumeRequest {
-                            id: target.id,
-                            workspace: Some(target.workspace),
-                        });
-                    }
-                    session.picker = None;
-                }
-                Some(PickerAction::SetDiagrams { enabled, save }) => {
-                    session.pending_diagram_settings.push((enabled, save));
-                }
-                // The failed model picker's instruction row activates
-                // nothing and keeps the failure surface open.
-                Some(PickerAction::Noop) => {}
-                Some(_) | None => session.picker = None,
+        (KeyCode::Esc, _) => {
+            session.picker = None;
+            if let Some(pending) = session.pending_setting_edit.as_mut() {
+                pending.reopen = false;
             }
         }
+        (KeyCode::Enter, _) => activate_picker_selection(session, live),
         (KeyCode::Up, _) => picker.move_selection(false),
         (KeyCode::Down, _) => picker.move_selection(true),
         (KeyCode::Backspace, _) => picker.remove_filter_char(),
@@ -3091,6 +3189,75 @@ fn apply_picker_key(session: &mut Session, live: &mut Live, key: crate::keys::Ke
             picker.add_filter_char(character);
         }
         _ => {}
+    }
+}
+
+/// Enter on the focused picker row runs the row's action. The `Noop`
+/// instruction row keeps the picker open; a row with no action, or one this
+/// picker does not handle, closes it.
+fn activate_picker_selection(session: &mut Session, live: &mut Live) {
+    match session
+        .picker
+        .as_mut()
+        .and_then(PickerUi::activate_selected)
+    {
+        Some(PickerAction::Command(command)) => {
+            session.pending_commands.push(command);
+            session.picker = None;
+        }
+        Some(PickerAction::ConfirmLogoutAll) => {
+            session.signin = Some(SignIn::confirm_all());
+            session.picker = None;
+        }
+        Some(PickerAction::Login { provider, method }) => {
+            session
+                .front
+                .push(FrontRequest::StartMethod { provider, method });
+            session.picker = None;
+        }
+        Some(PickerAction::SetDraft(text)) => {
+            // History recall: the row's message becomes the draft.
+            session.composer.set(&text);
+            session.popup_base = None;
+            session.popup_index = 0;
+            session.picker = None;
+            session.update_popup();
+        }
+        Some(PickerAction::ResumeSession(target)) => {
+            if Some(target.id) == session.own {
+                live.notice_as(
+                    crate::theme::Role::Error,
+                    "note: this is the current session",
+                );
+            } else {
+                session.resume_target = Some(ResumeRequest {
+                    id: target.id,
+                    workspace: Some(target.workspace),
+                });
+            }
+            session.picker = None;
+        }
+        Some(PickerAction::SetDiagrams { enabled, save }) => {
+            session.pending_diagram_settings.push((enabled, save));
+        }
+        Some(PickerAction::EditSetting(setting)) => {
+            session.picker = Some(crate::picker::setting_value_picker(setting));
+        }
+        // The picker stays until the writer answers: a refused edit
+        // keeps the value picker open for a corrected value.
+        Some(PickerAction::SaveSetting(edit)) => {
+            // One save pends at a time; a save already admitted keeps the slot.
+            if session.pending_setting_edit.is_none() {
+                session.pending_setting_edit = Some(PendingSettingEdit { edit, reopen: true });
+            }
+        }
+        Some(PickerAction::RejectSetting(reason)) => {
+            live.notice_as(crate::theme::Role::Error, format!("note: {reason}"));
+        }
+        // The failed model picker's instruction row activates
+        // nothing and keeps the failure surface open.
+        Some(PickerAction::Noop) => {}
+        Some(_) | None => session.picker = None,
     }
 }
 
@@ -3400,7 +3567,13 @@ mod tests {
         use dal_core::{Answer, ClientId, ResolutionCause};
 
         let notice = |cause| {
-            super::resolution_notice(cause, &ClientId::new("core"), &Answer::Decline, "ship it")
+            super::resolution_notice(
+                crate::copy::identity("dal"),
+                cause,
+                &ClientId::new("core"),
+                &Answer::Decline,
+                "ship it",
+            )
         };
         let default_word = crate::copy::answer_word(&Answer::Decline);
         let causes = [
@@ -3505,6 +3678,7 @@ mod tests {
                 session.accept_reply(dal_core::Reply::Choose {
                     chooser,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
                 [] as [String; 0],
                 "{chooser:?} must render no rows"
@@ -4392,12 +4566,52 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_setting_value_keeps_plain_letters_as_text() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue};
+
+        let mut session = Session {
+            picker: Some(crate::picker::setting_value_picker(ProductSetting {
+                key: "plugin.review.diff_base".into(),
+                group: "review".into(),
+                label: "diff base".into(),
+                value: SettingValue::Text("".into()),
+                running: None,
+                control: SettingControl::Text,
+            })),
+            ..Session::default()
+        };
+        for character in "kj dev".chars() {
+            apply_key(
+                &mut session,
+                Key::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            session
+                .pending_setting_edit
+                .as_ref()
+                .map(|pending| &pending.edit),
+            Some(&SettingEdit {
+                key: "plugin.review.diff_base".into(),
+                value: SettingValue::Text("kj dev".into()),
+            })
+        );
+    }
+
+    #[test]
     fn settings_picker_updates_local_state_and_queues_config_saves() {
         use crate::keys::Key;
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut session = Session {
-            picker: Some(crate::picker::settings_picker(false, "")),
+            picker: Some(crate::picker::settings_picker(
+                false,
+                dal_core::ThinkingLevel::Off,
+                "",
+            )),
             ..Session::default()
         };
         apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -5599,7 +5813,7 @@ mod run_command_tests {
     };
     use tokio::sync::Notify;
 
-    use super::{InflightRun, Session, run, start_run};
+    use super::{InflightRun, Session, start_run};
     use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
     use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions};
 
@@ -5741,7 +5955,8 @@ mod run_command_tests {
         };
         let io = crate::term::fake_term_io(Vec::new());
 
-        let outcome = run(&host, &opts, &io, || Ok(Vec::new()), |_| Ok(()));
+        let outcome =
+            crate::run_backend_with_settings_save(&host, &opts, &io, || Ok(Vec::new()), |_| Ok(()));
 
         assert!(
             matches!(outcome, Err(TuiError::Terminal(_))),
@@ -6075,6 +6290,7 @@ mod loop_tests {
         ThinkingLevel, TreeOutline, TurnState, Usage, UsageView, View, Workspace,
     };
 
+    use super::PendingSettingEdit;
     use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
     use crate::term::TermIo;
     use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -6844,8 +7060,14 @@ mod loop_tests {
         let terminal = ScriptedTerminal {
             chunks: Mutex::new(script.into()),
         };
-        super::run(&host, &opts, &terminal, || Ok(Vec::new()), |_| Ok(()))
-            .expect("the loop exits cleanly");
+        crate::run_backend_with_settings_save(
+            &host,
+            &opts,
+            &terminal,
+            || Ok(Vec::new()),
+            |_| Ok(()),
+        )
+        .expect("the loop exits cleanly");
         log.events()
     }
 
@@ -7341,6 +7563,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7454,6 +7677,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7506,6 +7730,7 @@ mod loop_tests {
                 Ok(Reply::Choose {
                     chooser: dal_core::Chooser::ScopedModels,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
             )
             .expect("the chooser reply folds");
@@ -7516,6 +7741,165 @@ mod loop_tests {
         let notices = rig.surfaces.live.notices();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].text.contains("not available"), "{notices:?}");
+    }
+
+    #[test]
+    fn thinking_chooser_with_supplied_levels_opens_picker() {
+        let mut rig = Rig::new();
+        rig.surfaces.view.settings.thinking = dal_core::ThinkingLevel::Low;
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        let levels = vec![
+            dal_core::ThinkingLevel::Off,
+            dal_core::ThinkingLevel::Low,
+            dal_core::ThinkingLevel::High,
+        ]
+        .into_boxed_slice();
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: Some(levels),
+                }),
+            )
+            .expect("the chooser reply folds");
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_mut()
+            .expect("thinking picker opens");
+        assert_eq!(picker.title, "Thinking level");
+        assert_eq!(picker.visible_len(), 3);
+        assert_eq!(
+            picker.visible_option(0).map(|o| o.label.as_str()),
+            Some("off")
+        );
+        assert_eq!(
+            picker.visible_option(1).map(|o| o.label.as_str()),
+            Some("low (current)")
+        );
+        assert_eq!(
+            picker.visible_option(2).map(|o| o.label.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            picker.activate_selected(),
+            Some(crate::picker::PickerAction::Command(
+                dal_core::Command::Run {
+                    name: "thinking".into(),
+                    args: "low".into(),
+                    expected: None,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn thinking_chooser_with_empty_levels_gives_unsupported_notice() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: Some(Box::new([])),
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "empty levels must not open a picker"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(
+            notices[0].text,
+            crate::copy::ids::PICKER_THINKING_UNSUPPORTED
+        );
+    }
+
+    #[test]
+    fn thinking_chooser_legacy_without_levels_gives_legacy_unsupported_notice() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Choose {
+                    chooser: dal_core::Chooser::Thinking,
+                    filter: "".into(),
+                    thinking_levels: None,
+                }),
+            )
+            .expect("the chooser reply folds");
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "legacy missing levels must not open a picker"
+        );
+        let notices = rig.surfaces.live.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].text, crate::copy::ids::PICKER_UNSUPPORTED);
+    }
+
+    #[test]
+    fn thinking_stale_level_refusal_handled_as_existing_host() {
+        let mut rig = Rig::new();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: Log::default(),
+                run_entered: Arc::new(AtomicBool::new(false)),
+            },
+        };
+        let mut source = || Ok(Vec::new());
+        rig.surfaces
+            .fold_submit_reply(
+                &rig.opts,
+                &rig.agent,
+                &host,
+                &mut source,
+                Ok(Reply::Done(dal_core::Output::Text(
+                    "Thinking: off. Not changed to max: not supported.".into(),
+                ))),
+            )
+            .expect("done reply folds");
+        assert!(
+            rig.rows()
+                .iter()
+                .any(|row| row.contains("Thinking: off. Not changed to max")),
+            "refusal is recorded in transcript as returned by host: {:?}",
+            rig.rows()
+        );
     }
 
     /// The plain text of every row one frame paints over the rig's surfaces,
@@ -7713,6 +8097,7 @@ mod loop_tests {
                         Ok(Reply::Choose {
                             chooser: dal_core::Chooser::Settings,
                             filter: "".into(),
+                            thinking_levels: None,
                         }),
                     )
                     .expect("the chooser reply folds");
@@ -7823,6 +8208,413 @@ mod loop_tests {
             roles,
             [Role::Error, Role::Dim, Role::Error],
             "the session-only diagram toggle stays informational: {tail:?}"
+        );
+    }
+
+    /// A saved product edit says it needs a restart and reopens the settings
+    /// over the reread rows; a refused edit is an error note that keeps the
+    /// value picker open and claims nothing was saved.
+    #[test]
+    fn product_setting_saves_need_a_restart_and_refusals_keep_the_editor() {
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue};
+
+        let row = |value: i64| ProductSetting {
+            key: "plugin.web.timeout_secs".into(),
+            group: "web".into(),
+            label: "timeout secs".into(),
+            value: SettingValue::Integer(value),
+            running: None,
+            control: SettingControl::Integer,
+        };
+        let saved = std::cell::RefCell::new(30_i64);
+        let mut product = crate::ProductSettings {
+            catalog: || Ok(vec![row(*saved.borrow())]),
+            edit: |edit: &SettingEdit| match edit.value {
+                SettingValue::Integer(value) if (1..=300).contains(&value) => {
+                    *saved.borrow_mut() = value;
+                    Ok(())
+                }
+                _ => Err(TuiError::Terminal(
+                    "dalgona: dal.toml: timeout_secs must be 1 to 300".to_owned(),
+                )),
+            },
+        };
+        let mut rig = Rig::new();
+
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(row(30)));
+        rig.surfaces.session.pending_setting_edit = Some(PendingSettingEdit {
+            edit: SettingEdit {
+                key: "plugin.web.timeout_secs".into(),
+                value: SettingValue::Integer(301),
+            },
+            reopen: true,
+        });
+        rig.surfaces.apply_product_settings(&mut product);
+        let (role, text) = rig
+            .surfaces
+            .live
+            .notices()
+            .last()
+            .map(|row| (row.role, row.text.clone()))
+            .expect("a notice");
+        assert_eq!(role, crate::theme::Role::Error);
+        assert!(text.contains("timeout_secs must be 1 to 300"), "{text}");
+        assert!(!text.contains("saved"), "{text}");
+        assert_eq!(*saved.borrow(), 30);
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| !picker.is_settings()),
+            "the value editor stays open for a corrected value"
+        );
+
+        rig.surfaces.session.pending_setting_edit = Some(PendingSettingEdit {
+            edit: SettingEdit {
+                key: "plugin.web.timeout_secs".into(),
+                value: SettingValue::Integer(45),
+            },
+            reopen: true,
+        });
+        rig.surfaces.apply_product_settings(&mut product);
+        let text = rig
+            .surfaces
+            .live
+            .notices()
+            .last()
+            .map(|row| row.text.clone())
+            .expect("a notice");
+        assert_eq!(
+            text,
+            "saved plugin.web.timeout_secs = 45 to dal.toml · restart required: the running session is unchanged"
+        );
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("settings reopen");
+        assert!(picker.is_settings());
+        assert!(
+            (0..picker.visible_len())
+                .filter_map(|index| picker.visible_option(index))
+                .any(|option| option.label
+                    == "web · timeout secs: 45 · saved in dal.toml · restart required"),
+            "the reopened settings show the reread value"
+        );
+    }
+
+    /// Toggling a boolean setting directly from the settings list saves the
+    /// flipped value to dal.toml and refreshes the settings list over the
+    /// updated catalog, displaying the saved-vs-running row.
+    #[test]
+    fn direct_settings_list_boolean_toggle_saves_and_refreshes_catalog_row() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingControl, SettingEdit, SettingValue, ThinkingLevel};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saved = std::cell::RefCell::new(false);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+
+        let row = |is_saved: bool| ProductSetting {
+            key: "plugin.web.enabled".into(),
+            group: "web".into(),
+            label: "enabled".into(),
+            value: SettingValue::Bool(is_saved),
+            running: is_saved.then_some(SettingValue::Bool(false)),
+            control: SettingControl::Toggle,
+        };
+
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![row(*saved.borrow())])
+            },
+            edit: |edit: &SettingEdit| -> Result<(), TuiError> {
+                if let SettingValue::Bool(value) = edit.value {
+                    *saved.borrow_mut() = value;
+                }
+                Ok(())
+            },
+        };
+
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::settings_picker(
+            false,
+            ThinkingLevel::Off,
+            "",
+        ));
+        rig.surfaces.session.settings_catalog_due = true;
+        rig.surfaces.apply_product_settings(&mut product);
+        assert_eq!(catalog_calls.get(), 1);
+
+        for _ in 0..4 {
+            press(&mut rig, plain(KeyCode::Down));
+        }
+        press(&mut rig, plain(KeyCode::Enter));
+
+        assert_eq!(
+            rig.surfaces
+                .session
+                .pending_setting_edit
+                .as_ref()
+                .map(|pending| &pending.edit),
+            Some(&SettingEdit {
+                key: "plugin.web.enabled".into(),
+                value: SettingValue::Bool(true),
+            })
+        );
+
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert!(*saved.borrow(), "the toggle saves the flipped value");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.enabled"), 1);
+        assert_eq!(
+            catalog_calls.get(),
+            2,
+            "saving refreshes the catalog to reread product settings"
+        );
+
+        let picker = rig
+            .surfaces
+            .session
+            .picker
+            .as_ref()
+            .expect("settings list remains open / refreshes");
+        assert!(picker.is_settings());
+        assert!(
+            (0..picker.visible_len())
+                .filter_map(|index| picker.visible_option(index))
+                .any(|option| option.label
+                    == "web · enabled: on (running: off) · saved in dal.toml · restart required"),
+            "the reopened settings show the reread value"
+        );
+    }
+
+    /// The provider choice row the ordering regressions below edit.
+    fn provider_choice() -> dal_core::ProductSetting {
+        use dal_core::{ProductSetting, SettingControl, SettingValue};
+
+        ProductSetting {
+            key: "plugin.web.provider".into(),
+            group: "web".into(),
+            label: "provider".into(),
+            value: SettingValue::Text("brave".into()),
+            running: None,
+            control: SettingControl::Choice(vec!["brave".into(), "tavily".into()]),
+        }
+    }
+
+    /// Saved-setting notices for `key`: one per successful edit that
+    /// `apply_product_settings` drains.
+    fn saved_notices_for(rig: &Rig, key: &str) -> usize {
+        let prefix = format!("saved {key} ");
+        rig.surfaces
+            .live
+            .notices()
+            .iter()
+            .filter(|row| row.text.starts_with(prefix.as_str()))
+            .count()
+    }
+
+    /// Enter then Esc in one input batch: Enter queues the save, Esc dismisses
+    /// the editor, and the drained save runs once. The dismissed picker stays
+    /// closed and its catalog is not refetched behind the user's Esc.
+    #[test]
+    fn a_save_queued_before_esc_in_one_batch_keeps_the_picker_closed() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![provider_choice()])
+            },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the queued Enter saves exactly once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "Esc dismissed the editor; the drained save must not reopen it"
+        );
+        assert_eq!(
+            catalog_calls.get(),
+            0,
+            "no catalog refetch behind a dismissed picker"
+        );
+    }
+
+    /// Two Enter presses in one input batch on one choice editor queue the
+    /// same save twice. The drained batch runs it once and notices it once.
+    #[test]
+    fn a_duplicate_enter_in_one_batch_saves_the_choice_once() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Enter));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "two Enters in one batch save once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+    }
+
+    /// A second submit in the same batch as an admitted save is refused while
+    /// that save pends: the first applies once, the second is never admitted,
+    /// and the drain reopens the list over the same editor.
+    #[test]
+    fn a_second_submit_while_a_save_pends_is_refused_not_queued() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit, SettingValue};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let written = std::cell::RefCell::new(Vec::<String>::new());
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |edit: &SettingEdit| -> Result<(), TuiError> {
+                if let SettingValue::Text(value) = &edit.value {
+                    written.borrow_mut().push(value.to_string());
+                }
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Up));
+        press(&mut rig, plain(KeyCode::Enter));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(
+            written.borrow().to_vec(),
+            vec!["tavily".to_owned()],
+            "the admitted save applies once; the second submit is refused while it pends"
+        );
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(crate::picker::PickerUi::is_settings),
+            "the successful save reopens the list over the same editor"
+        );
+    }
+
+    /// Esc after an admitted save dismisses the editor without cancelling the
+    /// save: the save applies once, nothing reopens, and the composer takes the
+    /// next keys.
+    #[test]
+    fn esc_after_an_admitted_save_keeps_the_save_and_frees_the_composer() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> { Ok(vec![provider_choice()]) },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        press(&mut rig, plain(KeyCode::Char('x')));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the admitted save applies once");
+        assert_eq!(saved_notices_for(&rig, "plugin.web.provider"), 1);
+        assert!(
+            rig.surfaces.session.picker.is_none(),
+            "Esc dismissed the editor; nothing reopens"
+        );
+        assert_eq!(rig.surfaces.session.composer.text(), "x");
+    }
+
+    /// A save admitted before Esc never reopens: an editor for the same key
+    /// opened again before the drain stays open, and no catalog is fetched.
+    #[test]
+    fn a_save_admitted_before_esc_never_reopens_a_reopened_editor() {
+        use crate::keys::Key;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use dal_core::{ProductSetting, SettingEdit};
+
+        let plain = |code| Key::new(code, KeyModifiers::NONE);
+        let saves = std::cell::Cell::new(0_usize);
+        let catalog_calls = std::cell::Cell::new(0_usize);
+        let mut product = crate::ProductSettings {
+            catalog: || -> Result<Vec<ProductSetting>, TuiError> {
+                catalog_calls.set(catalog_calls.get() + 1);
+                Ok(vec![provider_choice()])
+            },
+            edit: |_edit: &SettingEdit| -> Result<(), TuiError> {
+                saves.set(saves.get() + 1);
+                Ok(())
+            },
+        };
+        let mut rig = Rig::new();
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+
+        press(&mut rig, plain(KeyCode::Down));
+        press(&mut rig, plain(KeyCode::Enter));
+        press(&mut rig, plain(KeyCode::Esc));
+        rig.surfaces.session.picker = Some(crate::picker::setting_value_picker(provider_choice()));
+        rig.surfaces.apply_product_settings(&mut product);
+
+        assert_eq!(saves.get(), 1, "the admitted save applies once");
+        assert!(
+            rig.surfaces
+                .session
+                .picker
+                .as_ref()
+                .is_some_and(|picker| !picker.is_settings()),
+            "the reopened editor stays; the save never reopens the list"
+        );
+        assert_eq!(
+            catalog_calls.get(),
+            0,
+            "no catalog fetch for a dismissed save"
         );
     }
 
@@ -8145,25 +8937,14 @@ mod loop_tests {
     /// stays mid-line, if undo cannot restore the pre-edit draft, or if the
     /// stale completion ring outlives the replaced draft.
     #[test]
+    #[cfg(unix)]
     fn external_editor_success_replaces_the_draft_and_moves_the_caret_to_the_end() {
-        let dir = tempfile::tempdir().expect("editor scratch");
-        let script = dir.path().join("dal-test-editor");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'edited by the editor' > \"$1\"\n",
-        )
-        .expect("editor script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("executable editor");
-        }
+        let original = "printf 'edited by the editor' > \"$0.new\" && mv \"$0.new\" \"$0\"";
         let mut rig = Rig::new();
-        rig.opts.editor = script.to_string_lossy().into_owned().into_boxed_str();
-        rig.surfaces.session.composer.set("original draft");
-        rig.surfaces.session.popup_base = Some("original draft".into());
-        rig.surfaces.session.popup_last = "original draft".into();
+        rig.opts.editor = "/bin/sh".into();
+        rig.surfaces.session.composer.set(original);
+        rig.surfaces.session.popup_base = Some(original.into());
+        rig.surfaces.session.popup_last = original.into();
 
         let io = ModeProbe::new();
         let state = Arc::new(Mutex::new(crate::term::TermState::new()));
@@ -8172,7 +8953,8 @@ mod loop_tests {
         assert_eq!(
             rig.surfaces.session.composer.text(),
             "edited by the editor",
-            "a successful edit replaces the draft with the file contents"
+            "a successful edit replaces the draft with the file contents; notices: {:?}",
+            rig.surfaces.live.notices()
         );
         assert_eq!(
             rig.surfaces.session.composer.cursor(),
@@ -8186,7 +8968,7 @@ mod loop_tests {
         rig.surfaces.session.composer.undo();
         assert_eq!(
             rig.surfaces.session.composer.text(),
-            "original draft",
+            original,
             "the edit checkpoints, so undo restores the pre-edit draft"
         );
         assert!(
@@ -8243,5 +9025,87 @@ mod loop_tests {
             crate::theme::Role::Error,
             "a spawn failure is an error, not a dim note"
         );
+    }
+
+    #[test]
+    fn turn_length_and_request_resolution_notices_follow_the_product_identity() {
+        use dal_core::{
+            Answer, ClientId, Owner, Question, Request, RequestId, ResolutionCause, Stop, TurnId,
+            UpdateKind,
+        };
+
+        let request_for = |title: &str| Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Confirm { text: title.into() },
+            timeout: Duration::from_secs(5),
+            default: Answer::Decline,
+        };
+
+        for (binary, expected_length, expected_timeout, expected_no_controller) in [
+            (
+                "dalgon",
+                "The reply hit the length limit. Ask dal to continue.",
+                r#"note: "ship it" timed out. dal used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dal used the default: deny."#,
+            ),
+            (
+                "dalgona",
+                "The reply hit the length limit. Ask dalgona to continue.",
+                r#"note: "ship it" timed out. dalgona used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dalgona used the default: deny."#,
+            ),
+            (
+                "dg",
+                "The reply hit the length limit. Ask dalgona to continue.",
+                r#"note: "ship it" timed out. dalgona used the default: deny."#,
+                r#"note: no one was attached to answer "ship it"; dalgona used the default: deny."#,
+            ),
+        ] {
+            let mut rig = Rig::new();
+            rig.opts.binary = binary;
+            rig.surfaces.live = crate::live::Live::for_binary(binary);
+
+            rig.feed(UpdateKind::TurnEnded {
+                turn: TurnId::new(std::num::NonZeroU64::MIN),
+                stop: Stop::Length,
+            });
+            assert!(
+                shows(&rig, expected_length),
+                "{binary}: turn-length notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+
+            let timed_out = request_for("ship it");
+            let timed_out_id = timed_out.id;
+            rig.feed(UpdateKind::RequestOpened(timed_out));
+            rig.feed(UpdateKind::RequestResolved {
+                id: timed_out_id,
+                answer: Answer::Decline,
+                by: ClientId::new("core"),
+                cause: Some(ResolutionCause::TimedOut),
+            });
+            assert!(
+                shows(&rig, expected_timeout),
+                "{binary}: timed-out notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+
+            let unattached = request_for("ship it");
+            let unattached_id = unattached.id;
+            rig.feed(UpdateKind::RequestOpened(unattached));
+            rig.feed(UpdateKind::RequestResolved {
+                id: unattached_id,
+                answer: Answer::Decline,
+                by: ClientId::new("core"),
+                cause: Some(ResolutionCause::NoController),
+            });
+            assert!(
+                shows(&rig, expected_no_controller),
+                "{binary}: no-controller notice must render in frame: {:?}",
+                frame_texts(&rig)
+            );
+        }
     }
 }

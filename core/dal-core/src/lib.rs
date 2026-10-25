@@ -29,8 +29,9 @@ pub use command::{
 pub use config::{
     AgentsConfig, ApprovalMode, AskConfig, AskTimeoutClamp, ClampSide, Config, ConfigError,
     ConfigOverrides, ConfigProduct, EditStyleInput, GuardBands, GuardCheckMode, GuardPolicies,
-    GuardSection, JudgeMode, Mode, ModeProjection, PROMPT_DIAGRAMS, PluginLimits, RulesConfig,
-    Screen, ServeConfig, TuiConfig,
+    GuardSection, JudgeMode, Mode, ModeProjection, PROMPT_DIAGRAMS, PluginLimits, ProductSetting,
+    RulesConfig, Screen, ServeConfig, SettingControl, SettingEdit, SettingValue, TuiConfig,
+    edit_user_toml,
 };
 pub use content::{ContentError, ContentLimits, Part};
 pub use ext::{

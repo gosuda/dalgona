@@ -35,6 +35,7 @@ pub(super) fn settings() -> Reply {
     Reply::Choose {
         chooser: Chooser::Settings,
         filter: "".into(),
+        thinking_levels: None,
     }
 }
 
@@ -44,6 +45,7 @@ pub(super) async fn model(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply
         return Ok(Reply::Choose {
             chooser: Chooser::Model,
             filter: "".into(),
+            thinking_levels: None,
         });
     };
     let catalog = cx.catalog();
@@ -473,16 +475,17 @@ pub(super) fn parse_mode(word: &str) -> Option<Mode> {
 
 /// Runs `/thinking`: opens the picker or sets one level.
 pub(super) async fn thinking(cx: &CommandCx<'_>, arg: Option<&str>) -> Result<Reply, ErrorTriple> {
+    let supported = cx.levels_for();
     let Some(word) = arg else {
         return Ok(Reply::Choose {
             chooser: Chooser::Thinking,
             filter: "".into(),
+            thinking_levels: Some(supported.into_boxed_slice()),
         });
     };
     let Some(level) = parse_thinking(word) else {
         return Err(unknown_thinking(word));
     };
-    let supported = cx.levels_for();
     if !supported.contains(&level) {
         let whose =
             cx.view()
@@ -561,6 +564,7 @@ pub(super) fn scoped_models(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     Ok(Reply::Choose {
         chooser: Chooser::ScopedModels,
         filter: "".into(),
+        thinking_levels: None,
     })
 }
 
@@ -623,6 +627,7 @@ fn login_or_logout(cmd: &str, chooser: Chooser, arg: Option<&str>) -> Result<Rep
         return Ok(Reply::Choose {
             chooser,
             filter: "".into(),
+            thinking_levels: None,
         });
     };
     if !providers().contains(&provider) {

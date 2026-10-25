@@ -8,6 +8,7 @@ mod eval_cmd;
 mod eval_host;
 mod plugins;
 mod sections;
+mod settings;
 
 use dal_agent::ext::Extension;
 use dalgona_batteries::{
@@ -55,8 +56,10 @@ pub fn product() -> dalgon::ProductFactory {
         // dalgona package version independently of the dalgon package version.
         version: env!("CARGO_PKG_VERSION"),
         defaults: DEFAULTS,
+        config_product: dal_core::ConfigProduct::Dalgona,
         build,
         docs: docs::manuals,
+        settings: settings::catalog,
     }
 }
 

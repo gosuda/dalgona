@@ -274,6 +274,7 @@ impl TuiAgent for ProbeAgent {
                 Ok(Reply::Choose {
                     chooser: Chooser::Model,
                     filter: "".into(),
+                    thinking_levels: None,
                 })
             }
             Command::SetModel { model, .. } => {

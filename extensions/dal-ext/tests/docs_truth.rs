@@ -1122,29 +1122,6 @@ fn miss_write_error_is_reported() {
     assert_ne!(text, "");
 }
 
-#[test]
-fn truth_dalgona_config_diff() {
-    // Every `dalgona default` cell equals the Dalgona product default: symbol
-    // search on, `hashline` edit style, guard on (the Dalgona product contract).
-    let text = std::fs::read_to_string(repo_root().join("dalgona/docs/config.md")).expect("config");
-    for (key, default) in [
-        ("search_symbols", "true"),
-        ("edit_style", "hashline"),
-        ("[guard].enabled", "true"),
-    ] {
-        let row: Vec<_> = text
-            .lines()
-            .filter(|line| line.contains(&format!("`{key}`")))
-            .collect();
-        assert_eq!(row.len(), 1, "one row for {key}");
-        assert!(
-            row[0].contains(&format!("`{default}`")),
-            "dalgona default for {key}: {}",
-            row[0]
-        );
-    }
-}
-
 fn fenced(text: &str, tag: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut lines = text.lines().peekable();

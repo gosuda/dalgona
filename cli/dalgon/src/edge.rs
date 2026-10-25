@@ -5,30 +5,48 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// A process-edge failure: root resolution, workspace validation, or user
+/// config reads. Public so product binaries (`dalgona eval`) resolve roots
+/// through the same edge as normal startup and keep the typed cause.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum EdgeError {
+pub enum EdgeError {
+    /// No home candidate is an absolute path. POSIX reads `HOME`; Windows
+    /// reads `HOME`, then `USERPROFILE`, then `HOMEDRIVE`+`HOMEPATH`.
     #[error("home directory is unavailable")]
     HomeMissing,
+    /// The resolved workspace path exists but is not a directory.
     #[error("workspace is not a directory: {0}")]
     Workspace(PathBuf),
+    /// The workspace path is relative.
     #[error("workspace path must be absolute")]
     WorkspaceRelative,
+    /// A filesystem `operation` on the absolute `path` failed with `source`.
     #[error("{operation} {path}: {source}")]
     Io {
+        /// The attempted operation, such as `read`.
         operation: &'static str,
+        /// The path the operation named.
         path: PathBuf,
+        /// The underlying I/O failure.
         #[source]
         source: io::Error,
     },
+    /// The binary name maps to no product family, or a joined root is not
+    /// absolute.
     #[error("invalid product identity")]
     InvalidProduct,
 }
 
+/// The absolute per-family roots a product binary reads and writes.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RootPaths {
+pub struct RootPaths {
+    /// The selected home directory.
     pub home: PathBuf,
+    /// `$XDG_CONFIG_HOME/<family>`, else `<home>/.config/<family>`.
     pub config: PathBuf,
+    /// `$XDG_DATA_HOME/<family>`, else `<home>/.local/share/<family>`.
     pub data: PathBuf,
+    /// `<data>/cache`.
     pub cache: PathBuf,
 }
 
@@ -440,7 +458,17 @@ pub(crate) fn data_root_log_path(data_root: &Path) -> PathBuf {
     data_root.join("cache").join(format!("{family}.log"))
 }
 
-pub(crate) fn resolve_roots(
+/// Resolves the family roots for `binary` from a captured environment.
+///
+/// Normal startup and `dalgona eval` both call this, so they accept the same
+/// environments and share config and data roots. An empty or relative
+/// `XDG_CONFIG_HOME`/`XDG_DATA_HOME` falls back to the home-relative default.
+///
+/// # Errors
+///
+/// [`EdgeError::InvalidProduct`] when `binary` names no family;
+/// [`EdgeError::HomeMissing`] when no home candidate is absolute.
+pub fn resolve_roots(
     vars: &BTreeMap<OsString, OsString>,
     binary: &str,
 ) -> Result<RootPaths, EdgeError> {
@@ -464,7 +492,7 @@ pub(crate) fn resolve_roots(
 
 /// Returns the user configuration file path inside the resolved config root.
 #[must_use]
-pub(crate) fn config_file_path(roots: &RootPaths) -> PathBuf {
+pub fn config_file_path(roots: &RootPaths) -> PathBuf {
     roots.config.join(CONFIG_FILE_NAME)
 }
 

@@ -27,6 +27,8 @@ mod layer;
 mod parse;
 mod partial;
 mod prices;
+mod settings;
+pub use settings::{ProductSetting, SettingControl, SettingEdit, SettingValue, edit_user_toml};
 mod types;
 mod values;
 

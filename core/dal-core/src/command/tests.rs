@@ -336,6 +336,7 @@ fn planned_replies_round_trip_with_wire_tags() -> TestResult {
         Reply::Choose {
             chooser: Chooser::Model,
             filter: "".into(),
+            thinking_levels: None,
         },
         Reply::Front(FrontAction::NewSession),
         Reply::Front(FrontAction::CopyReply { text: "x".into() }),
@@ -359,6 +360,14 @@ fn planned_replies_round_trip_with_wire_tags() -> TestResult {
     assert_eq!(
         sonic_rs::to_string(&Reply::Queued { turn: Some(turn) })?,
         r#"{"type":"queued","turn":1}"#
+    );
+    assert_eq!(
+        sonic_rs::to_string(&Reply::Choose {
+            chooser: Chooser::Model,
+            filter: "".into(),
+            thinking_levels: None,
+        })?,
+        r#"{"type":"choose","chooser":"model","filter":""}"#
     );
     assert_eq!(
         sonic_rs::from_str::<Reply>(r#"{"type":"queued"}"#)?,
@@ -665,6 +674,101 @@ fn set_model_without_provider_decodes_to_no_provider() -> TestResult {
                 provider: None,
             },
             save: Save::SessionOnly,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn choose_reply_legacy_wire_decodes_without_thinking_levels() -> TestResult {
+    let wire = r#"{"type":"choose","chooser":"model","filter":""}"#;
+    let decoded: Reply = sonic_rs::from_str(wire)?;
+    assert_eq!(
+        decoded,
+        Reply::Choose {
+            chooser: Chooser::Model,
+            filter: "".into(),
+            thinking_levels: None,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn choose_reply_with_thinking_levels_decodes_and_round_trips() -> TestResult {
+    let wire = r#"{"type":"choose","chooser":"model","filter":"claude","thinkingLevels":["off","low","medium","high"]}"#;
+    let decoded: Reply = sonic_rs::from_str(wire)?;
+    let expected = Reply::Choose {
+        chooser: Chooser::Model,
+        filter: "claude".into(),
+        thinking_levels: Some(
+            vec![
+                ThinkingLevel::Off,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+            ]
+            .into_boxed_slice(),
+        ),
+    };
+    assert_eq!(decoded, expected);
+
+    // Serialization omits thinkingLevels when None, includes when Some
+    let encoded_none = sonic_rs::to_string(&Reply::Choose {
+        chooser: Chooser::Model,
+        filter: "".into(),
+        thinking_levels: None,
+    })?;
+    assert_eq!(
+        encoded_none,
+        r#"{"type":"choose","chooser":"model","filter":""}"#
+    );
+
+    let encoded_some = sonic_rs::to_string(&expected)?;
+    assert_eq!(encoded_some, wire);
+
+    let round_tripped: Reply = sonic_rs::from_str(&encoded_some)?;
+    assert_eq!(round_tripped, expected);
+
+    // Explicit empty list represents supported chooser with no choices
+    let empty_levels = Reply::Choose {
+        chooser: Chooser::Model,
+        filter: "".into(),
+        thinking_levels: Some(Box::new([])),
+    };
+    let encoded_empty = sonic_rs::to_string(&empty_levels)?;
+    assert_eq!(
+        encoded_empty,
+        r#"{"type":"choose","chooser":"model","filter":"","thinkingLevels":[]}"#
+    );
+    let decoded_empty: Reply = sonic_rs::from_str(&encoded_empty)?;
+    assert_eq!(decoded_empty, empty_levels);
+
+    Ok(())
+}
+
+#[test]
+fn choose_reply_ignores_forward_unknown_fields() -> TestResult {
+    let wire_with_unknown = r#"{"type":"choose","chooser":"model","filter":"","thinkingLevels":["low"],"futureField":true,"version":42}"#;
+    let decoded: Reply = sonic_rs::from_str(wire_with_unknown)?;
+    assert_eq!(
+        decoded,
+        Reply::Choose {
+            chooser: Chooser::Model,
+            filter: "".into(),
+            thinking_levels: Some(vec![ThinkingLevel::Low].into_boxed_slice()),
+        }
+    );
+
+    let legacy_with_unknown =
+        r#"{"type":"choose","chooser":"model","filter":"","nextProtocol":123}"#;
+    let decoded_legacy: Reply = sonic_rs::from_str(legacy_with_unknown)?;
+    assert_eq!(
+        decoded_legacy,
+        Reply::Choose {
+            chooser: Chooser::Model,
+            filter: "".into(),
+            thinking_levels: None,
         }
     );
     Ok(())

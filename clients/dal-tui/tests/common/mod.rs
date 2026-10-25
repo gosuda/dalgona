@@ -342,6 +342,7 @@ impl TuiAgent for ProbeAgent {
                 Command::Run { name, .. } if name.as_ref() == "model" => Ok(Reply::Choose {
                     chooser: Chooser::Model,
                     filter: "".into(),
+                    thinking_levels: None,
                 }),
                 _ => Ok(Reply::Done(dal_core::Output::Nothing)),
             }

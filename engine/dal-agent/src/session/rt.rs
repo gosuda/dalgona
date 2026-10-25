@@ -753,18 +753,32 @@ pub(crate) fn resolve_extension_scheme(
     let Some(resolver) = generation.scheme(scheme) else {
         return Box::pin(async move { Err(ToolError::Scheme(SchemeError::NotFound { uri })) });
     };
-    let path_start = scheme.len() + "://".len();
-    let resolver = Arc::clone(resolver);
-    let caller = (*context.caller).clone();
-    let services = Arc::clone(context.services);
-    let session = context.session;
-    let (store, shared, initial_entries) = make_store();
-    let state = generation
+    // The resolver acts as the extension that registered the scheme: it
+    // reads its owner's records and holds its owner's services, never the
+    // requester's identity, injected services, or cell approval.
+    let Some((owner, name)) = generation
         .schemes
         .find(scheme)
         .and_then(|entry| generation.extensions.get(entry.ext))
-        .and_then(|owner| Name::parse(owner.name()).ok())
-        .and_then(|owner| shared.owner_state(&owner));
+        .and_then(|owner| Some((owner, Name::parse(owner.name()).ok()?)))
+    else {
+        return Box::pin(async move { Err(ToolError::Scheme(SchemeError::NotFound { uri })) });
+    };
+    let path_start = scheme.len() + "://".len();
+    let resolver = Arc::clone(resolver);
+    let (store, shared, initial_entries) = make_store();
+    let state = shared.owner_state(&name);
+    let caller = Caller::new(
+        name,
+        owner.origin(),
+        owner.inject(),
+        owner.state_version(),
+        crate::ext::CallerKind::Handler,
+        context.caller.turn(),
+    )
+    .with_extension(owner);
+    let services = Arc::clone(context.services);
+    let session = context.session;
     let cx = SchemeCx::new(
         caller,
         services,

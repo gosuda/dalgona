@@ -17,15 +17,15 @@ use std::{
 
 use dal_agent::{Agent, Delivery, Env, Host, SessionRef, Subscription};
 use dal_core::{
-    Answer, ApprovalMode, CancelScope, ClientId, Command, Config, ConfigProduct, Expect,
-    ExportFormat, ModelRoute, Part, RawJson, Reply, RequestId, Save, SessionId, ThinkingLevel,
-    TurnId, Update, UpdateKind, Workspace,
+    Answer, ApprovalMode, CancelScope, ClientId, Command, Config, Expect, ExportFormat, ModelRoute,
+    Part, RawJson, Reply, RequestId, Save, SessionId, ThinkingLevel, TurnId, Update, UpdateKind,
+    Workspace,
 };
 use dal_provider::Script;
 use serde::Deserialize;
 
 use super::{DevError, util};
-use crate::{BuildCx, VarsMap, cli, exit};
+use crate::{BuildCx, ProductFactory, VarsMap, cli, exit};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -37,6 +37,7 @@ const DEVPROBE_STAR: &str = include_str!("devprobe.star");
 /// Runs the scenario file to completion or its first failing step.
 pub(super) async fn run(
     args: &cli::DevRunArgs,
+    factory: ProductFactory,
     vars: VarsMap,
     cwd: PathBuf,
     helper: Option<PathBuf>,
@@ -51,6 +52,7 @@ pub(super) async fn run(
         .filter(|dir| !dir.as_os_str().is_empty())
         .map_or_else(|| cwd.clone(), |dir| resolve(&cwd, dir));
     let mut run = RunCx::new(
+        factory,
         scenario_dir,
         vars,
         helper,
@@ -191,6 +193,8 @@ impl Step {
 
 /// The process state one scenario run owns.
 struct RunCx {
+    /// The invoking product: its config kind, defaults, and build.
+    factory: ProductFactory,
     root_path: PathBuf,
     root: Option<PathBuf>,
     keep: bool,
@@ -222,6 +226,7 @@ impl RunCx {
     /// scenarios find a populated store — pass the `kept run root` line of
     /// an earlier `--keep` run.
     fn new(
+        factory: ProductFactory,
         scenario_dir: PathBuf,
         vars: VarsMap,
         helper: Option<PathBuf>,
@@ -251,6 +256,7 @@ impl RunCx {
             source,
         })?;
         Ok(Self {
+            factory,
             root_path,
             root,
             keep,
@@ -807,10 +813,10 @@ impl RunCx {
                 "a `provider` or `config` step must precede the first session step".to_owned(),
             ));
         }
-        let factory = crate::product();
+        let factory = self.factory;
         let user = self.user_config();
         let config = Config::load(
-            ConfigProduct::Dalgon,
+            factory.config_product,
             &self.data_root,
             factory.defaults,
             Some(&user),

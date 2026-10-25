@@ -1,6 +1,27 @@
 # Changelog
 
 ## Unreleased
+- Support host-filtered reasoning levels in `/thinking` and the live settings
+  thinking row. Default, alias, and remote model routes supply their supported
+  levels to the picker, choices revalidate through the `/thinking` command, and
+  the current saved value is preserved if a selection is refused.
+- Show dalgona's name in terminal headers, prompts, and session notices.
+- Edit documented, non-secret product settings through `/settings`. Valid
+  edits save immediately to `dal.toml` with owner-only permissions and preserve
+  comments and unrelated settings. Rows show saved and running values when
+  they differ. Restart dalgona to apply product changes. Remote clients keep
+  these host-owned settings out of their local picker.
+- Run `dalgona dev run` scenarios with dalgona's defaults, configuration,
+  and batteries instead of the base dal product.
+- Resolve eval configuration and data directories through the same process-edge
+  rules used by interactive sessions, including the Windows home-directory fallback.
+- Read work progress through the work battery's existing `todo://terminal`
+  document. Scheme resolvers now use their registered owner's identity and
+  permissions, not the requesting extension's identity.
+- Show review activity while a review is running and clear it when it ends.
+- Deliver pending quality offers to the model once, with bounded notices
+  and file reads. Keep unreadable offers pending without blocking later
+  offers, and keep concurrent sessions' quality state separate.
 - Keep held quality lanes from advancing repetition history or reporting findings.
   Apply each session's recorded lane settings before extension defaults.
 - Report an MCP process crash after a partial write instead of masking the error

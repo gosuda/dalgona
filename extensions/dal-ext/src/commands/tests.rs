@@ -774,6 +774,7 @@ fn login_logout_flows() {
         Reply::Choose {
             chooser: Chooser::Login,
             filter: "".into(),
+            thinking_levels: None,
         }
     );
     assert_eq!(
