@@ -9,22 +9,27 @@
 //! keep rendering, and the policy survives later turns and a reopen. Real
 //! host admission, journal persistence, and replay run unmodified; the
 //! probe inspects the exact bytes the provider boundary receives.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use dal_agent::ext::command::{CommandCx, CommandHandler};
 use dal_agent::ext::{
-    BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler, ModelRecord,
-    PromptOrder, PromptSection,
+    ArgError, BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
+    ModelRecord, PromptOrder, PromptSection, RawValue, Tool, ToolCall, ToolCx, ToolOutcome,
+    ToolOutput,
 };
 use dal_agent::{Env, Host, Product, ServiceError, SessionRef, Subscription};
 use dal_core::{
     AgentStart, AgentsOp, AgentsReply, CallId, ClientId, Command, CommandName, CommandSpec, Config,
-    ConfigProduct, ContextItem, Expect, ModelId, Output, Part, Reply, ServiceSet, SessionId,
-    ThinkingLevel, TurnState, UpdateKind, Workspace,
+    ConfigProduct, ContextItem, Expect, ModelId, ModelInfo, Name, Output, Part, RawJson, Reply,
+    ServiceSet, SessionId, ThinkingLevel, ToolClass, ToolSpec, TurnState, UpdateKind, Visibility,
+    Workspace,
 };
 use dal_provider::{ProviderError, StreamEvent};
 
@@ -44,14 +49,23 @@ struct Captured {
 }
 
 /// The synthetic model every child uses: it records the system prompt and
-/// the first user text of each request, then replies with plain text.
+/// the first user text of each request, then replies with plain text unless
+/// a tool call was queued for the next request.
 struct Probe {
     requests: Mutex<Vec<Captured>>,
+    pending: Mutex<VecDeque<String>>,
 }
 
 impl Probe {
     fn requests(&self) -> Vec<Captured> {
         self.requests.lock().expect("probe lock").clone()
+    }
+
+    fn queue_call(&self, tool: &str) {
+        self.pending
+            .lock()
+            .expect("probe lock")
+            .push_back(tool.to_owned());
     }
 }
 
@@ -81,6 +95,28 @@ fn text_stream() -> EventStream {
     EventStream::new(futures::stream::iter(items), || {})
 }
 
+fn call_stream(name: &str) -> EventStream {
+    let args = RawJson::parse("{}").expect("args json");
+    let items: Vec<Result<StreamEvent, ProviderError>> = vec![
+        Ok(StreamEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: name.into(),
+        }),
+        Ok(StreamEvent::ToolCallsDone {
+            calls: vec![dal_provider::ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                args: dal_provider::ToolArgs::Parsed(args),
+            }],
+        }),
+        Ok(StreamEvent::Usage { usage: usage() }),
+        Ok(StreamEvent::Stop {
+            reason: dal_provider::StopReason::ToolUse,
+        }),
+    ];
+    EventStream::new(futures::stream::iter(items), || {})
+}
+
 impl ModelHandler for Probe {
     fn run<'a>(
         &'a self,
@@ -99,7 +135,64 @@ impl ModelHandler for Probe {
                 system: request.system.to_string(),
                 user,
             });
-            Ok(text_stream())
+            let next = self.pending.lock().expect("probe lock").pop_front();
+            match next {
+                Some(name) => Ok(call_stream(&name)),
+                None => Ok(text_stream()),
+            }
+        })
+    }
+}
+
+/// A patch-class tool that runs through the approval ladder, so a headless
+/// child denies instead of running.
+struct PatchProbe {
+    name: Name,
+    spec: Arc<ToolSpec>,
+    runs: Arc<AtomicUsize>,
+}
+
+impl PatchProbe {
+    fn new(runs: Arc<AtomicUsize>) -> Arc<Self> {
+        let name = Name::parse("patch").expect("tool name");
+        let spec = Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "Headless-denial probe.".into(),
+            parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#)
+                .expect("schema json"),
+            grammar: None,
+        });
+        Arc::new(Self { name, spec, runs })
+    }
+}
+
+impl Tool for PatchProbe {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _workspace: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Patch)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let preview = dal_core::Preview {
+                title: "patch-probe".into(),
+                body: "patch bytes".into(),
+                digest: None,
+            };
+            match cx.authorize(preview).await {
+                Ok(_) => {
+                    self.runs.fetch_add(1, Ordering::SeqCst);
+                    ToolOutcome::Ok(Box::new(ToolOutput::from_text("patched")))
+                }
+                Err(reason) => ToolOutcome::Err(dal_agent::ToolError::Denied(reason)),
+            }
         })
     }
 }
@@ -217,6 +310,7 @@ struct Rig {
     probe: Arc<Probe>,
     children: Arc<Mutex<Vec<SessionId>>>,
     errors: Arc<Mutex<Vec<String>>>,
+    patch_runs: Arc<AtomicUsize>,
 }
 
 /// A rig without the sentinel prompt section.
@@ -246,11 +340,15 @@ async fn rig_with_fixture_section(with_section: bool) -> Rig {
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
     let probe = Arc::new(Probe {
         requests: Mutex::new(Vec::new()),
+        pending: Mutex::new(VecDeque::new()),
     });
     let children = Arc::new(Mutex::new(Vec::new()));
     let errors = Arc::new(Mutex::new(Vec::new()));
+    let patch_runs = Arc::new(AtomicUsize::new(0));
     let inject = ServiceSet::from_names(["agents"]).expect("inject set");
-    let mut builder = ExtensionBuilder::new("kit", "0.1.0", inject).expect("builder");
+    let mut builder = ExtensionBuilder::new("kit", "0.1.0", inject)
+        .expect("builder")
+        .tool(PatchProbe::new(Arc::clone(&patch_runs)), Visibility::Model);
     for (name, kind) in [
         ("spawn_plain", SpawnKind::Plain),
         ("spawn_system", SpawnKind::System),
@@ -317,6 +415,7 @@ async fn rig_with_fixture_section(with_section: bool) -> Rig {
         probe,
         children,
         errors,
+        patch_runs,
     }
 }
 
@@ -583,5 +682,36 @@ async fn a_start_cannot_combine_role_and_system() {
     assert!(
         rig.children.lock().expect("children lock").is_empty(),
         "a refused start leaves no child session behind"
+    );
+}
+
+/// A depth-1 child holds no answerer, so its patch call takes the headless
+/// denial: the model-visible result names patch with the edits rung, the
+/// patch tool never runs, and the turn still ends. The `MaxDepth` half of
+/// this spec stays pinned by the backend unit test; this test pins the
+/// remaining patch-denial clause through a real child model call.
+#[tokio::test]
+async fn child_cannot_start_children() {
+    let rig = rig().await;
+    rig.probe.queue_call("patch");
+    rig.run("spawn_plain").await;
+    let child = rig.child();
+    rig.settled(child, 1).await;
+    assert_eq!(
+        rig.patch_runs.load(Ordering::SeqCst),
+        0,
+        "a headless child patch denial runs nothing"
+    );
+    let dump = format!("{:?}", rig.child_view(child).await);
+    let expected = dal_core::headless_denial_text("patch", dal_core::Rung::Edits);
+    assert!(
+        dump.contains(&expected),
+        "the child tool result carries the headless patch denial with the edits rung:\n{expected}\n{dump}"
+    );
+    assert!(
+        dump.contains("needs approval")
+            && dump.contains("has no one to ask")
+            && dump.contains("--approval edits"),
+        "the denial names the fix so the model can report it: {dump}"
     );
 }

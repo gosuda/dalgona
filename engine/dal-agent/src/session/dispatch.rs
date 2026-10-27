@@ -881,53 +881,39 @@ impl CallRuntime {
     ) -> Result<Approved, dal_core::DenyReason> {
         use dal_core::DenyReason;
         let mut approved = Approved::new(self.call.clone(), digest, prefix, roots, job);
-        if !job_is_live(&*self.jobs.lock().await, job) {
-            return Err(DenyReason::NotGranted);
+        // Only a job-scoped grant has a row to check. Taking the table lock
+        // for every call would park a cancelled call behind a settle or
+        // cancel that holds it across ledger IO.
+        if job.is_some() {
+            let live = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return Err(DenyReason::Unavailable {
+                        what: "turn cancelled".into(),
+                    });
+                }
+                jobs = self.jobs.lock() => job_is_live(&jobs, job),
+            };
+            if !live {
+                return Err(DenyReason::NotGranted);
+            }
         }
         if matches!(class, ToolClass::Exec { .. }) {
-            let permit = self
-                .host
-                .shared
-                .admission
-                .acquire_process(cancel)
+            // One admission operation: the session slot, then the host
+            // process permit, then the fd charge, all against one deadline.
+            // A call queued behind the session cap holds no host capacity.
+            let admission = &self.host.shared.admission;
+            let admitted = admission
+                .admit_process(
+                    &self.jobs,
+                    &self.call,
+                    &*self.shared,
+                    cancel,
+                    admission.begin(),
+                )
                 .await
-                .map_err(|error| match error {
-                    crate::error::ToolError::Cancelled => DenyReason::Unavailable {
-                        what: "turn cancelled".into(),
-                    },
-                    crate::error::ToolError::Admission { limit } => DenyReason::Unavailable {
-                        what: format!(
-                            "no free {} slot within limits.admission_wait",
-                            limit.as_str()
-                        )
-                        .into(),
-                    },
-                    _ => DenyReason::Unavailable {
-                        what: "process unavailable".into(),
-                    },
-                })?;
-            let fd_permit = self
-                .host
-                .shared
-                .admission
-                .charge_fds(crate::proc::PROCESS_FD_COST, cancel)
-                .await
-                .map_err(|error| match error {
-                    crate::error::ToolError::Cancelled => DenyReason::Unavailable {
-                        what: "turn cancelled".into(),
-                    },
-                    crate::error::ToolError::Admission { limit } => DenyReason::Unavailable {
-                        what: format!(
-                            "no free {} slot within limits.admission_wait",
-                            limit.as_str()
-                        )
-                        .into(),
-                    },
-                    _ => DenyReason::Unavailable {
-                        what: "file descriptors unavailable".into(),
-                    },
-                })?;
-            approved = approved.with_permits(permit, fd_permit);
+                .map_err(|error| crate::admission::admission_denial(&error))?;
+            approved = approved.with_admission(admitted);
         }
         *self.auth.lock().await = Some(AuthProof { digest });
         Ok(approved)
@@ -1212,10 +1198,10 @@ impl ToolCxRuntime for CallRuntime {
                 self.tool.as_str(),
             )));
         }
-        let permit = approved.take_permits();
-        let Some((permit, fd_permit)) = permit else {
+        let Some(admitted) = approved.take_admission() else {
             return Err(ToolError::Denied(dal_core::DenyReason::NotGranted));
         };
+        let lease = admitted.lease(Arc::clone(&self.host.shared.snapshots));
         let launcher = match &self.launcher {
             Ok(launcher) => launcher,
             Err(setup) => return Err(setup.tool_error()),
@@ -1229,8 +1215,7 @@ impl ToolCxRuntime for CallRuntime {
             &self.jobs_dir,
             &self.env_snapshot,
             launcher,
-            permit,
-            Some(fd_permit),
+            lease,
         )
         .map(|proc| {
             let progress = Arc::clone(&self.shared);
@@ -4568,6 +4553,667 @@ mod tests {
             matches!(units.as_slice(), [Unit::Reads { calls }] if calls.len() == 2),
             "plain reads still batch: {units:?}"
         );
+    }
+
+    struct ConcurrencyRead {
+        name: Name,
+        spec: Arc<dal_core::ToolSpec>,
+        current: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    impl crate::ext::tool::Tool for ConcurrencyRead {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+        fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<dal_core::ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+        fn classify(
+            &self,
+            _args: &crate::ext::tool::RawValue,
+            _ws: &Workspace,
+        ) -> Result<ToolClass, crate::ext::tool::ArgError> {
+            Ok(ToolClass::Read)
+        }
+        fn run<'a>(
+            &'a self,
+            call: ToolCall,
+            _cx: ToolCx<'a>,
+        ) -> crate::ext::BoxFuture<'a, ToolOutcome> {
+            let current = Arc::clone(&self.current);
+            let peak = Arc::clone(&self.peak);
+            let delay = self.delay_ms;
+            Box::pin(async move {
+                let now = current.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                current.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                ToolOutcome::Ok(Box::new(crate::ext::ToolOutput::from_text(
+                    call.id.as_str(),
+                )))
+            })
+        }
+    }
+
+    struct OrderRead {
+        name: Name,
+        spec: Arc<dal_core::ToolSpec>,
+        finished: Arc<std::sync::atomic::AtomicU64>,
+        t0: Arc<std::time::Instant>,
+    }
+
+    impl crate::ext::tool::Tool for OrderRead {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+        fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<dal_core::ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+        fn classify(
+            &self,
+            _args: &crate::ext::tool::RawValue,
+            _ws: &Workspace,
+        ) -> Result<ToolClass, crate::ext::tool::ArgError> {
+            Ok(ToolClass::Read)
+        }
+        fn run<'a>(
+            &'a self,
+            call: ToolCall,
+            _cx: ToolCx<'a>,
+        ) -> crate::ext::BoxFuture<'a, ToolOutcome> {
+            let finished = Arc::clone(&self.finished);
+            let t0 = Arc::clone(&self.t0);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let nanos = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                finished.fetch_max(nanos, std::sync::atomic::Ordering::SeqCst);
+                ToolOutcome::Ok(Box::new(crate::ext::ToolOutput::from_text(
+                    call.id.as_str(),
+                )))
+            })
+        }
+    }
+
+    struct GateExec {
+        name: Name,
+        spec: Arc<dal_core::ToolSpec>,
+        auth_started: Arc<std::sync::atomic::AtomicU64>,
+        t0: Arc<std::time::Instant>,
+    }
+
+    impl crate::ext::tool::Tool for GateExec {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+        fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<dal_core::ToolSpec> {
+            Arc::clone(&self.spec)
+        }
+        fn classify(
+            &self,
+            _args: &crate::ext::tool::RawValue,
+            _ws: &Workspace,
+        ) -> Result<ToolClass, crate::ext::tool::ArgError> {
+            Ok(ToolClass::Exec {
+                read_only: true,
+                grant: None,
+            })
+        }
+        fn run<'a>(
+            &'a self,
+            _call: ToolCall,
+            mut cx: ToolCx<'a>,
+        ) -> crate::ext::BoxFuture<'a, ToolOutcome> {
+            let auth_started = Arc::clone(&self.auth_started);
+            let t0 = Arc::clone(&self.t0);
+            Box::pin(async move {
+                let nanos = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                auth_started.store(nanos, std::sync::atomic::Ordering::SeqCst);
+                let preview = Preview {
+                    title: "exec-c".into(),
+                    body: "exec-c runs".into(),
+                    digest: None,
+                };
+                match cx.authorize(preview).await {
+                    Ok(_) => {
+                        ToolOutcome::Ok(Box::new(crate::ext::ToolOutput::from_text("exec done")))
+                    }
+                    Err(deny) => ToolOutcome::Err(crate::error::ToolError::Denied(deny)),
+                }
+            })
+        }
+    }
+
+    fn tool_spec(name: &str) -> Arc<dal_core::ToolSpec> {
+        Arc::new(dal_core::ToolSpec {
+            name: name.parse().expect("tool name parses"),
+            description: "dispatch test stub".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).expect("schema parses"),
+            grammar: None,
+        })
+    }
+
+    struct LiveHarness {
+        backend: Arc<Backend>,
+        services: Arc<crate::ext::services::SessionServices>,
+        broker: Arc<Broker>,
+        generation: Arc<Generation>,
+        workspace: Workspace,
+        session: SessionId,
+        _tmp: tempfile::TempDir,
+        _host: crate::host::Host,
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the harness wires the full live backend in one builder"
+    )]
+    async fn live_backend_with(
+        tools: Vec<(Arc<dyn crate::ext::tool::Tool>, dal_core::Visibility)>,
+    ) -> LiveHarness {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let workspace_dir = tmp.path().join("w");
+        std::fs::create_dir_all(&data).expect("data dir exists");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir exists");
+        let config = dal_core::Config::load(dal_core::ConfigProduct::Dalgon, &data, "", None)
+            .expect("config loads");
+        let workspace = Workspace::new(workspace_dir.clone()).expect("workspace parses");
+        let env = crate::Env {
+            vars: std::collections::BTreeMap::new(),
+            cwd: workspace_dir,
+            sandbox_helper: None,
+        };
+        let mut builder =
+            crate::ext::ExtensionBuilder::new("test", "0.1.0", dal_core::ServiceSet::EMPTY)
+                .expect("builder parses")
+                .with_origin(dal_core::Origin::Builtin, None);
+        for (tool, visibility) in tools {
+            builder = builder.tool(tool, visibility);
+        }
+        let extension = builder.build().expect("extension builds");
+        let product = crate::Product {
+            name: "dal",
+            data_root: data.clone(),
+            defaults: "",
+            extensions: vec![extension],
+            bundled: Vec::new(),
+        };
+        let host = crate::host::Host::start(product, config, env)
+            .await
+            .expect("host starts");
+        let workspace_clone = workspace.clone();
+        let _agent = host
+            .open(
+                crate::SessionRef::Ephemeral {
+                    workspace: workspace_clone,
+                },
+                ClientId::new("dispatch-test"),
+            )
+            .await
+            .expect("session opens");
+        let session = *host
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .next()
+            .expect("one session exists");
+        let (handle, shared, broker, cancel, entry_workspace) = {
+            let sessions = host
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = sessions.get(&session).expect("entry exists");
+            (
+                entry.handle.clone(),
+                Arc::clone(&entry.shared),
+                Arc::clone(&entry.broker),
+                entry.cancel.clone(),
+                entry.workspace.clone(),
+            )
+        };
+        let resolutions = handle.resolutions();
+        let jobs = Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new()));
+        let tasks = crate::session::tasks::SessionTasks::new();
+        let backend = Arc::new(Backend::new(crate::session::backend::BackendDeps {
+            session,
+            workspace: entry_workspace,
+            host: Arc::clone(&host.state),
+            shared: Arc::clone(&shared),
+            initial_entries: Arc::from([]),
+            broker: Arc::clone(&broker),
+            handle,
+            jobs: Arc::clone(&jobs),
+            cancel: cancel.clone(),
+            tasks: tasks.clone(),
+        }));
+        let grants = Arc::new(
+            crate::ext::grants::GrantStore::with_runtime_scoped(
+                data.clone(),
+                data.clone(),
+                Arc::clone(&broker),
+            )
+            .expect("grants open"),
+        );
+        let procs = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let rt = Arc::new(crate::session::rt::SessionRt::new(
+            crate::session::rt::SessionRtDeps {
+                workspace: workspace.clone(),
+                shared: Arc::clone(&shared),
+                initial_entries: Arc::from([]),
+                scheme_store: Arc::clone(backend.scheme_store()),
+                host: Arc::clone(&host.state),
+                jobs: Arc::clone(&jobs),
+                procs,
+                env_snapshot: backend.env_snapshot().to_vec(),
+                launcher: Ok(crate::proc::Launcher::Direct),
+                cancel: cancel.clone(),
+                jobs_dir: backend.jobs_dir().to_path_buf(),
+                tasks,
+            },
+        ));
+        let services = Arc::new(crate::ext::services::SessionServices::new(
+            crate::ext::services::SessionServicesDeps {
+                grants,
+                broker: Arc::clone(&broker),
+                backend: Arc::clone(&backend) as Arc<dyn crate::ext::services::SessionBackend>,
+                rt,
+                mcp_client: None,
+                judge: None,
+                generation: host.state.shared.generation.subscribe(),
+                overlay: Arc::new(crate::ext::overlay::Overlay::default()),
+                history: Arc::from([]),
+                sites: std::collections::HashMap::new(),
+                turn_cancel: Arc::new(|_: TurnId| Some(tokio_util::sync::CancellationToken::new())),
+                cancel,
+                resolutions,
+                ask_timeout: Duration::from_secs(30),
+                ephemeral: true,
+                workspace: workspace.clone(),
+            },
+        ));
+        backend.set_services(&services);
+        let generation = host.state.shared.generation.borrow().clone();
+        LiveHarness {
+            backend,
+            services,
+            broker,
+            generation,
+            workspace,
+            session,
+            _tmp: tmp,
+            _host: host,
+        }
+    }
+
+    struct CtxParts {
+        turn: TurnId,
+        policy: Policy,
+        parallel_reads: usize,
+    }
+
+    fn dispatch_ctx(harness: &LiveHarness, parts: CtxParts) -> DispatchCtx {
+        DispatchCtx {
+            session: harness.session,
+            parent: None,
+            process_env: Arc::clone(&harness.backend.host_state().shared.env),
+            turn: parts.turn,
+            workspace: harness.workspace.clone(),
+            mode: Mode::Normal,
+            generation: Arc::clone(&harness.generation),
+            tools: TurnTools::empty(),
+            deferred_search: Arc::from([]),
+            services: Arc::clone(&harness.services) as Arc<dyn crate::ext::Services>,
+            generation_id: harness.generation.id,
+            backend: Arc::clone(&harness.backend),
+            broker: Arc::clone(&harness.broker),
+            policy: parts.policy,
+            cancel: CancellationToken::new(),
+            turn_deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            parallel_reads: parts.parallel_reads,
+            cutoff: None,
+            ledger: Arc::new(Mutex::new(GrantLedger::new())),
+            script: None,
+        }
+    }
+
+    fn ask_policy() -> Policy {
+        Policy {
+            mode: dal_core::ApprovalMode::Ask,
+            answerer_attached: true,
+            allow_always: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn all_policy() -> Policy {
+        Policy {
+            mode: dal_core::ApprovalMode::All,
+            answerer_attached: true,
+            allow_always: std::collections::BTreeSet::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_reads_capped() {
+        let current = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool: Arc<dyn crate::ext::tool::Tool> = Arc::new(ConcurrencyRead {
+            name: "read".parse().expect("tool name parses"),
+            spec: tool_spec("read"),
+            current: Arc::clone(&current),
+            peak: Arc::clone(&peak),
+            delay_ms: 60,
+        });
+        let harness = live_backend_with(vec![(tool, dal_core::Visibility::Model)]).await;
+        let turn = TurnId::new(std::num::NonZeroU64::new(1).expect("turn id"));
+        let ctx = dispatch_ctx(
+            &harness,
+            CtxParts {
+                turn,
+                policy: all_policy(),
+                parallel_reads: 4,
+            },
+        );
+        let broker = Arc::clone(&harness.broker);
+        let ids: Vec<CallId> = (0..8).map(|n| CallId::new(format!("r{n}"))).collect();
+        let mut ready = std::collections::HashMap::new();
+        for id in &ids {
+            ready.insert(
+                id.clone(),
+                ReadyCall {
+                    call: id.clone(),
+                    name: "read".parse().expect("tool name parses"),
+                    args: RawJson::parse("{}").expect("args parse"),
+                    class: ToolClass::Read,
+                },
+            );
+        }
+        let settled = run_unit(&ctx, &Unit::Reads { calls: ids.clone() }, &ready).await;
+        assert_eq!(settled.len(), 8, "every submitted read settles");
+        for (position, item) in settled.iter().enumerate() {
+            assert_eq!(
+                item.call, ids[position],
+                "tool-settled order equals call order"
+            );
+            assert!(
+                matches!(item.outcome, SettledOutcome::Ok { .. }),
+                "every read succeeds: {:?}",
+                item.outcome
+            );
+        }
+        let observed = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            observed <= 4,
+            "in-flight reads never exceed PARALLEL_READS=4: saw {observed}"
+        );
+        assert!(
+            observed > 1,
+            "reads actually overlap instead of running serially: saw {observed}"
+        );
+        assert_eq!(
+            broker.open_requests().len(),
+            0,
+            "reads never open approvals"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test drives its own dispatch task"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scenario is one serialized ordering walk"
+    )]
+    async fn read_then_exec_order() {
+        let t0 = Arc::new(std::time::Instant::now());
+        let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let auth_started = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let read_a: Arc<dyn crate::ext::tool::Tool> = Arc::new(OrderRead {
+            name: "read-a".parse().expect("tool name parses"),
+            spec: tool_spec("read-a"),
+            finished: Arc::clone(&finished),
+            t0: Arc::clone(&t0),
+        });
+        let read_b: Arc<dyn crate::ext::tool::Tool> = Arc::new(OrderRead {
+            name: "read-b".parse().expect("tool name parses"),
+            spec: tool_spec("read-b"),
+            finished: Arc::clone(&finished),
+            t0: Arc::clone(&t0),
+        });
+        let exec_c: Arc<dyn crate::ext::tool::Tool> = Arc::new(GateExec {
+            name: "exec-c".parse().expect("tool name parses"),
+            spec: tool_spec("exec-c"),
+            auth_started: Arc::clone(&auth_started),
+            t0: Arc::clone(&t0),
+        });
+        let harness = live_backend_with(vec![
+            (read_a, dal_core::Visibility::Model),
+            (read_b, dal_core::Visibility::Model),
+            (exec_c, dal_core::Visibility::Model),
+        ])
+        .await;
+        let broker = Arc::clone(&harness.broker);
+        let _session = harness.session;
+        let resolved = |id: &str, name: &str, class: ToolClass| dal_core::ResolvedCall {
+            call: CallId::new(id),
+            name: name.parse().expect("tool name parses"),
+            promoted: false,
+            result: Ok(class),
+        };
+        let calls = vec![
+            resolved("a", "read-a", ToolClass::Read),
+            resolved("b", "read-b", ToolClass::Read),
+            resolved(
+                "c",
+                "exec-c",
+                ToolClass::Exec {
+                    read_only: true,
+                    grant: None,
+                },
+            ),
+        ];
+        let (units, failed) = plan_units(&calls);
+        assert_eq!(failed, [], "all three calls resolve");
+        assert!(
+            matches!(
+                units.as_slice(),
+                [Unit::Reads { calls: reads }, Unit::Serial { call: exec }]
+                    if reads.len() == 2
+                        && reads[0].as_str() == "a"
+                        && reads[1].as_str() == "b"
+                        && exec.as_str() == "c"
+            ),
+            "reads batch while the exec stays serial: {units:?}"
+        );
+        // Ask-gated variant: the exec approval must wait for both reads.
+        {
+            let turn = TurnId::new(std::num::NonZeroU64::new(2).expect("turn id"));
+            let ctx = dispatch_ctx(
+                &harness,
+                CtxParts {
+                    turn,
+                    policy: ask_policy(),
+                    parallel_reads: 4,
+                },
+            );
+            let mut ready = std::collections::HashMap::new();
+            ready.insert(
+                CallId::new("a"),
+                ReadyCall {
+                    call: CallId::new("a"),
+                    name: "read-a".parse().expect("tool name parses"),
+                    args: RawJson::parse("{}").expect("args parse"),
+                    class: ToolClass::Read,
+                },
+            );
+            ready.insert(
+                CallId::new("b"),
+                ReadyCall {
+                    call: CallId::new("b"),
+                    name: "read-b".parse().expect("tool name parses"),
+                    args: RawJson::parse("{}").expect("args parse"),
+                    class: ToolClass::Read,
+                },
+            );
+            ready.insert(
+                CallId::new("c"),
+                ReadyCall {
+                    call: CallId::new("c"),
+                    name: "exec-c".parse().expect("tool name parses"),
+                    args: RawJson::parse("{}").expect("args parse"),
+                    class: ToolClass::Exec {
+                        read_only: true,
+                        grant: None,
+                    },
+                },
+            );
+            auth_started.store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+            finished.store(0, std::sync::atomic::Ordering::SeqCst);
+            let broker_clone = Arc::clone(&broker);
+            let dispatch_all = tokio::spawn(async move {
+                let mut out = Vec::new();
+                for unit in &units {
+                    out.extend(run_unit(&ctx, unit, &ready).await);
+                }
+                out
+            });
+            // While the two reads are still in flight the exec has not
+            // started, so no approval question may be open yet.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(
+                broker_clone.open_requests().len(),
+                0,
+                "the exec ask fires only after the reads settle"
+            );
+            let open = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let open = broker_clone.open_requests();
+                    if !open.is_empty() {
+                        return open;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the exec opens its approval");
+            assert_eq!(open.len(), 1, "exactly one exec approval opens");
+            let reads_done = finished.load(std::sync::atomic::Ordering::SeqCst);
+            assert_ne!(reads_done, 0, "both reads finished before the exec asked");
+            let began = auth_started.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                began >= reads_done,
+                "the exec ladder starts after the reads settle: began {began} reads done {reads_done}"
+            );
+            let answered = broker_clone
+                .answer(open[0].id, Answer::Approve, ClientId::new("test-front-end"))
+                .expect("the exec approval answers");
+            broker_clone.release(&answered);
+            let settled = tokio::time::timeout(Duration::from_secs(10), dispatch_all)
+                .await
+                .expect("dispatch finishes")
+                .expect("dispatch task joins");
+            assert_eq!(settled.len(), 3, "all three calls settle");
+            assert!(
+                settled
+                    .iter()
+                    .all(|item| matches!(item.outcome, SettledOutcome::Ok { .. })),
+                "ask-approved exec succeeds after the reads: {:?}",
+                settled.iter().map(|item| &item.outcome).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                broker_clone.open_requests().len(),
+                0,
+                "the answered approval settles"
+            );
+        }
+        // All-mode variant: nothing asks, so all three start and settle in
+        // one tick with no broker wait. The reference planner batches the
+        // read-only exec with the reads; dispatch keeps it serial but still
+        // settles without opening any approval.
+        {
+            let planned_for_core = vec![
+                dal_core::PlannedCall {
+                    call: CallId::new("a"),
+                    name: "read-a".parse().expect("tool name parses"),
+                    class: ToolClass::Read,
+                },
+                dal_core::PlannedCall {
+                    call: CallId::new("b"),
+                    name: "read-b".parse().expect("tool name parses"),
+                    class: ToolClass::Read,
+                },
+                dal_core::PlannedCall {
+                    call: CallId::new("c"),
+                    name: "exec-c".parse().expect("tool name parses"),
+                    class: ToolClass::Exec {
+                        read_only: true,
+                        grant: None,
+                    },
+                },
+            ];
+            let core_units = dal_core::approval::plan(&planned_for_core, &all_policy());
+            assert!(
+                matches!(
+                    core_units.as_slice(),
+                    [Unit::Reads { calls }] if calls.len() == 3
+                ),
+                "all mode batches the read-only exec with the reads: {core_units:?}"
+            );
+            let turn = TurnId::new(std::num::NonZeroU64::new(3).expect("turn id"));
+            let ctx = dispatch_ctx(
+                &harness,
+                CtxParts {
+                    turn,
+                    policy: all_policy(),
+                    parallel_reads: 4,
+                },
+            );
+            let mut ready = std::collections::HashMap::new();
+            for (id, name, class) in [
+                ("a", "read-a", ToolClass::Read),
+                ("b", "read-b", ToolClass::Read),
+                (
+                    "c",
+                    "exec-c",
+                    ToolClass::Exec {
+                        read_only: true,
+                        grant: None,
+                    },
+                ),
+            ] {
+                ready.insert(
+                    CallId::new(id),
+                    ReadyCall {
+                        call: CallId::new(id),
+                        name: name.parse().expect("tool name parses"),
+                        args: RawJson::parse("{}").expect("args parse"),
+                        class,
+                    },
+                );
+            }
+            let single = Unit::Reads {
+                calls: vec![CallId::new("a"), CallId::new("b"), CallId::new("c")],
+            };
+            let out = run_unit(&ctx, &single, &ready).await;
+            assert_eq!(out.len(), 3, "all three calls settle in all mode");
+            assert!(
+                out.iter()
+                    .all(|item| matches!(item.outcome, SettledOutcome::Ok { .. })),
+                "all mode needs no approval: {:?}",
+                out.iter().map(|item| &item.outcome).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                broker.open_requests().len(),
+                0,
+                "all mode opens no approval question"
+            );
+        }
     }
 
     #[test]

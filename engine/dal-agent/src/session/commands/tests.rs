@@ -126,6 +126,7 @@ fn markdown_export_includes_assistant_reply() -> Result<(), Box<dyn std::error::
             kind: EntryKind::Assistant {
                 api: Family::Responses,
                 model: "gpt-test".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Responses)),
                 content: vec![
                     Block::Reasoning {
@@ -298,6 +299,7 @@ fn markdown_export_names_unnamed_sessions_marks_failed_tools_and_skips_reasoning
             kind: EntryKind::Assistant {
                 api: Family::Responses,
                 model: "gpt-test".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Responses)),
                 content: vec![Block::Reasoning {
                     text: "private reasoning".into(),

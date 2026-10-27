@@ -36,6 +36,7 @@ struct Captured {
     covered: Vec<(EntryId, Option<Box<str>>)>,
     context_items: usize,
     estimated_tokens: Vec<u64>,
+    instructions: String,
 }
 
 struct CaptureCompactor(Arc<Mutex<Option<Captured>>>);
@@ -67,6 +68,7 @@ impl Compactor for CaptureCompactor {
                 .map(|covered| covered.estimated_tokens)
                 .collect(),
             context_items: input.covered_context().len(),
+            instructions: input.instructions.to_string(),
         });
         Box::pin(async { Ok(None) })
     }
@@ -319,6 +321,53 @@ async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
     assert_eq!(captured.covered_span, (entry(1), entry(1)));
     assert_eq!(captured.covered, vec![(entry(1), None)]);
     assert_eq!(captured.context_items, 1);
+    host.close(session).await.expect("close session");
+}
+
+#[tokio::test]
+async fn compact_focus_reaches_compactor() {
+    let (_temp, agent, host, seen, session) = compact_fixture().await;
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "warm".into(),
+            }],
+        })
+        .await
+        .expect("submit warm prompt");
+    turn_ended(&mut subscription).await;
+    let compact_reply = agent
+        .submit(Command::Compact {
+            focus: Some("auth flow".into()),
+        })
+        .await;
+    assert!(
+        compact_reply.is_ok(),
+        "manual compact reply: {compact_reply:?}; captured={:?}",
+        *seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    );
+    let captured = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(captured) = seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                return captured;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("compactor receives selected context");
+    assert_eq!(
+        captured.instructions, "auth flow",
+        "stored compact focus must reach CompactInput.instructions"
+    );
     host.close(session).await.expect("close session");
 }
 

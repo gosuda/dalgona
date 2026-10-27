@@ -262,6 +262,7 @@ impl BranchFixture {
                 kind: EntryKind::Assistant {
                     api: dal_core::Family::Chat,
                     model: "synth/test-model".into(),
+                    provider: None,
                     route: None,
                     content: vec![dal_core::Block::ToolCall {
                         id: CallId::new(self.call),

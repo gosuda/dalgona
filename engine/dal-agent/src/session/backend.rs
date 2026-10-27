@@ -484,6 +484,15 @@ pub(crate) struct Backend {
     broker: Arc<Broker>,
     handle: SessionHandle,
     script_services: std::sync::OnceLock<std::sync::Weak<SessionServices>>,
+    /// The live hook chain's script host, registered while the chain runs.
+    ///
+    /// A hook-driven trusted inference carries this host as its script
+    /// context, so a scripted model route runs under the chain's fail-closed
+    /// empty authority instead of refusing typed. Weak back-reference: the
+    /// host owns this backend by strong `Arc`, so this side stays weak, and
+    /// a chain that ended upgrades to `None`: absence stays typed. One
+    /// short lock per inference; never held across an await.
+    hook_script: std::sync::Mutex<std::sync::Weak<crate::session::script::SessionScriptHost>>,
     jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
     procs: Arc<tokio::sync::Mutex<std::collections::HashMap<dal_core::JobId, crate::proc::Proc>>>,
     env_snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
@@ -554,6 +563,7 @@ impl Backend {
             broker,
             handle,
             script_services: std::sync::OnceLock::new(),
+            hook_script: std::sync::Mutex::new(std::sync::Weak::new()),
             jobs,
             procs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             env_snapshot,
@@ -620,6 +630,27 @@ impl Backend {
 
     pub(crate) fn script_services(&self) -> Option<Arc<SessionServices>> {
         self.script_services.get()?.upgrade()
+    }
+
+    /// Registers the live hook chain's script host.
+    ///
+    /// Called by the hook-chain constructors right after they mint the
+    /// host, before any hook runs. The registration is replaced by the next
+    /// chain and outlives only that chain, which holds the host's `Arc` in
+    /// its `ScriptCx`.
+    pub(crate) fn set_hook_script(&self, host: &Arc<crate::session::script::SessionScriptHost>) {
+        *self
+            .hook_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(host);
+    }
+
+    /// Upgrades the live hook chain's script host, if one still runs.
+    fn hook_script_host(&self) -> Option<Arc<crate::session::script::SessionScriptHost>> {
+        self.hook_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade()
     }
 
     /// Borrows the session job table.
@@ -1900,7 +1931,12 @@ impl Backend {
         super::turn::RequestDeps {
             session: self.session,
             host: Arc::clone(&self.host),
-            script: None,
+            // A live hook chain lends its fail-closed script host to trusted
+            // inference, so hook-driven scripted routes run with a real
+            // script context instead of refusing at the handler gate. With
+            // no chain running (or after it dropped its host) this is
+            // `None` and every non-session path keeps its typed absence.
+            script: self.hook_script_host(),
             continuation: caller.continuation(),
         }
     }

@@ -254,4 +254,163 @@ mod tests {
         assert!(!Subscriber::answers_approval(&slot));
         assert!(!Subscriber::answers_ask(&slot));
     }
+
+    fn delta(text: &str) -> Arc<Update> {
+        let (r#gen, seq) = cursor();
+        Arc::new(Update {
+            r#gen,
+            seq,
+            kind: UpdateKind::Delta {
+                turn: dal_core::TurnId::new(NonZeroU64::MIN),
+                channel: dal_core::StreamChannel::Text,
+                text: text.into(),
+            },
+        })
+    }
+
+    fn progress(call: &str, tail: &str) -> Arc<Update> {
+        let (r#gen, seq) = cursor();
+        Arc::new(Update {
+            r#gen,
+            seq,
+            kind: UpdateKind::ToolProgress {
+                call: CallId::new(call),
+                tail: tail.into(),
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_lag_resync() {
+        // Spec workload: a never-reading subscriber takes 5000 deltas plus
+        // 50 progress updates for one call. A healthy sibling drains as it
+        // goes and must see every delivery with no resync.
+        let lagging = Subscriber::with_backlog(VecDeque::new(), cursor(), false, false);
+        let slow = lagging.port();
+        let healthy = Subscriber::with_backlog(VecDeque::new(), cursor(), false, false);
+        let well = healthy.port();
+
+        let mut healthy_delivered = 0usize;
+        for index in 0..5000 {
+            let update = if index % 100 == 0 {
+                progress("call-9", &format!("p{}", index / 100))
+            } else {
+                delta("d")
+            };
+            let _ = Subscriber::offer(&slow, Arc::clone(&update), cursor());
+            assert!(
+                Subscriber::offer(&well, Arc::clone(&update), cursor()),
+                "the draining sibling keeps room for every delivery"
+            );
+            if index % 100 == 99 {
+                healthy_delivered += drain_available(&well).await;
+            }
+        }
+        // The 50 progress updates replace in place; the shed keeps at most
+        // one unsent tool_progress per call.
+        for index in 0..50 {
+            let update = progress("call-9", &format!("q{index}"));
+            let _ = Subscriber::offer(&slow, Arc::clone(&update), cursor());
+            assert!(
+                Subscriber::offer(&well, Arc::clone(&update), cursor()),
+                "the draining sibling keeps room for every delivery"
+            );
+        }
+        healthy_delivered += drain_available(&well).await;
+        assert_eq!(
+            healthy_delivered, 5001,
+            "the sibling takes the whole workload: 5050 pushes minus the \
+             49 same-call progress replacements, with nothing shed"
+        );
+        // Every sibling drain above matched Update only and never saw a
+        // Resync: full delivery elsewhere needs no resync.
+        // A lagged queue refuses new work until the client resubscribes.
+        assert!(
+            !Subscriber::offer(&slow, delta("late"), cursor()),
+            "a lagged subscriber sheds every later offer"
+        );
+        {
+            let queue = slow
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                queue.items.len() <= QUEUE_CAP,
+                "the shed queue never exceeds QUEUE_CAP"
+            );
+            let deltas = queue
+                .items
+                .iter()
+                .filter(|delivery| {
+                    matches!(
+                        delivery,
+                        Delivery::Update(update)
+                            if matches!(update.kind, UpdateKind::Delta { .. })
+                    )
+                })
+                .count();
+            assert_eq!(deltas, 0, "shed drops every queued delta");
+            let progresses = queue
+                .items
+                .iter()
+                .filter(|delivery| {
+                    matches!(
+                        delivery,
+                        Delivery::Update(update)
+                            if matches!(update.kind, UpdateKind::ToolProgress { .. })
+                    )
+                })
+                .count();
+            assert!(
+                progresses <= 1,
+                "at most one unsent tool_progress per call survives, got {progresses}"
+            );
+            let resyncs = queue
+                .items
+                .iter()
+                .filter(|delivery| matches!(delivery, Delivery::Resync { .. }))
+                .count();
+            assert_eq!(resyncs, 1, "shed queues exactly one resync");
+        }
+        // Draining delivers the kept progress, then the single resync,
+        // then ends: full delivery resumes after the catch-up resubscribe.
+        let mut saw_progress = false;
+        loop {
+            match Subscriber::next(&slow).await {
+                Some(Delivery::Update(update)) => {
+                    if matches!(update.kind, UpdateKind::ToolProgress { .. }) {
+                        saw_progress = true;
+                    }
+                }
+                Some(Delivery::Resync { .. }) => break,
+                None => panic!("the lagged queue ends in a resync, not silence"),
+            }
+        }
+        assert!(saw_progress, "the kept progress delivers before the resync");
+        assert!(
+            Subscriber::next(&slow).await.is_none(),
+            "the lagged queue ends after its single resync"
+        );
+    }
+
+    async fn drain_available(slot: &Arc<SubscriberShared>) -> usize {
+        // Progress replacement keeps one slot per call, so pushed
+        // items overcount queued items: read the queue length first.
+        // A fixed push-count drain would wait forever on an empty
+        // queue and hang the proof.
+        let queued = {
+            slot.queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .items
+                .len()
+        };
+        for _ in 0..queued {
+            match Subscriber::next(slot).await {
+                Some(Delivery::Update(_)) => {}
+                other => panic!("healthy sibling drains updates only, got {other:?}"),
+            }
+        }
+        queued
+    }
 }

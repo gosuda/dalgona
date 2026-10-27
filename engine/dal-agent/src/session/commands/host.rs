@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use dal_core::{
     ApprovalMode, ClientId, Command, EntryKind, EntryView, JobId, JobOutcome, JournalPart,
-    ListQuery, Mode, ModelRoute, Page, PageReq, Save, SessionId, SessionSummary, ThinkingLevel,
-    TurnId, View, Workspace,
+    ListQuery, Mode, ModelRoute, Output, Page, PageReq, Reply, Save, SessionId, SessionSummary,
+    ThinkingLevel, TurnId, View, Workspace,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -235,11 +235,13 @@ fn command_label(cmd: &Command) -> String {
     }
 }
 
-enum PersistDefault {
+pub(in crate::session) enum PersistDefault {
     Model(ModelRoute),
     Thinking(ThinkingLevel),
     Approval(ApprovalMode),
     Mode(Mode),
+    /// The ordered scoped model list; empty clears it.
+    ScopedModels(Vec<Box<str>>),
 }
 
 fn default_model_text(route: &ModelRoute) -> String {
@@ -253,7 +255,7 @@ fn default_model_text(route: &ModelRoute) -> String {
     }
 }
 
-async fn persist_default(
+pub(in crate::session) async fn persist_default(
     host: &Arc<crate::host::HostState>,
     persist: PersistDefault,
 ) -> Result<(), SaveError> {
@@ -313,6 +315,11 @@ async fn persist_default(
             .map_err(|error| SaveError::Failed {
                 message: format!("cannot update dal.toml: {error}").into(),
             })?,
+        PersistDefault::ScopedModels(ids) => config
+            .update_scoped_models(&ids, user_toml.as_deref())
+            .map_err(|error| SaveError::Failed {
+                message: format!("cannot update dal.toml: {error}").into(),
+            })?,
     };
     let bytes = updated.into_bytes();
     let parent = path.parent().map(std::path::Path::to_path_buf);
@@ -345,7 +352,7 @@ async fn persist_default(
     }
 }
 
-fn persist_for(command: &Command) -> Option<PersistDefault> {
+pub(in crate::session) fn persist_for(command: &Command) -> Option<PersistDefault> {
     match command {
         Command::SetModel {
             model,
@@ -363,6 +370,9 @@ fn persist_for(command: &Command) -> Option<PersistDefault> {
             mode,
             save: Save::SessionAndDefault,
         } => Some(PersistDefault::Mode(*mode)),
+        // `SetScopedModels` carries no `Save`: it always persists, in
+        // `commands::set_scoped_models`, so `submit_wait` must not write it a
+        // second time.
         _ => None,
     }
 }
@@ -403,20 +413,22 @@ impl CommandHost for DriverHost {
                 })
             });
         }
-        let persist = persist_for(&command);
+        // The actor owns the default save on the shared submit path; this
+        // host only translates the actor's outcome back into the typed
+        // `SaveError` contract handlers consume. For a command that carries
+        // a default save, a `Done` text reply is exactly that warning: the
+        // fold itself answers these commands with `Done(Output::Nothing)`.
+        let expect_save = persist_for(&command).is_some();
         let handle = self.handle.clone();
-        let host = Arc::clone(&self.host);
         let by = ClientId::new(caller.ext().as_str());
         Box::pin(async move {
-            handle
-                .submit(command, by)
-                .await
-                .map(|_| ())
-                .map_err(save_error)?;
-            if let Some(persist) = persist {
-                persist_default(&host, persist).await?;
+            match handle.submit(command, by).await {
+                Ok(Reply::Done(Output::Text(message))) if expect_save => {
+                    Err(SaveError::Failed { message })
+                }
+                Ok(_) => Ok(()),
+                Err(error) => Err(save_error(error)),
             }
-            Ok(())
         })
     }
 

@@ -16,16 +16,17 @@ use dal_core::ext::{
 };
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, EntryId,
-    EntryKind, Event, Family, InferFailure, Inference, MailMode, ModelRoute, Name, Part,
-    PartialResponse, Phase, Policy, PrivateConflict, PrivateEffectId, PrivateLoopId, Record,
-    Rejection, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Session, SessionId,
-    StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState, UpdateKind,
-    Workspace,
+    EntryKind, Event, Family, InferFailure, Inference, MAILBOX_WAITING_LIMIT, MailMode, ModelRoute,
+    Name, Output, Part, PartialResponse, Phase, Policy, PrivateConflict, PrivateEffectId,
+    PrivateLoopId, Record, Rejection, Reply, Request, RequestId, ResolutionCause, ResolvedCall,
+    Session, SessionId, StreamEvent, Timestamp, TurnId, TurnOp, TurnOpReply, TurnSource, TurnState,
+    UpdateKind, Workspace,
 };
 use dal_store::Journal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
+use super::commands::{default_save_warning, persist_default, persist_for, persist_label};
 use super::control::ControlCell;
 use super::driver::{OpeningModel, WatchDelivery, opening_model};
 use super::shared::Shared;
@@ -537,26 +538,6 @@ fn wake_refusal(rejection: &Rejection) -> dal_core::ext::WakeError {
         },
     }
 }
-
-/// Undelivered mail bound for this session.
-///
-/// A `NextTurn` message always waits for a following turn, so its record
-/// counts as undelivered; `Aside` and delivered `Steer` records do not.
-fn undelivered_mail(session: SessionId, records: &[Record]) -> usize {
-    records
-        .iter()
-        .filter(|record| {
-            matches!(
-                record,
-                Record::Mail(record)
-                    if record.to == session && record.mode == MailMode::NextTurn
-            )
-        })
-        .count()
-}
-
-/// Maximum number of waiting messages per recipient.
-const MAILBOX_WAITING_LIMIT: usize = 100;
 
 /// Dedicated bound for opening-safe service ingress.
 const OPENING_CHANNEL: usize = COMMAND_CHANNEL;
@@ -1186,6 +1167,7 @@ impl Actor {
             Arc::clone(&self.host.shared.interpreters),
             generation,
         );
+        backend.set_hook_script(&script);
         script.attach(None)
     }
 
@@ -1648,6 +1630,12 @@ impl Actor {
             let _ = reply.send(Err(AgentError::Invalid(ValidationError::new(broken))));
             return;
         }
+        // Read before the fold consumes the command: a `SessionAndDefault`
+        // command persists its default here, on the one dispatch path every
+        // frontend submits through, so the save cannot depend on which
+        // entry point the client used. A rejected command never reaches the
+        // save, and `SessionOnly` never maps to a persist.
+        let persist = persist_for(&command);
         self.sweep_expiry().await;
         self.flags.note_submit(&command);
         let mut effects = Vec::new();
@@ -1661,9 +1649,43 @@ impl Actor {
                 let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
-            Ok(()) => {
-                let _ = self.execute(effects, Some(reply)).await;
-            }
+            Ok(()) => match persist {
+                None => {
+                    let _ = self.execute(effects, Some(reply)).await;
+                }
+                Some(persist) => {
+                    // The four Set commands the fold handles reply inside
+                    // this `execute` pass (journal record and settings
+                    // update first, then the reply effect), so holding the
+                    // reply until the default save lands never waits on a
+                    // later actor request, and the save still starts only
+                    // after the session state is durable. An inner sender
+                    // dropped without a reply means the command produced
+                    // none at all; fail the caller instead of hanging it.
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self.execute(effects, Some(tx)).await;
+                    match rx.await {
+                        Ok(Ok(inner)) => {
+                            let label = persist_label(&persist);
+                            let inner = match persist_default(&self.host, persist).await {
+                                Ok(()) => inner,
+                                Err(error) => Reply::Done(Output::Text(
+                                    default_save_warning(label, &error).into(),
+                                )),
+                            };
+                            let _ = reply.send(Ok(inner));
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(error));
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(AgentError::Invalid(ValidationError::new(
+                                "the command finished without a reply.",
+                            ))));
+                        }
+                    }
+                }
+            },
         }
     }
 
@@ -1914,8 +1936,7 @@ impl Actor {
             script: self.hook_script(),
         };
         let (content, opening) = if run_input {
-            self.fold_input_hooks(&scope, &generation, turn, content)
-                .await
+            Box::pin(self.fold_input_hooks(&scope, &generation, turn, content)).await
         } else {
             (content, None)
         };
@@ -2828,11 +2849,31 @@ impl Actor {
             text: mail.text.clone(),
             reply_to: mail.reply_to.map(|entry| entry.get().to_string().into()),
         });
+        // The position is minted before the write and refused with it: no
+        // record lands without its fold-known position.
+        let Some(position) = self.fold.next_mail_position() else {
+            let _ = reply.send(Err(ServiceError::failed(
+                Some(dal_core::Service::Agents),
+                "mail position space exhausted",
+            )));
+            return;
+        };
         if let Err(error) = self.journal.append(vec![record]).await {
             let message: Box<str> = format!("journal write failed: {error}").into();
             if breaks_session(&error) {
                 self.broken = Some(message.clone());
             }
+            let _ = reply.send(Err(ServiceError::failed(
+                Some(dal_core::Service::Agents),
+                message,
+            )));
+            return;
+        }
+        // The fold learns the landed row only after the append succeeded,
+        // so a failed commit leaves neither receipt nor pending state.
+        if let Err(error) = self.fold.note_buffered_mail(position, &mail) {
+            let message: Box<str> = format!("fold mail note failed: {error}").into();
+            self.broken = Some(message.clone());
             let _ = reply.send(Err(ServiceError::failed(
                 Some(dal_core::Service::Agents),
                 message,
@@ -2863,8 +2904,13 @@ impl Actor {
 
     /// Receipt for a message that waits in the journal; a full mailbox
     /// refuses with `Full` instead of silently accepting the message.
+    ///
+    /// The bound counts the fold's pending `NextTurn` mail: rows no turn
+    /// has incorporated yet, not every retained row, so delivery at a turn
+    /// start frees capacity without erasing history. The fold state is the
+    /// source of truth for the live query and for replay alike.
     fn buffered_mail_receipt(&self) -> Receipt {
-        if undelivered_mail(self.session, self.journal.records()) >= MAILBOX_WAITING_LIMIT {
+        if self.fold.pending_mails() >= MAILBOX_WAITING_LIMIT {
             Receipt::Full
         } else {
             Receipt::Buffered

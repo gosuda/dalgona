@@ -238,7 +238,7 @@ pub(crate) fn tool_list(
         right
             .0
             .cmp(&left.0)
-            .then_with(|| spec_bytes(&left.1).cmp(&spec_bytes(&right.1)))
+            .then_with(|| left.1.name.as_str().cmp(right.1.name.as_str()))
     });
     let mut tools: Vec<ModelToolSpec> = specs
         .into_iter()
@@ -392,11 +392,6 @@ fn tool_visible(visibility: Option<Visibility>, mode: Mode) -> bool {
         (Some(Visibility::Model), _)
             | (Some(Visibility::EvalOnly), Mode::EvalFirst | Mode::EvalOnly)
     )
-}
-
-/// Byte length of one serialized-equivalent spec for ordering.
-fn spec_bytes(spec: &dal_core::ToolSpec) -> usize {
-    spec.name.as_str().len() + spec.description.len() + spec.parameters.as_str().len()
 }
 
 /// One model-streamed call awaiting resolution.
@@ -777,6 +772,7 @@ mod tests {
             EntryKind::Assistant {
                 api: Family::Chat,
                 model: "model".into(),
+                provider: None,
                 route: Some(dal_core::AssistantRoute::Api(Family::Chat)),
                 content: calls
                     .iter()
@@ -906,6 +902,7 @@ mod tests {
             EntryKind::Assistant {
                 api: Family::Chat,
                 model: "model".into(),
+                provider: None,
                 route: Some(dal_core::AssistantRoute::Api(Family::Chat)),
                 content: vec![
                     Block::Text {
@@ -1173,6 +1170,204 @@ mod tests {
         );
         assert_ne!(cache_key(session, 0, 0), cache_key(session, 0, 1));
         assert_ne!(cache_key(session, 0, 0), cache_key(session, 1, 0));
+    }
+
+    struct CtxStubTool {
+        name: Name,
+        spec: std::sync::Arc<dal_core::ToolSpec>,
+    }
+
+    impl crate::ext::tool::Tool for CtxStubTool {
+        fn name(&self) -> &Name {
+            &self.name
+        }
+
+        fn spec(&self, _model: &ModelInfo) -> std::sync::Arc<dal_core::ToolSpec> {
+            std::sync::Arc::clone(&self.spec)
+        }
+
+        fn classify(
+            &self,
+            _args: &crate::ext::tool::RawValue,
+            _ws: &Workspace,
+        ) -> Result<ToolClass, crate::ext::tool::ArgError> {
+            Ok(ToolClass::Read)
+        }
+
+        fn run<'a>(
+            &'a self,
+            _call: crate::ext::tool::ToolCall,
+            _cx: crate::ext::tool::ToolCx<'a>,
+        ) -> crate::ext::BoxFuture<'a, crate::ext::tool::ToolOutcome> {
+            Box::pin(async { crate::ext::tool::ToolOutcome::Interrupted })
+        }
+    }
+
+    fn ctx_tool(name: &str) -> std::sync::Arc<dyn crate::ext::tool::Tool> {
+        let parsed: Name = name.parse().expect("valid tool name");
+        std::sync::Arc::new(CtxStubTool {
+            name: parsed.clone(),
+            spec: std::sync::Arc::new(dal_core::ToolSpec {
+                name: parsed,
+                description: format!("test tool {name}").into(),
+                parameters: RawJson::parse(r#"{"type":"object"}"#).expect("valid schema"),
+                grammar: None,
+            }),
+        })
+    }
+
+    fn ctx_model_info() -> ModelInfo {
+        ModelInfo {
+            route: ModelRoute::from_id("acme/test"),
+            name: "test-model".into(),
+            provider: "".into(),
+            caps: Caps {
+                context_window: Some(8192),
+                thinking: Box::default(),
+                tool_use: true,
+                image_input: false,
+                custom_grammar: false,
+            },
+        }
+    }
+
+    struct CtxExtension {
+        name: &'static str,
+        tools: Vec<(std::sync::Arc<dyn crate::ext::tool::Tool>, Visibility)>,
+        sections: Vec<PromptSection>,
+    }
+
+    fn ctx_generation(extensions: Vec<CtxExtension>) -> Generation {
+        let mut built = Vec::with_capacity(extensions.len());
+        for extension in extensions {
+            let mut builder = crate::ext::ExtensionBuilder::new(
+                extension.name,
+                "1.0.0",
+                dal_core::ServiceSet::EMPTY,
+            )
+            .expect("valid extension identity")
+            .with_origin(dal_core::Origin::User, None);
+            for (tool, visibility) in extension.tools {
+                builder = builder.tool(tool, visibility);
+            }
+            for section in extension.sections {
+                builder = builder.prompt_section(section);
+            }
+            built.push(builder.build().expect("valid extension"));
+        }
+        Generation::build(
+            crate::ext::generation::ValidatedExtensions::validate(built, None).expect("validates"),
+        )
+    }
+
+    fn prompt_bytes(generation: &Generation, mode: Mode) -> String {
+        system_prompt(generation, mode, &|_, _| None)
+    }
+
+    fn tool_names(generation: &Generation, mode: Mode) -> Vec<String> {
+        let turn_tools = TurnTools::empty();
+        let model = ctx_model_info();
+        let model_id = ModelId::parse("acme/test").expect("valid model id");
+        let surface = search_surface("", &model.route);
+        let (tools, _) = tool_list(generation, &turn_tools, &model, &model_id, mode, surface);
+        tools.iter().map(|tool| tool.name.to_string()).collect()
+    }
+
+    #[test]
+    fn agents_walk_concatenation() {
+        use crate::ext::prompt::PromptOrder;
+        // Two AGENTS.md files at different tree depths become prompt
+        // sections in depth order; the SYSTEM tail appends wrapper-free.
+        // system_prompt joins sections with exactly one blank line. Per-file
+        // and total byte caps live in the prompt skills/letter layer
+        // (extensions/dal-ext instructions), not in this assembler: this
+        // test pins the dal-agent seam of depth order, blank-line joins,
+        // and the wrapper-free tail.
+        // Removing the order sort or the blank-line join breaks this.
+        let ext = |name: &'static str, sections: Vec<PromptSection>| CtxExtension {
+            name,
+            tools: Vec::new(),
+            sections,
+        };
+        let root = PromptSection::static_text(PromptOrder::Instructions, "root".into());
+        let child = PromptSection::static_text(PromptOrder::Fallback, "child".into());
+        let system = PromptSection::static_text(PromptOrder::DocsLine, "SYSTEM".into());
+        let forward = ctx_generation(vec![
+            ext("aaa", vec![root.clone()]),
+            ext("zzz", vec![child.clone(), system.clone()]),
+        ]);
+        let reversed = ctx_generation(vec![
+            ext("zzz", vec![system.clone(), child.clone()]),
+            ext("aaa", vec![root.clone()]),
+        ]);
+        let expected = "root\n\nchild\n\nSYSTEM";
+        assert_eq!(
+            prompt_bytes(&forward, Mode::Normal),
+            expected,
+            "sections concatenate in depth order with blank-line joins"
+        );
+        assert_eq!(
+            prompt_bytes(&reversed, Mode::Normal),
+            expected,
+            "registration order never leaks into prompt bytes"
+        );
+        assert!(
+            !prompt_bytes(&forward, Mode::Normal).contains("<instructions>"),
+            "the SYSTEM tail rides wrapper-free"
+        );
+    }
+
+    #[test]
+    fn load_order_independence() {
+        // Two filesystem iteration orders (extension input orders) produce
+        // identical prompt and tool bytes: the generation settles User
+        // extensions by name, so reversing the input changes nothing.
+        // Eval-first mode still lists the eval tool first.
+        let ext = |name: &'static str, tools: Vec<(&str, Visibility)>| CtxExtension {
+            name,
+            tools: tools
+                .into_iter()
+                .map(|(tool, visibility)| (ctx_tool(tool), visibility))
+                .collect(),
+            sections: vec![PromptSection::static_text(
+                crate::ext::prompt::PromptOrder::Identity,
+                format!("id-{name}").into(),
+            )],
+        };
+        let first = ctx_generation(vec![
+            ext("aaa", vec![("beta", Visibility::Model)]),
+            ext("zzz", vec![("alpha", Visibility::Model)]),
+        ]);
+        let second = ctx_generation(vec![
+            ext("zzz", vec![("alpha", Visibility::Model)]),
+            ext("aaa", vec![("beta", Visibility::Model)]),
+        ]);
+        assert_eq!(
+            prompt_bytes(&first, Mode::Normal),
+            prompt_bytes(&second, Mode::Normal),
+            "prompt bytes are independent of filesystem order"
+        );
+        assert_eq!(
+            tool_names(&first, Mode::Normal),
+            tool_names(&second, Mode::Normal),
+            "tool bytes are independent of filesystem order"
+        );
+        assert_eq!(
+            tool_names(&first, Mode::Normal),
+            vec!["alpha".to_owned(), "beta".to_owned()],
+            "tools settle in byte order whatever the input order"
+        );
+        let eval = ctx_generation(vec![
+            ext("aaa", vec![("zeta", Visibility::Model)]),
+            ext("zzz", vec![("alpha_eval", Visibility::EvalOnly)]),
+        ]);
+        assert_eq!(
+            tool_names(&eval, Mode::EvalFirst)
+                .first()
+                .map(String::as_str),
+            Some("alpha_eval"),
+            "eval-first lists the eval tool first"
+        );
     }
 
     #[test]

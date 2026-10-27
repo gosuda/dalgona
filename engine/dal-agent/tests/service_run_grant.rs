@@ -21,8 +21,8 @@ use dal_agent::ext::{
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, ToolError};
 use dal_core::{
     Answer, ClientId, Command, Config, ConfigProduct, ExitStatusKind, Expect, GrantSpec, JobId,
-    JobOutcome, JobsOp, JobsReply, ModelInfo, Name, Part, Preview, RawJson, RunRequest, ServiceSet,
-    ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
+    JobOutcome, JobsOp, JobsReply, ModelInfo, Name, Origin, Part, Preview, Question, RawJson,
+    RunRequest, ServiceSet, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
 };
 use tokio::sync::mpsc;
 
@@ -37,14 +37,12 @@ const USAGE: &str = "{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached
 
 const STEP_END: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"done\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
 
-/// One provider step that calls the runner once per `modes` entry.
-fn call_step(modes: &[&str]) -> String {
+/// One provider step that calls the named tool once per `modes` entry.
+fn call_step_named(tool: &str, modes: &[&str]) -> String {
     let started = modes
         .iter()
         .map(|mode| {
-            format!(
-                "{{\"type\":\"tool_call_started\",\"id\":\"c-{mode}\",\"name\":\"fixture__runner\"}}"
-            )
+            format!("{{\"type\":\"tool_call_started\",\"id\":\"c-{mode}\",\"name\":\"{tool}\"}}")
         })
         .collect::<Vec<_>>()
         .join(",");
@@ -52,7 +50,7 @@ fn call_step(modes: &[&str]) -> String {
         .iter()
         .map(|mode| {
             format!(
-                "{{\"id\":\"c-{mode}\",\"name\":\"fixture__runner\",\"args\":{{\"kind\":\"parsed\",\"value\":{{\"mode\":\"{mode}\"}}}}}}"
+                "{{\"id\":\"c-{mode}\",\"name\":\"{tool}\",\"args\":{{\"kind\":\"parsed\",\"value\":{{\"mode\":\"{mode}\"}}}}}}"
             )
         })
         .collect::<Vec<_>>()
@@ -120,11 +118,62 @@ fn request(argv: &[&str], cwd: &Path) -> RunRequest {
 /// `approved` asks for approval with a `git` grant, makes one `run` call
 /// inside the call, starts one job, and leaves a background worker that runs
 /// whatever the test sends. Mode `plain` skips the approval, starts one job,
-/// and leaves a worker.
+/// and leaves a worker. The bare tool skips the approval and the job: it
+/// registers a jobless worker, so its turn touches no gated service and the
+/// extension's grant question stays unraised until the background run.
 struct Runner {
     name: Name,
     spec: Arc<ToolSpec>,
     rig: Arc<Rig>,
+    bare: bool,
+}
+
+impl Runner {
+    /// Registers the bare fixture worker: no approval and no job — just a
+    /// jobless command inbox whose background runs raise the extension's
+    /// grant prompt as the session's first gated call.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture holds abort-on-drop ownership of each background worker"
+    )]
+    fn start_bare_worker(&self, services: Arc<dyn Services>, caller: Caller) -> ToolOutcome {
+        let (commands, mut inbox) = mpsc::channel::<Cmd>(COMMAND_QUEUE);
+        self.rig
+            .history
+            .lock()
+            .expect("history lock")
+            .push(commands.clone());
+        self.rig
+            .workers
+            .lock()
+            .expect("workers lock")
+            .insert("bare".to_owned(), commands);
+        let seen = self.rig.seen.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = inbox.recv().await {
+                let (label, outcome) = match cmd {
+                    Cmd::Run { label, argv, cwd } => {
+                        let ran = services.run(&caller, request(argv, &cwd)).await;
+                        (label, exit_zero(ran))
+                    }
+                    Cmd::SpawnChild | Cmd::SpawnLateRoot | Cmd::Settle => {
+                        ("no-job", Err("the bare worker holds no job".to_owned()))
+                    }
+                };
+                seen.try_send(Seen {
+                    label: label.to_owned(),
+                    outcome,
+                })
+                .expect("the fixture outcome queue has room");
+            }
+        });
+        self.rig
+            .tasks
+            .lock()
+            .expect("tasks lock")
+            .push(tokio_util::task::AbortOnDropHandle::new(worker));
+        ToolOutcome::Ok(Box::new(ToolOutput::from_text("started")))
+    }
 }
 
 impl Tool for Runner {
@@ -137,7 +186,7 @@ impl Tool for Runner {
     }
 
     fn classify(&self, args: &RawValue, workspace: &Workspace) -> Result<ToolClass, ArgError> {
-        if args.as_str().contains("\"plain\"") {
+        if self.bare || args.as_str().contains("\"plain\"") {
             return Ok(ToolClass::Other);
         }
         Ok(ToolClass::Exec {
@@ -158,6 +207,9 @@ impl Tool for Runner {
     )]
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
+            if self.bare {
+                return self.start_bare_worker(cx.services(), cx.caller().clone());
+            }
             let mode = if call.args.as_str().contains("\"plain\"") {
                 "plain"
             } else {
@@ -306,6 +358,16 @@ struct Session {
     _tmp: tempfile::TempDir,
 }
 
+/// Which fixture tool the scripted turn drives.
+#[derive(Clone, Copy)]
+enum Fixture {
+    /// The job-owning runner the shared battery uses.
+    Runner,
+    /// The bare `run`-only tool behind a user-origin extension whose
+    /// background worker raises the extension's grant prompt.
+    Bare,
+}
+
 /// Starts one host with the runner registered and one scripted turn that
 /// calls it once per mode.
 async fn start_turn(modes: &[&str]) -> Result<Session, Box<dyn std::error::Error>> {
@@ -317,52 +379,24 @@ async fn start_configured(
     repeats: usize,
     workspace_subdir: Option<&str>,
 ) -> Result<Session, Box<dyn std::error::Error>> {
-    let tmp = tempfile::tempdir()?;
-    let data = tmp.path().join("data");
-    let workspace_dir =
-        workspace_subdir.map_or_else(|| tmp.path().join("w"), |subdir| data.join(subdir));
-    std::fs::create_dir_all(&data)?;
-    std::fs::create_dir_all(&workspace_dir)?;
-    let fixture = data.join("script.jsonl");
-    std::fs::write(
-        &fixture,
-        format!("{}{STEP_END}", call_step(modes).repeat(repeats)),
-    )?;
-    let user = format!(
-        "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.to_string_lossy().replace('\\', "\\\\")
-    );
-    let config = Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str()))?;
-    let (seen_tx, seen) = mpsc::channel(COMMAND_QUEUE);
-    let rig = Arc::new(Rig {
-        workers: Mutex::new(HashMap::new()),
-        history: Mutex::new(Vec::new()),
-        tasks: Mutex::new(Vec::new()),
-        seen: seen_tx,
-        data: data.clone(),
-        dirs: Mutex::new(None),
-    });
-    let runner = Arc::new(Runner {
-        name: Name::parse("fixture__runner")?,
-        spec: Arc::new(ToolSpec {
-            name: Name::parse("fixture__runner")?,
-            description: "grant runner tool".into(),
-            parameters: RawJson::parse(r#"{"type":"object"}"#)?,
-            grammar: None,
-        }),
-        rig: Arc::clone(&rig),
-    });
-    let extension =
-        ExtensionBuilder::new("fixture", "0.1.0", ServiceSet::from_names(["jobs", "run"])?)?
-            .tool(runner, Visibility::Model)
-            .build()?;
-    let product = Product {
-        name: "dal",
-        data_root: data,
-        defaults: "",
-        extensions: vec![extension],
-        bundled: Vec::new(),
-    };
+    start_session(Fixture::Runner, modes, repeats, workspace_subdir).await
+}
+
+/// Starts one host over the bare `run`-only extension with the real
+/// 30 m `[ask] timeout` pinned: nothing gates its turn, nothing pre-approves
+/// its grant, so the background run itself raises the grant prompt.
+async fn start_bare() -> Result<Session, Box<dyn std::error::Error>> {
+    start_session(Fixture::Bare, &["bare"], 1, None).await
+}
+
+/// Starts one host over the prepared product with the fixture environment:
+/// a scratch HOME and cache under `tmp`, the test PATH, and `workspace` cwd.
+async fn start_host(
+    product: Product,
+    config: Config,
+    tmp: &tempfile::TempDir,
+    workspace: PathBuf,
+) -> Result<Host, Box<dyn std::error::Error>> {
     let env = Env {
         vars: BTreeMap::from([
             (OsString::from("OPENAI_API_KEY"), OsString::from("sk-test")),
@@ -376,10 +410,79 @@ async fn start_configured(
                 OsString::from(tmp.path().join("cache")),
             ),
         ]),
-        cwd: workspace_dir.clone(),
+        cwd: workspace,
         sandbox_helper: None,
     };
-    let host = Host::start(product, config, env).await?;
+    Ok(Host::start(product, config, env).await?)
+}
+
+async fn start_session(
+    fixture: Fixture,
+    modes: &[&str],
+    repeats: usize,
+    workspace_subdir: Option<&str>,
+) -> Result<Session, Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    let data = tmp.path().join("data");
+    let workspace_dir =
+        workspace_subdir.map_or_else(|| tmp.path().join("w"), |subdir| data.join(subdir));
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&workspace_dir)?;
+    let (tool, ask_pin) = match fixture {
+        Fixture::Runner => ("fixture__runner", ""),
+        Fixture::Bare => ("fixture__bare", "[ask]\ntimeout = 1800\n"),
+    };
+    let script = data.join("script.jsonl");
+    std::fs::write(
+        &script,
+        format!("{}{STEP_END}", call_step_named(tool, modes).repeat(repeats)),
+    )?;
+    let user = format!(
+        "model = \"openai/gpt-6-luna\"\n\n{ask_pin}[providers.scripted]\nfixture = \"{}\"\n",
+        script.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config = Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str()))?;
+    let (seen_tx, seen) = mpsc::channel(COMMAND_QUEUE);
+    let rig = Arc::new(Rig {
+        workers: Mutex::new(HashMap::new()),
+        history: Mutex::new(Vec::new()),
+        tasks: Mutex::new(Vec::new()),
+        seen: seen_tx,
+        data: data.clone(),
+        dirs: Mutex::new(None),
+    });
+    let runner = Arc::new(Runner {
+        name: Name::parse(tool)?,
+        spec: Arc::new(ToolSpec {
+            name: Name::parse(tool)?,
+            description: "grant runner tool".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+            grammar: None,
+        }),
+        rig: Arc::clone(&rig),
+        bare: matches!(fixture, Fixture::Bare),
+    });
+    let inject = match fixture {
+        Fixture::Runner => ServiceSet::from_names(["jobs", "run"])?,
+        Fixture::Bare => ServiceSet::from_names(["run"])?,
+    };
+    let builder =
+        ExtensionBuilder::new("fixture", "0.1.0", inject)?.tool(runner, Visibility::Model);
+    let extension = match fixture {
+        Fixture::Runner => builder.build()?,
+        // The user origin puts the extension behind the real grant store, and
+        // the test pre-approves nothing, so the first ungated service call
+        // asks and the question's deadline is the one under test.
+        Fixture::Bare => builder.with_origin(Origin::User, None).build()?,
+    };
+    let product = Product {
+        name: "dal",
+        data_root: data,
+        defaults: "",
+        extensions: vec![extension],
+        bundled: Vec::new(),
+    };
+    let host = start_host(product, config, &tmp, workspace_dir.clone()).await?;
     let agent = host
         .open(
             SessionRef::New {
@@ -611,12 +714,12 @@ async fn a_grant_root_covers_the_directory_it_names_not_look_alike_paths() -> Te
             .await?;
         assert_eq!(seen.outcome, Ok(()), "{label} stays inside the root");
     }
-    let mut escapes = vec![
+    let escapes = vec![
         ("name-prefix-sibling", &sibling),
         ("walk-out-to-sibling", &walk_out),
+        #[cfg(unix)]
+        ("symlink-out", &link),
     ];
-    #[cfg(unix)]
-    escapes.push(("symlink-out", &link));
     for (label, cwd) in escapes {
         let seen = session
             .send(
@@ -630,6 +733,78 @@ async fn a_grant_root_covers_the_directory_it_names_not_look_alike_paths() -> Te
             seen.outcome
         );
     }
+    Ok(())
+}
+
+/// A grant prompt that a background worker raises and nobody answers opens with
+/// its own 120 s deadline, not the 30 m `[ask] timeout` of the real `Config`.
+/// It stays open until 120 s pass, then settles as a typed denial.
+#[tokio::test]
+async fn an_unanswered_grant_prompt_expires_at_120s_not_at_the_ask_timeout() -> TestResult {
+    let mut session = start_bare().await?;
+    session.finish_turn(&Answer::Approve).await?;
+    let workspace = session.workspace.clone();
+    let worker = session
+        .rig
+        .workers
+        .lock()
+        .expect("workers lock")
+        .get("bare")
+        .cloned()
+        .ok_or("no worker for the bare call")?;
+    worker
+        .try_send(Session::run_cmd(
+            "unanswered",
+            &["git", "--version"],
+            &workspace,
+        ))
+        .map_err(|error| format!("the worker did not take the command: {error}"))?;
+    // The bare turn gated nothing, so this command's `run` is the extension's
+    // first gated call: the grant prompt it raises is the first fresh question.
+    // Every non-grant question that arrives instead joins the admission
+    // timeline and keeps waiting bounded by WAIT; nothing is swallowed.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut timeline = Vec::new();
+    let request = loop {
+        let delivery = tokio::time::timeout_at(deadline, session.subscription.next())
+            .await
+            .map_err(|_| {
+                format!("no grant prompt within {WAIT:?}; admission timeline: {timeline:?}")
+            })?
+            .ok_or("the session closed before the grant prompt opened")?;
+        let Delivery::Update(update) = delivery else {
+            continue;
+        };
+        let UpdateKind::RequestOpened(opened) = &update.kind else {
+            continue;
+        };
+        if matches!(opened.question, Question::Grant { .. }) {
+            break opened.clone();
+        }
+        timeline.push(format!("{:?}", opened.question));
+    };
+    assert!(
+        request.timeout >= Duration::from_secs(119) && request.timeout <= Duration::from_secs(120),
+        "a grant prompt waits its own 120 s contract, not the pinned 30 m [ask] timeout: {:?}",
+        request.timeout
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(119)).await;
+    assert!(
+        session.seen.try_recv().is_err(),
+        "the prompt is still open at 119 s"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let expired = session.next_seen().await?;
+    assert_eq!(expired.label, "unanswered");
+    let text = match &expired.outcome {
+        Err(text) => text.as_str(),
+        Ok(()) => return Err("an unanswered grant prompt must not succeed".into()),
+    };
+    assert!(
+        text == "Declined" || text.starts_with("Denied(ServiceNotGranted"),
+        "the timed-out prompt settles as a typed denial: {text}"
+    );
     Ok(())
 }
 

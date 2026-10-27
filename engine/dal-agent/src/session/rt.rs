@@ -16,7 +16,7 @@ use dal_core::{
     Preview, RunRequest, SessionId, ToolClass, Workspace,
 };
 use serde::Deserialize;
-use tokio::sync::{Mutex, OwnedSemaphorePermit};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{SchemeError, ToolError};
@@ -138,54 +138,22 @@ impl SessionRt {
             .cover(&key, &req.argv, cwd, &jobs)
     }
 
-    /// Acquires the process permit for one allowed services run.
+    /// Admits one allowed services run: the session slot, the host process
+    /// permit, and the fd charge, all against one admission deadline.
+    ///
+    /// The session cap comes first, exactly as at the exec door, so a call
+    /// queued behind it holds no host capacity. The returned admission is
+    /// carried by the spawn proof until the spawn door moves it into the lease.
     async fn acquire(
         &self,
+        call: &CallId,
         cancel: &CancellationToken,
-    ) -> Result<(OwnedSemaphorePermit, crate::admission::FdPermit), DenyReason> {
-        let process = self
-            .host
-            .shared
-            .admission
-            .acquire_process(cancel)
+    ) -> Result<crate::admission::ProcessAdmission, DenyReason> {
+        let admission = &self.host.shared.admission;
+        admission
+            .admit_process(&self.jobs, call, &*self.shared, cancel, admission.begin())
             .await
-            .map_err(|error| match error {
-                ToolError::Cancelled => DenyReason::Unavailable {
-                    what: "turn cancelled".into(),
-                },
-                ToolError::Admission { limit } => DenyReason::Unavailable {
-                    what: format!(
-                        "no free {} slot within limits.admission_wait",
-                        limit.as_str()
-                    )
-                    .into(),
-                },
-                _ => DenyReason::Unavailable {
-                    what: "process unavailable".into(),
-                },
-            })?;
-        let fds = self
-            .host
-            .shared
-            .admission
-            .charge_fds(crate::proc::PROCESS_FD_COST, cancel)
-            .await
-            .map_err(|error| match error {
-                ToolError::Cancelled => DenyReason::Unavailable {
-                    what: "turn cancelled".into(),
-                },
-                ToolError::Admission { limit } => DenyReason::Unavailable {
-                    what: format!(
-                        "no free {} slot within limits.admission_wait",
-                        limit.as_str()
-                    )
-                    .into(),
-                },
-                _ => DenyReason::Unavailable {
-                    what: "file descriptors unavailable".into(),
-                },
-            })?;
-        Ok((process, fds))
+            .map_err(|error| crate::admission::admission_denial(&error))
     }
     /// Mints the spawn proof for one allowed services run: process and fd
     /// permits plus the digest-bound proof the spawn door consumes.
@@ -195,12 +163,12 @@ impl SessionRt {
         preview: Preview,
         cancel: &CancellationToken,
     ) -> Result<Approved, DenyReason> {
-        let (permit, fds) = self.acquire(cancel).await?;
+        let admitted = self.acquire(call, cancel).await?;
         let digest = preview.digest;
         self.proofs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(call.clone(), (digest, permit, fds, None));
+            .insert(call.clone(), (digest, admitted, None));
         Ok(Approved::new(
             call.clone(),
             digest,
@@ -269,7 +237,7 @@ impl ToolCxRuntime for SessionRt {
             if self.covering(who, req).await.is_none() {
                 return Ok(None);
             }
-            let (permit, fds) = self.acquire(cancel).await?;
+            let admitted = self.acquire(call, cancel).await?;
             // The wait for a slot may outlast the run that earned the grant.
             let Some(covering) = self.covering(who, req).await else {
                 return Err(DenyReason::NotGranted);
@@ -278,7 +246,7 @@ impl ToolCxRuntime for SessionRt {
             self.proofs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(call.clone(), (digest, permit, fds, CallKey::of(who)));
+                .insert(call.clone(), (digest, admitted, CallKey::of(who)));
             Ok(Some(Approved::new(
                 call.clone(),
                 digest,
@@ -306,7 +274,7 @@ impl ToolCxRuntime for SessionRt {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(approved.call());
-        let Some((digest, permit, fd_permit, key)) = proof else {
+        let Some((digest, admitted, key)) = proof else {
             return Err(ToolError::Denied(DenyReason::NotGranted));
         };
         if let Some(key) = key {
@@ -333,6 +301,7 @@ impl ToolCxRuntime for SessionRt {
                 service_tool().as_str(),
             )));
         }
+        let lease = admitted.lease(Arc::clone(&self.host.shared.snapshots));
         spawn_process(
             argv,
             approved.call().clone(),
@@ -342,8 +311,7 @@ impl ToolCxRuntime for SessionRt {
             &self.jobs_dir,
             &self.env_snapshot,
             launcher,
-            permit,
-            Some(fd_permit),
+            lease,
         )
         .map(|proc| {
             let progress = Arc::clone(&self.shared);
@@ -728,12 +696,11 @@ impl SchemeCxRuntime for SchemeRuntime {
     }
 }
 
-/// One minted spawn proof: the bound digest, the process slot, and the fd
-/// permit released when the child settles.
+/// One minted spawn proof: the bound digest, the admitted process capacity
+/// (session slot, host permit, fd charge), and the grant key of a scoped run.
 type SpawnProof = (
     Option<[u8; 32]>,
-    OwnedSemaphorePermit,
-    crate::admission::FdPermit,
+    crate::admission::ProcessAdmission,
     Option<CallKey>,
 );
 

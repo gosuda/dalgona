@@ -5,12 +5,13 @@
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU8, NonZeroU64};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use dal_core::ext::{NativeOp, OpId};
 use dal_core::{
-    CallId, ModelPrice, ModelRequest, OnError, ScopeSpec, ScopeSpecError, ScopeUsage, StreamEvent,
+    AgentsReply, CallId, HandleStatus, ModelPrice, ModelRequest, OnError, ScopeSpec,
+    ScopeSpecError, ScopeUsage, SessionId, StreamEvent,
 };
 use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -40,6 +41,13 @@ pub(crate) const MAX_HOST_RESULT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) struct SessionTasks {
     tracker: TaskTracker,
     stop: CancellationToken,
+    /// Shared admission gate: `true` while the owner still registers work.
+    ///
+    /// Every clone of one owner shares the gate, so admission is
+    /// linearizable against [`SessionTasks::stop`]: a registration and the
+    /// closing of admission are ordered by one lock, and no registration
+    /// can slip in after the tracker closed.
+    gate: Arc<Mutex<bool>>,
 }
 
 impl SessionTasks {
@@ -48,7 +56,51 @@ impl SessionTasks {
         Self {
             tracker: TaskTracker::new(),
             stop: CancellationToken::new(),
+            gate: Arc::new(Mutex::new(true)),
         }
+    }
+
+    /// Creates a child owner attached to `parent` and its runtime.
+    ///
+    /// The child stop token derives from the parent stop token, so parent
+    /// cancellation cascades into the child. Exactly one parent-tracked
+    /// drain watcher is admitted under the parent gate before this
+    /// returns: it waits for the child stop token to be cancelled, then
+    /// drains the child through the idempotent [`SessionTasks::stop`]. A
+    /// parent whose admission already closed returns a child whose
+    /// admission is closed: nothing registers, nothing detaches, and late
+    /// work is dropped with cancelled semantics.
+    pub(crate) fn child(parent: &Self, runtime: &tokio::runtime::Handle) -> Self {
+        let child = Self {
+            tracker: TaskTracker::new(),
+            stop: parent.stop.child_token(),
+            gate: Arc::new(Mutex::new(true)),
+        };
+        let open = parent.lock_gate();
+        if *open {
+            let drain = child.clone();
+            drop(parent.tracker.spawn_on(
+                async move {
+                    drain.stop.cancelled().await;
+                    drain.stop().await;
+                },
+                runtime,
+            ));
+        } else {
+            *child.lock_gate() = false;
+        }
+        drop(open);
+        child
+    }
+
+    /// Cancels owned work synchronously without draining.
+    ///
+    /// An early relay-stream drop calls this: the parent-tracked drain of
+    /// a child owner observes the cancellation and performs the bounded
+    /// asynchronous stop, so no runtime handle is captured and nothing is
+    /// spawned at drop time.
+    pub(crate) fn cancel(&self) {
+        self.stop.cancel();
     }
 
     /// Returns the number of session-owned tasks still tracked.
@@ -57,10 +109,17 @@ impl SessionTasks {
     }
 
     /// Runs `work` only while the owning session remains open.
+    ///
+    /// A closed owner drops `work` with cancelled semantics; work is never
+    /// detached from its owner.
     pub(crate) fn spawn<F>(&self, work: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let open = self.lock_gate();
+        if !*open {
+            return;
+        }
         let stop = self.stop.clone();
         drop(self.tracker.spawn(async move {
             let _ = stop.run_until_cancelled_owned(work).await;
@@ -68,18 +127,40 @@ impl SessionTasks {
     }
 
     /// Spawns cleanup work that the owner drains before session shutdown.
+    ///
+    /// A closed owner drops `work` with cancelled semantics; work is never
+    /// detached from its owner.
     pub(crate) fn spawn_cleanup<F>(&self, handle: &tokio::runtime::Handle, work: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let open = self.lock_gate();
+        if !*open {
+            return;
+        }
         drop(self.tracker.spawn_on(work, handle));
     }
 
     /// Cancels and waits for every task before session shutdown continues.
+    ///
+    /// Admission closes together with the tracker under one lock release,
+    /// then the token cancels before the wait, so token-guarded work ends
+    /// and the drain joins it. The lock is never held across the await.
     pub(crate) async fn stop(&self) {
+        {
+            let mut open = self.lock_gate();
+            *open = false;
+            self.tracker.close();
+        }
         self.stop.cancel();
-        self.tracker.close();
         self.tracker.wait().await;
+    }
+
+    /// Locks the shared admission gate.
+    fn lock_gate(&self) -> MutexGuard<'_, bool> {
+        self.gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -153,6 +234,10 @@ struct TaskRecord {
     cancel: CancellationToken,
     /// The resolved model price, when this task is a model request.
     price: Option<ModelPrice>,
+    /// The measured usage charged by this task.
+    usage: ScopeUsage,
+    /// The child session started by an agent task.
+    member: Option<SessionId>,
 }
 
 /// One invocation-owned scope.
@@ -394,6 +479,8 @@ impl ScopeTable {
             delivered: false,
             cancel: entry.cancel.child_token(),
             price,
+            usage: ScopeUsage::default(),
+            member: None,
         };
         entry.admitted = entry.admitted.saturating_add(1);
         entry.tasks.push(id);
@@ -480,6 +567,11 @@ impl ScopeTable {
         let op = record.op.clone();
         let was_issued = record.state == TaskState::Issued;
         let charge = scope_charge(&op, &o, record.price.as_ref());
+        let usage = match &charge {
+            Charge::Measured(usage) => *usage,
+            Charge::Skip | Charge::Unmetered => ScopeUsage::default(),
+        };
+        let member = member_session(&op, &o);
         if over_invocation || over_host {
             if let Some(entry) = self.scopes.get_mut(&scope) {
                 entry.book(&charge);
@@ -491,6 +583,8 @@ impl ScopeTable {
         let failed = !matches!(&o, OpOutcome::Ok { .. });
         if let Some(record) = self.tasks.get_mut(&t) {
             record.state = TaskState::Done;
+            record.usage = usage;
+            record.member = member;
             record.outcome = Some(o);
         }
         if let Some(entry) = self.scopes.get_mut(&scope) {
@@ -578,6 +672,40 @@ impl ScopeTable {
         }
         let all: Vec<TaskId> = self.tasks.keys().copied().collect();
         all.into_iter().filter_map(|t| self.stop_root(t)).collect()
+    }
+
+    /// Terminalizes every scope and task synchronously for the owner.
+    ///
+    /// The invocation-abandon boundary calls this while holding the host
+    /// tables: every scope not yet closed latches a
+    /// [`ScopeSpecError::Cancelled`] refusal once (dropping its deadline on
+    /// that first latch), cancels its token, and transitions to closing;
+    /// every unfinished task then settles with
+    /// [`OpOutcome::Terminal`](`crate::ext::HostTerminal::Cancelled`).
+    /// Idempotent, await-free, one `&mut self`; recorded outcomes stay
+    /// projectable and late arrivals absorb. Afterwards `runnable` is
+    /// empty, `submit` refuses, and `next_deadline` is `None`.
+    pub(crate) fn terminalize(&mut self) {
+        let ids: Vec<ScopeId> = self.scopes.keys().copied().collect();
+        for s in ids {
+            let Some(entry) = self.scopes.get_mut(&s) else {
+                continue;
+            };
+            if entry.state == ScopeState::Closed {
+                continue;
+            }
+            if entry.refusal.is_none() {
+                entry.refusal = Some(ScopeSpecError::Cancelled);
+                entry.deadline = None;
+            }
+            entry.cancel.cancel();
+            let _ = entry.transition(ScopeEvent::Cancel);
+            let members = entry.tasks.clone();
+            for task in members {
+                self.settle_stopped(task, OpOutcome::Terminal(HostTerminal::Cancelled));
+            }
+            self.close_if_drained(s);
+        }
     }
 
     /// Settles one unfinished task as owner-cancelled and recoverable.
@@ -730,6 +858,59 @@ impl ScopeTable {
     #[must_use]
     pub(crate) fn call_id(&self, t: TaskId) -> Option<CallId> {
         self.tasks.get(&t).map(|record| record.call.clone())
+    }
+
+    /// Reads one task's actual status, usage, member identity, and failure.
+    #[must_use]
+    pub(crate) fn probe(&self, t: TaskId) -> Option<crate::ext::script::TaskProbe> {
+        let record = self.tasks.get(&t)?;
+        let status = match record.state {
+            TaskState::Queued => HandleStatus::Pending,
+            TaskState::Issued => HandleStatus::Running,
+            TaskState::Done => match record.outcome.as_ref() {
+                Some(OpOutcome::Ok { .. }) => HandleStatus::Done,
+                Some(OpOutcome::Failed { failure, .. })
+                    if failure.code == FailureCode::Cancelled =>
+                {
+                    HandleStatus::Cancelled
+                }
+                Some(OpOutcome::Failed { .. }) => HandleStatus::Failed,
+                Some(OpOutcome::Terminal(_)) | None => HandleStatus::Cancelled,
+            },
+        };
+        let error = match record.outcome.as_ref() {
+            Some(OpOutcome::Failed { failure, .. }) => Some(failure.clone()),
+            _ => None,
+        };
+        Some(crate::ext::script::TaskProbe {
+            status,
+            usage: record.usage,
+            member: record.member,
+            error,
+        })
+    }
+
+    /// Returns the child session owned by one task, if the start settled.
+    #[must_use]
+    pub(crate) fn member(&self, t: TaskId) -> Option<SessionId> {
+        self.tasks.get(&t).and_then(|record| record.member)
+    }
+}
+
+fn member_session(op: &OpId, outcome: &OpOutcome) -> Option<SessionId> {
+    if !matches!(op, OpId::Native(NativeOp::AgentsStart)) {
+        return None;
+    }
+    let OpOutcome::Ok {
+        value: OpValue::Json(value),
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    match value.decode_as::<AgentsReply>().ok()? {
+        AgentsReply::Started { id } => Some(id),
+        _ => None,
     }
 }
 

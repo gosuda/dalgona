@@ -49,6 +49,7 @@ fn dangling_journal(workspace: Workspace) -> Vec<Record> {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test".into(),
+            provider: None,
             route: None,
             content: vec![
                 Block::ToolCall {
@@ -113,6 +114,7 @@ fn mixed_journal(workspace: Workspace) -> Vec<Record> {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test".into(),
+            provider: None,
             route: None,
             content: vec![
                 call("ask-call", "ask"),
