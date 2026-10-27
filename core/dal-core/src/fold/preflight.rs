@@ -246,16 +246,18 @@ impl Session {
                 let reminder = usize::from(
                     matches!(outcome.verdict(), HookVerdict::BeforeTurn(Some(text)) if !text.is_empty()),
                 );
-                // `begin_turn` journals the reminder, then runs the boundary.
+                // `begin_turn` journals the pending mail, the reminder, then
+                // runs the boundary; one entry carries the whole delivery.
+                let mail = usize::from(!self.pending_mail.is_empty());
                 match &self.phase {
                     Phase::Settling {
                         follow_up: Some((next_turn, _)),
                         ..
                     } if *next_turn == turn => {
-                        self.reserve_entries(1 + reminder + self.boundary_entries())
+                        self.reserve_entries(1 + reminder + mail + self.boundary_entries())
                     }
                     Phase::Opening { turn: active, .. } if *active == turn => {
-                        self.reserve_entries(reminder + self.boundary_entries())
+                        self.reserve_entries(reminder + mail + self.boundary_entries())
                     }
                     _ => Ok(()),
                 }

@@ -1,8 +1,9 @@
-use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, Step, Tree, TurnStage};
+use super::session::MAILBOX_WAITING_LIMIT;
+use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, PendingMail, Step, Tree, TurnStage};
 use super::{
     BTreeMap, Block, CallId, Effect, Emit, Entry, EntryId, EntryKind, EntryView, JobEvent, JobId,
-    JobKind, JobOutcome, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session,
-    TurnEndStop, TurnId,
+    JobKind, JobOutcome, JournalPart, MailMode, Name, NonZeroU64, Phase, Record, ReplayError,
+    Session, TurnEndStop, TurnId,
 };
 use crate::journal::TurnSequence;
 
@@ -85,12 +86,19 @@ pub(super) fn replay_tool_name(tool: &str, record: &str) -> Result<Name, ReplayE
         .map_err(|_| contradiction(format!("{record} record contains an invalid tool name")))
 }
 
+pub(super) struct PendingWake {
+    pub(super) turn: TurnId,
+    pub(super) jobs: Vec<JobId>,
+}
+
 /// Record-order state carried while folding one journal into a session.
 pub(super) struct Replay {
     pub(super) session: Session,
     pub(super) active_turn: Option<TurnId>,
     pub(super) calls: Vec<ReplayCall>,
     pub(super) started_jobs: Vec<(JobId, Option<JobKind>)>,
+    pub(super) pending_wakes: Vec<PendingWake>,
+    pub(super) opening_wake: Option<Vec<JobId>>,
     pub(super) turns: TurnSequence,
     pub(super) last_completed_turn: u64,
     pub(super) max_entry: u64,
@@ -104,6 +112,8 @@ impl Replay {
             active_turn: None,
             calls: Vec::new(),
             started_jobs: Vec::new(),
+            pending_wakes: Vec::new(),
+            opening_wake: None,
             turns: TurnSequence::default(),
             last_completed_turn: 0,
             max_entry: 0,
@@ -132,10 +142,12 @@ impl Replay {
 
     pub(super) fn protocol(&mut self, record: &Record) -> Result<(), ReplayError> {
         self.feed_totals(record)?;
+        let opening_wake = self.opening_wake.take();
         match record {
             Record::Boot { r#gen, .. } => {
                 self.session.generation = Some(*r#gen);
                 self.turns.expire_pending();
+                self.pending_wakes.clear();
             }
             Record::TurnReserved { turn, .. } => self
                 .turns
@@ -151,9 +163,73 @@ impl Replay {
             Record::TurnEnd { turn, .. } => self.turn_end(*turn)?,
             Record::WakeAttempt {
                 turn, count, jobs, ..
+            } => self.wake_attempt(*turn, *count, jobs)?,
+            Record::MailDelivered {
+                at,
+                turn,
+                entry,
+                mails,
             } => {
-                self.wake_attempt(*turn, *count)?;
-                self.session.delivered_jobs.extend(jobs.iter().copied());
+                if self.active_turn != Some(*turn) {
+                    return Err(contradiction(
+                        "mail delivered outside the turn that started it",
+                    ));
+                }
+                // The fold holds the authoritative copy of every waiting
+                // row, so the delivery must match it byte for byte before
+                // anything mutates: a tampered or foreign line consumes
+                // nothing instead of replaying text the retained row never
+                // held. A pending position exists only for a `NextTurn` row
+                // this session addressed to itself, which is the recipient
+                // a stored position implies.
+                for (index, mail) in mails.iter().enumerate() {
+                    if mails[..index]
+                        .iter()
+                        .any(|prior| prior.position == mail.position)
+                    {
+                        return Err(contradiction("mail delivered repeats a position"));
+                    }
+                    let pending = self
+                        .session
+                        .pending_mail
+                        .iter()
+                        .find(|pending| pending.position == mail.position)
+                        .ok_or_else(|| contradiction("mail delivered was never waiting"))?;
+                    if pending.text != mail.text {
+                        return Err(contradiction(
+                            "mail delivered text differs from the waiting mail",
+                        ));
+                    }
+                }
+                if self.session.tree.entries.contains_key(entry) {
+                    return Err(contradiction("mail delivery reused a tree entry"));
+                }
+                // Validated whole: now consume exactly the validated
+                // positions in one sweep, then materialize the entry they
+                // name with the parent the live fold stamped (the leaf so
+                // far).
+                self.session
+                    .pending_mail
+                    .retain(|pending| !mails.iter().any(|mail| mail.position == pending.position));
+                let parts = mails
+                    .iter()
+                    .map(|mail| JournalPart::Text {
+                        text: mail.text.clone(),
+                    })
+                    .collect();
+                let derived = Entry {
+                    id: *entry,
+                    parent: self.session.tree.leaf,
+                    at: *at,
+                    kind: EntryKind::User { parts },
+                };
+                self.max_entry = self.max_entry.max(entry.get());
+                self.session.tree.append(derived);
+            }
+            Record::User(_) => {
+                if let Some(jobs) = opening_wake {
+                    self.session.delivered_jobs.extend(jobs);
+                }
             }
             Record::Job { job, event, .. } => self.job(*job, event)?,
             Record::Reminder(Entry {
@@ -218,9 +294,19 @@ impl Replay {
         {
             self.session.wake_run = 0;
             self.session.wake_attempt_turn = None;
+            self.pending_wakes.clear();
         }
         self.calls.clear();
+        self.opening_wake = self.claim_wake_attempt(turn);
         Ok(())
+    }
+
+    fn claim_wake_attempt(&mut self, turn: TurnId) -> Option<Vec<JobId>> {
+        let index = self
+            .pending_wakes
+            .iter()
+            .position(|pending| pending.turn == turn)?;
+        Some(self.pending_wakes.swap_remove(index).jobs)
     }
 
     pub(super) fn assistant_calls(&mut self, entry: &Entry) {
@@ -303,9 +389,21 @@ impl Replay {
         Ok(())
     }
 
-    pub(super) fn wake_attempt(&mut self, turn: TurnId, count: u32) -> Result<(), ReplayError> {
+    pub(super) fn wake_attempt(
+        &mut self,
+        turn: TurnId,
+        count: u32,
+        jobs: &[JobId],
+    ) -> Result<(), ReplayError> {
         if count == 0 || count > MAX_WAKE_RUN {
             return Err(contradiction("wake count is outside the configured limit"));
+        }
+        if self
+            .pending_wakes
+            .iter()
+            .any(|pending| pending.turn == turn)
+        {
+            return Err(contradiction("wake attempt repeats a turn"));
         }
         self.session.wake_run = count;
         self.session.wake_attempt_turn = Some(turn);
@@ -314,6 +412,10 @@ impl Replay {
                 .reserve(turn)
                 .map_err(|error| contradiction(error.to_string()))?;
         }
+        self.pending_wakes.push(PendingWake {
+            turn,
+            jobs: jobs.to_vec(),
+        });
         Ok(())
     }
 
@@ -446,7 +548,34 @@ impl Replay {
                     .promoted
                     .insert(replay_tool_name(tool, "tool-promoted")?);
             }
+            Record::Mail(mail) => self.note_mail(mail)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Folds one journaled mail row: every row mints its journal-wide
+    /// position, while only this session's own undelivered `NextTurn` rows
+    /// become pending; `Aside` and `Steer` rows, foreign recipients, and
+    /// delivered history never count against the bound. The waiting check
+    /// precedes the position mint, so a rejected row mutates nothing.
+    pub(super) fn note_mail(&mut self, mail: &crate::Mail) -> Result<(), ReplayError> {
+        let session = &mut self.session;
+        let waiting = mail.mode == MailMode::NextTurn && session.id.is_some_and(|id| mail.to == id);
+        if waiting && session.pending_mail.len() >= MAILBOX_WAITING_LIMIT {
+            return Err(contradiction(
+                "waiting mail exceeds the recipient's pending limit",
+            ));
+        }
+        let Some(position) = session.next_mail_position() else {
+            return Err(contradiction("mail position space exhausted"));
+        };
+        session.mail_rows = position.get();
+        if waiting {
+            session.pending_mail.push(PendingMail {
+                position,
+                text: mail.text.clone(),
+            });
         }
         Ok(())
     }
