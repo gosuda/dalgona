@@ -87,6 +87,7 @@ pub(crate) fn route_label(route: &ModelRoute) -> String {
                 Family::GoogleGenerativeAi => "google-generative-ai",
                 Family::GoogleVertex => "google-vertex",
                 Family::GoogleGeminiCli => "google-gemini-cli",
+                Family::GoogleCloudCodeAssist => "google-cloud-code-assist",
                 Family::GoogleAntigravity => "google-antigravity",
                 Family::Mistral => "mistral",
                 Family::Ollama => "ollama",

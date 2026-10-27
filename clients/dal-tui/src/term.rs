@@ -45,7 +45,7 @@ pub trait TermIo: Send {
     /// # Errors
     /// Returns the terminal I/O error when the size cannot be read.
     fn size(&self) -> io::Result<(u16, u16)>;
-    /// Writes one complete logical output and flushes it once.
+    /// Writes one chunk of output and flushes it once. A terminal sequence may span calls.
     ///
     /// # Errors
     /// Returns the terminal I/O error when the write or flush fails.
@@ -527,6 +527,7 @@ fn encode_key(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
     bytes
 }
 
+#[cfg(any(unix, test))]
 /// What [`take_position_report`] extracted from queued input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PositionScan {
@@ -538,6 +539,7 @@ pub(crate) enum PositionScan {
     Waiting,
 }
 
+#[cfg(any(unix, test))]
 /// Removes from `bytes` the first `CSI row ; column R` that is immediately
 /// followed by `CSI 0 n` or `CSI 3 n`, together with that status packet
 /// ([`PositionScan::Found`]). Otherwise removes the first status packet that
@@ -588,6 +590,7 @@ pub(crate) fn take_position_report(bytes: &mut Vec<u8>) -> PositionScan {
     PositionScan::Waiting
 }
 
+#[cfg(any(unix, test))]
 /// Returns the byte length of a leading `CSI 0n`/`CSI 3n` packet, else 0.
 fn status_packet_len(bytes: &[u8]) -> usize {
     match bytes {
@@ -596,6 +599,7 @@ fn status_packet_len(bytes: &[u8]) -> usize {
     }
 }
 
+#[cfg(any(unix, test))]
 /// Returns the first index of `needle` in `haystack` at or after `from`.
 fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     haystack
@@ -605,6 +609,7 @@ fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
         .map(|offset| from + offset)
 }
 
+#[cfg(any(unix, test))]
 /// One CSI sequence recognized while scanning query responses.
 enum ResponseCsi {
     /// The sequence has no final byte yet.
@@ -621,6 +626,7 @@ enum ResponseCsi {
     Other(usize),
 }
 
+#[cfg(any(unix, test))]
 /// Parses the CSI sequence at `bytes[0] == ESC, bytes[1] == '['`.
 fn parse_response_csi(bytes: &[u8]) -> ResponseCsi {
     for (offset, byte) in bytes.iter().enumerate().skip(2) {
@@ -633,6 +639,7 @@ fn parse_response_csi(bytes: &[u8]) -> ResponseCsi {
     ResponseCsi::Partial
 }
 
+#[cfg(any(unix, test))]
 /// Classifies a complete CSI by parameter bytes and final byte.
 fn classify_response(parameters: &[u8], final_byte: u8, length: usize) -> ResponseCsi {
     if parameters == b"200" && final_byte == b'~' {
@@ -655,6 +662,7 @@ fn classify_response(parameters: &[u8], final_byte: u8, length: usize) -> Respon
     ResponseCsi::Other(length)
 }
 
+#[cfg(any(unix, test))]
 /// Parses `row ; column` report parameters; both must be `u16 >= 1`.
 fn parse_report_parameters(parameters: &[u8]) -> Option<(u16, u16)> {
     let text = std::str::from_utf8(parameters).ok()?;
@@ -751,6 +759,35 @@ fn colorfgbg_theme(value: &str) -> Option<&'static str> {
             7 | 15 => Some("flexoki-light"),
             _ => None,
         })
+}
+
+const OSC52_CHUNK: usize = 4096;
+const OSC52_HEADER: &[u8] = b"\x1b]52;c;";
+const OSC52_ST: &[u8] = b"\x1b\\";
+
+/// Writes one clipboard copy as an OSC 52 sequence: the header, the base64
+/// payload in writes of at most 4096 bytes, then the ST terminator.
+///
+/// A refused write while the sequence is open is followed by one best-effort
+/// string terminator. A refused terminator is returned without a retry.
+///
+/// # Errors
+/// Returns the first refused write; the rest of the copy is not written.
+pub(crate) fn write_clipboard(io: &dyn TermIo, text: &str) -> io::Result<()> {
+    use base64::Engine as _;
+
+    let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    open_write(io, OSC52_HEADER)?;
+    for chunk in payload.as_bytes().chunks(OSC52_CHUNK) {
+        open_write(io, chunk)?;
+    }
+    io.write(OSC52_ST)
+}
+
+fn open_write(io: &dyn TermIo, bytes: &[u8]) -> io::Result<()> {
+    io.write(bytes).inspect_err(|_| {
+        let _ = io.write(OSC52_ST);
+    })
 }
 
 #[cfg(test)]

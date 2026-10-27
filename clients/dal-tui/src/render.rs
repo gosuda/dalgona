@@ -1278,6 +1278,93 @@ fn resolve_colors(mut rows: Vec<RenderRow>, theme: &ResolvedTheme) -> Vec<Render
     rows
 }
 
+/// Resolves every diagram a one-shot settled frame can project, using the
+/// explicitly synchronous cache API before any rows are built.
+pub(crate) fn pre_resolve_frame_diagrams(
+    view: &View,
+    columns: u16,
+    settings: DiagramSettings,
+    cache: &RenderCache,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let cap = prose_cap(usize::from(columns));
+    for entry in &view.entries.items {
+        match &entry.kind {
+            EntryKind::User { parts } => {
+                let text = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        JournalPart::Text { text } => Some(text.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                pre_resolve_verbatim(&text, cap.saturating_sub(2), cache);
+            }
+            EntryKind::Assistant { content, .. } => {
+                for block in content {
+                    if let Block::Text { text, .. } = block {
+                        pre_resolve_markdown(text, cap, cache);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for request in &view.open {
+        match &request.question {
+            dal_core::Question::Approval { preview, .. } => {
+                pre_resolve_verbatim(&preview.body, usize::from(columns), cache);
+            }
+            dal_core::Question::Select {
+                preview: Some(preview),
+                ..
+            } => pre_resolve_markdown(&preview.body, usize::from(columns), cache),
+            _ => {}
+        }
+    }
+}
+
+fn pre_resolve_verbatim(text: &str, cap: usize, cache: &RenderCache) {
+    let spans = crate::markdown::fence_spans(text);
+    let [span] = spans.as_slice() else {
+        return;
+    };
+    if span.span.start == 0
+        && text[span.span.end..]
+            .chars()
+            .all(|character| matches!(character, '\r' | '\n'))
+    {
+        pre_resolve_span(text, span, cap, cache);
+    }
+}
+
+fn pre_resolve_markdown(text: &str, cap: usize, cache: &RenderCache) {
+    for span in crate::markdown::fence_spans(text) {
+        pre_resolve_span(text, &span, cap, cache);
+    }
+}
+
+fn pre_resolve_span(
+    text: &str,
+    span: &crate::markdown::FenceSpan,
+    cap: usize,
+    cache: &RenderCache,
+) {
+    if !span.routable {
+        return;
+    }
+    if let Some(kind) = DiagramKind::parse(&text[span.info.clone()]) {
+        let _ = cache.get_or_render(
+            kind,
+            crate::markdown::fence_body(text, span).as_bytes(),
+            cap,
+        );
+    }
+}
+
 /// Renders the settled form of one visible history entry.
 pub(crate) fn entry_rows(
     entry: &EntryView,
@@ -1975,6 +2062,24 @@ mod tests {
         assert_eq!(off_cache.renders(), 0);
 
         let on_cache = RenderCache::default();
+        let generation = on_cache.generation();
+        let _ = entry_rows(
+            &entry,
+            80,
+            WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &on_cache,
+        );
+        for _ in 0..200 {
+            if on_cache.generation() > generation {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            on_cache.generation() > generation,
+            "background renderer did not finish"
+        );
         let on_rows = entry_rows(
             &entry,
             80,
@@ -2017,6 +2122,7 @@ mod tests {
             kind: EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "model".into(),
+                provider: None,
                 content: vec![Block::Text {
                     text: fence.into(),
                     replay: None,
@@ -2038,6 +2144,19 @@ mod tests {
         let settings = DiagramSettings { enabled: true };
         let cache = RenderCache::default();
         let hint = "ctrl+o expands";
+        let generation = cache.generation();
+        let _ = entry_rows(&user, 80, WidthMode::Narrow, settings, &cache);
+        let _ = entry_rows(&assistant, 80, WidthMode::Narrow, settings, &cache);
+        for _ in 0..200 {
+            if cache.generation() > generation {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cache.generation() > generation,
+            "background renderer did not finish"
+        );
         assert!(
             !entry_rows(&user, 80, WidthMode::Narrow, settings, &cache)
                 .iter()
@@ -2249,6 +2368,7 @@ mod tests {
             kind: EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "model".into(),
+                provider: None,
                 content: vec![Block::Text {
                     text: format!("intro\n{}\noutro", fences.join("\nmiddle\n")).into(),
                     replay: None,
@@ -2306,12 +2426,31 @@ mod tests {
     #[test]
     fn an_embedded_ready_fence_carries_the_expand_header_at_its_position() {
         let entry = assistant_with_fences(&["```mermaid\ngraph TD; A-->B\n```"]);
+        let cache = RenderCache::default();
+        let generation = cache.generation();
+        let _ = entry_rows(
+            &entry,
+            80,
+            WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &cache,
+        );
+        for _ in 0..200 {
+            if cache.generation() > generation {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cache.generation() > generation,
+            "background renderer did not finish"
+        );
         let rows = entry_rows(
             &entry,
             80,
             WidthMode::Narrow,
             DiagramSettings { enabled: true },
-            &RenderCache::default(),
+            &cache,
         );
         let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
         let header = texts
@@ -2396,6 +2535,7 @@ mod tests {
             kind: EntryKind::Assistant {
                 api: dal_core::Family::Chat,
                 model: "model".into(),
+                provider: None,
                 content: vec![Block::Reasoning {
                     text: "step one\nstep two".into(),
                     replay: dal_core::RawJson::null(),

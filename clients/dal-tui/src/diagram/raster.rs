@@ -24,6 +24,10 @@ pub fn render_svg(svg: &[u8], kind: super::DiagramKind, fonts: &FontSnapshot) ->
     let missing = &missing_font;
     let mut options = resvg::usvg::Options {
         fontdb: Arc::clone(&fonts.0),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
         ..resvg::usvg::Options::default()
     };
     let select_font = options.font_resolver.select_font;
@@ -34,7 +38,7 @@ pub fn render_svg(svg: &[u8], kind: super::DiagramKind, fonts: &FontSnapshot) ->
         }
         selected
     });
-    let Ok(tree) = resvg::usvg::Tree::from_data_nested(svg, &options) else {
+    let Ok(tree) = resvg::usvg::Tree::from_data(svg, &options) else {
         return fallback(invalid_kind(kind));
     };
     if missing_font.load(Ordering::SeqCst) {
@@ -223,5 +227,48 @@ mod tests {
         };
         assert_eq!(png_dimensions(&png), Some((64, 64)));
         assert_eq!(png_dimensions(b"not a PNG"), None);
+    }
+
+    #[test]
+    fn existing_file_and_data_image_hrefs_never_reach_the_raster() {
+        use base64::Engine as _;
+
+        let DiagramOutcome::Pixels(baseline) =
+            render_svg(SVG.as_bytes(), DiagramKind::D2, &FontSnapshot::default())
+        else {
+            panic!("geometry must rasterize without fonts");
+        };
+        let red_svg = SVG.replace("<rect ", "<rect fill=\"#ff0000\" ");
+        let DiagramOutcome::Pixels(red_png) = render_svg(
+            red_svg.as_bytes(),
+            DiagramKind::D2,
+            &FontSnapshot::default(),
+        ) else {
+            panic!("red probe image must rasterize");
+        };
+        let dir = tempfile::tempdir().expect("tempdir for image href probe");
+        let file_path = dir.path().join("probe.png");
+        std::fs::write(&file_path, &*red_png).expect("write probe png");
+        let file_href = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"><rect width=\"64\" height=\"64\"/><image href=\"{}\" width=\"64\" height=\"64\"/></svg>",
+            file_path.display()
+        );
+        let data_uri = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&*red_png)
+        );
+        let data_href = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"><rect width=\"64\" height=\"64\"/><image href=\"{data_uri}\" width=\"64\" height=\"64\"/></svg>"
+        );
+        for candidate in [&file_href, &data_href] {
+            let DiagramOutcome::Pixels(rendered) = render_svg(
+                candidate.as_bytes(),
+                DiagramKind::D2,
+                &FontSnapshot::default(),
+            ) else {
+                panic!("blocked image href must still rasterize geometry");
+            };
+            assert_eq!(rendered, baseline);
+        }
     }
 }

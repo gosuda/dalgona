@@ -252,6 +252,7 @@ fn reasoning_entry(id: u64, text: &str) -> Result<EntryView, dal_tui::TuiError> 
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "probe-model".into(),
+            provider: None,
             content: vec![Block::Reasoning {
                 text: text.into(),
                 replay: RawJson::null(),
@@ -304,6 +305,7 @@ fn diagram_entry(id: u64) -> Result<EntryView, dal_tui::TuiError> {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "probe-model".into(),
+            provider: None,
             content: vec![Block::Text {
                 text: "intro\n```mermaid\ngraph TD; A-->B\n```\noutro".into(),
                 replay: None,
