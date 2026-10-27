@@ -8,12 +8,14 @@ mod request;
 mod set;
 mod shape;
 mod transport;
+pub(crate) mod wire;
 
 pub use api::{Http, Provider};
 pub use config::{
     AuthStyle, ProviderConfig, ProviderConfigError, ProviderEntry, ProviderSettings,
     ScriptedSelection, Transport,
 };
+pub(crate) use config::{Origin, Origins};
 pub use def::{
     Completion, Device, Hook, KeySpec, OAuthSpec, PROVIDERS, ProviderDef, QueryValue, Redirect,
     find,

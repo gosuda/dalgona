@@ -7,6 +7,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::{PROVIDERS, ProviderDef, Shape, def::FamilyPolicy};
+use crate::auth::credential::OAuthCredential;
 
 /// The transport used to reach a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +35,40 @@ pub enum AuthStyle {
     /// Send no credential: the entry authenticates nothing, so no
     /// authorization header is built for it and none is ever invented.
     None,
+    /// Send the credential as `cf-aig-authorization: Bearer <key>`: the
+    /// Cloudflare AI Gateway key header. The gateway sends no
+    /// `authorization` and no `x-api-key` on any wire; this style never
+    /// selects Azure routing, which `ApiKey` alone keeps.
+    CfAigAuthorization,
+}
+
+/// How one of the three connection defaults got its value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Origin {
+    /// A built-in row default or a family default supplied by decode: no key
+    /// named it in the entry's own table. Only a row-default base may be
+    /// materialized from the captured environment, and only a row-default
+    /// auth lets a wire's own style apply.
+    #[default]
+    RowDefault,
+    /// The entry's own table named the key, so the value wins everywhere: an
+    /// explicit `api` narrows the served wires, an explicit `base_url` is
+    /// authoritative over every wire, an explicit `auth` overrides every
+    /// wire style.
+    Explicit,
+}
+
+/// Where each connection default came from, recorded at decode from the raw
+/// key presence of the entry's own table, before any default merges. Cold
+/// metadata beside the hot `family`, `base_url`, and `auth` fields.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Origins {
+    /// Whether the table named `api`.
+    pub api: Origin,
+    /// Whether the table named `base_url`.
+    pub base: Origin,
+    /// Whether the table named `auth`.
+    pub auth: Origin,
 }
 
 /// Provider-specific settings decoded from the effective configuration.
@@ -61,18 +96,8 @@ pub struct ProviderConfig {
 /// `providers.<id>` table, trimmed; an absent key leaves it empty. Nothing is
 /// inherited from a built-in row and nothing is read from the environment:
 /// the families that consume a setting overlay the environment themselves.
-/// `base_url_defaulted` is the one field without a same-named key: it records
-/// whether the entry's own table named no `base_url`, so the entry carries
-/// its built-in row default. Preparation consults the captured environment
-/// for such an entry only; an explicit URL wins even when it equals the row
-/// default, because omission is what the table said, not what the value is.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProviderSettings {
-    /// Whether the entry's own table named no `base_url`: the entry carries
-    /// its built-in row default, which preparation may replace from the
-    /// captured environment. `false` for every named provider, whose table
-    /// always names one.
-    pub(crate) base_url_defaulted: bool,
     /// The `api-version` query value of an Azure endpoint.
     pub(crate) api_version: Option<Box<str>>,
     /// Catalog model id to deployment name, in model-id order.
@@ -115,6 +140,9 @@ pub struct ProviderEntry {
     pub max_concurrent_requests: u32,
     /// The settings of this entry's own `providers.<id>` table.
     pub settings: ProviderSettings,
+    /// Where each connection default came from: recorded at decode from the
+    /// raw key presence of the entry's own table, before any default merges.
+    pub(crate) origins: Origins,
 }
 
 impl ProviderEntry {
@@ -130,6 +158,27 @@ impl ProviderEntry {
         match self.def {
             Some(def) if def.family == self.family => def.shape,
             _ => Shape::of_family(self.family),
+        }
+    }
+
+    /// The Google Cloud project one Cloud Code Assist request names: the one
+    /// owner of the rule, shared by the request adapter, readiness, and
+    /// catalog discovery, so none of them can drift from the others.
+    ///
+    /// Cloud Code Assist takes only the project its sign-in discovered and
+    /// stored: that is the project the account was validated for, and no
+    /// setting replaces it. Antigravity keeps its explicit
+    /// `providers.<id>.project` setting first, as it always did, and falls
+    /// back to the stored project. Every other family has none, and a blank
+    /// value is no project.
+    #[must_use]
+    pub(crate) fn cloud_code_project<'a>(&'a self, oauth: &'a OAuthCredential) -> Option<&'a str> {
+        let named = |project: &&str| !project.trim().is_empty();
+        let stored = oauth.project_id.as_deref().filter(named);
+        match self.family {
+            Family::GoogleCloudCodeAssist => stored,
+            Family::GoogleAntigravity => self.settings.project.as_deref().filter(named).or(stored),
+            _ => None,
         }
     }
 }
@@ -249,6 +298,17 @@ const PROVIDER_KEYS: &[&str] = &[
     "binary",
     "integration",
 ];
+
+impl Origin {
+    /// `Explicit` when the entry's own table named the key, else `RowDefault`.
+    fn of_presence(configured: Option<&str>) -> Self {
+        if configured.is_some() {
+            Self::Explicit
+        } else {
+            Self::RowDefault
+        }
+    }
+}
 
 fn invalid(message: impl Into<Box<str>>) -> ProviderConfigError {
     ProviderConfigError::InvalidConfig {
@@ -470,7 +530,6 @@ fn decode_settings(
     path: &str,
 ) -> Result<ProviderSettings, ProviderConfigError> {
     Ok(ProviderSettings {
-        base_url_defaulted: false,
         api_version: setting_field(table, "api_version", path)?,
         deployments: deployments_field(table, path)?,
         region: setting_field(table, "region", path)?,
@@ -493,7 +552,10 @@ fn decode_builtin(
         reject_unknown_keys(table, &path, PROVIDER_KEYS)?;
     }
 
-    let family = match (def.family_policy, string_field(table, "api", &path)?) {
+    // Raw key presence, captured before any default merges: `api` names the
+    // family here, and its presence alone decides `origins.api`.
+    let api_configured = string_field(table, "api", &path)?;
+    let family = match (def.family_policy, api_configured) {
         // A generic compatibility preset takes an explicit `api` the way the
         // named-provider path did before the row existed: any supported key
         // family wins. `openai_codex` stays rejected by `parse_api`, so a
@@ -545,12 +607,17 @@ fn decode_builtin(
     } else {
         AuthStyle::Bearer
     };
-    let auth = parse_auth(string_field(table, "auth", &path)?, default_auth, name)?;
+    let auth_configured = string_field(table, "auth", &path)?;
+    let auth = parse_auth(auth_configured, default_auth, name)?;
     let key_env =
         string_field(table, "key_env", &path)?.map(|value| value.to_owned().into_boxed_str());
     let max_concurrent_requests = concurrency_limit(table, name)?;
-    let mut settings = decode_settings(table, &path)?;
-    settings.base_url_defaulted = configured.is_none();
+    let settings = decode_settings(table, &path)?;
+    let origins = Origins {
+        api: Origin::of_presence(api_configured),
+        base: Origin::of_presence(configured),
+        auth: Origin::of_presence(auth_configured),
+    };
 
     validate_transport(name, family, transport)?;
     validate_auth(name, family, auth)?;
@@ -565,6 +632,7 @@ fn decode_builtin(
         auth,
         max_concurrent_requests,
         settings,
+        origins,
     })
 }
 
@@ -583,6 +651,7 @@ const fn api_name(family: Family) -> &'static str {
         Family::GoogleGenerativeAi => "google-generative-ai",
         Family::GoogleVertex => "google-vertex",
         Family::GoogleGeminiCli => "google-gemini-cli",
+        Family::GoogleCloudCodeAssist => "google-cloud-code-assist",
         Family::GoogleAntigravity => "google-antigravity",
         Family::Mistral => "mistral",
         Family::Ollama => "ollama",
@@ -624,14 +693,13 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
     } else {
         AuthStyle::Bearer
     };
-    let auth = parse_auth(
-        string_field(Some(table), "auth", &path)?,
-        default_auth,
-        name,
-    )?;
-    // Every credential style names the variable its key comes from; only an
-    // entry that authenticates nothing may omit it.
-    if key_env.is_none() && auth != AuthStyle::None {
+    let auth_configured = string_field(Some(table), "auth", &path)?;
+    let auth = parse_auth(auth_configured, default_auth, name)?;
+    // Every credential style names the variable its key comes from; an entry
+    // that authenticates nothing omits it, and a Bedrock entry may too: its
+    // chain resolves the ambient captured AWS environment by itself, and an
+    // explicit `key_env` names a bearer variable the attempt honors.
+    if key_env.is_none() && auth != AuthStyle::None && family != Family::Bedrock {
         return Err(ProviderConfigError::MissingKey {
             name: name.to_owned().into_boxed_str(),
             key: "key_env",
@@ -639,6 +707,13 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
     }
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
     let settings = decode_settings(Some(table), &path)?;
+    // A named provider's table always names `api` and `base_url` (both are
+    // required keys), so both are explicit; `auth` per its own presence.
+    let origins = Origins {
+        api: Origin::Explicit,
+        base: Origin::Explicit,
+        auth: Origin::of_presence(auth_configured),
+    };
     validate_transport(name, family, transport)?;
     validate_auth(name, family, auth)?;
 
@@ -652,6 +727,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
         auth,
         max_concurrent_requests,
         settings,
+        origins,
     })
 }
 
@@ -668,6 +744,7 @@ fn parse_api(name: &str, value: &str) -> Result<Family, ProviderConfigError> {
         "google-generative-ai" => Ok(Family::GoogleGenerativeAi),
         "google-vertex" => Ok(Family::GoogleVertex),
         "google-gemini-cli" => Ok(Family::GoogleGeminiCli),
+        "google-cloud-code-assist" => Ok(Family::GoogleCloudCodeAssist),
         "google-antigravity" => Ok(Family::GoogleAntigravity),
         "mistral" => Ok(Family::Mistral),
         "ollama" => Ok(Family::Ollama),
@@ -704,9 +781,10 @@ fn parse_auth(
         Some("bearer") => Ok(AuthStyle::Bearer),
         Some("x-api-key") => Ok(AuthStyle::XApiKey),
         Some("api-key") => Ok(AuthStyle::ApiKey),
+        Some("cf-aig-authorization") => Ok(AuthStyle::CfAigAuthorization),
         Some("none") => Ok(AuthStyle::None),
         Some(_) => Err(invalid(format!(
-            "providers.{name}.auth must be bearer, x-api-key, api-key, or none"
+            "providers.{name}.auth must be bearer, x-api-key, api-key, cf-aig-authorization, or none"
         ))),
     }
 }
@@ -734,11 +812,19 @@ fn concurrency_limit(table: Option<&toml::Table>, name: &str) -> Result<u32, Pro
 }
 
 /// A `google-gemini-cli` entry spawns a local process and sends no
-/// credential, so its `auth` is `none`, by default or by explicit choice.
+/// credential, so its `auth` is `none`, by default or by explicit choice. A
+/// `google-cloud-code-assist` entry signs in with OAuth and sends the access
+/// token as a bearer, so its `auth` is `bearer`: another style, `none`
+/// included, names a credential it could never use.
 fn validate_auth(name: &str, family: Family, auth: AuthStyle) -> Result<(), ProviderConfigError> {
     if family == Family::GoogleGeminiCli && auth != AuthStyle::None {
         return Err(invalid(format!(
             "providers.{name}.auth must be none for api google-gemini-cli"
+        )));
+    }
+    if family == Family::GoogleCloudCodeAssist && auth != AuthStyle::Bearer {
+        return Err(invalid(format!(
+            "providers.{name}.auth must be bearer for api google-cloud-code-assist"
         )));
     }
     Ok(())

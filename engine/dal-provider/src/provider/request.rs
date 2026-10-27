@@ -1,6 +1,6 @@
 //! Provider request assembly: contexts, wire builders, and parameter shaping.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use dal_core::{
     Caps, ContextItem, Family, ModelInfo, ModelRequest, ModelRoute, SessionId, ThinkingLevel,
@@ -12,7 +12,10 @@ use super::api::Http;
 use super::config::{AuthStyle, ProviderEntry};
 use super::set::{ProviderSetInner, lock};
 use crate::{
-    auth::credential::{AuthStore, Credential, EnvSnapshot, OAuthCredential},
+    auth::{
+        credential::{AuthStore, Credential, EnvSnapshot, OAuthCredential},
+        kimi::ClientIdentity,
+    },
     catalog::{CatalogEntry, ResolvedModel},
     compact::{self, CompactedHistory},
     error::ProviderError,
@@ -45,6 +48,7 @@ use crate::{
         },
         google::{
             antigravity::{self, AntigravityRequest},
+            cloud_code::{self, NativeRequest},
             gemini::{self, GeminiRequest},
             gemini_cli::{self, CliRequest},
             shared as google_shared,
@@ -62,13 +66,19 @@ use crate::{
     tool_names::{ANTHROPIC_OAUTH_NAME_MAX, ToolNames, WIRE_NAME_MAX},
 };
 
-use super::transport as transport_mod;
+use super::wire;
+pub(crate) use super::wire::is_azure_entry;
+use super::{Origin, transport as transport_mod};
 
 #[derive(Clone)]
 pub(crate) struct StreamContext {
     pub(crate) family: Family,
     pub(crate) provider: Box<str>,
     pub(crate) base_url: Box<str>,
+    /// The wire the resolved model selected on this row: `None` for a named
+    /// entry or a single-wire row. Carried so the request builders key
+    /// per-wire behavior on the matched wire instead of re-scanning.
+    pub(crate) wire: Option<&'static wire::WireDef>,
     pub(crate) auth: AuthStyle,
     pub(crate) model: Box<str>,
     pub(crate) entry: CatalogEntry,
@@ -84,20 +94,38 @@ pub(crate) fn stream_context(
     request: &ModelRequest,
     thinking: ThinkingPlan,
     session: SessionId,
-) -> StreamContext {
-    StreamContext {
-        family: http.entry.family,
+    env: &EnvSnapshot,
+) -> Result<StreamContext, ProviderError> {
+    let family = request_family(request)?;
+    let model = http.resolved.entry.id.clone();
+    let wire = wire::wire_for(&http.entry, &model);
+    // An explicit table `auth` overrides every wire style; otherwise the
+    // matched wire's style serves, and a single-wire row keeps its own.
+    let auth = if http.entry.origins.auth == Origin::Explicit {
+        http.entry.auth
+    } else {
+        wire.map_or(http.entry.auth, |w| w.auth)
+    };
+    Ok(StreamContext {
+        family,
         provider: http.entry.id.clone(),
-        base_url: http.entry.base_url.clone(),
-        auth: http.entry.auth,
-        model: http.resolved.entry.id.clone(),
+        base_url: anthropic_wire_base(
+            &http.entry.id,
+            wire.map(|w| w.family),
+            wire::base(&http.entry, wire, env)?,
+        )
+        .into_owned()
+        .into_boxed_str(),
+        auth,
+        model,
         entry: http.resolved.entry.clone(),
         request: request.clone(),
         thinking,
         session,
         client: http.client.clone(),
         user_agent: http.user_agent.clone(),
-    }
+        wire,
+    })
 }
 #[derive(Clone)]
 pub(crate) struct CompactContext {
@@ -109,6 +137,43 @@ pub(crate) struct CompactContext {
     pub(crate) session: SessionId,
     pub(crate) client: reqwest::Client,
     pub(crate) user_agent: Box<str>,
+    /// The captured environment, for the endpoint template of a wired row.
+    pub(crate) env: EnvSnapshot,
+    /// The client identity of a Kimi Code OAuth credential; `None` for every
+    /// other request. Resolved by [`client_identity_for`] before the
+    /// attempt, so the attempt itself needs no provider set.
+    pub(crate) client_identity: Option<Arc<ClientIdentity>>,
+}
+
+/// Whether `credential` is an OAuth sign-in of `provider` whose requests
+/// name the vendor's client (Kimi Code): the row's hook says so. Its
+/// requests carry the client identity, never Claude's fingerprint, and a
+/// request of such a sign-in without the identity is refused.
+pub(crate) fn names_client(provider: &str, credential: &Credential) -> bool {
+    matches!(credential, Credential::OAuth(_))
+        && crate::find(provider)
+            .and_then(|def| def.oauth)
+            .is_some_and(|oauth| oauth.hook.sends_client_identity())
+}
+
+/// The client identity one request of `provider` sends with `credential`:
+/// the set's shared identity for a sign-in that names the client, `None`
+/// for every other credential. Derived once per provider set, off the async
+/// runtime.
+///
+/// # Errors
+///
+/// [`ProviderError::AuthWrite`] when the blocking derivation task fails.
+pub(crate) async fn client_identity_for(
+    owner: &ProviderSetInner,
+    provider: &str,
+    credential: &Credential,
+) -> Result<Option<Arc<ClientIdentity>>, ProviderError> {
+    if names_client(provider, credential) {
+        owner.client_identity.get().await.map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 /// The captured variable that downgrades an openrouter stream to its Chat
@@ -186,8 +251,27 @@ pub(crate) async fn stream_attempt(
         Family::GitLab => gitlab_attempt(&context, &credential, &cancel, &owner).await,
         Family::Devin => devin_attempt(&context, &credential, &cancel).await,
         Family::Droid => droid_attempt(&context, &credential, &cancel).await,
-        Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
+        Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleCloudCodeAssist
+        | Family::GoogleAntigravity => {
             google_attempt(&context, &credential, &cancel, &owner, &slot.entry).await
+        }
+        // A Kimi Code sign-in names the vendor's client on every request.
+        Family::Anthropic if names_client(&context.provider, &credential) => {
+            let identity = owner
+                .client_identity
+                .get()
+                .await
+                .map_err(AttemptFailure::Provider)?;
+            let parts = build_anthropic_stream_request(
+                &context,
+                &credential,
+                credential_secrets(&credential),
+                Some(identity.as_ref()),
+            )
+            .map_err(AttemptFailure::Provider)?;
+            send_parts(&context, &credential, &cancel, parts).await
         }
         _ => {
             let parts =
@@ -287,12 +371,20 @@ async fn bedrock_attempt(
         .aws_resolver
         .resolve_region(entry.settings.region.as_deref(), None, cancel, deadline)
         .await;
+    // A defaulted row base follows the resolved region: the helper borrows
+    // when unchanged and owns only the actual rewrite. An explicit base
+    // (`StreamContext.base_url: Box<str>`, request.rs:71) borrows verbatim
+    // and only the signing scope follows the region.
+    let base_url: std::borrow::Cow<'_, str> = match entry.origins.base {
+        Origin::RowDefault => bedrock::endpoint_for_defaulted_base(&context.base_url, &region),
+        Origin::Explicit => std::borrow::Cow::Borrowed(&*context.base_url),
+    };
     let options = AwsResolveOptions {
         profile: None,
         region,
     };
     let first = Box::pin(bedrock_try(
-        context, credential, &entry, &options, cancel, owner, deadline,
+        context, credential, &entry, &options, &base_url, cancel, owner, deadline,
     ))
     .await;
     if !is_bedrock_unauthorized(&first) {
@@ -302,7 +394,7 @@ async fn bedrock_attempt(
         .aws_resolver
         .invalidate(options.profile.as_deref(), &options.region);
     Box::pin(bedrock_try(
-        context, credential, &entry, &options, cancel, owner, deadline,
+        context, credential, &entry, &options, &base_url, cancel, owner, deadline,
     ))
     .await
 }
@@ -328,6 +420,7 @@ async fn bedrock_try(
     credential: &Credential,
     entry: &ProviderEntry,
     options: &AwsResolveOptions,
+    base_url: &str,
     cancel: &CancellationToken,
     owner: &Arc<ProviderSetInner>,
     deadline: tokio::time::Instant,
@@ -341,7 +434,7 @@ async fn bedrock_try(
     )
     .await
     .map_err(AttemptFailure::Provider)?;
-    let (builder, auth_secrets) = bedrock_request(context, &auth, &options.region)?;
+    let (builder, auth_secrets) = bedrock_request(context, &auth, &options.region, base_url)?;
     let mut secrets = credential_secrets(credential);
     secrets.extend(auth_secrets);
     let response = tokio::select! {
@@ -387,11 +480,12 @@ fn bedrock_request(
     context: &StreamContext,
     auth: &BedrockAuth,
     region: &str,
+    base_url: &str,
 ) -> Result<(reqwest::RequestBuilder, Vec<Box<str>>), ProviderError> {
     match auth {
         BedrockAuth::None => {
             let path = bedrock::request_path(&context.model);
-            let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
+            let url = http::endpoint(Family::Bedrock, base_url, &path)?;
             let body = bedrock::request_body(&context.request, &context.thinking)
                 .map_err(bedrock_body_error)?;
             let builder = context
@@ -403,7 +497,7 @@ fn bedrock_request(
         }
         BedrockAuth::Bearer(token) => {
             let path = bedrock::request_path(&context.model);
-            let url = http::endpoint(Family::Bedrock, &context.base_url, &path)?;
+            let url = http::endpoint(Family::Bedrock, base_url, &path)?;
             let body = bedrock::request_body(&context.request, &context.thinking)
                 .map_err(bedrock_body_error)?;
             let builder = context
@@ -419,7 +513,7 @@ fn bedrock_request(
             let wire = bedrock::build(
                 &context.request,
                 &context.thinking,
-                &context.base_url,
+                base_url,
                 Some(region),
                 credential,
                 now_unix,
@@ -686,19 +780,6 @@ fn copilot_domain_base(base: &str) -> bool {
     host == "githubcopilot.com" || host.ends_with(".githubcopilot.com")
 }
 
-/// Whether `entry` routes through Azure `OpenAI`: a Chat or Responses row
-/// with the Azure `api-key` style or Azure settings.
-///
-/// The style gate matters: [`azure::build`] serves only those two families,
-/// so any other family keeps its own path whatever its auth style.
-#[must_use]
-pub(crate) fn is_azure_entry(entry: &ProviderEntry) -> bool {
-    matches!(entry.family, Family::Chat | Family::Responses)
-        && (entry.auth == AuthStyle::ApiKey
-            || entry.settings.api_version.is_some()
-            || !entry.settings.deployments.is_empty())
-}
-
 /// The default `x-api-provider` of one Droid model id: the first entry of
 /// its `upstream-rotation` in the pinned Factory registry. Ids outside the
 /// registry fall back to their route's dominant upstream; that fallback is
@@ -719,10 +800,6 @@ pub(crate) fn droid_default_upstream(model: &str) -> &'static str {
     }
 }
 
-/// The Antigravity client version the `User-Agent` carries, captured from
-/// the real client (the backend gates on the version, like Devin's pinned
-/// CLI identity).
-const ANTIGRAVITY_CLIENT_VERSION: &str = "2.19.1";
 const ACCOUNT_VERIFICATION_PREFIX: &str = "Account verification required.";
 
 /// The default `x-api-provider` per Droid model id, transcribed from the
@@ -819,6 +896,7 @@ fn azure_parts(
         request: &context.request,
         thinking: &context.thinking,
         reasoning_summary: context.entry.supports_reasoning_summaries,
+        max_output: context.entry.max_output,
         provider: &context.provider,
         base_url: &context.base_url,
         settings: &settings,
@@ -931,11 +1009,7 @@ async fn devin_attempt(
 ) -> Result<Option<EventStream>, AttemptFailure> {
     let api_key = match credential {
         Credential::ApiKey { key } => key.expose().to_owned(),
-        Credential::OAuth(_) => {
-            return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
-                message: format!("{} does not accept an OAuth credential", context.provider),
-            }));
-        }
+        Credential::OAuth(oauth) => oauth.access_token.expose().to_owned(),
         Credential::None => {
             return Err(AttemptFailure::Provider(ProviderError::NoCredentials {
                 provider: context.provider.to_string(),
@@ -1235,6 +1309,9 @@ async fn google_attempt(
             .await
         }
         Family::GoogleVertex => vertex_attempt(context, credential, cancel, owner, entry).await,
+        Family::GoogleCloudCodeAssist => {
+            google_cloud_code_assist_attempt(context, credential, cancel, owner, entry).await
+        }
         Family::GoogleAntigravity => {
             google_antigravity_attempt(context, credential, cancel, owner, entry).await
         }
@@ -1242,6 +1319,61 @@ async fn google_attempt(
             message: String::from("not a Google request"),
         })),
     }
+}
+
+/// The OAuth sign-in a Cloud Code Assist surface needs. Both surfaces refuse
+/// an API key and an absent credential, never sending a request without a
+/// real sign-in.
+fn cloud_code_oauth<'a>(
+    context: &StreamContext,
+    credential: &'a Credential,
+) -> Result<&'a OAuthCredential, AttemptFailure> {
+    match credential {
+        Credential::OAuth(oauth) => Ok(oauth),
+        Credential::ApiKey { .. } => Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
+            message: format!(
+                "{} needs an OAuth sign-in, not an API key",
+                context.provider
+            ),
+        })),
+        Credential::None => Err(AttemptFailure::Provider(ProviderError::NoCredentials {
+            provider: context.provider.to_string(),
+        })),
+    }
+}
+
+/// Runs one native Cloud Code Assist turn: the stored OAuth sign-in and the
+/// project it stored lower to the plain `{project, model, request}` envelope,
+/// the configured base is the only endpoint, and the reply decodes through
+/// the shared Google decoder. A credential with no project never reaches the
+/// wire: the module refuses a blank one.
+async fn google_cloud_code_assist_attempt(
+    context: &StreamContext,
+    credential: &Credential,
+    cancel: &CancellationToken,
+    owner: &Arc<ProviderSetInner>,
+    entry: &ProviderEntry,
+) -> Result<Option<EventStream>, AttemptFailure> {
+    let oauth = cloud_code_oauth(context, credential)?;
+    let wire = cloud_code::build(&NativeRequest {
+        request: &context.request,
+        thinking: &context.thinking,
+        provider: &context.provider,
+        access_token: oauth.access_token.expose(),
+        project: entry.cloud_code_project(oauth).unwrap_or_default(),
+        identity: &owner.identity,
+        image_input: context.entry.image_input,
+    })
+    .map_err(AttemptFailure::Provider)?;
+    google_send(
+        context,
+        &credential_secrets(credential),
+        cancel,
+        wire,
+        true,
+        None,
+    )
+    .await
 }
 
 /// Environment variables that may carry the Vertex project, in resolve
@@ -1278,8 +1410,9 @@ fn env_value<'a>(env: &'a EnvSnapshot, names: &[&str]) -> Option<&'a str> {
 /// settings win, then the captured environment (`owner.env`, never the
 /// process environment). A location from settings is an explicit residency
 /// choice; one from the environment is ambient and may fall back to the
-/// global endpoint on a 404.
-fn resolve_vertex_env<'a>(
+/// global endpoint on a 404. Readiness shares this one resolution so a row
+/// can never drift from the request route.
+pub(super) fn resolve_vertex_env<'a>(
     entry: &'a ProviderEntry,
     env: &'a EnvSnapshot,
 ) -> (Option<&'a str>, Option<&'a str>, bool) {
@@ -1301,31 +1434,40 @@ fn resolve_vertex_env<'a>(
 /// The Vertex bearer credential for one request: the stored OAuth sign-in,
 /// else a pre-minted token from the captured environment. (The caller only
 /// reaches here for a non-key credential.)
-fn vertex_bearer<'a>(
-    credential: &'a Credential,
-    owner: &'a ProviderSetInner,
+async fn vertex_bearer(
+    credential: &Credential,
+    owner: &ProviderSetInner,
     provider: &str,
-) -> Result<&'a str, AttemptFailure> {
+    cancel: &CancellationToken,
+) -> Result<Box<str>, AttemptFailure> {
     if let Credential::OAuth(oauth) = credential {
-        return Ok(oauth.access_token.expose());
+        return Ok(oauth.access_token.expose().into());
     }
-    vertex_env_token(&owner.env).ok_or_else(|| {
-        AttemptFailure::Provider(ProviderError::NoCredentials {
-            provider: provider.to_string(),
-        })
-    })
+    if let Some(token) = vertex_env_token(&owner.env) {
+        return Ok(token.into());
+    }
+    owner
+        .vertex_adc
+        .resolve(cancel, provider)
+        .await
+        .map_err(AttemptFailure::Provider)
 }
 
-/// Refuses a bearer request whose route is incomplete: the message names the
-/// settings keys and the environment variables that can supply them.
-fn require_vertex_route(
+/// Validates the bearer route and returns the project/location pair the
+/// wire carries; the refusal message names the settings keys and the
+/// environment variables that can supply them. Nothing falls back to an
+/// empty default.
+fn require_vertex_route<'a>(
     provider: &str,
-    project: Option<&str>,
-    location: Option<&str>,
-) -> Result<(), AttemptFailure> {
+    project: Option<&'a str>,
+    location: Option<&'a str>,
+) -> Result<(&'a str, &'a str), AttemptFailure> {
     let usable = |value: Option<&str>| value.is_some_and(|v| !v.trim().is_empty());
-    if usable(project) && usable(location) {
-        return Ok(());
+    if let (Some(project), Some(location)) = (project, location)
+        && usable(Some(project))
+        && usable(Some(location))
+    {
+        return Ok((project, location));
     }
     Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
         message: format!(
@@ -1354,20 +1496,28 @@ async fn vertex_attempt(
     // authenticates: a token that never lived in the credential must still
     // be scrubbed from every error text and stream the request produces.
     let mut secrets = credential_secrets(credential);
-    let auth = if let Credential::ApiKey { key } = credential {
-        VertexAuth::Express {
+    // The endpoint authority follows the entry's own table: only a row that
+    // named no base lowers to the regional location host.
+    let endpoint = match entry.origins.base {
+        Origin::RowDefault => vertex::VertexEndpoint::Regional,
+        Origin::Explicit => vertex::VertexEndpoint::ConfiguredProviderBase,
+    };
+    let bearer_token;
+    let auth = match credential {
+        Credential::ApiKey { key } => VertexAuth::Express {
             api_key: key.expose(),
             location,
             explicit_location,
-        }
-    } else {
-        let token = vertex_bearer(credential, owner, &context.provider)?;
-        require_vertex_route(&context.provider, project, location)?;
-        secrets.push(Box::from(token));
-        VertexAuth::Bearer {
-            access_token: token,
-            project: project.unwrap_or_default(),
-            location: location.unwrap_or_default(),
+        },
+        Credential::OAuth(_) | Credential::None => {
+            let (project, location) = require_vertex_route(&context.provider, project, location)?;
+            bearer_token = vertex_bearer(credential, owner, &context.provider, cancel).await?;
+            secrets.push(bearer_token.clone());
+            VertexAuth::Bearer {
+                access_token: &bearer_token,
+                project,
+                location,
+            }
         }
     };
     let oauth = matches!(credential, Credential::OAuth(_));
@@ -1376,6 +1526,7 @@ async fn vertex_attempt(
         thinking: &context.thinking,
         auth,
         image_input: context.entry.image_input,
+        endpoint,
     })
     .map_err(AttemptFailure::Provider)?;
     google_send(context, &secrets, cancel, wire, oauth, None).await
@@ -1388,31 +1539,17 @@ async fn google_antigravity_attempt(
     owner: &Arc<ProviderSetInner>,
     entry: &ProviderEntry,
 ) -> Result<Option<EventStream>, AttemptFailure> {
-    let access_token = match credential {
-        Credential::OAuth(oauth) => oauth.access_token.expose().to_owned(),
-        Credential::ApiKey { .. } => {
-            return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
-                message: format!(
-                    "{} needs an OAuth sign-in, not an API key",
-                    context.provider
-                ),
-            }));
-        }
-        Credential::None => {
-            return Err(AttemptFailure::Provider(ProviderError::NoCredentials {
-                provider: context.provider.to_string(),
-            }));
-        }
-    };
-    let project = entry.settings.project.as_deref().unwrap_or("");
-    if project.is_empty() {
+    let oauth = cloud_code_oauth(context, credential)?;
+    let access_token = oauth.access_token.expose();
+    let Some(project) = entry.cloud_code_project(oauth) else {
         return Err(AttemptFailure::Provider(ProviderError::InvalidRequest {
             message: format!(
-                "{} needs a project in its provider settings",
-                context.provider
+                "{provider} has no Google Cloud project: run dalgon login {provider} again, \
+                 or set providers.{provider}.project",
+                provider = context.provider
             ),
         }));
-    }
+    };
     let wire_model = context.request.model.id().to_owned();
     let model_enum = antigravity::wire_profile(&wire_model).and_then(|profile| profile.model_enum);
     let used_claude = google_shared::is_claude_model(&wire_model);
@@ -1434,10 +1571,10 @@ async fn google_antigravity_attempt(
     let input = AntigravityRequest {
         request: &context.request,
         thinking: &context.thinking,
-        access_token: &access_token,
+        access_token,
         project,
         wire_model: &wire_model,
-        client_version: ANTIGRAVITY_CLIENT_VERSION,
+        client_version: antigravity::CLIENT_VERSION,
         envelope: &envelope,
         claude_thinking,
         image_input: context.entry.image_input,
@@ -1661,8 +1798,10 @@ async fn google_status_failure(
     // account-verification message with `retry your request` and no
     // email or PII when the structured URL validates; ordinary error
     // mapping below is untouched.
-    if matches!(family, Family::GoogleGeminiCli | Family::GoogleAntigravity)
-        && let Some(url) = antigravity::validation_url(&redacted)
+    if matches!(
+        family,
+        Family::GoogleCloudCodeAssist | Family::GoogleAntigravity
+    ) && let Some(url) = antigravity::validation_url(&redacted)
     {
         let message = transport_mod::redact_text(
             format!(
@@ -1971,12 +2110,12 @@ fn build_chat_stream_request(
     secrets: Vec<Box<str>>,
     user_agent: Box<str>,
 ) -> Result<StreamRequestParts, ProviderError> {
-    let body =
-        family::chat::request_body(&context.request, &context.thinking).map_err(|error| {
-            ProviderError::InvalidRequest {
-                message: error.to_string(),
-            }
-        })?;
+    let dialect = family::chat::Dialect::of(&context.provider, &context.base_url, &context.model);
+    let body = family::chat::request_body(&context.request, &context.thinking, dialect).map_err(
+        |error| ProviderError::InvalidRequest {
+            message: error.to_string(),
+        },
+    )?;
     let url = http::endpoint(
         context.family,
         &context.base_url,
@@ -1989,6 +2128,9 @@ fn build_chat_stream_request(
         optional_auth_header(context.auth, credential, context.family, &context.provider)?
     {
         request = request.header(header, value);
+    }
+    if let Some((name, value)) = session_header(context) {
+        request = request.header(name, value);
     }
     Ok((request.body(body), user_agent, secrets, None))
 }
@@ -2085,6 +2227,9 @@ pub(crate) fn build_stream_request(
             if let Some((name, value)) = &wire.auth_header {
                 request = request.header(*name, value);
             }
+            if let Some((name, value)) = session_header(context) {
+                request = request.header(name, value);
+            }
             Ok((
                 request.body(wire.body),
                 wire.user_agent.into(),
@@ -2110,18 +2255,19 @@ pub(crate) fn build_stream_request(
         Family::GitLab => Err(ProviderError::InvalidRequest {
             message: String::from("GitLab requests use the dedicated Duo adapter"),
         }),
-        Family::GoogleGenerativeAi | Family::GoogleVertex | Family::GoogleAntigravity => {
-            Err(ProviderError::InvalidRequest {
-                message: String::from("Google requests use the dedicated GenerateContent adapter"),
-            })
-        }
+        Family::GoogleGenerativeAi
+        | Family::GoogleVertex
+        | Family::GoogleCloudCodeAssist
+        | Family::GoogleAntigravity => Err(ProviderError::InvalidRequest {
+            message: String::from("Google requests use the dedicated GenerateContent adapter"),
+        }),
         Family::GoogleGeminiCli => Err(ProviderError::InvalidRequest {
             message: String::from("Gemini CLI requests use the dedicated subprocess adapter"),
         }),
         Family::Mistral => build_mistral_stream_request(context, credential, secrets, user_agent),
         Family::Ollama => build_ollama_stream_request(context, credential, secrets, user_agent),
         Family::PiMessages => build_pi_stream_request(context, credential, secrets, user_agent),
-        Family::Anthropic => build_anthropic_stream_request(context, credential, secrets),
+        Family::Anthropic => build_anthropic_stream_request(context, credential, secrets, None),
     }
 }
 
@@ -2129,6 +2275,7 @@ fn build_anthropic_stream_request(
     context: &StreamContext,
     credential: &Credential,
     secrets: Vec<Box<str>>,
+    client_identity: Option<&ClientIdentity>,
 ) -> Result<StreamRequestParts, ProviderError> {
     let mut wire = build_anthropic_wire(
         &context.request,
@@ -2136,7 +2283,12 @@ fn build_anthropic_stream_request(
         context.auth,
         &context.thinking,
         credential,
-        false,
+        WireOptions::turn()
+            .named_by(client_identity)
+            .with_tool_schemas(anthropic_tool_schemas(
+                context.provider.as_ref(),
+                context.wire.map(|w| w.family),
+            )),
     )?;
     let url = http::endpoint(context.family, &context.base_url, wire.path)?;
     let user_agent = wire
@@ -2146,12 +2298,20 @@ fn build_anthropic_stream_request(
         .to_owned()
         .into_boxed_str();
     let replay_prefix = std::mem::take(&mut wire.prefix);
-    Ok((
-        wire.into_request(&context.client, url),
-        user_agent,
-        secrets,
-        Some(replay_prefix),
-    ))
+    let mut request = wire.into_request(&context.client, url);
+    if let Some((name, value)) = session_header(context) {
+        request = request.header(name, value);
+    }
+    Ok((request, user_agent, secrets, Some(replay_prefix)))
+}
+
+/// The row's session header with the explicit `SessionId` of this turn:
+/// `None` for every row that names none. The value is the dal conversation
+/// id `Provider::open` received, never an inferred one and never a
+/// per-request field.
+fn session_header(context: &StreamContext) -> Option<(&'static str, String)> {
+    let name = crate::find(&context.provider)?.session_header?;
+    Some((name, context.session.to_string()))
 }
 
 /// The auth header of one request, or none for a credential-less entry that
@@ -2177,10 +2337,20 @@ pub(crate) fn build_responses_wire_from_context(
         request: &context.request,
         thinking: context.thinking.wire,
         reasoning_summary: context.entry.supports_reasoning_summaries,
+        max_output: context.entry.max_output,
         auth: context.auth,
         credential,
         session_id: context.session,
         user_agent: &context.user_agent,
+        // One trusted selector for every Responses request, stream and
+        // compact alike: the tool-schema flavor is the matched wire's, keyed
+        // on the row and the wire family — never on model-id text. The B.AI
+        // Responses wire repairs union-root tool schemas (`OpenAiCompat`);
+        // every other Responses wire sends them verbatim.
+        tool_schemas: match (context.provider.as_ref(), context.wire.map(|w| w.family)) {
+            ("bai", Some(Family::Responses)) => crate::family::schema::ToolSchemas::OpenAiCompat,
+            _ => crate::family::schema::ToolSchemas::Verbatim,
+        },
     })
 }
 
@@ -2201,14 +2371,114 @@ pub(crate) fn build_codex_wire(
     })
 }
 
+/// How one Anthropic wire is lowered beyond its request and credential.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WireOptions<'a> {
+    /// Whether this is the summarize (remote compaction) request.
+    summarize: bool,
+    /// The vendor client identity a Kimi Code sign-in sends; `None` for
+    /// every other credential.
+    client_identity: Option<&'a ClientIdentity>,
+    /// The tool-schema flavor the matched wire selected; `Verbatim`
+    /// everywhere but the B.AI Anthropic wire.
+    tool_schemas: family::schema::ToolSchemas,
+}
+
+impl<'a> WireOptions<'a> {
+    /// An ordinary turn.
+    pub(crate) const fn turn() -> Self {
+        Self {
+            summarize: false,
+            client_identity: None,
+            tool_schemas: family::schema::ToolSchemas::Verbatim,
+        }
+    }
+
+    /// The summarize request of a remote compaction.
+    pub(crate) const fn summarize() -> Self {
+        Self {
+            summarize: true,
+            client_identity: None,
+            tool_schemas: family::schema::ToolSchemas::Verbatim,
+        }
+    }
+
+    /// The same options for a request that names the vendor's client.
+    pub(crate) const fn named_by(self, client_identity: Option<&'a ClientIdentity>) -> Self {
+        Self {
+            client_identity,
+            ..self
+        }
+    }
+
+    /// The same options with the tool-schema flavor the matched wire
+    /// selected.
+    pub(crate) const fn with_tool_schemas(self, tool_schemas: family::schema::ToolSchemas) -> Self {
+        Self {
+            tool_schemas,
+            ..self
+        }
+    }
+}
+
+/// The effective base of one Anthropic wire, keyed on the row and the wire
+/// family. The B.AI wire path already carries the `v1` version segment in
+/// `v1/messages`, so a base ending in `/v1` keeps exactly one version: the
+/// trailing segment is dropped here and re-added by the path. Every other
+/// row keeps its base verbatim.
+fn anthropic_wire_base<'b>(
+    provider: &str,
+    wire_family: Option<Family>,
+    base: Cow<'b, str>,
+) -> Cow<'b, str> {
+    if (provider, wire_family) != ("bai", Some(Family::Anthropic)) {
+        return base;
+    }
+    let path_start = base
+        .find("://")
+        .and_then(|scheme_end| base[scheme_end + 3..].find('/').map(|p| scheme_end + 3 + p));
+    let Some(path_start) = path_start else {
+        return base;
+    };
+    let trimmed = {
+        let (origin, path) = base.split_at(path_start);
+        let path = path.strip_suffix('/').unwrap_or(path);
+        path.strip_suffix("/v1")
+            .map(|kept| format!("{origin}{kept}"))
+    };
+    match trimmed {
+        Some(joined) => Cow::Owned(joined),
+        None => base,
+    }
+}
+/// The tool-schema flavor of one Anthropic wire, keyed on the row and the
+/// wire family — never on model-id text. The B.AI Anthropic wire repairs
+/// union-root tool schemas (`ToolSchemas::OpenAiCompat`, per-wire parity
+/// with its Chat and Responses wires); every other Anthropic wire sends them
+/// verbatim.
+fn anthropic_tool_schemas(
+    provider: &str,
+    wire_family: Option<Family>,
+) -> family::schema::ToolSchemas {
+    match (provider, wire_family) {
+        ("bai", Some(Family::Anthropic)) => family::schema::ToolSchemas::OpenAiCompat,
+        _ => family::schema::ToolSchemas::Verbatim,
+    }
+}
+
 pub(crate) fn build_anthropic_wire(
     request: &ModelRequest,
     entry: &CatalogEntry,
     auth_style: AuthStyle,
     thinking: &ThinkingPlan,
     credential: &Credential,
-    summarize: bool,
+    options: WireOptions<'_>,
 ) -> Result<family::anthropic::AnthropicWire, ProviderError> {
+    let WireOptions {
+        summarize,
+        client_identity,
+        tool_schemas,
+    } = options;
     let (thinking_fragment, effort) = match thinking.wire {
         WireThinking::Anthropic { thinking, effort } => (thinking, effort),
         WireThinking::OpenAi { .. } => {
@@ -2228,12 +2498,13 @@ pub(crate) fn build_anthropic_wire(
                 message: String::from("Anthropic requests do not support the api-key header style"),
             });
         }
-        AuthStyle::Bearer | AuthStyle::XApiKey => {}
+        AuthStyle::Bearer | AuthStyle::XApiKey | AuthStyle::CfAigAuthorization => {}
     }
     let auth = match credential {
         Credential::ApiKey { key } => match auth_style {
             AuthStyle::XApiKey => AnthropicAuth::ApiKey(key.expose()),
             AuthStyle::Bearer => AnthropicAuth::Bearer(key.expose()),
+            AuthStyle::CfAigAuthorization => AnthropicAuth::GatewayKey { key: key.expose() },
             AuthStyle::ApiKey => {
                 return Err(ProviderError::InvalidRequest {
                     message: String::from(
@@ -2247,9 +2518,35 @@ pub(crate) fn build_anthropic_wire(
                 });
             }
         },
-        Credential::OAuth(oauth) => AnthropicAuth::ClaudeOAuth {
-            access_token: oauth.access_token.expose(),
-            version: crate::claude_fingerprint::CLAUDE_CODE_VERSION,
+        Credential::OAuth(oauth) if auth_style == AuthStyle::CfAigAuthorization => {
+            return Err(ProviderError::InvalidRequest {
+                message: format!(
+                    "{} carries its gateway key in cf-aig-authorization, never an OAuth credential",
+                    entry.provider
+                ),
+            });
+        }
+        Credential::OAuth(oauth) => match client_identity {
+            Some(identity) => AnthropicAuth::ClientBearer {
+                access_token: oauth.access_token.expose(),
+                user_agent: identity.user_agent(),
+                headers: identity.headers(),
+            },
+            // A sign-in that names the vendor's client never falls back to
+            // Claude's fingerprint: without the identity the request is
+            // refused.
+            None if names_client(&entry.provider, credential) => {
+                return Err(ProviderError::InvalidRequest {
+                    message: format!(
+                        "{} needs its client identity before it can send a request",
+                        entry.provider
+                    ),
+                });
+            }
+            None => AnthropicAuth::ClaudeOAuth {
+                access_token: oauth.access_token.expose(),
+                version: crate::claude_fingerprint::CLAUDE_CODE_VERSION,
+            },
         },
         Credential::None => {
             return Err(ProviderError::NoCredentials {
@@ -2267,7 +2564,7 @@ pub(crate) fn build_anthropic_wire(
         summarize,
         display_supported: entry.display_supported,
     };
-    family::anthropic::build(&request, auth)
+    family::anthropic::build_with_tool_schemas(&request, auth, tool_schemas)
 }
 
 /// Maps one rejected response the way its family requires: Devin bodies go
@@ -2369,13 +2666,18 @@ pub(crate) async fn compact_attempt(
             message: String::from("Chat compaction has no remote adapter"),
         })),
         Family::Responses => {
-            let stream_context = compact_stream_context(&context);
+            let stream_context =
+                compact_stream_context(&context).map_err(AttemptFailure::Provider)?;
             let wire = build_responses_wire_from_context(&stream_context, &credential)
                 .map_err(AttemptFailure::Provider)?;
-            let headers = wire.auth_header.into_iter().collect::<Vec<_>>();
+            let headers = wire
+                .auth_header
+                .into_iter()
+                .chain(session_header(&stream_context))
+                .collect::<Vec<_>>();
             compact::openai_responses(
                 &context.client,
-                &context.provider.base_url,
+                stream_context.base_url.as_ref(),
                 &context.resolved.entry.id,
                 &wire.body,
                 &headers,
@@ -2390,7 +2692,8 @@ pub(crate) async fn compact_attempt(
                     provider: context.provider.id.to_string(),
                 }));
             };
-            let stream_context = compact_stream_context(&context);
+            let stream_context =
+                compact_stream_context(&context).map_err(AttemptFailure::Provider)?;
             let wire = build_codex_wire(
                 &stream_context,
                 &context.request,
@@ -2399,21 +2702,34 @@ pub(crate) async fn compact_attempt(
                 context.session,
             )
             .map_err(AttemptFailure::Provider)?;
-            compact::openai_codex(&context.client, &context.provider.base_url, wire, &cancel).await
+            compact::openai_codex(
+                &context.client,
+                stream_context.base_url.as_ref(),
+                wire,
+                &cancel,
+            )
+            .await
         }
         Family::Anthropic => {
+            let stream_context =
+                compact_stream_context(&context).map_err(AttemptFailure::Provider)?;
             let wire = build_anthropic_wire(
                 &context.request,
                 &context.resolved.entry,
-                context.provider.auth,
+                stream_context.auth,
                 &context.thinking,
                 &credential,
-                true,
+                WireOptions::summarize()
+                    .named_by(context.client_identity.as_deref())
+                    .with_tool_schemas(anthropic_tool_schemas(
+                        stream_context.provider.as_ref(),
+                        stream_context.wire.map(|w| w.family),
+                    )),
             )
             .map_err(AttemptFailure::Provider)?;
             compact::anthropic(
                 &context.client,
-                &context.provider.base_url,
+                &stream_context.base_url,
                 &context.resolved.entry.id,
                 wire,
                 &context.user_agent,
@@ -2432,6 +2748,7 @@ pub(crate) async fn compact_attempt(
         | Family::GoogleGenerativeAi
         | Family::GoogleVertex
         | Family::GoogleGeminiCli
+        | Family::GoogleCloudCodeAssist
         | Family::GoogleAntigravity
         | Family::Mistral
         | Family::Ollama
@@ -2444,20 +2761,32 @@ pub(crate) async fn compact_attempt(
     }
 }
 
-pub(crate) fn compact_stream_context(context: &CompactContext) -> StreamContext {
-    StreamContext {
+pub(crate) fn compact_stream_context(
+    context: &CompactContext,
+) -> Result<StreamContext, ProviderError> {
+    let model = context.resolved.entry.id.clone();
+    let wire = wire::wire_for(&context.provider, &model);
+    let auth = if context.provider.origins.auth == Origin::Explicit {
+        context.provider.auth
+    } else {
+        wire.map_or(context.provider.auth, |w| w.auth)
+    };
+    Ok(StreamContext {
         family: context.family,
         provider: context.provider.id.clone(),
-        base_url: context.provider.base_url.clone(),
-        auth: context.provider.auth,
-        model: context.resolved.entry.id.clone(),
+        base_url: wire::base(&context.provider, wire, &context.env)?
+            .into_owned()
+            .into_boxed_str(),
+        auth,
+        model,
         entry: context.resolved.entry.clone(),
         request: context.request.clone(),
         thinking: context.thinking.clone(),
         session: context.session,
         client: context.client.clone(),
         user_agent: context.user_agent.clone(),
-    }
+        wire,
+    })
 }
 
 pub(crate) fn ensure_request(http: &Http, request: &ModelRequest) -> Result<(), ProviderError> {
@@ -2474,7 +2803,16 @@ pub(crate) fn ensure_request(http: &Http, request: &ModelRequest) -> Result<(), 
     let other_provider = provider
         .as_deref()
         .is_some_and(|named| named != http.entry.id.as_ref());
-    if *family != http.entry.family || model.as_ref() != http.model() || other_provider {
+    // The bound route's family, not the row's logical default: a wired row
+    // serves other families on their wires, and `Provider::new` already
+    // authorized this route against the wire table.
+    let bound_family = match &http.resolved.route {
+        ModelRoute::Api { family, .. } => *family,
+        // Unreachable after `Provider::new`, which refuses every non-API
+        // route for an HTTP provider; the row family keeps the match total.
+        _ => http.entry.family,
+    };
+    if *family != bound_family || model.as_ref() != http.model() || other_provider {
         return Err(ProviderError::InvalidRequest {
             message: String::from("request model does not match the bound provider route"),
         });
@@ -2483,8 +2821,13 @@ pub(crate) fn ensure_request(http: &Http, request: &ModelRequest) -> Result<(), 
 }
 
 pub(crate) fn tool_names(http: &Http, request: &ModelRequest) -> Result<ToolNames, ProviderError> {
-    let max = match http.entry.family {
-        Family::Anthropic if matches!(&http.credential, Credential::OAuth(_)) => {
+    // Only Claude's OAuth prefixes tool names, so only it gets the reduced
+    // cap; a Kimi Code sign-in sends names as an API key does.
+    let max = match request_family(request)? {
+        Family::Anthropic
+            if matches!(&http.credential, Credential::OAuth(_))
+                && !names_client(&http.entry.id, &http.credential) =>
+        {
             ANTHROPIC_OAUTH_NAME_MAX
         }
         _ => WIRE_NAME_MAX,
@@ -2576,17 +2919,21 @@ pub(crate) fn make_thinking_plan(
     patch: &BeforeRequestPatch,
 ) -> Result<ThinkingPlan, ProviderError> {
     let route_family = request_family(request)?;
-    let max_output = http.resolved.entry.max_output.unwrap_or_else(|| {
-        if route_family == Family::Anthropic {
-            family::anthropic::MAX_TOKENS_CAP
-        } else {
-            0
-        }
-    });
-    let max_tokens = if route_family == Family::Anthropic {
-        family::anthropic::base_max_tokens(http.resolved.entry.max_output)
+    let catalog = http.resolved.entry.max_output;
+    let requested = request.params.max_output_tokens;
+    // The caller's requested cap bounds the thinking budget too: the planner
+    // shrinks or drops a budget that does not fit under it.
+    let (max_tokens, max_output) = if route_family == Family::Anthropic {
+        (
+            family::anthropic::base_max_tokens(catalog, requested),
+            family::anthropic::output_ceiling(catalog, requested),
+        )
     } else {
-        max_output
+        // Droid and GitLab Duo route by their own family yet plan a budget
+        // for their Anthropic wires from these limits (unknown ceiling: 0).
+        let ceiling = catalog.unwrap_or(0);
+        let ceiling = requested.map_or(ceiling, |ask| ask.min(ceiling));
+        (ceiling, ceiling)
     };
     Ok(thinking::plan(
         request.params.thinking,
@@ -2634,6 +2981,9 @@ pub(crate) fn auth_header(
             AuthStyle::Bearer => Ok(("authorization", format!("Bearer {}", key.expose()))),
             AuthStyle::XApiKey => Ok(("x-api-key", key.expose().to_owned())),
             AuthStyle::ApiKey => Ok(("api-key", key.expose().to_owned())),
+            AuthStyle::CfAigAuthorization => {
+                Ok(("cf-aig-authorization", format!("Bearer {}", key.expose())))
+            }
             AuthStyle::None => Err(ProviderError::InvalidRequest {
                 message: String::from("credential-less entries carry no auth header"),
             }),
@@ -2689,5 +3039,90 @@ pub(crate) fn model_info(
             custom_grammar: entry.custom_grammar
                 && matches!(family, Family::Responses | Family::Codex),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-minted bearer order: the `GOOGLE_CLOUD_ACCESS_TOKEN` alias
+    /// wins, the gcloud override answers alone, a blank alias is skipped,
+    /// and nothing derives from an empty snapshot.
+    #[test]
+    fn vertex_env_token_prefers_the_cloud_alias_over_the_gcloud_override() {
+        let both = EnvSnapshot::test(&[
+            ("GOOGLE_CLOUD_ACCESS_TOKEN", "cloud-bearer"),
+            ("CLOUDSDK_AUTH_ACCESS_TOKEN", "sdk-bearer"),
+        ]);
+        assert_eq!(vertex_env_token(&both), Some("cloud-bearer"));
+        let only_sdk = EnvSnapshot::test(&[("CLOUDSDK_AUTH_ACCESS_TOKEN", "sdk-bearer")]);
+        assert_eq!(vertex_env_token(&only_sdk), Some("sdk-bearer"));
+        let blank_alias = EnvSnapshot::test(&[
+            ("GOOGLE_CLOUD_ACCESS_TOKEN", "   "),
+            ("CLOUDSDK_AUTH_ACCESS_TOKEN", "sdk-bearer"),
+        ]);
+        assert_eq!(vertex_env_token(&blank_alias), Some("sdk-bearer"));
+        assert_eq!(vertex_env_token(&EnvSnapshot::test(&[])), None);
+    }
+
+    /// The bearer route gate: both a project and a location are required,
+    /// blanks do not count, and the refusal names the settings keys and the
+    /// environment variables that can supply them.
+    #[test]
+    fn vertex_bearer_route_requires_project_and_location() {
+        assert!(require_vertex_route("vertex", Some("p"), Some("l")).is_ok());
+        for (project, location) in [
+            (Some("p"), None),
+            (None, Some("l")),
+            (Some(" "), Some("l")),
+            (Some("p"), Some("")),
+        ] {
+            match require_vertex_route("vertex", project, location) {
+                Err(AttemptFailure::Provider(ProviderError::InvalidRequest { message })) => {
+                    assert!(message.contains("providers.vertex.project"), "{message}");
+                    assert!(message.contains("GOOGLE_CLOUD_PROJECT"), "{message}");
+                    assert!(message.contains("GOOGLE_VERTEX_LOCATION"), "{message}");
+                }
+                other => panic!("expected a route refusal, got {other:?}"),
+            }
+        }
+    }
+
+    /// The shared route resolution: settings win over the captured
+    /// environment, and the ambient flag follows the settings location only.
+    #[test]
+    fn vertex_route_resolution_prefers_settings_over_environment() {
+        let entry =
+            |project: Option<&str>, location: Option<&str>| crate::provider::ProviderEntry {
+                id: "vertex".into(),
+                def: None,
+                family: Family::GoogleVertex,
+                base_url: String::from("https://aiplatform.googleapis.com").into_boxed_str(),
+                transport: crate::provider::Transport::Https,
+                key_env: None,
+                auth: crate::provider::AuthStyle::Bearer,
+                max_concurrent_requests: 1,
+                origins: crate::provider::Origins::default(),
+                settings: crate::provider::ProviderSettings {
+                    project: project.map(Into::into),
+                    location: location.map(Into::into),
+                    ..crate::provider::ProviderSettings::default()
+                },
+            };
+        let ambient = EnvSnapshot::test(&[
+            ("GOOGLE_CLOUD_PROJECT", "env-project"),
+            ("GOOGLE_VERTEX_LOCATION", "env-location"),
+        ]);
+        let explicit_entry = entry(Some("set"), Some("set"));
+        let (project, location, explicit) = resolve_vertex_env(&explicit_entry, &ambient);
+        assert_eq!(project, Some("set"));
+        assert_eq!(location, Some("set"));
+        assert!(explicit, "a settings location is an explicit residency");
+        let ambient_entry = entry(None, None);
+        let (project, location, explicit) = resolve_vertex_env(&ambient_entry, &ambient);
+        assert_eq!(project, Some("env-project"));
+        assert_eq!(location, Some("env-location"));
+        assert!(!explicit, "an environment location is ambient");
     }
 }

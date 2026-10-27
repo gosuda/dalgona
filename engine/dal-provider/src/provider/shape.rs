@@ -6,7 +6,7 @@ use super::ProviderEntry;
 use crate::{
     auth::{credential::Credential, oauth::CODEX_ORIGINATOR},
     error::ProviderError,
-    provider::AuthStyle,
+    provider::{AuthStyle, Hook},
 };
 
 /// The header set a provider's requests carry.
@@ -14,8 +14,9 @@ use crate::{
 pub enum Shape {
     /// The configured API-key header, or a bearer token for OAuth.
     Plain,
-    /// Plain headers plus the Anthropic version and, for OAuth, the Claude
-    /// Code beta markers.
+    /// Plain headers plus the Anthropic version and, for a Claude OAuth
+    /// sign-in, the Claude Code beta markers. An OAuth sign-in of another
+    /// provider on the Anthropic wire (Kimi Code) carries none of them.
     Claude,
     /// A bearer token plus the `ChatGPT` account and originator markers.
     Codex,
@@ -40,6 +41,7 @@ impl Shape {
             | Family::GoogleGenerativeAi
             | Family::GoogleVertex
             | Family::GoogleGeminiCli
+            | Family::GoogleCloudCodeAssist
             | Family::GoogleAntigravity
             | Family::Mistral
             | Family::Ollama
@@ -94,6 +96,7 @@ fn key_header(provider: &ProviderEntry, key: &str) -> Result<(String, String), P
         AuthStyle::Bearer => ("authorization", format!("Bearer {key}")),
         AuthStyle::XApiKey => ("x-api-key", key.to_owned()),
         AuthStyle::ApiKey => ("api-key", key.to_owned()),
+        AuthStyle::CfAigAuthorization => ("cf-aig-authorization", format!("Bearer {key}")),
         // Unreachable through `Shape::headers`, which refuses a held
         // credential under `none` first; the arm keeps the match exhaustive
         // and refuses rather than invent a header if a caller reaches it.
@@ -111,7 +114,7 @@ fn claude_headers(
         String::from("anthropic-version"),
         String::from("2023-06-01"),
     ));
-    if matches!(credential, Credential::OAuth(_)) {
+    if matches!(credential, Credential::OAuth(_)) && is_claude_oauth(provider) {
         headers.push((
             String::from("anthropic-beta"),
             String::from("claude-code-20250219,oauth-2025-04-20"),
@@ -119,6 +122,17 @@ fn claude_headers(
         headers.push((String::from("x-app"), String::from("cli")));
     }
     Ok(headers)
+}
+
+/// Whether an OAuth credential of `provider` is a Claude sign-in and so
+/// carries the Claude Code markers: the Claude hook, or an entry that names
+/// no sign-in row. Any other OAuth hook on the Anthropic wire (Kimi Code)
+/// is a different vendor's session and gets only its bearer.
+fn is_claude_oauth(provider: &ProviderEntry) -> bool {
+    provider
+        .def
+        .and_then(|def| def.oauth)
+        .is_none_or(|oauth| oauth.hook == Hook::ClaudeCode)
 }
 
 fn codex_headers(

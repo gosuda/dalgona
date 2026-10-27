@@ -41,8 +41,13 @@ fn rows_that_share_a_loopback_share_a_client() {
             let Some(second_oauth) = second.oauth else {
                 continue;
             };
-            let same_loopback = first_oauth.redirect.host == second_oauth.redirect.host
-                && first_oauth.redirect.port == second_oauth.redirect.port;
+            let (Some(first_redirect), Some(second_redirect)) =
+                (first_oauth.redirect, second_oauth.redirect)
+            else {
+                continue;
+            };
+            let same_loopback = first_redirect.host == second_redirect.host
+                && first_redirect.port == second_redirect.port;
             assert!(
                 !same_loopback || first_oauth.client_id == second_oauth.client_id,
                 "{} and {} share a loopback but not a client",
@@ -103,10 +108,29 @@ fn methods_follow_the_row() {
         methods("gitlab-duo"),
         Some(vec![Method::ApiKey, Method::Browser])
     );
-    assert_eq!(methods("radius"), Some(vec![Method::ApiKey]));
-    assert_eq!(methods("openrouter"), Some(vec![Method::ApiKey]));
+    assert_eq!(
+        methods("radius"),
+        Some(vec![Method::ApiKey, Method::Browser, Method::Device])
+    );
+    assert_eq!(
+        methods("openrouter"),
+        Some(vec![Method::ApiKey, Method::Browser])
+    );
     assert_eq!(methods("google"), Some(vec![Method::ApiKey]));
     assert_eq!(methods("google-vertex"), Some(vec![Method::ApiKey]));
+    assert_eq!(
+        methods("cursor"),
+        Some(vec![Method::ApiKey, Method::Browser])
+    );
+    assert_eq!(
+        methods("devin"),
+        Some(vec![Method::ApiKey, Method::Browser])
+    );
+    assert_eq!(
+        methods("google-cloud-code-assist"),
+        Some(vec![Method::Browser])
+    );
+    assert_eq!(methods("google-antigravity"), Some(vec![Method::Browser]));
     assert_eq!(methods("nobody"), None);
 }
 
@@ -123,6 +147,10 @@ fn a_vendor_family_is_named_by_its_first_row() {
         (Family::PiMessages, "radius"),
         (Family::GoogleGenerativeAi, "google"),
         (Family::GoogleVertex, "google-vertex"),
+        (Family::Cursor, "cursor"),
+        (Family::Devin, "devin"),
+        (Family::GoogleCloudCodeAssist, "google-cloud-code-assist"),
+        (Family::GoogleAntigravity, "google-antigravity"),
     ] {
         let first = PROVIDERS.iter().find(|def| def.family == family);
         assert_eq!(first.map(|def| def.id), Some(vendor), "{family:?}");
@@ -327,7 +355,13 @@ fn the_table_lists_the_vendor_rows_then_the_presets_by_id() {
         );
     }
     for def in VENDOR_ROWS {
-        assert_eq!(def.family_policy, FamilyPolicy::Native, "{}", def.id);
+        let expected = match def.id {
+            "xai" | "meta" | "cloudflare-ai-gateway" | "opencode" | "opencode-go" | "bai" => {
+                FamilyPolicy::Compatible
+            }
+            _ => FamilyPolicy::Native,
+        };
+        assert_eq!(def.family_policy, expected, "{}", def.id);
     }
     for def in presets {
         assert_eq!(def.family_policy, FamilyPolicy::Compatible, "{}", def.id);
@@ -408,7 +442,11 @@ fn oauth_rows_use_https_endpoints_pkce_state_and_an_unprivileged_loopback_redire
     for def in PROVIDERS {
         let Some(oauth) = def.oauth else { continue };
         let id = def.id;
-        assert!(!oauth.client_id.is_empty(), "{id}: empty client id");
+        assert!(
+            oauth.client_id.is_some()
+                || matches!(oauth.hook, Hook::OpenRouterKey | Hook::DevinCliToken),
+            "{id}: missing client id"
+        );
         https_endpoint(id, "authorize_url", oauth.authorize_url);
         https_endpoint(id, "token_url", oauth.token_url);
         if let Some(revoke) = oauth.revoke_url {
@@ -417,30 +455,27 @@ fn oauth_rows_use_https_endpoints_pkce_state_and_an_unprivileged_loopback_redire
         if let Some(device) = oauth.device {
             https_endpoint(id, "usercode_url", device.usercode_url);
             https_endpoint(id, "poll_url", device.poll_url);
-            https_endpoint(id, "page_url", device.page_url);
-            if !device.redirect_uri.is_empty() {
-                https_endpoint(id, "redirect_uri", device.redirect_uri);
+            if let Some(page_url) = device.page_url {
+                https_endpoint(id, "page_url", page_url);
+            }
+            if let Some(redirect_uri) = device.redirect_uri {
+                https_endpoint(id, "redirect_uri", redirect_uri);
             }
         }
-        if !oauth.browser {
+        let Some(redirect) = oauth.redirect else {
             continue;
-        }
+        };
         assert!(
-            matches!(oauth.redirect.host, "localhost" | "127.0.0.1"),
+            matches!(redirect.host, "localhost" | "127.0.0.1"),
             "{id}: redirect host {} is not loopback",
-            oauth.redirect.host
+            redirect.host
         );
         assert!(
-            oauth.redirect.port >= 1024,
+            redirect.port == 0 || redirect.port >= 1024,
             "{id}: privileged redirect port"
         );
-        assert!(oauth.redirect.path.starts_with('/'), "{id}: redirect path");
-        for (param, value) in [
-            ("client_id", QueryValue::ClientId),
-            ("redirect_uri", QueryValue::RedirectUri),
-            ("code_challenge", QueryValue::Challenge),
-            ("state", QueryValue::State),
-        ] {
+        assert!(redirect.path.starts_with('/'), "{id}: redirect path");
+        for &(param, value) in oauth.query {
             let sent = oauth
                 .query
                 .iter()
@@ -448,12 +483,37 @@ fn oauth_rows_use_https_endpoints_pkce_state_and_an_unprivileged_loopback_redire
                 .count();
             assert_eq!(sent, 1, "{id}: the authorize query must send {param} once");
         }
-        assert!(
-            oauth
-                .query
-                .contains(&("code_challenge_method", QueryValue::Text("S256"))),
-            "{id}: PKCE method is not S256"
+        // Every row pins PKCE with the S256 method except the two Cloud Code
+        // Assist rows, whose installed clients the vendor registered with no
+        // PKCE: they send `state` alone, and nothing else may drop it.
+        let sends_challenge = oauth
+            .query
+            .contains(&("code_challenge", QueryValue::Challenge));
+        assert_eq!(
+            sends_challenge,
+            !oauth.hook.binds_project(),
+            "{id}: only a Cloud Code Assist row sends no PKCE challenge"
         );
+        if sends_challenge {
+            assert!(
+                oauth
+                    .query
+                    .contains(&("code_challenge_method", QueryValue::Text("S256"))),
+                "{id}: PKCE method is not S256"
+            );
+        } else {
+            assert!(
+                oauth
+                    .query
+                    .iter()
+                    .all(|(name, _)| !name.starts_with("code_challenge")),
+                "{id}: a row with no PKCE sends no challenge parameter"
+            );
+            assert!(
+                oauth.query.contains(&("state", QueryValue::State)),
+                "{id}: a row with no PKCE still guards the callback with state"
+            );
+        }
     }
 }
 
@@ -485,7 +545,7 @@ fn the_openrouter_row_defaults_to_responses_with_a_bearer_key() {
     assert_eq!(def.family, Family::Responses);
     assert_eq!(def.base_url, "https://openrouter.ai/api/v1");
     assert_eq!(def.transport, Transport::Https);
-    assert!(def.oauth.is_none(), "openrouter signs in by key only");
+    assert!(def.oauth.is_some(), "openrouter offers browser OAuth");
     let key = def.key.expect("openrouter takes an API key");
     assert_eq!(key.style, AuthStyle::Bearer);
     assert_eq!(key.env, ["OPENROUTER_API_KEY"]);
@@ -495,4 +555,281 @@ fn the_openrouter_row_defaults_to_responses_with_a_bearer_key() {
         "{} is not an admitted base URL",
         def.base_url
     );
+}
+
+#[test]
+fn a_redirect_is_registered_exactly_for_the_redirecting_browser_rows() {
+    // A browser row that completes through a redirect names the address the
+    // vendor registered; a device-only row and a poll row have no redirect at
+    // all, so no placeholder host, port, or path can reach a sign-in.
+    for def in PROVIDERS {
+        let Some(oauth) = def.oauth else { continue };
+        let redirects = oauth.browser && oauth.completion != Completion::Poll;
+        assert_eq!(oauth.redirect.is_some(), redirects, "{}", def.id);
+        if let Some(redirect) = oauth.redirect {
+            assert!(
+                !redirect.host.is_empty() && !redirect.path.is_empty(),
+                "{}: placeholder redirect",
+                def.id
+            );
+        }
+    }
+    for id in ["cursor", "factory-droid"] {
+        let oauth = find(id).and_then(|def| def.oauth).expect("an OAuth row");
+        assert!(oauth.redirect.is_none(), "{id}");
+    }
+}
+
+#[test]
+fn hooks_split_credential_storage_from_refresh() {
+    // (stores an OAuth credential, refreshes it) per hook; no wildcard, so a
+    // new hook must choose both.
+    for hook in [
+        Hook::CodexAccount,
+        Hook::ClaudeCode,
+        Hook::WorkOsDevice,
+        Hook::GitLabDuo,
+        Hook::RadiusGateway,
+        Hook::OpenRouterKey,
+        Hook::CursorPoll,
+        Hook::DevinCliToken,
+        Hook::GoogleCloudCodeAssist,
+        Hook::GoogleAntigravity,
+        Hook::XaiDevice,
+        Hook::MetaMuse,
+        Hook::KimiCodeDevice,
+    ] {
+        let expected = match hook {
+            Hook::CodexAccount
+            | Hook::ClaudeCode
+            | Hook::WorkOsDevice
+            | Hook::GitLabDuo
+            | Hook::RadiusGateway
+            | Hook::CursorPoll
+            | Hook::GoogleCloudCodeAssist
+            | Hook::GoogleAntigravity
+            | Hook::XaiDevice
+            | Hook::MetaMuse
+            | Hook::KimiCodeDevice => (true, true),
+            Hook::DevinCliToken => (true, false),
+            Hook::OpenRouterKey => (false, false),
+        };
+        assert_eq!(
+            (hook.stores_oauth(), hook.refreshes()),
+            expected,
+            "{hook:?}"
+        );
+    }
+}
+
+#[test]
+fn only_the_kimi_hook_sends_a_client_identity() {
+    for hook in [
+        Hook::CodexAccount,
+        Hook::ClaudeCode,
+        Hook::WorkOsDevice,
+        Hook::GitLabDuo,
+        Hook::RadiusGateway,
+        Hook::OpenRouterKey,
+        Hook::CursorPoll,
+        Hook::DevinCliToken,
+        Hook::GoogleCloudCodeAssist,
+        Hook::GoogleAntigravity,
+        Hook::XaiDevice,
+        Hook::MetaMuse,
+        Hook::KimiCodeDevice,
+    ] {
+        assert_eq!(
+            hook.sends_client_identity(),
+            hook == Hook::KimiCodeDevice,
+            "{hook:?}"
+        );
+    }
+}
+
+#[test]
+fn the_cursor_row_pins_the_poll_grant_and_its_refresh_client() {
+    let def = find("cursor").expect("the cursor row is registered");
+    assert_eq!(def.name, "Cursor");
+    assert_eq!(def.family, Family::Cursor);
+    assert_eq!(def.family_policy, FamilyPolicy::Native);
+    assert_eq!(def.base_url, "https://api2.cursor.sh");
+    assert_eq!(def.transport, Transport::Https);
+    assert_eq!(def.shape, Shape::Plain);
+    let key = def.key.expect("cursor takes an access token as a key");
+    assert_eq!(key.style, AuthStyle::Bearer);
+    assert_eq!(key.env, ["CURSOR_ACCESS_TOKEN", "CURSOR_API_KEY"]);
+    let oauth = def.oauth.expect("cursor signs in by its poll grant");
+    assert_eq!(oauth.client_id, Some("KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"));
+    assert_eq!(oauth.client_id_env, None);
+    assert_eq!(oauth.authorize_url, "https://cursor.com/loginDeepControl");
+    assert_eq!(oauth.token_url, "https://api2.cursor.sh/oauth/token");
+    assert!(oauth.scopes.is_empty() && oauth.query.is_empty());
+    assert!(oauth.redirect.is_none());
+    assert_eq!(oauth.completion, Completion::Poll);
+    assert!(oauth.browser);
+    assert!(oauth.device.is_none() && oauth.revoke_url.is_none());
+    assert_eq!(oauth.hook, Hook::CursorPoll);
+}
+
+#[test]
+fn the_devin_row_pins_the_cli_grant_without_a_client_or_refresh() {
+    let def = find("devin").expect("the devin row is registered");
+    assert_eq!(def.name, "Devin");
+    assert_eq!(def.family, Family::Devin);
+    assert_eq!(def.family_policy, FamilyPolicy::Native);
+    assert_eq!(def.base_url, "https://server.codeium.com");
+    assert_eq!(def.transport, Transport::Https);
+    assert_eq!(def.shape, Shape::Plain);
+    let key = def.key.expect("devin takes an API key");
+    assert_eq!(key.env, ["DEVIN_API_KEY"]);
+    let oauth = def.oauth.expect("devin signs in by its CLI grant");
+    assert_eq!(oauth.client_id, None);
+    assert_eq!(oauth.client_id_env, None);
+    assert_eq!(
+        oauth.authorize_url,
+        "https://app.devin.ai/auth/cli/continue"
+    );
+    assert_eq!(oauth.token_url, "https://api.devin.ai/auth/cli/token");
+    assert_eq!(
+        oauth.query,
+        [
+            ("response_type", QueryValue::Text("code")),
+            ("redirect_uri", QueryValue::RedirectUri),
+            ("code_challenge", QueryValue::Challenge),
+            ("code_challenge_method", QueryValue::Text("S256")),
+            ("state", QueryValue::State),
+            ("prompt", QueryValue::Text("select_account")),
+        ]
+    );
+    let redirect = oauth.redirect.expect("devin registers a loopback callback");
+    assert_eq!(
+        (redirect.host, redirect.port, redirect.path),
+        ("127.0.0.1", 59653, "/callback")
+    );
+    assert_eq!(oauth.completion, Completion::PasteCode);
+    assert!(oauth.browser);
+    assert!(oauth.device.is_none() && oauth.revoke_url.is_none());
+    assert_eq!(oauth.hook, Hook::DevinCliToken);
+    assert!(oauth.hook.stores_oauth() && !oauth.hook.refreshes());
+}
+
+/// The SHA-256 of a pinned credential, as lowercase hex.
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+#[test]
+fn the_google_cloud_code_rows_pin_the_installed_application_grants() {
+    // Each row pins the SHA-256 digest of its client id and secret. Any edit to
+    // the row changes its digest, so the fixture proves byte-for-byte
+    // transcription without storing the credential itself.
+    for (id, name, family, base, client_sha, secret_sha, scopes, port, path, hook) in [
+        (
+            "google-cloud-code-assist",
+            "Google Cloud Code Assist (Gemini CLI)",
+            Family::GoogleCloudCodeAssist,
+            "https://cloudcode-pa.googleapis.com",
+            "636d7183f3ca4ad92c7803811a3f635643f1da657a22eeedf280283161cb6e17",
+            "6a5f78b8b99dd4025e41ba11bf54c304c6af29f924c5569cc7865b2428ce03a9",
+            &[
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ][..],
+            8085,
+            "/oauth2callback",
+            Hook::GoogleCloudCodeAssist,
+        ),
+        (
+            "google-antigravity",
+            "Antigravity (Gemini 3, Claude, GPT-OSS)",
+            Family::GoogleAntigravity,
+            "https://daily-cloudcode-pa.googleapis.com",
+            "bf00c418024ba6bf606ccdc37120976e41bc429dd1d46ecf16a729aa532626ea",
+            "1d2f041093fd95aa8995a038c711d50a7960da09a505381c09a745d6ad0ecc60",
+            &[
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/cclog",
+                "https://www.googleapis.com/auth/experimentsandconfigs",
+            ][..],
+            51121,
+            "/oauth-callback",
+            Hook::GoogleAntigravity,
+        ),
+    ] {
+        let def = find(id).unwrap_or_else(|| panic!("the {id} row is registered"));
+        assert_eq!(def.name, name, "{id}");
+        assert_eq!(def.family, family, "{id}");
+        assert_eq!(def.family_policy, FamilyPolicy::Native, "{id}");
+        assert_eq!(def.base_url, base, "{id}");
+        assert_eq!(def.transport, Transport::Https, "{id}");
+        assert_eq!(def.shape, Shape::Plain, "{id}");
+        assert!(def.key.is_none(), "{id} takes no API key");
+        let oauth = def
+            .oauth
+            .unwrap_or_else(|| panic!("{id} signs in with OAuth"));
+        assert_eq!(oauth.hook, hook, "{id}");
+        assert!(oauth.hook.binds_project() && oauth.hook.stores_oauth() && oauth.hook.refreshes());
+        let client_id = oauth.client_id.expect("a registered client id");
+        assert_eq!(digest(client_id.as_bytes()), client_sha, "{id}");
+        assert!(client_id.ends_with(".apps.googleusercontent.com"), "{id}");
+        assert_eq!(oauth.client_id_env, None, "{id}");
+        let secret = oauth
+            .client_secret
+            .expect("a registered installed-app secret");
+        assert_eq!(digest(secret.as_bytes()), secret_sha, "{id}");
+        assert!(secret.starts_with("GOCSPX-"), "{id}");
+        assert_eq!(
+            oauth.authorize_url, "https://accounts.google.com/o/oauth2/v2/auth",
+            "{id}"
+        );
+        assert_eq!(
+            oauth.token_url, "https://oauth2.googleapis.com/token",
+            "{id}"
+        );
+        assert_eq!(oauth.scopes, scopes, "{id}");
+        assert_eq!(
+            oauth.query,
+            [
+                ("client_id", QueryValue::ClientId),
+                ("response_type", QueryValue::Text("code")),
+                ("redirect_uri", QueryValue::RedirectUri),
+                ("scope", QueryValue::Scope),
+                ("state", QueryValue::State),
+                ("access_type", QueryValue::Text("offline")),
+                ("prompt", QueryValue::Text("consent")),
+            ],
+            "{id}"
+        );
+        let redirect = oauth.redirect.expect("a registered loopback callback");
+        assert_eq!(
+            (redirect.host, redirect.port, redirect.path),
+            ("127.0.0.1", port, path),
+            "{id}"
+        );
+        assert_eq!(oauth.completion, Completion::PasteCode, "{id}");
+        assert!(oauth.browser, "{id}");
+        assert!(oauth.device.is_none() && oauth.revoke_url.is_none(), "{id}");
+    }
+    // Every other row carries no client secret: only an installed-app client
+    // registers one.
+    for def in PROVIDERS {
+        let Some(oauth) = def.oauth else { continue };
+        assert_eq!(
+            oauth.client_secret.is_some(),
+            oauth.hook.binds_project(),
+            "{}",
+            def.id
+        );
+    }
 }

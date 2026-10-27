@@ -9,8 +9,12 @@ use std::{
 use dal_core::{Family, ModelInfo, ModelRequest, ModelRoute, Purpose, SessionId, Usage};
 use tokio_util::sync::CancellationToken;
 
-use super::config::{AuthStyle, ProviderEntry, Transport};
-use super::set::{ProviderSet, ProviderSetInner, accepts_only_oauth, authenticates_ambiently};
+use super::config::{AuthStyle, Origin, ProviderEntry, Transport};
+use super::set::{
+    ProviderSet, ProviderSetInner, ProviderSlot, accepts_only_oauth, authenticates_ambiently,
+    catalog_user_agent,
+};
+use super::wire;
 use crate::family::cursor::{decode as cursor_decode, lower as cursor_lower};
 use crate::run::{HostToolResult, ProviderRun};
 use crate::{
@@ -28,6 +32,54 @@ use crate::{
 use super::request as request_mod;
 use super::transport as transport_mod;
 
+/// The set-owned slot for `entry`, once every caller-visible field of the
+/// entry is proven identical to the slot.
+///
+/// Every field carries routing or credential authority, and the static
+/// definition selects wires that may replace the endpoint, so the exhaustive
+/// pattern makes a new field fail to compile until it is compared here. The
+/// definition is compared by pointer identity: rows are shared statics.
+fn owned_slot<'set>(
+    owner: &'set ProviderSet,
+    entry: &ProviderEntry,
+) -> Result<&'set ProviderSlot, ProviderError> {
+    let slot =
+        owner
+            .inner
+            .providers
+            .get(&entry.id)
+            .ok_or_else(|| ProviderError::InvalidRequest {
+                message: format!("provider {} is not owned by this provider set", entry.id),
+            })?;
+    let ProviderEntry {
+        id: _,
+        def,
+        family,
+        base_url,
+        transport,
+        key_env,
+        auth,
+        max_concurrent_requests,
+        settings,
+        origins,
+    } = entry;
+    let slot_entry = &slot.entry;
+    if slot_entry.family != *family
+        || slot_entry.base_url != *base_url
+        || slot_entry.transport != *transport
+        || slot_entry.key_env != *key_env
+        || slot_entry.auth != *auth
+        || slot_entry.max_concurrent_requests != *max_concurrent_requests
+        || slot_entry.settings != *settings
+        || slot_entry.origins != *origins
+        || slot_entry.def.map(std::ptr::from_ref) != def.map(std::ptr::from_ref)
+    {
+        return Err(ProviderError::InvalidRequest {
+            message: format!("provider {} does not match this provider set", entry.id),
+        });
+    }
+    Ok(slot)
+}
 /// One HTTP-backed provider adapter. Its fields stay private; construct it
 /// through [`ProviderSet::provider`] or [`Provider::new`].
 #[must_use]
@@ -52,12 +104,15 @@ pub enum Provider {
     /// Anthropic Messages.
     Anthropic(Http),
     /// Every other HTTP-backed family (Bedrock, Cursor, Devin, Droid, GitLab,
-    /// the Google HTTPS surfaces, Mistral, Ollama, `pi-messages`): one general
-    /// variant whose request family drives the dispatch in [`Provider::open`].
+    /// the Google HTTPS surfaces including Cloud Code Assist, Mistral, Ollama,
+    /// `pi-messages`): one general variant whose request family drives the
+    /// dispatch in [`Provider::open`].
     Http(Http),
     /// `google-gemini-cli`: a credential-less local subprocess, never HTTP.
     /// It drives `gemini_cli::spawn().into_events()` instead of `http::send`,
-    /// so it stays out of the HTTP catalog, refresh, and decode paths.
+    /// so it stays out of the HTTP catalog, refresh, and decode paths. The
+    /// signed-in Cloud Code Assist surface is the distinct
+    /// `google-cloud-code-assist` family and rides [`Provider::Http`].
     GeminiCli(Http),
     /// Deterministic provider steps for tests and headless replay.
     Scripted(crate::scripted::Script),
@@ -93,30 +148,35 @@ impl Provider {
                 message: String::from("an HTTP provider needs a concrete API route"),
             });
         };
-        let slot =
-            owner
-                .inner
-                .providers
-                .get(&entry.id)
-                .ok_or_else(|| ProviderError::InvalidRequest {
-                    message: format!("provider {} is not owned by this provider set", entry.id),
-                })?;
-        if slot.entry.family != entry.family
-            || slot.entry.base_url != entry.base_url
-            || slot.entry.transport != entry.transport
-            || slot.entry.key_env != entry.key_env
-            || slot.entry.auth != entry.auth
-            || slot.entry.max_concurrent_requests != entry.max_concurrent_requests
-            || slot.entry.settings != entry.settings
-        {
-            return Err(ProviderError::InvalidRequest {
-                message: format!("provider {} does not match this provider set", entry.id),
+        owned_slot(owner, &entry)?;
+        // A wired row re-enforces every wire rule the catalog applies, so a
+        // forged or stale route that skipped resolution can reach neither
+        // the row's default adapter nor a wire the configuration excluded:
+        // the model must select a wire (an unbound id never falls back to
+        // the row default), the wire's family must match the route, and an
+        // explicit `api` narrows the row to its configured family.
+        let wired = entry.def.is_some_and(|def| !def.wires.is_empty());
+        let bound = wire::wire_for(&entry, model);
+        let narrowed = entry.origins.api == Origin::Explicit;
+        let authorized = if wired {
+            bound.is_some_and(|w| w.family == *family && (!narrowed || w.family == entry.family))
+        } else {
+            *family == entry.family
+        };
+        if !authorized {
+            return Err(if wired && bound.is_none() {
+                ProviderError::InvalidRequest {
+                    message: format!("provider {} serves no wire for model {model}", entry.id),
+                }
+            } else {
+                ProviderError::InvalidRequest {
+                    message: String::from("resolved model does not match its configured provider"),
+                }
             });
         }
         if resolved.provider != entry.id
             || resolved.entry.provider != resolved.provider
             || resolved.entry.id != *model
-            || *family != entry.family
         {
             return Err(ProviderError::InvalidRequest {
                 message: String::from("resolved model does not match its configured provider"),
@@ -150,8 +210,13 @@ impl Provider {
                 provider: entry.id.to_string(),
             });
         }
+        // A Responses row that signs in by OAuth (xAI, Meta) sends its access
+        // token as the bearer the key would be; every other Chat or
+        // Responses entry takes an API key only.
+        let signs_in_by_oauth = entry.def.and_then(|def| def.oauth).is_some();
         if matches!(*family, Family::Chat | Family::Responses)
             && matches!(&credential, Credential::OAuth(_))
+            && !(*family == Family::Responses && signs_in_by_oauth)
         {
             return Err(ProviderError::InvalidRequest {
                 message: String::from("this provider family requires an API-key credential"),
@@ -186,6 +251,7 @@ impl Provider {
             | Family::GitLab
             | Family::GoogleGenerativeAi
             | Family::GoogleVertex
+            | Family::GoogleCloudCodeAssist
             | Family::GoogleAntigravity
             | Family::Mistral
             | Family::Ollama
@@ -663,7 +729,8 @@ impl Provider {
         } = turn;
         let permit = transport_mod::acquire_provider_permit(owner, &http.entry.id, cancel).await?;
         let retries = owner.config.stream_max_retries;
-        let context = request_mod::stream_context(http, request, thinking.clone(), session);
+        let context =
+            request_mod::stream_context(http, request, thinking.clone(), session, &owner.env)?;
         let ws_turn = match request_mod::request_family(request)? {
             Family::Codex => {
                 let Credential::OAuth(oauth) = &credential else {
@@ -709,6 +776,7 @@ impl Provider {
             | Family::GoogleGenerativeAi
             | Family::GoogleVertex
             | Family::GoogleGeminiCli
+            | Family::GoogleCloudCodeAssist
             | Family::GoogleAntigravity
             | Family::Mistral
             | Family::Ollama
@@ -765,7 +833,7 @@ impl Provider {
             cancel.clone(),
             notices,
         );
-        let ctx = request_mod::stream_context(http, request, thinking, session);
+        let ctx = request_mod::stream_context(http, request, thinking, session, &owner.env)?;
         let ctx_for_attempt = ctx.clone();
         let owner_for_attempt = Arc::clone(owner);
         let attempt = move |credential: &Credential, attempt_cancel: &CancellationToken| {
@@ -820,13 +888,15 @@ impl Provider {
             &refresh_cancel,
         )
         .await?;
+        let user_agent = catalog_user_agent(&http.entry, &owner.identity, &http.user_agent);
         let fetch = ModelFetch {
             client: &http.client,
             provider: &http.entry,
             credential: &credential,
             cache_dir: &owner.cache_dir,
-            user_agent: &http.user_agent,
+            user_agent: &user_agent,
             version: &owner.identity.version,
+            env: &owner.env,
         };
         let catalog = catalog::load_models(&fetch, tokio::time::sleep).await;
         drop(permit);
@@ -1051,6 +1121,8 @@ impl Provider {
             cancel,
         )
         .await?;
+        let client_identity =
+            request_mod::client_identity_for(&owner, &http.entry.id, &credential).await?;
         let max_retries = if http.entry.family == Family::Codex {
             compact::CODEX_STREAM_RETRIES
         } else {
@@ -1063,8 +1135,12 @@ impl Provider {
             .ok_or_else(|| ProviderError::InvalidRequest {
                 message: format!("provider {} has no admission semaphore", http.entry.id),
             })?;
+        // The compact route carries its wire's family, not the row's
+        // logical default: `check_compact_preconditions` already authorized
+        // the route.
+        let route_family = request_mod::request_family(request)?;
         let plan = Plan::new(
-            http.entry.family,
+            route_family,
             http.entry.id.clone(),
             http.resolved.entry.id.clone(),
             max_retries,
@@ -1073,7 +1149,7 @@ impl Provider {
             notices,
         );
         let ctx = request_mod::CompactContext {
-            family: http.entry.family,
+            family: route_family,
             provider: http.entry.clone(),
             resolved: http.resolved.clone(),
             request: request.clone(),
@@ -1081,6 +1157,8 @@ impl Provider {
             session,
             client: http.client.clone(),
             user_agent: http.user_agent.clone(),
+            env: owner.env.clone(),
+            client_identity,
         };
         let ctx_for_attempt = ctx.clone();
         let attempt = move |credential: &Credential, attempt_cancel: &CancellationToken| {
