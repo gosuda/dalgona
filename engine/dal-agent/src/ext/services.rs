@@ -44,7 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -60,7 +60,7 @@ use crate::broker::{Resolution, Settled};
 use crate::error::{SIDECAR_VALUE_LIMIT, ServiceError, ToolError};
 use crate::proc::{ProcResult, ProcStatus, SpawnOpts, StopReason};
 use dal_core::ExitStatusKind;
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
+use dal_core::ext::{JUDGE_DENIED, JudgeAuth, McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, DenyReason, EntryId, FetchRequest, FetchResponse,
     Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview,
@@ -74,7 +74,7 @@ use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
 mod contract;
-pub use contract::{ServiceFuture, Services};
+pub use contract::{JudgeTransport, ServiceFuture, Services};
 pub(crate) use contract::{SessionBackend, SessionServicesDeps};
 
 /// Session-scoped [`Services`] over one shared capability gate.
@@ -103,6 +103,9 @@ pub struct SessionServices {
     ask_open: Mutex<HashSet<RequestId>>,
     run_open: Mutex<Option<RequestId>>,
     next_call: AtomicU64,
+    /// The session judge backend, registered once at session setup; one
+    /// lock, never held across a backend await.
+    judge: RwLock<Option<Arc<dyn JudgeTransport>>>,
 }
 
 /// Cap on concurrently open extension asks. Real callers are blocked tool
@@ -294,7 +297,16 @@ impl SessionServices {
             ask_open: Mutex::new(HashSet::new()),
             run_open: Mutex::new(None),
             next_call: AtomicU64::new(1),
+            judge: RwLock::new(deps.judge),
         }
+    }
+    /// Clones the registered judge backend, if any. The lock is released
+    /// before any backend await, so a slow judge never blocks registration.
+    fn judge_backend(&self) -> Option<Arc<dyn JudgeTransport>> {
+        self.judge
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     /// Binds the call to its caller's turn token while that turn is live.
     /// Once the turn has ended (or the caller is turnless), work belongs to
@@ -864,6 +876,77 @@ impl Services for SessionServices {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         let texts = self.history.to_vec();
         Box::pin(std::future::ready(Ok(texts)))
+    }
+
+    fn judge_ask(&self, who: &Caller, question: String) -> ServiceFuture<'_, bool> {
+        let who = who.clone();
+        Box::pin(async move {
+            if !who.inject.contains(Service::Judge) {
+                return Err(ServiceError::failed(Some(Service::Judge), JUDGE_DENIED));
+            }
+            self.gated(&who, Service::Judge)
+                .await
+                .map_err(|error| match error {
+                    ServiceError::Cancelled => ServiceError::Cancelled,
+                    _ => ServiceError::failed(Some(Service::Judge), JUDGE_DENIED),
+                })?;
+            let backend = self.judge_backend();
+            let Some(backend) = backend else {
+                return Err(ServiceError::failed(
+                    Some(Service::Judge),
+                    "judge is unavailable (gate = off, judge = none)",
+                ));
+            };
+            backend
+                .ask(
+                    JudgeAuth {
+                        injected: true,
+                        cell: who.cell(),
+                        turn: who.turn,
+                    },
+                    question,
+                )
+                .await
+        })
+    }
+
+    fn judge_batch(&self, who: &Caller, questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>> {
+        let who = who.clone();
+        Box::pin(async move {
+            if !who.inject.contains(Service::Judge) {
+                return Err(ServiceError::failed(Some(Service::Judge), JUDGE_DENIED));
+            }
+            self.gated(&who, Service::Judge)
+                .await
+                .map_err(|error| match error {
+                    ServiceError::Cancelled => ServiceError::Cancelled,
+                    _ => ServiceError::failed(Some(Service::Judge), JUDGE_DENIED),
+                })?;
+            let backend = self.judge_backend();
+            let Some(backend) = backend else {
+                return Err(ServiceError::failed(
+                    Some(Service::Judge),
+                    "judge is unavailable (gate = off, judge = none)",
+                ));
+            };
+            backend
+                .ask_batch(
+                    JudgeAuth {
+                        injected: true,
+                        cell: who.cell(),
+                        turn: who.turn,
+                    },
+                    questions,
+                )
+                .await
+        })
+    }
+
+    fn set_judge_transport(&self, backend: Arc<dyn JudgeTransport>) {
+        *self
+            .judge
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(backend);
     }
 
     fn add_session_tools(

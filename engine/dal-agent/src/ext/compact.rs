@@ -13,7 +13,8 @@
 //! `compact_params().with_max_output_tokens(SUMMARY_MAX_OUTPUT_TOKENS)`.
 //! Cancellation stays typed as
 //! [`CompactError::Service`](CompactError::Service)
-//! (`ServiceError::Cancelled`); refusals are `Fail`, never `Ok(None)`.
+//! (`ServiceError::Cancelled`); a refusal is `Ok(None)` or `Fail` and
+//! advances the chain, never a fabricated success.
 
 use std::sync::Arc;
 

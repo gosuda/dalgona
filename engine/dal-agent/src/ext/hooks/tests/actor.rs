@@ -10,20 +10,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use dal_core::ext::{BeforeRequest, BeforeTurn, ExportId, ExportKind, OpSet};
+use dal_core::ext::{BeforeRequest, BeforeTurn};
+#[cfg(unix)]
+use dal_core::ext::{ExportId, ExportKind, OpSet};
+#[cfg(unix)]
+use dal_core::{Answer, Question, Record, RequestId, RunRequest, SessionId};
 use dal_core::{
-    Answer, CancelScope, ClientId, Command, Config, ConfigProduct, EntryView, Expect, InputEvent,
-    InputVerdict, ModelInfo, Name, Part, Question, RawJson, Record, RequestId, RequestParams,
-    RunRequest, ServiceSet, SessionId, Stop, ToolCallEvent, ToolCallVerdict, ToolClass, ToolSpec,
-    TurnId, UpdateKind, Visibility, Workspace,
+    CancelScope, ClientId, Command, Config, ConfigProduct, EntryView, Expect, InputEvent,
+    InputVerdict, ModelInfo, Name, Part, RawJson, RequestParams, ServiceSet, Stop, ToolCallEvent,
+    ToolCallVerdict, ToolClass, ToolSpec, TurnId, UpdateKind, Visibility, Workspace,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use crate::ToolError;
+#[cfg(unix)]
 use crate::ext::generation::catalog::ExportSpec;
 use crate::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use crate::ext::{BoxFuture, Extension, ExtensionBuilder, Hook, HookCx, HookError};
-use crate::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, ToolError};
+use crate::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -50,6 +56,11 @@ fn text_step(text: &str) -> String {
 struct Live {
     host: Host,
     workspace: Workspace,
+    /// Keeps the temp root alive; read only by unix-only setups.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "only unix-gated tests read the path")
+    )]
     tmp: tempfile::TempDir,
 }
 
@@ -646,11 +657,13 @@ async fn held_input_hook_cancel_starts_no_later_hook() {
 
 /// Runs `sh -c 'echo ran > ran.marker'` through the `run` service, which asks
 /// for approval first.
+#[cfg(unix)]
 struct MarkerRun {
     name: Name,
     spec: Arc<ToolSpec>,
 }
 
+#[cfg(unix)]
 impl Tool for MarkerRun {
     fn name(&self) -> &Name {
         &self.name
@@ -794,6 +807,7 @@ async fn open_approval_cancel_refuses_a_late_approval() {
 
 /// The answers the journal holds for one request: the durable record of how
 /// the cancelled approval settled.
+#[cfg(unix)]
 async fn journaled_answers_for(live: &Live, session: SessionId, request: RequestId) -> Vec<Answer> {
     let store = dal_store::Store::new(
         live.tmp.path().join("data"),

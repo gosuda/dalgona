@@ -24,6 +24,20 @@ fn origin_rank(origin: Origin) -> u8 {
     }
 }
 
+/// The canonical extension order: builtins keep input order, then bundled
+/// and user extensions sort bytewise by name within their rank.
+pub(crate) fn canonical_order(a: &Extension, b: &Extension) -> Ordering {
+    origin_rank(a.origin())
+        .cmp(&origin_rank(b.origin()))
+        .then_with(|| {
+            if matches!(a.origin(), Origin::Builtin) {
+                Ordering::Equal
+            } else {
+                a.name().cmp(b.name())
+            }
+        })
+}
+
 /// Maps one extension to the claimant its records attribute conflicts to
 /// plus its parsed name: builtins blame the built-in extension, bundled and
 /// user extensions blame the registering plugin. The name rides along so
@@ -115,17 +129,7 @@ impl ValidatedExtensions {
         prev: Option<&Generation>,
     ) -> Result<Self, RegistrationError> {
         let mut sorted = extensions;
-        sorted.sort_by(|a, b| {
-            origin_rank(a.origin())
-                .cmp(&origin_rank(b.origin()))
-                .then_with(|| {
-                    if matches!(a.origin(), Origin::Builtin) {
-                        Ordering::Equal
-                    } else {
-                        a.name().cmp(b.name())
-                    }
-                })
-        });
+        sorted.sort_by(canonical_order);
         let mut tables = ClaimTables::new();
         if let Some(prev) = prev {
             for ext in prev.extensions.iter() {

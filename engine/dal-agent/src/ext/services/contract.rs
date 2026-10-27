@@ -5,11 +5,11 @@
 //! implementation and every gate. [`ServiceFuture`] is the future alias the
 //! rest of the extension runtime imports.
 
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
+use dal_core::ext::{JudgeAuth, McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
     JobsReply, ModelRequest, ModelRoute, Name, Notice, PrivateEffect, Question, Request, RunOutput,
-    RunRequest, SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord, TurnOp,
+    RunRequest, Service, SidecarName, SidecarOp, Site, StateError, StateOp, StateRecord, TurnOp,
     TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
@@ -34,6 +34,20 @@ use crate::ext::{Caller, ExtRecord};
 /// [`GrantStore::ensure`] returns this shape; this module owns the alias the
 /// rest of the extension runtime imports.
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ServiceError>> + Send + 'a>>;
+
+/// A session judge backend behind the cell `judge` entries.
+///
+/// The host holds this behind [`Services::judge_ask`]; the real backend lives
+/// in `dal-ext`, which opens the per-session judge handle at setup and
+/// registers it here. Test doubles script it directly. The backend enforces
+/// the cell-only rule itself, so a missing inject or a non-cell caller fails
+/// with the judge denial rather than a generic grant text.
+pub trait JudgeTransport: Send + Sync + 'static {
+    /// Judges one boolean question from an eval cell.
+    fn ask(&self, auth: JudgeAuth, question: String) -> ServiceFuture<'_, bool>;
+    /// Judges a batch of boolean questions from an eval cell, in order.
+    fn ask_batch(&self, auth: JudgeAuth, questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>>;
+}
 
 /// Service access for hook and handler contexts.
 ///
@@ -126,6 +140,49 @@ pub trait Services: Send + Sync + 'static {
     ///
     /// Never fails today; the future shape matches every other service.
     fn history_texts(&self, who: &Caller) -> ServiceFuture<'_, Vec<String>>;
+    /// Judges one boolean question from an eval cell through the registered
+    /// judge backend.
+    ///
+    /// The default answers fail-closed without a backend; the session
+    /// implementation overrides it with the inject, grant, and backend path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the inject, grant, availability, or backend failure.
+    fn judge_ask(&self, who: &Caller, question: String) -> ServiceFuture<'_, bool> {
+        let _ = (who, question);
+        Box::pin(async move {
+            Err(ServiceError::failed(
+                Some(Service::Judge),
+                "judge is unavailable (gate = off, judge = none)",
+            ))
+        })
+    }
+    /// Judges a batch of boolean questions from an eval cell, in order.
+    ///
+    /// The default answers fail-closed without a backend; the session
+    /// implementation overrides it with the inject, grant, and backend path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the inject, grant, availability, or backend failure.
+    fn judge_batch(&self, who: &Caller, questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>> {
+        let _ = (who, questions);
+        Box::pin(async move {
+            Err(ServiceError::failed(
+                Some(Service::Judge),
+                "judge is unavailable (gate = off, judge = none)",
+            ))
+        })
+    }
+    /// Registers the session judge backend that [`Services::judge_ask`] and
+    /// [`Services::judge_batch`] delegate to.
+    ///
+    /// The default ignores the backend; the session implementation stores it
+    /// for later judge calls.
+    fn set_judge_transport(&self, backend: Arc<dyn JudgeTransport>) {
+        let _ = backend;
+    }
     /// Runs one child-agent operation.
     ///
     /// # Errors
@@ -363,6 +420,9 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
 
 /// Construction inputs for [`super::SessionServices`], held by the host.
 pub(crate) struct SessionServicesDeps {
+    /// The session judge backend for the cell `judge` entries, when the
+    /// product registered one at setup.
+    pub(crate) judge: Option<Arc<dyn JudgeTransport>>,
     /// The shared capability gate; one store serves every service.
     pub(crate) grants: Arc<GrantStore>,
     /// The session request broker for `ask` and run approvals.

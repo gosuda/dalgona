@@ -712,6 +712,83 @@ async fn approval_held_approver_cancel_denies_and_drops_future() {
     );
 }
 
+#[test]
+fn watch_factory_starts_once_and_watcher_is_synchronous() {
+    use super::watch::{StreamWatch, TurnInfo, WatchFactory, feed_watchers, start_watchers};
+    struct Rec {
+        log: Arc<Mutex<Vec<&'static str>>>,
+        tag: &'static str,
+        interrupt: bool,
+    }
+    impl StreamWatch for Rec {
+        fn feed(&mut self, _: dal_core::Channel, _: &str) -> dal_core::StreamVerdict {
+            self.log.lock().expect("log").push(self.tag);
+            if self.interrupt {
+                return dal_core::StreamVerdict::Interrupt {
+                    rule: "r".into(),
+                    inject: "stop".into(),
+                };
+            }
+            dal_core::StreamVerdict::Continue
+        }
+        fn finish(&mut self) -> dal_core::StreamVerdict {
+            dal_core::StreamVerdict::Continue
+        }
+    }
+    struct One {
+        log: Arc<Mutex<Vec<&'static str>>>,
+        tag: &'static str,
+        interrupt: bool,
+        starts: Arc<Mutex<u32>>,
+    }
+    impl WatchFactory for One {
+        fn start(&self, _: &TurnInfo<'_>) -> Option<Box<dyn StreamWatch>> {
+            *self.starts.lock().expect("starts") += 1;
+            Some(Box::new(Rec {
+                log: Arc::clone(&self.log),
+                tag: self.tag,
+                interrupt: self.interrupt,
+            }))
+        }
+    }
+    struct NoneF;
+    impl WatchFactory for NoneF {
+        fn start(&self, _: &TurnInfo<'_>) -> Option<Box<dyn StreamWatch>> {
+            None
+        }
+    }
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let starts = Arc::new(Mutex::new(0u32));
+    let mk = |tag, interrupt| {
+        Arc::new(One {
+            log: Arc::clone(&log),
+            tag,
+            interrupt,
+            starts: Arc::clone(&starts),
+        })
+    };
+    let factories: Vec<Arc<dyn WatchFactory>> =
+        vec![mk("first", false), Arc::new(NoneF), mk("second", true)];
+    let turn = TurnInfo::new(SessionId::new_v7(), TurnId::new(std::num::NonZeroU64::MIN));
+    let mut watchers = start_watchers(&factories, &turn);
+    assert_eq!(
+        *starts.lock().expect("starts"),
+        2,
+        "each returning factory starts exactly once"
+    );
+    assert_eq!(watchers.len(), 2, "one watcher per returning factory");
+    let verdict = feed_watchers(&mut watchers, &dal_core::Channel::Text, "d");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["first", "second"],
+        "deltas visit watchers inline in start order"
+    );
+    assert!(
+        matches!(verdict, dal_core::StreamVerdict::Interrupt { .. }),
+        "first interrupt wins"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn precancelled_ready_allow_still_denies() {
     let caller = caller();
@@ -747,5 +824,101 @@ async fn precancelled_ready_allow_still_denies() {
     assert!(
         matches!(&decision, ToolDecision::Denied),
         "pre-cancelled approval must deny even when the approver is ready to allow, got {decision:?}"
+    );
+}
+struct FailRequestHook;
+
+impl Hook<BeforeRequest, Option<RequestParams>> for FailRequestHook {
+    fn call(
+        &self,
+        _input: BeforeRequest,
+        _cx: crate::ext::HookCx,
+    ) -> BoxFuture<'static, Result<Option<RequestParams>, HookError>> {
+        Box::pin(async move {
+            Err(HookError::Failed {
+                message: "boom".into(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn before_request_clamp_cap() {
+    let caller = caller();
+    let services: Arc<dyn Services> = Arc::new(NoSvcs);
+    let cancel = CancellationToken::new();
+    let cx = cx(&caller, &services, &cancel);
+    let caps = Caps {
+        context_window: Some(4096),
+        thinking: Box::new([dal_core::ThinkingLevel::Low]),
+        tool_use: false,
+        image_input: false,
+        custom_grammar: false,
+    };
+    let params = RequestParams {
+        thinking: dal_core::ThinkingLevel::High,
+        ..RequestParams::default()
+    };
+    let event = BeforeRequest {
+        turn: TurnId::new(std::num::NonZeroU64::MIN),
+        round: 0,
+        model: ModelInfo {
+            route: ModelRoute::Synthetic {
+                id: "acme/test".into(),
+            },
+            name: "test".into(),
+            provider: "".into(),
+            caps: caps.clone(),
+        },
+        caps: caps.clone(),
+        params: params.clone(),
+        thinking_explicit: false,
+    };
+    // Error half: an erroring hook keeps the running params with exactly
+    // one hook_failed notice (ext/hooks.rs dispatch_before_request).
+    let failing: Vec<Arc<dyn Hook<BeforeRequest, Option<RequestParams>>>> =
+        vec![Arc::new(FailRequestHook)];
+    let step = dispatch_before_request("test", &cx, &failing, &event, params.clone()).await;
+    assert_eq!(
+        step.params.thinking,
+        dal_core::ThinkingLevel::High,
+        "a failed before_request hook keeps the running params"
+    );
+    assert_eq!(
+        step.notices.len(),
+        1,
+        "one erroring hook pushes exactly one hook_failed notice"
+    );
+    assert_eq!(
+        step.notices[0].as_ref(),
+        "plugin \"test\" hook before_request failed; before_request ignored",
+        "the notice names the extension, event, and ignored outcome"
+    );
+    // Clamp half: the stub hook requests High on a Low-cap model; dispatch
+    // carries High untouched and the caller-side clamp lowers it to Low.
+    // A clamp that returns its input keeps High and fails this test.
+    let hot: Vec<Arc<dyn Hook<BeforeRequest, Option<RequestParams>>>> = vec![Arc::new(HotHook)];
+    let over = RequestParams {
+        thinking: dal_core::ThinkingLevel::Low,
+        ..RequestParams::default()
+    };
+    let over_event = BeforeRequest {
+        params: over.clone(),
+        ..event
+    };
+    let hot_step = dispatch_before_request("test", &cx, &hot, &over_event, over).await;
+    assert_eq!(
+        hot_step.params.thinking,
+        dal_core::ThinkingLevel::High,
+        "the stub hook carries its above-cap request through dispatch"
+    );
+    assert_eq!(
+        clamp_params(hot_step.params, &caps).thinking,
+        dal_core::ThinkingLevel::Low,
+        "clamping a Low-cap model lowers the High request to Low"
+    );
+    assert!(
+        hot_step.notices.is_empty(),
+        "a successful hook pushes no notice"
     );
 }

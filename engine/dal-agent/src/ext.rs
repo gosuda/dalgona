@@ -29,6 +29,8 @@ pub(crate) mod overlay;
 
 pub mod prompt;
 
+pub mod replace;
+
 pub mod scheme;
 
 pub mod scope;
@@ -73,7 +75,7 @@ pub use tool::{Approved, ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome
 
 use dal_core::{
     Caps, Inference, ModelId, ModelRequest, Name, Origin, RawJson, ScopeSpec, ServiceSet,
-    SessionId, TurnId,
+    SessionId, StatusPayload, TurnId,
 };
 
 use crate::session::service_grants::Invocation as CallInvocation;
@@ -320,6 +322,17 @@ pub type Attach = Box<dyn FnOnce(crate::Host) -> BoxFuture<'static, ()> + Send>;
 pub trait StatusPoll: Send + Sync + 'static {
     /// Takes one status snapshot.
     fn snapshot(&self, cx: &StatusCx) -> StatusSnapshot;
+
+    /// Samples one poll: the snapshot plus an optional structured payload,
+    /// both read from the one immutable records view behind `cx`, so a poll
+    /// that folds records folds them once. The default keeps the snapshot
+    /// and carries no payload, so existing polls keep their exact behavior.
+    fn sample(&self, cx: &StatusCx) -> StatusSample {
+        StatusSample {
+            snapshot: self.snapshot(cx),
+            payload: None,
+        }
+    }
 }
 
 /// Host-provided synchronous context for one status poll: the polling
@@ -365,6 +378,16 @@ pub struct StatusSnapshot {
     pub quiet: bool,
     /// The status text, when any.
     pub text: Option<Box<str>>,
+}
+
+/// One status sample: the poll's snapshot plus its optional structured
+/// payload, taken from a single immutable records view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusSample {
+    /// The snapshot as before: quiet plus human text.
+    pub snapshot: StatusSnapshot,
+    /// The bounded structured payload, when the poll supplies one.
+    pub payload: Option<StatusPayload>,
 }
 
 /// One registered status kind with its poll.

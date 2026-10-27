@@ -408,6 +408,24 @@ impl CommandCx<'_> {
             .history_page(&self.caller, self.session, self.turn, query)
     }
 
+    /// Returns the full immutable candidate batch for a publication
+    /// without validating or publishing: the current generation's
+    /// extensions with same-named non-`User` records swapped for
+    /// `replace` in place and `plugins` appended, in that same in-place
+    /// order. The caller owns validation and publication, as in
+    /// [`CommandCx::publish_plugins`].
+    #[must_use]
+    pub fn plugin_candidate(
+        &self,
+        plugins: Vec<Extension>,
+        replace: Vec<Extension>,
+    ) -> Vec<Extension> {
+        let current = self
+            .host
+            .current_extensions(&self.caller, self.session, self.turn);
+        splice_plugins(&current, plugins, replace)
+    }
+
     /// Validates and publishes new plugin extensions against the current
     /// product set: the one publication point for `/reload`.
     ///
@@ -424,10 +442,7 @@ impl CommandCx<'_> {
         plugins: Vec<Extension>,
         replace: Vec<Extension>,
     ) -> BoxFuture<'_, Result<ReloadSummary, BuildError>> {
-        let current = self
-            .host
-            .current_extensions(&self.caller, self.session, self.turn);
-        let extensions = splice_plugins(&current, plugins, replace);
+        let extensions = self.plugin_candidate(plugins, replace);
         let validated = ValidatedExtensions::validate(extensions, None);
         Box::pin(async move {
             let generation = Generation::build(validated.map_err(BuildError::validation)?);

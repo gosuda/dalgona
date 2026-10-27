@@ -160,10 +160,8 @@ pub struct Approved {
     prefix: Box<[OsString]>,
     roots: Box<[PathBuf]>,
     job: Option<JobId>,
-    permits: Option<(
-        tokio::sync::OwnedSemaphorePermit,
-        crate::admission::FdPermit,
-    )>,
+    /// The process capacity the spawn door moves into the child's lease.
+    admission: Option<crate::admission::ProcessAdmission>,
     _seal: Seal,
 }
 
@@ -182,27 +180,20 @@ impl Approved {
             prefix,
             roots,
             job,
-            permits: None,
+            admission: None,
             _seal: Seal,
         }
     }
 
-    pub(crate) fn with_permits(
-        mut self,
-        permit: tokio::sync::OwnedSemaphorePermit,
-        fds: crate::admission::FdPermit,
-    ) -> Self {
-        self.permits = Some((permit, fds));
+    /// Attaches the admitted process capacity this approval spawns with.
+    pub(crate) fn with_admission(mut self, admission: crate::admission::ProcessAdmission) -> Self {
+        self.admission = Some(admission);
         self
     }
 
-    pub(crate) fn take_permits(
-        &mut self,
-    ) -> Option<(
-        tokio::sync::OwnedSemaphorePermit,
-        crate::admission::FdPermit,
-    )> {
-        self.permits.take()
+    /// Moves the admitted process capacity out for the spawn door.
+    pub(crate) fn take_admission(&mut self) -> Option<crate::admission::ProcessAdmission> {
+        self.admission.take()
     }
 
     /// Borrows the call this proof authorizes.
@@ -869,8 +860,9 @@ fn test_workspace() -> Workspace {
 #[cfg(test)]
 mod approval_tests {
     use super::Approved;
-    use crate::admission::{Admission, Limits};
+    use crate::admission::{Admission, Limits, ProcessAdmission};
     use crate::error::{AdmissionLimit, ToolError};
+    use crate::jobs::ProcessSlots;
     use dal_core::CallId;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
@@ -885,18 +877,32 @@ mod approval_tests {
             128,
         );
         let cancel = CancellationToken::new();
-        let permit = admission.acquire_process(&cancel).await?;
-        let fds = admission.charge_fds(1, &cancel).await?;
+        let slots = ProcessSlots::new(1, 1);
+        let admitted = ProcessAdmission {
+            process: admission
+                .acquire_process(&cancel, admission.begin())
+                .await?,
+            fds: admission.charge_fds(1, &cancel, admission.begin()).await?,
+            slot: slots.claim_for_test(),
+        };
         let approved = Approved::new(CallId::new("call"), None, Box::new([]), Box::new([]), None)
-            .with_permits(permit, fds);
+            .with_admission(admitted);
         assert!(matches!(
-            admission.acquire_process(&cancel).await,
+            admission.acquire_process(&cancel, admission.begin()).await,
             Err(ToolError::Admission {
                 limit: AdmissionLimit::Processes
             })
         ));
+        assert_eq!(slots.live(), 1, "the approval still holds its session slot");
         drop(approved);
-        let next = admission.acquire_process(&cancel).await?;
+        assert_eq!(
+            slots.live(),
+            0,
+            "dropping the approval frees the session slot"
+        );
+        let next = admission
+            .acquire_process(&cancel, admission.begin())
+            .await?;
         drop(next);
         Ok(())
     }

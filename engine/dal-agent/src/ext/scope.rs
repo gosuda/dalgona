@@ -104,6 +104,7 @@ struct Runtime {
     member_slots: Arc<Mutex<Vec<Weak<ContinuationSlot>>>>,
     lineage: Lineage,
     price: Option<PriceFn>,
+    has_session: bool,
     /// In-flight member starts that outlive their handle's wait: closing
     /// the tracker seals the set; spawned starts still run to completion.
     cleanup: TaskTracker,
@@ -663,19 +664,20 @@ impl Scope {
         cancel: CancellationToken,
         spec: ScopeSpec,
     ) -> Result<Self, ScopeError> {
-        Self::open(services, caller.clone(), cancel, &spec, None)
+        Self::open_with_session(services, caller.clone(), cancel, &spec, None, true)
     }
 
     #[expect(
         clippy::needless_pass_by_value,
         reason = "parent token is consumed to derive the scope's child token"
     )]
-    pub(crate) fn open(
+    pub(crate) fn open_with_session(
         services: Arc<dyn Services>,
         caller: Caller,
         cancel: CancellationToken,
         spec: &ScopeSpec,
         price: Option<PriceFn>,
+        has_session: bool,
     ) -> Result<Self, ScopeError> {
         spec.validate(GLOBAL_MEMBER_CAP)?;
         let lineage = synthetic::lineage();
@@ -690,6 +692,7 @@ impl Scope {
             member_slots: Arc::new(Mutex::new(Vec::new())),
             lineage,
             price,
+            has_session,
             cleanup: TaskTracker::new(),
         });
         let mut tasks = JoinSet::new();
@@ -743,6 +746,11 @@ impl Scope {
     /// denied or failed start surfaces through the handle's result.
     pub fn agent(&self, request: AgentStart) -> Result<ScopeHandle, ScopeError> {
         let shared = &self.inner.shared;
+        if !shared.rt.has_session {
+            return Err(ScopeError::Denied(DenyReason::Unavailable {
+                what: synthetic::relay::MEMBER_SESSIONS_OUTSIDE.into(),
+            }));
+        }
         if shared.ledger.requires_usd() {
             let model = request
                 .model

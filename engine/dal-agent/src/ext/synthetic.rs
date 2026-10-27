@@ -39,7 +39,7 @@ use crate::session::contain::{contained, crashed_tool};
 use crate::session::continuation::ContinuationSlot;
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 
-mod relay;
+pub(crate) mod relay;
 
 /// Private tool rounds one forward may run.
 const PRIVATE_ROUNDS: u32 = 8;
@@ -448,8 +448,26 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
     {
         return Some(price);
     }
-    let catalog = shared.cached_catalog();
-    let resolved = catalog.as_ref().and_then(|catalog| {
+    let configured = |key: &str| {
+        shared
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .price_for_model(key)
+            .cloned()
+    };
+    // The route's own provider/id spelling is a candidate too: the reference
+    // drops a named provider, while compiled and configured prices key on it.
+    let mut candidates: Vec<(String, Option<ModelPrice>)> = Vec::new();
+    if let ModelRoute::Api {
+        model,
+        provider: Some(provider),
+        ..
+    } = route
+    {
+        candidates.push((format!("{provider}/{model}"), None));
+    }
+    if let Some(catalog) = shared.cached_catalog() {
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
             .read()
@@ -458,28 +476,23 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        dal_provider::resolve(catalog, &aliases, &reference).ok()
-    });
-    let canonical = resolved
-        .as_ref()
-        .map(|r| format!("{}/{}", r.provider, r.entry.id));
-    if let Some(price) = canonical.as_deref().and_then(|key| {
-        shared
-            .config
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .price_for_model(key)
-            .cloned()
-    }) {
+        candidates.extend(dal_provider::price_candidates(
+            &catalog, &aliases, &reference,
+        ));
+    }
+    candidates.dedup_by(|left, right| left.0 == right.0);
+    if let Some(price) = candidates.iter().find_map(|(key, _)| configured(key)) {
         return Some(price);
     }
-    if let Some(price) = resolved.as_ref().and_then(|r| r.entry.price.as_ref()) {
-        return Some(price.clone());
+    if let Some(price) = candidates.iter().find_map(|(_, price)| price.clone()) {
+        return Some(price);
     }
     if let Some(price) = dal_provider::compiled_price(&reference) {
         return Some(price);
     }
-    canonical.as_deref().and_then(dal_provider::compiled_price)
+    candidates
+        .iter()
+        .find_map(|(key, _)| dal_provider::compiled_price(key))
 }
 
 pub(crate) async fn collect(mut stream: EventStream) -> Result<Inference, InferFailure> {
@@ -496,12 +509,13 @@ impl ModelCxRuntime for Run {
     fn scope(&self, spec: ScopeSpec) -> Result<Scope, ScopeError> {
         let shared = Arc::clone(&self.deps.host.shared);
         let price: PriceFn = Arc::new(move |route| price_of(&shared, route));
-        Scope::open(
+        Scope::open_with_session(
             Arc::clone(&self.services),
             self.handler.clone(),
             self.cancel.clone(),
             &spec,
             Some(price),
+            self.lineage.journal.is_some(),
         )
     }
 
@@ -519,17 +533,19 @@ impl ModelCxRuntime for Run {
         script: Arc<crate::session::script::SessionScriptHost>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<Inference, crate::error::ServiceError>> {
-        Box::pin(async move {
-            let Some(services) = &self.script_services else {
-                return Err(crate::error::ServiceError::failed(
-                    None,
-                    "models.infer is unavailable outside a session",
-                ));
-            };
-            services
-                .script_infer_with(who, request, Some(script), cancel)
-                .await
-        })
+        // The script host spawns model work without the caller's task-local
+        // lineage, so the ambient chain there is empty. The run's own lineage
+        // is authoritative (the parent chain plus this handler's id): re-enter
+        // it so the nested `open` enforces cycle/depth instead of resetting.
+        let lineage = self.lineage.clone();
+        Box::pin(enter(lineage, async move {
+            if let Some(services) = &self.script_services {
+                return services
+                    .script_infer_with(who, request, Some(script), cancel)
+                    .await;
+            }
+            self.services.infer(who, request).await
+        }))
     }
 
     fn script_forward<'a>(
@@ -540,13 +556,11 @@ impl ModelCxRuntime for Run {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
         Box::pin(async move {
-            let Some(services) = &self.script_services else {
-                return Err(crate::error::ServiceError::failed(
-                    None,
-                    "models.forward is unavailable outside a session",
-                ));
-            };
-            services.authorize_script_infer(who, cancel).await?;
+            if let Some(services) = &self.script_services {
+                services.authorize_script_infer(who, cancel).await?;
+            } else if cancel.is_cancelled() {
+                return Err(crate::error::ServiceError::Cancelled);
+            }
             self.forward(request, private)
                 .await
                 .map_err(|error| crate::error::ServiceError::failed(None, error.to_string()))

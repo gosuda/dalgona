@@ -248,7 +248,7 @@ fn rig_as(opener: Caller, budget: Budget, price: Option<super::PriceFn>) -> Rig 
         inferred: AtomicUsize::new(0),
     });
     let services: Arc<dyn Services> = held.clone();
-    let scope = Scope::open(
+    let scope = Scope::open_with_session(
         services,
         opener,
         CancellationToken::new(),
@@ -258,6 +258,7 @@ fn rig_as(opener: Caller, budget: Budget, price: Option<super::PriceFn>) -> Rig 
             budget,
         },
         price,
+        true,
     )
     .expect("scope opens");
     let shared = Arc::clone(&scope.inner.shared);
@@ -975,7 +976,7 @@ async fn unreported_usage_in_a_child_scope_exhausts_the_parent_budget() {
     let lineage = crate::ext::synthetic::Lineage::default().with_ledger(parent_ledger);
     let child = crate::ext::synthetic::enter(lineage, async {
         let services: Arc<dyn Services> = rig.held.clone();
-        Scope::open(
+        Scope::open_with_session(
             services,
             caller(),
             CancellationToken::new(),
@@ -985,6 +986,7 @@ async fn unreported_usage_in_a_child_scope_exhausts_the_parent_budget() {
                 budget: Budget::default(),
             },
             None,
+            true,
         )
         .expect("child scope opens")
     })
