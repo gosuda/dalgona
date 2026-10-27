@@ -1,4 +1,5 @@
 //! Typed model judgments, per-session gate resolution, and bounded ledgering.
+mod cell;
 mod config;
 mod format;
 mod machine;
@@ -6,6 +7,7 @@ mod record;
 #[cfg(test)]
 mod tests;
 mod types;
+pub use cell::CellJudge;
 pub use config::{GateSetting, JudgeConfig};
 pub use format::{SYSTEM_LINE, parse_answers, render_envelope};
 pub use machine::{Judge, JudgeOpen};

@@ -1,8 +1,8 @@
 //! Deterministic rendering of text with the bundled bitmap font.
 //!
 //! Glyph data: GNU Unifont 18.0.01 (`unifont-18.0.01.hex`), used under the
-//! SIL Open Font License, Version 1.1 (full text in `OFL-1.1.txt`).
-//! Upstream: <https://unifoundry.com/unifont>/
+//! SIL Open Font License, Version 1.1 (full text in the root `LICENSE.md`
+//! appendix “Third-party font: GNU Unifont 18.0.01”; see <https://unifoundry.com/unifont/>).
 //! Copyright (C) 1998-2026 Roman Czyborra, Paul Hardy, Qianqian Fang, Andrew Miller, Johnnie Weaver, David Corbett, Ælla Chiana Moskopp, Rebecca Bettencourt, Minseo Lee, Ho-Seok Ee, et al.
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -268,10 +268,20 @@ fn decode_record(body: &RawValue) -> Result<SkillLetterRecord, SchemeError> {
         })
 }
 
-/// Builds the validation-failure error for one stored id.
-fn invalid_record_error(id: &str) -> SchemeError {
+/// Renders the validation-failure text for one stored record, naming its id
+/// and version so an unsupported schema stands out from other failures.
+#[must_use]
+fn invalid_record_message(record: &SkillLetterRecord) -> String {
+    format!(
+        "letter record '{}' with version {} failed validation",
+        record.id, record.v
+    )
+}
+
+/// Builds the validation-failure error for one stored record.
+fn invalid_record_error(record: &SkillLetterRecord) -> SchemeError {
     SchemeError::Failed {
-        message: format!("letter record '{id}' failed validation").into(),
+        message: invalid_record_message(record).into(),
     }
 }
 
@@ -323,7 +333,7 @@ impl SchemeResolver for LetterResolver {
                         let record = decode_record(body)?;
                         if record.validated().is_none() {
                             if *record.id == *id {
-                                return Err(invalid_record_error(&id));
+                                return Err(invalid_record_error(&record));
                             }
                             continue;
                         }
@@ -631,10 +641,7 @@ async fn stored_letters(cx: &HookCx) -> Result<Vec<SkillLetterRecord>, HookError
         if let Some(number) = record.validated() {
             admitted.push((number, record));
         } else if matches!(parse_letter_id(&record.id), Some(1..=20)) {
-            return Err(failed(format!(
-                "letter record '{}' failed validation",
-                record.id
-            )));
+            return Err(failed(invalid_record_message(&record)));
         }
         // Well-formed bodies outside the admitted bounds are skipped: an
         // orphan id can never collide with a re-persisted admitted id.

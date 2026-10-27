@@ -8,6 +8,7 @@
 //! dispatch the product uses.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dal_agent::ext::{
@@ -49,6 +50,29 @@ impl dal_ext::commands::PluginReload for NeverReload {
 
 async fn agent() -> Outcome<(Agent, TempRoot)> {
     let root = tempfile_root::new("dal-ext-commands-host")?;
+    let (_host, agent) = boot(&root, "model = \"fixture/end\"\n", None).await?;
+    Ok((agent, root))
+}
+
+/// A host whose default saves land in a user `dal.toml` seeded with `seed`;
+/// `seed` must itself select the `fixture/end` model.
+async fn agent_saving_into(seed: &str) -> Outcome<(Host, Agent, TempRoot, PathBuf)> {
+    let root = tempfile_root::new("dal-ext-commands-host-saves")?;
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("dal.toml");
+    std::fs::write(&config_path, seed)?;
+    let (host, agent) = boot(&root, seed, Some(&config_path)).await?;
+    Ok((host, agent, root, config_path))
+}
+
+/// A real host over the built-in commands and one fixture model; `save_to`
+/// is where default saves land, and `None` leaves the host nowhere to write.
+async fn boot(
+    root: &TempRoot,
+    config_text: &str,
+    save_to: Option<&Path>,
+) -> Outcome<(Host, Agent)> {
     let data = root.path().join("data");
     std::fs::create_dir_all(&data)?;
     std::fs::create_dir_all(root.path().join("workspace"))?;
@@ -69,12 +93,7 @@ async fn agent() -> Outcome<(Agent, TempRoot)> {
             export: None,
         })
         .build()?;
-    let config = Config::load(
-        ConfigProduct::Dalgon,
-        &data,
-        "",
-        Some("model = \"fixture/end\"\n"),
-    )?;
+    let config = Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text))?;
     let product = Product {
         name: "dal",
         data_root: data,
@@ -88,6 +107,9 @@ async fn agent() -> Outcome<(Agent, TempRoot)> {
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await?;
+    if let Some(path) = save_to {
+        host.set_config_path(path.to_path_buf());
+    }
     let agent = host
         .open(
             SessionRef::New {
@@ -97,7 +119,7 @@ async fn agent() -> Outcome<(Agent, TempRoot)> {
             ClientId::new("commands-host"),
         )
         .await?;
-    Ok((agent, root))
+    Ok((host, agent))
 }
 
 mod tempfile_root {
@@ -130,10 +152,14 @@ mod tempfile_root {
 use tempfile_root::Root as TempRoot;
 
 async fn run(agent: &Agent, name: &str) -> Outcome<Reply> {
+    run_with(agent, name, "").await
+}
+
+async fn run_with(agent: &Agent, name: &str, args: &str) -> Outcome<Reply> {
     Ok(agent
         .submit(Command::Run {
             name: name.into(),
-            args: "".into(),
+            args: args.into(),
             expected: None,
         })
         .await?)
@@ -223,5 +249,62 @@ async fn bare_thinking_opens_chooser_with_host_supported_levels() -> Outcome<()>
             thinking_levels: Some(Box::new([ThinkingLevel::Off])),
         }
     );
+    Ok(())
+}
+
+/// A user file for the save cases: a comment and the fixture model.
+const SAVE_SEED: &str = "# kept note\nmodel = \"fixture/end\"\n";
+
+/// A scope save submitted the way a client submits it, in one session, runs
+/// beside `/mode` in another: `/mode` saves its default through the command
+/// host. Both reach `dal.toml`: the one config writer serializes them,
+/// neither drops the other, and the user's own text survives.
+#[tokio::test]
+async fn a_scope_save_and_a_default_command_both_reach_the_config() -> Outcome<()> {
+    let (host, agent, root, config_path) = agent_saving_into(SAVE_SEED).await?;
+    let other = host
+        .open(
+            SessionRef::New {
+                workspace: Workspace::new(root.path().join("workspace"))?,
+                name: None,
+            },
+            ClientId::new("commands-host-other"),
+        )
+        .await?;
+    let scope: Vec<Box<str>> = vec!["fixture/end".into(), "beta/gpt-4o".into()];
+    let (scoped, mode) = tokio::join!(
+        agent.submit(Command::SetScopedModels(scope.clone())),
+        run_with(&other, "mode", "eval-first"),
+    );
+    let Reply::Done(Output::Text(scoped)) = scoped? else {
+        return Err("the scope save did not answer with text".into());
+    };
+    assert!(
+        scoped.starts_with("2 scoped models saved."),
+        "the scope save must report what it saved: {scoped}"
+    );
+    let Reply::Done(Output::Text(mode)) = mode? else {
+        return Err("/mode did not answer with text".into());
+    };
+    assert!(mode.contains("Saved as the default."), "{mode}");
+    let saved = std::fs::read_to_string(&config_path)?;
+    for landed in ["# kept note", "scoped_models", "mode = \"eval-first\""] {
+        assert!(saved.contains(landed), "{landed:?} is missing: {saved}");
+    }
+    let data = root.path().join("data");
+    let reloaded = Config::load(ConfigProduct::Dalgon, &data, "", Some(saved.as_str()))?;
+    assert_eq!(reloaded.mode(), dal_core::Mode::EvalFirst);
+    assert_eq!(agent.scoped_models(), scope);
+    Ok(())
+}
+
+/// `/scoped-models` without a cached catalog opens nothing and writes
+/// nothing: the user's file keeps its bytes and the session keeps no scope.
+#[tokio::test]
+async fn scoped_models_without_a_catalog_leaves_the_config_untouched() -> Outcome<()> {
+    let (_host, agent, _root, config_path) = agent_saving_into(SAVE_SEED).await?;
+    assert!(run(&agent, "scoped-models").await.is_err());
+    assert_eq!(std::fs::read_to_string(&config_path)?, SAVE_SEED);
+    assert_eq!(agent.scoped_models(), [] as [Box<str>; 0]);
     Ok(())
 }

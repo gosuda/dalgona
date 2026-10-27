@@ -171,6 +171,10 @@ async fn open_session(
     let judge_model_requested = !judge_config.model.is_empty() || cx.model.is_some();
     let judge_unresolved = judge_unresolved_reason(&judge_config);
     let judge = open_judge_for_session(&cx, judge_config, &judge_unresolved).await?;
+    cx.services
+        .set_judge_transport(std::sync::Arc::new(crate::judge::CellJudge::new(
+            judge.clone(),
+        )));
     let mut session_notices = Vec::new();
     if let Some(notice) =
         auto_off_notice(judge_gate, judge_model_requested, &judge, &judge_unresolved)

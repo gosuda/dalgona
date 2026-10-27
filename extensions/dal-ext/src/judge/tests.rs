@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use dal_agent::error::ServiceError;
-use dal_agent::ext::services::ServiceFuture;
+use dal_agent::ext::services::{JudgeTransport, ServiceFuture};
 use dal_agent::ext::tool::{RawValue, ToolOutcome};
 use dal_agent::ext::{Caller, HookCx, Services};
 use dal_core::ModelRoute;
@@ -26,9 +26,10 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tokio::time::sleep;
 
 use super::{
-    Gate, GateSetting, Judge, JudgeConfig, JudgeError, JudgeOpen, JudgeQuestion, SHARED_MAX,
-    STREAK_NOTICE_PREFIX, Verdict,
+    CellJudge, Gate, GateSetting, Judge, JudgeConfig, JudgeError, JudgeOpen, JudgeQuestion,
+    SHARED_MAX, STREAK_NOTICE_PREFIX, Verdict,
 };
+use dal_core::ext::JudgeAuth;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -212,6 +213,20 @@ impl Services for FakeServices {
 
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         Box::pin(async move { Err(FakeServices::failing("judge fake never reads history")) })
+    }
+
+    fn judge_ask(&self, _who: &Caller, _question: String) -> ServiceFuture<'_, bool> {
+        Box::pin(async move { Err(FakeServices::failing("judge fake never judges")) })
+    }
+
+    fn judge_batch(&self, _who: &Caller, _questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>> {
+        Box::pin(async move { Err(FakeServices::failing("judge fake never judges")) })
+    }
+
+    fn set_judge_transport(
+        &self,
+        _backend: std::sync::Arc<dyn dal_agent::ext::services::JudgeTransport>,
+    ) {
     }
 
     fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
@@ -1171,6 +1186,105 @@ async fn provider_error() -> TestResult {
     assert!(error.to_string().contains("boom downstream"));
     assert_eq!(services.row_statuses(), ["provider"]);
     assert_eq!(services.notices(), [] as [String; 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cell_transport_denies_without_inject() -> TestResult {
+    let services = Arc::new(FakeServices::new(vec![ready_probe("judge-model")], vec![]));
+    let judge = open_judge(Arc::clone(&services), test_config(), None).await;
+    let error = CellJudge::new(judge)
+        .ask(
+            JudgeAuth {
+                injected: false,
+                cell: true,
+                turn: None,
+            },
+            String::from("safe?"),
+        )
+        .await
+        .expect_err("inject is required");
+    assert_eq!(
+        error.to_string(),
+        "judge: denied (declare \"judge\" in the cell's inject)"
+    );
+    assert_eq!(services.completions(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cell_transport_denies_non_cell_caller() -> TestResult {
+    let services = Arc::new(FakeServices::new(vec![ready_probe("judge-model")], vec![]));
+    let judge = open_judge(Arc::clone(&services), test_config(), None).await;
+    let error = CellJudge::new(judge)
+        .ask(
+            JudgeAuth {
+                injected: true,
+                cell: false,
+                turn: None,
+            },
+            String::from("safe?"),
+        )
+        .await
+        .expect_err("cells only");
+    assert_eq!(
+        error.to_string(),
+        "judge: denied (declare \"judge\" in the cell's inject)"
+    );
+    assert_eq!(services.completions(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cell_transport_answers_bool() -> TestResult {
+    let services = Arc::new(FakeServices::new(
+        vec![ready_probe("judge-model")],
+        vec![FakeServices::scripted(r#"{"answers":[true]}"#)],
+    ));
+    let judge = open_judge(Arc::clone(&services), test_config(), None).await;
+    let answer = CellJudge::new(judge)
+        .ask(
+            JudgeAuth {
+                injected: true,
+                cell: true,
+                turn: None,
+            },
+            String::from("safe?"),
+        )
+        .await?;
+    assert!(answer);
+    assert_eq!(services.completions(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cell_transport_unavailable_names_gate() -> TestResult {
+    let services = Arc::new(FakeServices::new(vec![], vec![]));
+    let judge = open_judge(
+        Arc::clone(&services),
+        JudgeConfig {
+            gate: GateSetting::Off,
+            ..test_config()
+        },
+        None,
+    )
+    .await;
+    let error = CellJudge::new(judge)
+        .ask(
+            JudgeAuth {
+                injected: true,
+                cell: true,
+                turn: None,
+            },
+            String::from("safe?"),
+        )
+        .await
+        .expect_err("the gate is off");
+    assert_eq!(
+        error.to_string(),
+        "judge is unavailable (gate = off, judge = none)"
+    );
+    assert_eq!(services.completions(), 0);
     Ok(())
 }
 

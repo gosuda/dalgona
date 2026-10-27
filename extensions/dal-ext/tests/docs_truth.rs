@@ -451,6 +451,34 @@ fn generator_example_assembly() {
 }
 
 #[test]
+fn license_page_is_root_sourced_and_hard_fails_without_it() {
+    let guard = tempfile_guard::Guard::new();
+    let root = guard.dir();
+    let dir = root.join("docs");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("pages"), "license user,model docs 240\n").unwrap();
+    std::fs::write(root.join("LICENSE.md"), "# License\n\nFull license text.\n").unwrap();
+    let args = GenArgs {
+        scheme: Scheme::Dal,
+        dir: dir.clone(),
+        examples: None,
+        scan: vec![dir.clone()],
+    };
+    let module = generate(&args).expect("generates with the root license present");
+    assert!(
+        module.contains("\"license\""),
+        "module embeds the license page"
+    );
+    assert!(
+        module.contains("Full license text."),
+        "page carries the full root text"
+    );
+    std::fs::remove_file(root.join("LICENSE.md")).unwrap();
+    let errors = generate(&args).expect_err("a listed license page requires the root file");
+    assert!(!errors.is_empty(), "absence is a hard failure, not a skip");
+}
+
+#[test]
 fn resolver_index_and_page_bytes() {
     let snap = snapshot();
     match lookup(&snap, "dal://") {
@@ -950,6 +978,7 @@ fn truth_ext_status_claims() {
         ext: "focus".into(),
         state: dal_core::ExtState::Quiet,
         text: None,
+        payload: None,
     };
     assert!(quiet.is_quiet());
     assert!(quiet.text.is_none());

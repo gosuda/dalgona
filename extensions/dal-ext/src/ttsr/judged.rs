@@ -72,7 +72,8 @@ pub const JUDGE_ON_WITHOUT_CREDENTIALS: &str =
 /// `judged_count` is the number of judged rules in the set; `reason` is the
 /// already-resolved unavailability cause the caller derived once, reused here
 /// so this module derives no cause of its own. No notice is emitted when no
-/// judged rules are present.
+/// judged rules are present; an explicit `off` with judged rules carries the
+/// counted inert note from `Judge::inert_rules_notice`.
 ///
 /// # Errors
 ///
@@ -85,10 +86,15 @@ pub fn gate_mode(
     reason: &str,
 ) -> Result<JudgeGate, JudgeGateError> {
     match (mode, judge_ready) {
-        (JudgeMode::Off, _) => Ok(JudgeGate::Disabled { note: None }),
+        (JudgeMode::Off, _) | (JudgeMode::Auto, false) if judged_count == 0 => {
+            Ok(JudgeGate::Disabled { note: None })
+        }
+
+        (JudgeMode::Off, _) => Ok(JudgeGate::Disabled {
+            note: Some(crate::judge::Judge::inert_rules_notice(judged_count).into_string()),
+        }),
 
         (JudgeMode::On, false) => Err(JudgeGateError),
-        (JudgeMode::Auto, false) if judged_count == 0 => Ok(JudgeGate::Disabled { note: None }),
         (JudgeMode::Auto, false) => Ok(JudgeGate::Disabled {
             note: Some(judge_auto_off_note(reason, judged_count)),
         }),
@@ -192,24 +198,6 @@ mod tests {
 
     #[test]
     fn gate_resolution_table() {
-        assert_eq!(
-            gate_mode(
-                JudgeMode::Off,
-                false,
-                2,
-                "no judge model with usable credentials"
-            ),
-            Ok(JudgeGate::Disabled { note: None })
-        );
-        assert_eq!(
-            gate_mode(
-                JudgeMode::Off,
-                true,
-                2,
-                "no judge model with usable credentials"
-            ),
-            Ok(JudgeGate::Disabled { note: None })
-        );
         assert_eq!(
             gate_mode(
                 JudgeMode::On,
