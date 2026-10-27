@@ -24,7 +24,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::oneshot,
-    time::{Instant, sleep, timeout_at},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -33,15 +33,28 @@ use uuid::Uuid;
 use super::device::DeviceOutcome;
 use crate::{
     AuthStore, AuthStyle, Completion, Credential, EnvSnapshot, Hook, OAuthCredential, OAuthSpec,
-    PROVIDERS, ProviderDef, ProviderEntry, ProviderError, ProviderSettings, QueryValue, Redirect,
-    SecretString, Transport,
-    auth::credential::{codex_identity, oauth_expires_at, oauth_issued_at},
-    family::gitlab::{DirectAccessCache, PROVIDER_ID as GITLAB_PROVIDER_ID},
+    PROVIDERS, ProviderDef, ProviderEntry, ProviderError, ProviderIdentity, ProviderSettings,
+    QueryValue, Redirect, SecretString, Transport,
+    auth::{
+        credential::{codex_identity, oauth_expires_at, oauth_issued_at},
+        kimi::{self, ClientIdentity},
+        meta,
+    },
+    family::{
+        cursor::auth as cursor_auth,
+        devin::auth as devin_auth,
+        gitlab::{DirectAccessCache, PROVIDER_ID as GITLAB_PROVIDER_ID},
+        google::{
+            antigravity,
+            cloud_code::{self, Discovery, Surface},
+        },
+    },
     find,
     http::{
         CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, OAUTH_TIMEOUT, STREAM_IDLE_TIMEOUT, check_base_url,
         endpoint, read_body, send,
     },
+    lifecycle::TokioClock,
 };
 
 /// The login-flow originator sent to `OpenAI`'s authorization endpoint.
@@ -95,6 +108,10 @@ pub struct LoginEndpoints {
     rows: Vec<RowEndpoints>,
     loopback_override: bool,
     copilot: CopilotEndpoints,
+    /// The environment the binary captured, kept for the sign-ins that read
+    /// it after the code exchange (the Google Cloud project variables of the
+    /// Cloud Code Assist rows). `Debug` names the variables only.
+    env: EnvSnapshot,
 }
 
 /// Private endpoint mapping for Copilot device login, discovery, and policy.
@@ -182,8 +199,9 @@ pub(crate) struct RowEndpoints {
     /// The client id every request of this sign-in carries: the trimmed value
     /// of the row's override variable in the captured environment when that
     /// is not blank, else the row's pinned id. The authorize URL, the code
-    /// exchange, and the revoke request all read this one value.
-    pub(crate) client_id: Box<str>,
+    /// exchange, and the revoke request all read this one value. `None` for
+    /// a row whose vendor registers no client (`OpenRouter`).
+    pub(crate) client_id: Option<Box<str>>,
     /// The redirect URI the captured environment supplies in place of the
     /// row's registered one, for the rows that honor one.
     redirect_override: Option<RedirectOverride>,
@@ -195,6 +213,13 @@ pub(crate) struct RowEndpoints {
     /// The base the sign-in's session is verified against before it is
     /// stored; `None` for the rows that verify nothing.
     pub(crate) session_base: Option<Url>,
+    /// The token release endpoint a [`Completion::Poll`] row's sign-in
+    /// polls; `None` for every other row.
+    pub(crate) poll: Option<Url>,
+    /// The root the Google Cloud project discovery of a Cloud Code Assist
+    /// sign-in talks to (the row's base URL, moved under the loopback server
+    /// by the test seam); `None` for every other row.
+    pub(crate) project_base: Option<Url>,
     pub(crate) callback_port: u16,
 }
 
@@ -221,16 +246,53 @@ impl fmt::Debug for RedirectOverride {
     }
 }
 
-/// The device-code endpoints of one OAuth row.
+/// The device-code endpoints and request scope of one OAuth row.
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceUrls {
     pub(crate) usercode: Url,
     pub(crate) poll: Url,
-    pub(crate) page: Url,
-    pub(crate) redirect_uri: &'static str,
+    /// The verification page the row names; `None` when the vendor's
+    /// authorization response always names it.
+    pub(crate) page: Option<Url>,
+    /// The redirect URI of the final code exchange; `None` when the device
+    /// poll delivers the tokens directly.
+    pub(crate) redirect_uri: Option<&'static str>,
+    /// The space-joined scopes the device authorization request names;
+    /// `None` when the row asks for none.
+    pub(crate) scope: Option<Box<str>>,
+    /// The vendor headers both device requests carry beyond the library's
+    /// own `User-Agent` and `Accept`: the Kimi client identity for a Kimi
+    /// Code sign-in, none for every other row. The endpoint table builds
+    /// none; the sign-in fills them once the host identity is known.
+    pub(crate) headers: Vec<(&'static str, String)>,
 }
 
 impl RowEndpoints {
+    /// The client id the row's requests carry.
+    ///
+    /// # Errors
+    /// Returns [`ProviderError::AuthWrite`] for a row that registers none.
+    /// Only a row whose requests send no client id has none, and it never
+    /// asks.
+    pub(crate) fn require_client_id(&self) -> Result<&str, ProviderError> {
+        self.client_id
+            .as_deref()
+            .ok_or_else(|| ProviderError::AuthWrite {
+                reason: format!("{} registers no OAuth client id", self.def.id),
+            })
+    }
+
+    /// The vendor-registered loopback redirect of the row's browser sign-in.
+    ///
+    /// # Errors
+    /// Returns [`ProviderError::AuthWrite`] for a row that registers none: a
+    /// device-only or poll row, which never reaches a redirecting flow.
+    fn redirect(&self) -> Result<Redirect, ProviderError> {
+        self.oauth.redirect.ok_or_else(|| ProviderError::AuthWrite {
+            reason: format!("{} registers no browser redirect", self.def.id),
+        })
+    }
+
     /// Places every URL of the row with `locate` and resolves its client id
     /// and redirect override from the captured environment: production keeps
     /// the table's URLs, the loopback seam moves them under one local server.
@@ -247,15 +309,17 @@ impl RowEndpoints {
                 Ok(DeviceUrls {
                     usercode: locate(device.usercode_url)?,
                     poll: locate(device.poll_url)?,
-                    page: locate(device.page_url)?,
+                    page: device.page_url.map(locate).transpose()?,
                     redirect_uri: device.redirect_uri,
+                    scope: (!oauth.scopes.is_empty()).then(|| oauth.scopes.join(" ").into()),
+                    headers: Vec::new(),
                 })
             })
             .transpose()?;
         Ok(Self {
             def,
             oauth,
-            client_id: effective_client_id(&oauth, env).into(),
+            client_id: effective_client_id(&oauth, env).map(Into::into),
             redirect_override: redirect_override(oauth.hook, env),
             authorize: locate(oauth.authorize_url)?,
             token: locate(oauth.token_url)?,
@@ -265,6 +329,12 @@ impl RowEndpoints {
                 .then(|| locate(def.base_url))
                 .transpose()?,
             session_base: verifies_session(oauth.hook)
+                .then(|| locate(def.base_url))
+                .transpose()?,
+            poll: poll_url(oauth.hook).map(locate).transpose()?,
+            project_base: oauth
+                .hook
+                .binds_project()
                 .then(|| locate(def.base_url))
                 .transpose()?,
             callback_port,
@@ -279,12 +349,17 @@ impl RowEndpoints {
         if let (Some(urls), Some(device)) = (&self.device, oauth.device) {
             validate_endpoint(family, &urls.usercode, &host_of(device.usercode_url))?;
             validate_endpoint(family, &urls.poll, &host_of(device.poll_url))?;
-            validate_endpoint(family, &urls.page, &host_of(device.page_url))?;
+            if let (Some(page), Some(text)) = (&urls.page, device.page_url) {
+                validate_endpoint(family, page, &host_of(text))?;
+            }
         }
         if let (Some(url), Some(text)) = (&self.revoke, oauth.revoke_url) {
             validate_endpoint(family, url, &host_of(text))?;
         }
-        for url in [&self.models_base, &self.session_base]
+        if let (Some(url), Some(text)) = (&self.poll, poll_url(oauth.hook)) {
+            validate_endpoint(family, url, &host_of(text))?;
+        }
+        for url in [&self.models_base, &self.session_base, &self.project_base]
             .into_iter()
             .flatten()
         {
@@ -307,7 +382,7 @@ impl LoginEndpoints {
             rows.push(RowEndpoints::build(
                 def,
                 oauth,
-                oauth.redirect.port,
+                oauth.redirect.map_or(0, |redirect| redirect.port),
                 env,
                 &locate,
             )?);
@@ -316,6 +391,7 @@ impl LoginEndpoints {
             rows,
             loopback_override: false,
             copilot: CopilotEndpoints::production()?,
+            env: env.clone(),
         };
         endpoints.validate()?;
         Ok(endpoints)
@@ -347,10 +423,13 @@ impl LoginEndpoints {
             let Some(oauth) = def.oauth else { continue };
             let prefix = loopback_prefix(oauth.hook);
             let locate = |production: &str| {
+                // A production path may end in a slash (Meta's device endpoints);
+                // the loopback seam refuses an empty path segment, so it places
+                // such a row at the same path without the slash.
                 let path = Url::parse(production)
                     .map_err(|error| endpoint_error(def.family, error.to_string()))?
                     .path()
-                    .trim_start_matches('/')
+                    .trim_matches('/')
                     .to_owned();
                 endpoint(def.family, base_url, &loopback_path(prefix, &path))
             };
@@ -360,6 +439,7 @@ impl LoginEndpoints {
             rows,
             loopback_override: true,
             copilot: CopilotEndpoints::loopback(&base),
+            env: env.clone(),
         })
     }
 
@@ -367,13 +447,18 @@ impl LoginEndpoints {
     /// the Claude sign-in; zero asks the OS to choose a free port. The other
     /// rows keep the port they were built with.
     #[must_use]
-    pub fn with_callback_ports(mut self, codex: u16, claude: u16) -> Self {
+    pub fn with_callback_ports(self, codex: u16, claude: u16) -> Self {
+        self.with_callback_port(Hook::CodexAccount, codex)
+            .with_callback_port(Hook::ClaudeCode, claude)
+    }
+
+    /// Sets the callback port of every row whose hook is `hook`.
+    #[must_use]
+    pub(crate) fn with_callback_port(mut self, hook: Hook, port: u16) -> Self {
         for row in &mut self.rows {
-            row.callback_port = match row.oauth.hook {
-                Hook::CodexAccount => codex,
-                Hook::ClaudeCode => claude,
-                Hook::WorkOsDevice | Hook::GitLabDuo => row.callback_port,
-            };
+            if row.oauth.hook == hook {
+                row.callback_port = port;
+            }
         }
         self
     }
@@ -394,13 +479,24 @@ impl LoginEndpoints {
     pub(crate) fn copilot(&self) -> &CopilotEndpoints {
         &self.copilot
     }
+
+    /// The captured environment the endpoints were built from.
+    pub(crate) fn env(&self) -> &EnvSnapshot {
+        &self.env
+    }
 }
 
 /// A single OAuth sign-in attempt.
 ///
 /// The store and cache paths are supplied by the host. The callback receives
-/// browser redirects on the bound loopback listener; a callback-only row falls
-/// back to device polling when its port is busy. For a paste row, call
+/// browser redirects on the bound loopback listener; a [`Completion::Callback`]
+/// row falls back to device polling when its port is busy, while a
+/// [`Completion::Loopback`] row fails with [`ProviderError::CallbackBind`]. A
+/// [`Completion::Poll`] row (Cursor) binds nothing: it reports the login page
+/// and polls the vendor until the tokens arrive. A
+/// row whose hook stores a durable API key (`OpenRouter`) returns
+/// [`Credential::ApiKey`]; every other row returns [`Credential::OAuth`]. For
+/// a paste row, call
 /// [`LoginFlow::take_paste_sender`] before `run` and send one value from the
 /// host's input surface. Cancellation drops the flow's one-shot receiver; if
 /// the host took the sender, it is disconnected and the host should drop it.
@@ -414,6 +510,10 @@ pub struct LoginFlow<'a> {
     cache_dir: PathBuf,
     endpoints: LoginEndpoints,
     gitlab_grants: Option<Arc<DirectAccessCache>>,
+    /// The host platform the Cloud Code Assist project discovery names in its
+    /// `User-Agent`; `None` for a flow whose host supplied none, which only
+    /// a row that binds a project needs.
+    identity: Option<ProviderIdentity>,
     models_provider: Option<ProviderEntry>,
     paste_sender: Option<oneshot::Sender<String>>,
     paste_receiver: Option<oneshot::Receiver<String>>,
@@ -478,6 +578,7 @@ impl<'a> LoginFlow<'a> {
             cache_dir: cache_dir.into(),
             endpoints,
             gitlab_grants: None,
+            identity: None,
             models_provider: None,
             paste_sender: Some(paste_sender),
             paste_receiver: Some(paste_receiver),
@@ -493,6 +594,17 @@ impl<'a> LoginFlow<'a> {
     #[must_use]
     pub fn with_device_auth(mut self) -> Self {
         self.device_auth = true;
+        self
+    }
+
+    /// Supplies the host platform the Cloud Code Assist sign-ins name in the
+    /// `User-Agent` of their project discovery. The library never reads the
+    /// platform itself: the binary captures it once and hands it down. A flow
+    /// for a row that binds a project and was given none fails the sign-in
+    /// before any token request.
+    #[must_use]
+    pub fn with_identity(mut self, identity: ProviderIdentity) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -559,7 +671,10 @@ impl<'a> LoginFlow<'a> {
     /// apply through callback/device authorization and token exchange. A row
     /// that verifies its session (Factory Droid) checks the new grant against
     /// the vendor before the write; a refused or cancelled verification fails
-    /// the login with nothing stored. Cancellation also applies while the
+    /// the login with nothing stored. A Cloud Code Assist row discovers its
+    /// Google Cloud project inside the code exchange and stores it on the
+    /// credential; a refused or cancelled discovery fails the login the same
+    /// way. Cancellation also applies while the
     /// auth-file lock is contended and is checked again under the lock before
     /// the write. After this commit point, the durable write completes as one
     /// locked atomic transaction. After commit, cancellation only stops the
@@ -593,8 +708,8 @@ impl<'a> LoginFlow<'a> {
                 },
             }
         };
-        let oauth = match authorization {
-            Ok(oauth) => oauth,
+        let credential = match authorization {
+            Ok(credential) => credential,
             Err(error) => {
                 drop(self.paste_sender.take());
                 drop(self.paste_receiver.take());
@@ -604,14 +719,13 @@ impl<'a> LoginFlow<'a> {
         let verified = if cancel.is_cancelled() {
             Err(ProviderError::LoginCancelled)
         } else {
-            self.verify_session(&oauth, cancel).await
+            self.verify_session(&credential, cancel).await
         };
         if let Err(error) = verified {
             drop(self.paste_sender.take());
             drop(self.paste_receiver.take());
             return Err(error);
         }
-        let credential = Credential::OAuth(oauth);
         #[cfg(test)]
         if let Some(commit_ready) = self.commit_ready.take() {
             let _ = commit_ready.send(());
@@ -642,29 +756,87 @@ impl<'a> LoginFlow<'a> {
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
         deadline: Instant,
-    ) -> Result<OAuthCredential, ProviderError> {
+    ) -> Result<Credential, ProviderError> {
         let Some(row) = self.endpoints.row(self.def).cloned() else {
             return Err(ProviderError::AuthWrite {
                 reason: format!("{} has no OAuth endpoints", self.def.id),
             });
         };
-        let verifier = new_pkce_verifier();
-        let challenge = pkce_challenge(&verifier);
+        // A project-binding sign-in refuses before the browser opens, so a
+        // host that supplied no platform never spends an authorization code
+        // on a grant it cannot finish. A Kimi Code sign-in needs the same
+        // platform for its client identity, before its first request.
+        if row.oauth.hook.binds_project() || row.oauth.hook.sends_client_identity() {
+            self.require_identity(&row)?;
+        }
+        // The poll grant mints its own PKCE pair inside its prompt, so the
+        // generic pair is drawn only for the flows that send it.
+        let pkce = || {
+            let verifier = new_pkce_verifier();
+            let challenge = pkce_challenge(&verifier);
+            (verifier, challenge)
+        };
         match row.oauth.completion {
-            Completion::Callback => {
+            Completion::Poll => self.authorize_poll(&row, progress, cancel).await,
+            Completion::Callback | Completion::Loopback => {
+                let (verifier, challenge) = pkce();
                 self.authorize_callback(&row, progress, cancel, deadline, &verifier, &challenge)
                     .await
             }
             Completion::PasteCode => {
+                let (verifier, challenge) = pkce();
                 self.authorize_paste(&row, progress, cancel, &verifier, &challenge)
                     .await
             }
         }
     }
 
-    /// The browser flow: the callback or a pasted redirect completes it; a
-    /// busy port falls back to the device flow, and a row that offers no
-    /// browser sign-in runs only the device flow.
+    /// The poll browser flow ([`Hook::CursorPoll`]): report the login page
+    /// with the prompt's challenge and `uuid`, then poll the row's token
+    /// release endpoint until the tokens arrive. Nothing listens and nothing
+    /// is pasted, so the paste channel closes at once; the flow deadline and
+    /// `cancel` bound the poll.
+    async fn authorize_poll(
+        &mut self,
+        row: &RowEndpoints,
+        progress: &(dyn Fn(LoginProgress) + Send + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<Credential, ProviderError> {
+        let Some(poll) = &row.poll else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{} has no token poll endpoint", row.def.id),
+            });
+        };
+        drop(self.paste_receiver.take());
+        drop(self.paste_sender.take());
+        let prompt = cursor_auth::Prompt::new();
+        report_progress(
+            progress,
+            LoginProgress::OpenUrl {
+                url: prompt.login_url(&row.authorize).into(),
+            },
+            cancel,
+        )?;
+        let http = OAuthHttp {
+            client: &self.oauth_client,
+            user_agent: &self.user_agent,
+        };
+        cursor_auth::poll_tokens(
+            &http,
+            poll,
+            &prompt,
+            cursor_auth::PollPacing::default(),
+            cancel,
+        )
+        .await
+        .map(Credential::OAuth)
+    }
+
+    /// The browser flow: the callback or a pasted redirect completes it. A
+    /// [`Completion::Callback`] row whose port is busy falls back to the
+    /// device flow; a [`Completion::Loopback`] row fails with
+    /// [`ProviderError::CallbackBind`]. A row that offers no browser sign-in
+    /// runs only the device flow.
     async fn authorize_callback(
         &mut self,
         row: &RowEndpoints,
@@ -673,55 +845,82 @@ impl<'a> LoginFlow<'a> {
         deadline: Instant,
         verifier: &str,
         challenge: &str,
-    ) -> Result<OAuthCredential, ProviderError> {
+    ) -> Result<Credential, ProviderError> {
         if self.device_auth || !row.oauth.browser {
             return self.authorize_device(row, progress, cancel, deadline).await;
         }
+        let registered = row.redirect()?;
         let state = flow_state(row.oauth.hook, verifier);
-        let listener = bind_callback(row.callback_port).await;
-        if let Ok((listener, port)) = listener {
-            let redirect = redirect_uri(row.oauth.redirect, port);
-            let url = authorize_url(
-                row.def.family,
-                &row.oauth,
-                &row.client_id,
-                &row.authorize,
-                &redirect,
-                challenge,
-                &state,
-            )?;
-            report_progress(
-                progress,
-                LoginProgress::OpenUrl {
-                    url: url.to_string(),
-                },
-                cancel,
-            )?;
-            report_progress(
-                progress,
-                LoginProgress::AskPaste {
-                    hint: String::from(PASTE_HINT),
-                    default: None,
-                },
-                cancel,
-            )?;
-            let receiver = self.paste_receiver.take();
-            drop(self.paste_sender.take());
-            let code = Self::paste_callback_code(
-                row,
-                row.oauth.redirect.path,
-                listener,
-                receiver,
-                &state,
-                cancel,
-            )
-            .await?;
-            report_progress(progress, LoginProgress::Exchanging, cancel)?;
-            return self
-                .exchange(row, &code, verifier, &redirect, &[&state, &code, verifier])
-                .await;
+        let path = callback_path(&row.oauth, registered, &state);
+        let expected = sends_state(&row.oauth).then_some(state.as_str());
+        match bind_callback(row.callback_port).await {
+            Ok((listener, port)) => {
+                let redirect = redirect_uri(registered, port, &path);
+                let endpoint = self.authorize_endpoint(row).await?;
+                let url = authorize_url(
+                    row.def.family,
+                    &row.oauth,
+                    row.client_id.as_deref(),
+                    &endpoint,
+                    &redirect,
+                    challenge,
+                    &state,
+                )?;
+                report_progress(
+                    progress,
+                    LoginProgress::OpenUrl {
+                        url: url.to_string(),
+                    },
+                    cancel,
+                )?;
+                report_progress(
+                    progress,
+                    LoginProgress::AskPaste {
+                        hint: String::from(PASTE_HINT),
+                        default: None,
+                    },
+                    cancel,
+                )?;
+                let receiver = self.paste_receiver.take();
+                drop(self.paste_sender.take());
+                let (code, _callback_guard) =
+                    Self::paste_callback_code(row, &path, listener, receiver, expected, cancel)
+                        .await?;
+                report_progress(progress, LoginProgress::Exchanging, cancel)?;
+                self.exchange(
+                    row,
+                    &code,
+                    verifier,
+                    &redirect,
+                    &[&state, &code, verifier],
+                    cancel,
+                )
+                .await
+            }
+            Err(_) if row.oauth.completion == Completion::Callback => {
+                self.authorize_device(row, progress, cancel, deadline).await
+            }
+            Err(error) => Err(ProviderError::CallbackBind {
+                port: row.callback_port,
+                reason: error.to_string(),
+            }),
         }
-        self.authorize_device(row, progress, cancel, deadline).await
+    }
+
+    /// The authorization endpoint the browser opens: the row's own, or for a
+    /// row whose hook discovers it ([`Hook::RadiusGateway`]) the one its
+    /// discovery document names. The discovery request uses the private OAuth
+    /// client, which follows no redirect.
+    async fn authorize_endpoint(&self, row: &RowEndpoints) -> Result<Url, ProviderError> {
+        if row.oauth.hook != Hook::RadiusGateway {
+            return Ok(row.authorize.clone());
+        }
+        let http = OAuthHttp {
+            client: &self.oauth_client,
+            user_agent: &self.user_agent,
+        };
+        let response = get_json(&http, row.def.family, &row.authorize).await?;
+        discovered_endpoint(row.def, &response, self.endpoints.loopback_override)
     }
 
     async fn authorize_device(
@@ -730,22 +929,34 @@ impl<'a> LoginFlow<'a> {
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
         deadline: Instant,
-    ) -> Result<OAuthCredential, ProviderError> {
+    ) -> Result<Credential, ProviderError> {
         let Some(device) = &row.device else {
             return Err(ProviderError::AuthWrite {
                 reason: format!("{} has no device sign-in", row.def.id),
             });
         };
+        // A Kimi Code sign-in names itself with the Kimi `User-Agent` and
+        // identity headers on every request; every other row keeps the
+        // host's own.
+        let identity = self.client_identity(row).await?;
+        let mut device = device.clone();
+        let user_agent: &str = match &identity {
+            Some(identity) => {
+                device.headers = identity.headers().to_vec();
+                identity.user_agent()
+            }
+            None => &self.user_agent,
+        };
         let http = OAuthHttp {
             client: &self.oauth_client,
-            user_agent: &self.user_agent,
+            user_agent,
         };
         let outcome = super::device::run(
             &http,
             row.def.family,
             row.oauth.hook,
-            &row.client_id,
-            device,
+            row.require_client_id()?,
+            &device,
             deadline,
             progress,
             cancel,
@@ -753,17 +964,90 @@ impl<'a> LoginFlow<'a> {
         .await?;
         match outcome {
             DeviceOutcome::Grant(grant) => {
+                let Some(redirect) = device.redirect_uri else {
+                    return Err(ProviderError::AuthWrite {
+                        reason: format!(
+                            "{} device sign-in exchanges a grant but names no redirect URI",
+                            row.def.id
+                        ),
+                    });
+                };
                 report_progress(progress, LoginProgress::Exchanging, cancel)?;
                 self.exchange(
                     row,
                     &grant.authorization_code,
                     &grant.code_verifier,
-                    device.redirect_uri,
+                    redirect,
                     &[&grant.authorization_code, &grant.code_verifier],
+                    cancel,
                 )
                 .await
             }
-            DeviceOutcome::Tokens(credential) => Ok(credential),
+            DeviceOutcome::Tokens(credential) => Ok(Credential::OAuth(credential)),
+            DeviceOutcome::Identity(identity_token) => {
+                report_progress(progress, LoginProgress::Exchanging, cancel)?;
+                Self::mint_key(row, &http, identity_token).await
+            }
+        }
+    }
+
+    /// The Kimi client identity of a row whose requests carry one, or `None`
+    /// for every other row: the headers derived from the host platform the
+    /// flow was given and the captured environment, with the install's
+    /// device id read (or first written) beside `auth.json` on the blocking
+    /// pool.
+    async fn client_identity(
+        &self,
+        row: &RowEndpoints,
+    ) -> Result<Option<ClientIdentity>, ProviderError> {
+        if !row.oauth.hook.sends_client_identity() {
+            return Ok(None);
+        }
+        let identity = self.require_identity(row)?;
+        let directory = self
+            .store
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| ProviderError::AuthWrite {
+                reason: format!("{} names no parent directory", self.store.path().display()),
+            })?;
+        let device_id =
+            crate::auth::refresh::blocking(move || Ok(kimi::device_id(&directory))).await?;
+        Ok(Some(ClientIdentity::new(
+            identity,
+            self.endpoints.env(),
+            &device_id,
+        )))
+    }
+
+    /// The Meta sign-in's last step: mint the Model API key from the device
+    /// grant's identity token at the row's mint endpoint and build the
+    /// credential that stores the key beside the identity token. A refused
+    /// mint fails the sign-in with nothing stored.
+    async fn mint_key(
+        row: &RowEndpoints,
+        http: &OAuthHttp<'_>,
+        identity_token: SecretString,
+    ) -> Result<Credential, ProviderError> {
+        let request = meta::request(http.client, &row.token, identity_token.expose());
+        let response = send_body(http, row.def.family, request).await?;
+        match meta::outcome(
+            row.def.family,
+            response.status,
+            &response.body,
+            &[identity_token.expose()],
+        ) {
+            meta::Outcome::Key(key) => Ok(Credential::OAuth(meta::credential(
+                key,
+                identity_token,
+                unix_now(),
+            ))),
+            meta::Outcome::SessionExpired => Err(ProviderError::TokenExchange {
+                status: response.status,
+                message: String::from("the Meta session expired; sign in again"),
+            }),
+            meta::Outcome::Refused(error) => Err(error),
         }
     }
 
@@ -775,17 +1059,24 @@ impl<'a> LoginFlow<'a> {
         cancel: &CancellationToken,
         verifier: &str,
         challenge: &str,
-    ) -> Result<OAuthCredential, ProviderError> {
+    ) -> Result<Credential, ProviderError> {
+        let registered = row.redirect()?;
         let state = flow_state(row.oauth.hook, verifier);
+        let expected = sends_state(&row.oauth).then_some(state.as_str());
         let Landing {
             uri,
             path,
             listener,
-        } = Landing::open(row).await?;
+        } = Landing::open(
+            row,
+            registered,
+            callback_path(&row.oauth, registered, &state),
+        )
+        .await?;
         let url = authorize_url(
             row.def.family,
             &row.oauth,
-            &row.client_id,
+            row.client_id.as_deref(),
             &row.authorize,
             &uri,
             challenge,
@@ -808,11 +1099,11 @@ impl<'a> LoginFlow<'a> {
         )?;
         let receiver = self.paste_receiver.take();
         drop(self.paste_sender.take());
-        let code = if let Some(listener) = listener {
-            Self::paste_callback_code(row, &path, listener, receiver, &state, cancel).await?
+        let (code, _callback_guard) = if let Some(listener) = listener {
+            Self::paste_callback_code(row, &path, listener, receiver, expected, cancel).await?
         } else {
             let value = receive_paste(receiver, cancel).await?;
-            parse_pasted_code(&value, &state, row.def.family)?
+            (parse_pasted_code(&value, expected, row.def.family)?, None)
         };
         report_progress(progress, LoginProgress::Exchanging, cancel)?;
         self.exchange(
@@ -821,6 +1112,7 @@ impl<'a> LoginFlow<'a> {
             verifier,
             &uri,
             &[code.as_str(), verifier, state.as_str()],
+            cancel,
         )
         .await
     }
@@ -830,16 +1122,23 @@ impl<'a> LoginFlow<'a> {
         path: &str,
         listener: tokio::net::TcpListener,
         receiver: Option<tokio::sync::oneshot::Receiver<String>>,
-        state: &str,
+        expected_state: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Result<String, ProviderError> {
-        let callback = callback_code(listener, path, state, row.def.family);
+    ) -> Result<(String, Option<CallbackGuard>), ProviderError> {
+        let callback = callback_code(
+            listener,
+            path,
+            expected_state,
+            row.def.family,
+            matches!(row.oauth.hook, Hook::RadiusGateway | Hook::OpenRouterKey),
+        );
         tokio::pin!(callback);
         tokio::select! {
             biased;
             result = &mut callback => result,
             pasted = receive_paste(receiver, cancel) => match pasted {
-                Ok(value) => parse_pasted_code(&value, state, row.def.family),
+                Ok(value) => parse_pasted_code(&value, expected_state, row.def.family)
+                    .map(|code| (code, None)),
                 Err(error) if cancel.is_cancelled() => Err(error),
                 Err(_) => callback.await,
             }
@@ -853,52 +1152,47 @@ impl<'a> LoginFlow<'a> {
         verifier: &str,
         redirect: &str,
         secrets: &[&str],
-    ) -> Result<OAuthCredential, ProviderError> {
+        cancel: &CancellationToken,
+    ) -> Result<Credential, ProviderError> {
         let http = OAuthHttp {
             client: &self.oauth_client,
             user_agent: &self.user_agent,
         };
         match row.oauth.hook {
+            Hook::GoogleCloudCodeAssist | Hook::GoogleAntigravity => {
+                self.exchange_google(row, &http, code, redirect, secrets, cancel)
+                    .await
+            }
             Hook::CodexAccount => {
-                let body = code_exchange_form(&row.client_id, code, verifier, redirect);
-                let response = post_form(&http, row.def.family, &row.token, &body).await?;
-                let token = token_or_exchange_error::<CodexTokenResponse>(&response, secrets)?;
-                validate_token_pair(&token.access_token, &token.refresh_token)?;
-                let identity = codex_identity(&token.id_token).ok_or(ProviderError::NoAccountId)?;
-                Ok(OAuthCredential {
-                    expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
-                    access_token: SecretString::from(token.access_token),
-                    refresh_token: SecretString::from(token.refresh_token),
-                    id_token: Some(token.id_token),
-                    account_id: Some(identity.account_id),
-                })
+                Self::exchange_codex(row, &http, code, verifier, redirect, secrets).await
             }
             Hook::ClaudeCode => {
                 let request = ClaudeTokenRequest {
                     grant_type: "authorization_code",
-                    client_id: &row.client_id,
+                    client_id: row.require_client_id()?,
                     code,
                     state: verifier,
                     redirect_uri: redirect,
                     code_verifier: verifier,
                 };
                 let response = post_json(&http, row.def.family, &row.token, &request).await?;
-                let token = token_or_exchange_error::<ClaudeTokenResponse>(&response, secrets)?;
+                let token = token_or_exchange_error::<PlainTokenResponse>(&response, secrets)?;
                 validate_token_pair(&token.access_token, &token.refresh_token)?;
-                Ok(OAuthCredential {
-                    expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
-                    access_token: SecretString::from(token.access_token),
-                    refresh_token: SecretString::from(token.refresh_token),
-                    id_token: None,
-                    account_id: None,
-                })
+                Ok(Credential::OAuth(plain_credential(token)))
+            }
+            Hook::RadiusGateway => {
+                let body = code_exchange_form(row.require_client_id()?, code, verifier, redirect);
+                let response = post_form(&http, row.def.family, &row.token, &body).await?;
+                let token = token_or_exchange_error::<PlainTokenResponse>(&response, secrets)?;
+                validate_token_pair(&token.access_token, &token.refresh_token)?;
+                Ok(Credential::OAuth(plain_credential(token)))
             }
             Hook::GitLabDuo => {
-                let body = code_exchange_form(&row.client_id, code, verifier, redirect);
+                let body = code_exchange_form(row.require_client_id()?, code, verifier, redirect);
                 let response = post_form(&http, row.def.family, &row.token, &body).await?;
                 let token = token_or_exchange_error::<GitLabTokenResponse>(&response, secrets)?;
                 validate_token_pair(&token.access_token, &token.refresh_token)?;
-                Ok(OAuthCredential {
+                Ok(Credential::OAuth(OAuthCredential {
                     expires_at: oauth_expires_at(
                         oauth_issued_at(token.created_at.as_ref(), unix_now()),
                         token.expires_in,
@@ -908,14 +1202,170 @@ impl<'a> LoginFlow<'a> {
                     refresh_token: SecretString::from(token.refresh_token),
                     id_token: None,
                     account_id: None,
+                    project_id: None,
+                }))
+            }
+            Hook::OpenRouterKey => {
+                let request = OpenRouterKeyRequest {
+                    code,
+                    code_verifier: verifier,
+                    code_challenge_method: "S256",
+                };
+                let response = post_json(&http, row.def.family, &row.token, &request).await?;
+                let granted = token_or_exchange_error::<OpenRouterKeyResponse>(&response, secrets)?;
+                if granted.key.is_empty() {
+                    return Err(ProviderError::TokenExchange {
+                        status: response.status,
+                        message: String::from("invalid key response"),
+                    });
+                }
+                Ok(Credential::ApiKey {
+                    key: SecretString::from(granted.key),
                 })
             }
-            Hook::WorkOsDevice => Err(ProviderError::AuthWrite {
+            Hook::DevinCliToken => {
+                devin_auth::exchange_code(&http, &row.token, code, verifier, secrets)
+                    .await
+                    .map(Credential::OAuth)
+            }
+            Hook::WorkOsDevice | Hook::XaiDevice | Hook::MetaMuse | Hook::KimiCodeDevice => {
+                Err(ProviderError::AuthWrite {
+                    reason: format!(
+                        "{} signs in by device grant and has no authorization-code exchange",
+                        row.def.id
+                    ),
+                })
+            }
+            Hook::CursorPoll => Err(ProviderError::AuthWrite {
                 reason: format!(
-                    "{} signs in by device grant and has no authorization-code exchange",
+                    "{} signs in by poll grant and has no authorization-code exchange",
                     row.def.id
                 ),
             }),
+        }
+    }
+
+    /// The `Codex` account exchange: the PKCE form post, then the decoded
+    /// token pair, validated and bound to the ID-token account identity the
+    /// row requires.
+    async fn exchange_codex(
+        row: &RowEndpoints,
+        http: &OAuthHttp<'_>,
+        code: &str,
+        verifier: &str,
+        redirect: &str,
+        secrets: &[&str],
+    ) -> Result<Credential, ProviderError> {
+        let body = code_exchange_form(row.require_client_id()?, code, verifier, redirect);
+        let response = post_form(http, row.def.family, &row.token, &body).await?;
+        let token = token_or_exchange_error::<CodexTokenResponse>(&response, secrets)?;
+        validate_token_pair(&token.access_token, &token.refresh_token)?;
+        let identity = codex_identity(&token.id_token).ok_or(ProviderError::NoAccountId)?;
+        Ok(Credential::OAuth(OAuthCredential {
+            expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
+            access_token: SecretString::from(token.access_token),
+            refresh_token: SecretString::from(token.refresh_token),
+            id_token: Some(token.id_token),
+            account_id: Some(identity.account_id),
+            project_id: None,
+        }))
+    }
+
+    /// The platform identity a project-binding sign-in names in its
+    /// discovery `User-Agent`, or the typed refusal when the host supplied
+    /// none. The flow checks it before the browser opens, so a missing
+    /// identity never spends an authorization code.
+    fn require_identity(&self, row: &RowEndpoints) -> Result<&ProviderIdentity, ProviderError> {
+        self.identity
+            .as_ref()
+            .ok_or_else(|| ProviderError::AuthWrite {
+                reason: format!(
+                    "{} sign-in needs the host platform identity; this flow was given none",
+                    row.def.id
+                ),
+            })
+    }
+
+    /// The Cloud Code Assist exchange (Gemini CLI and Antigravity): Google's
+    /// installed-application grant with the registered client secret and no
+    /// PKCE verifier, then the Google Cloud project discovery. The credential
+    /// is built only after discovery names a project; a failed discovery fails
+    /// the sign-in with nothing stored. No account identity is fetched or
+    /// stored: an error names the fixed verification URL and action, never the
+    /// account.
+    async fn exchange_google(
+        &self,
+        row: &RowEndpoints,
+        http: &OAuthHttp<'_>,
+        code: &str,
+        redirect: &str,
+        secrets: &[&str],
+        cancel: &CancellationToken,
+    ) -> Result<Credential, ProviderError> {
+        let identity = self.require_identity(row)?;
+        let client_secret = row
+            .oauth
+            .client_secret
+            .ok_or_else(|| ProviderError::AuthWrite {
+                reason: format!("{} registers no OAuth client secret", row.def.id),
+            })?;
+        let body = google_code_form(row.require_client_id()?, client_secret, code, redirect);
+        let response = post_form(http, row.def.family, &row.token, &body).await?;
+        let redacted: Vec<&str> = secrets.iter().copied().chain([client_secret]).collect();
+        let token = token_or_exchange_error::<PlainTokenResponse>(&response, &redacted)?;
+        validate_token_pair(&token.access_token, &token.refresh_token)?;
+        let mut credential = plain_credential(token);
+        if cancel.is_cancelled() {
+            return Err(ProviderError::LoginCancelled);
+        }
+        let project = self
+            .discover_google_project(row, identity, credential.access_token.expose(), cancel)
+            .await?;
+        credential.project_id = Some(project);
+        Ok(Credential::OAuth(credential))
+    }
+
+    /// Discovers the Google Cloud project of one Cloud Code Assist sign-in
+    /// through the shared module, over the private OAuth client (which
+    /// follows no redirect), the captured environment of the endpoint set,
+    /// and the host platform. The run is bounded by the module's budget, the
+    /// flow deadline above it, and `cancel`, which reports
+    /// [`ProviderError::LoginCancelled`].
+    async fn discover_google_project(
+        &self,
+        row: &RowEndpoints,
+        identity: &ProviderIdentity,
+        access_token: &str,
+        cancel: &CancellationToken,
+    ) -> Result<String, ProviderError> {
+        let (Some(surface), Some(base)) = (project_surface(row.oauth.hook), &row.project_base)
+        else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{} discovers no Google Cloud project", row.def.id),
+            });
+        };
+        let found = cloud_code::discover_project(&Discovery {
+            surface,
+            client: &self.oauth_client,
+            endpoint: base.as_str(),
+            access_token,
+            env: self.endpoints.env(),
+            identity,
+            clock: &TokioClock,
+            cancel,
+            deadline: Instant::now() + cloud_code::DISCOVERY_BUDGET,
+        })
+        .await;
+        match found {
+            Ok(project) if !project.trim().is_empty() => Ok(project),
+            Ok(_) => Err(ProviderError::InvalidRequest {
+                message: format!(
+                    "{} named no Google Cloud project for this account",
+                    row.def.name
+                ),
+            }),
+            Err(ProviderError::Cancelled) => Err(ProviderError::LoginCancelled),
+            Err(error) => Err(error),
         }
     }
 
@@ -924,9 +1374,12 @@ impl<'a> LoginFlow<'a> {
     /// [`ProviderError::LoginCancelled`]; every other refusal fails the login.
     async fn verify_session(
         &self,
-        oauth: &OAuthCredential,
+        credential: &Credential,
         cancel: &CancellationToken,
     ) -> Result<(), ProviderError> {
+        let Credential::OAuth(oauth) = credential else {
+            return Ok(());
+        };
         let Some(base) = self
             .endpoints
             .row(self.def)
@@ -1017,6 +1470,7 @@ impl<'a> LoginFlow<'a> {
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 1,
             settings: ProviderSettings::default(),
+            origins: crate::provider::Origins::default(),
         };
         let entry = self
             .models_provider
@@ -1030,6 +1484,7 @@ impl<'a> LoginFlow<'a> {
             cache_dir: &self.cache_dir,
             user_agent: &self.user_agent,
             version: env!("CARGO_PKG_VERSION"),
+            env: self.endpoints.env(),
         };
         let _catalog = crate::catalog::load_models(&fetch, |duration| sleep(duration)).await;
     }
@@ -1379,8 +1834,25 @@ fn code_exchange_form(client_id: &str, code: &str, verifier: &str, redirect_uri:
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
         .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
         .append_pair("code", code)
         .append_pair("code_verifier", verifier)
+        .finish()
+}
+
+/// The form body of Google's installed-application code exchange: the
+/// registered client secret and no PKCE verifier, in the reference's order.
+fn google_code_form(
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+    redirect_uri: &str,
+) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("client_id", client_id)
+        .append_pair("client_secret", client_secret)
+        .append_pair("code", code)
         .append_pair("redirect_uri", redirect_uri)
         .finish()
 }
@@ -1401,16 +1873,28 @@ async fn post_revoke(
                 let mut form = url::form_urlencoded::Serializer::new(String::new());
                 form.append_pair("token", refresh_token)
                     .append_pair("token_type_hint", "refresh_token")
-                    .append_pair("client_id", &row.client_id);
+                    .append_pair("client_id", row.require_client_id()?);
                 form.finish()
             };
             post_form(http, family, url, &body).await
         }
-        Hook::CodexAccount | Hook::ClaudeCode | Hook::WorkOsDevice => {
+        Hook::GoogleCloudCodeAssist | Hook::GoogleAntigravity => Err(ProviderError::AuthWrite {
+            reason: format!("{} has no token revocation endpoint", row.def.id),
+        }),
+        Hook::CodexAccount
+        | Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::DevinCliToken
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => {
             let request = RevokeRequest {
                 token: refresh_token,
                 token_type_hint: "refresh_token",
-                client_id: &row.client_id,
+                client_id: row.require_client_id()?,
             };
             post_json(http, family, url, &request).await
         }
@@ -1442,15 +1926,104 @@ pub(crate) async fn post_form(
     url: &Url,
     body: &str,
 ) -> Result<OAuthResponse, ProviderError> {
+    post_form_with(http, family, url, body, &[]).await
+}
+
+/// One form `POST` that also carries `headers`: the vendor headers of a row
+/// whose sign-in names its client on every request. The library still owns
+/// `User-Agent` and `Accept`.
+pub(crate) async fn post_form_with(
+    http: &OAuthHttp<'_>,
+    family: Family,
+    url: &Url,
+    body: &str,
+    headers: &[(&'static str, String)],
+) -> Result<OAuthResponse, ProviderError> {
+    let mut request = http
+        .client
+        .post(url.clone())
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body.to_owned());
+    for (name, value) in headers {
+        request = request.header(*name, value.as_str());
+    }
+    send_body(http, family, request).await
+}
+
+/// One GET of a discovery document, answered as JSON. The private OAuth
+/// client follows no redirect, so a 3xx answer is a failed discovery.
+pub(crate) async fn get_json(
+    http: &OAuthHttp<'_>,
+    family: Family,
+    url: &Url,
+) -> Result<OAuthResponse, ProviderError> {
     send_body(
         http,
         family,
         http.client
-            .post(url.clone())
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(body.to_owned()),
+            .get(url.clone())
+            .header("Accept", "application/json"),
     )
     .await
+}
+
+/// The authorization endpoint a successful discovery document names.
+///
+/// The document is `{"authorizationEndpoint": "<url>"}`. The endpoint only
+/// ever receives the browser (the PKCE challenge, never the verifier), so it
+/// may sit on another host than the gateway, but it must be an `https` URL
+/// without credentials or a fragment; the loopback test seam admits only
+/// loopback URLs instead.
+///
+/// # Errors
+/// [`ProviderError::Status`] when the discovery request failed,
+/// [`ProviderError::Transport`] when the document names no admissible
+/// endpoint.
+fn discovered_endpoint(
+    def: &ProviderDef,
+    response: &OAuthResponse,
+    loopback_override: bool,
+) -> Result<Url, ProviderError> {
+    #[derive(Deserialize)]
+    struct Discovery {
+        #[serde(default, rename = "authorizationEndpoint")]
+        authorization_endpoint: Option<String>,
+    }
+
+    if !(200..300).contains(&response.status) {
+        return Err(ProviderError::Status {
+            family: def.family,
+            status: response.status,
+            message: format!(
+                "{} OAuth discovery failed: {}",
+                def.name,
+                error_message(&response.body, &[])
+            ),
+        });
+    }
+    let unusable = || {
+        endpoint_error(
+            def.family,
+            format!(
+                "{} OAuth discovery named no usable authorization endpoint; the gateway needs an https authorizationEndpoint without credentials or a fragment.",
+                def.name
+            ),
+        )
+    };
+    let url = decode_json::<Discovery>(&response.body)
+        .and_then(|document| document.authorization_endpoint)
+        .and_then(|text| Url::parse(&text).ok())
+        .ok_or_else(unusable)?;
+    let admitted = url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && if loopback_override {
+            is_loopback(&url) && matches!(url.scheme(), "http" | "https")
+        } else {
+            url.scheme() == "https"
+        };
+    if admitted { Ok(url) } else { Err(unusable()) }
 }
 
 async fn send_body(
@@ -1479,18 +2052,36 @@ pub(crate) fn decode_json<T: DeserializeOwned>(body: &[u8]) -> Option<T> {
 
 pub(crate) fn error_message(body: &[u8], secrets: &[&str]) -> String {
     #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ErrorField {
+        Code(String),
+        Detail {
+            #[serde(default)]
+            message: Option<String>,
+        },
+    }
+
+    #[derive(Deserialize)]
     struct ErrorBody {
         #[serde(default)]
         error_description: Option<String>,
         #[serde(default)]
         message: Option<String>,
         #[serde(default)]
-        error: Option<String>,
+        error: Option<ErrorField>,
     }
 
     let parsed = decode_json::<ErrorBody>(body);
     let message = parsed
-        .and_then(|value| value.error_description.or(value.message).or(value.error))
+        .and_then(|value| {
+            value
+                .error_description
+                .or(value.message)
+                .or(value.error.and_then(|error| match error {
+                    ErrorField::Code(code) => Some(code),
+                    ErrorField::Detail { message } => message,
+                }))
+        })
         .or_else(|| {
             let text = std::str::from_utf8(body).ok()?.trim();
             (!text.starts_with('{') && !text.starts_with('[')).then(|| text.to_owned())
@@ -1533,7 +2124,7 @@ fn validate_token_pair(access_token: &str, refresh_token: &str) -> Result<(), Pr
     Ok(())
 }
 
-fn token_or_exchange_error<T: DeserializeOwned>(
+pub(crate) fn token_or_exchange_error<T: DeserializeOwned>(
     response: &OAuthResponse,
     secrets: &[&str],
 ) -> Result<T, ProviderError> {
@@ -1558,12 +2149,41 @@ struct CodexTokenResponse {
     expires_in: Option<i64>,
 }
 
+/// An access and refresh token with an optional lifetime and no identity:
+/// the Claude and Radius code exchanges.
 #[derive(Deserialize)]
-struct ClaudeTokenResponse {
+struct PlainTokenResponse {
     access_token: String,
     refresh_token: String,
     #[serde(default)]
     expires_in: Option<i64>,
+}
+
+/// The credential a [`PlainTokenResponse`] stores: no ID token, no account.
+fn plain_credential(token: PlainTokenResponse) -> OAuthCredential {
+    OAuthCredential {
+        expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
+        access_token: SecretString::from(token.access_token),
+        refresh_token: SecretString::from(token.refresh_token),
+        id_token: None,
+        account_id: None,
+        project_id: None,
+    }
+}
+
+/// The durable key `OpenRouter`'s code exchange returns.
+#[derive(Deserialize)]
+struct OpenRouterKeyResponse {
+    key: String,
+}
+
+/// The `OpenRouter` key exchange body: no client id and no `state`; the PKCE
+/// verifier is the proof the code belongs to this sign-in.
+#[derive(Serialize)]
+struct OpenRouterKeyRequest<'a> {
+    code: &'a str,
+    code_verifier: &'a str,
+    code_challenge_method: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -1600,34 +2220,126 @@ struct RevokeRequest<'a> {
 fn authorize_url(
     family: Family,
     oauth: &OAuthSpec,
-    client_id: &str,
+    client_id: Option<&str>,
     endpoint_url: &Url,
     redirect_uri: &str,
     challenge: &str,
     state: &str,
 ) -> Result<Url, ProviderError> {
     let scope = oauth.scopes.join(" ");
-    let pairs: Vec<(&str, &str)> = oauth
-        .query
-        .iter()
-        .map(|(name, value)| {
-            let text = match value {
-                QueryValue::Text(text) => text,
-                QueryValue::ClientId => client_id,
-                QueryValue::RedirectUri => redirect_uri,
-                QueryValue::Scope => scope.as_str(),
-                QueryValue::Challenge => challenge,
-                QueryValue::State => state,
-            };
-            (*name, text)
-        })
-        .collect();
+    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(oauth.query.len());
+    for (name, value) in oauth.query {
+        let text = match value {
+            QueryValue::Text(text) => text,
+            QueryValue::ClientId => client_id.ok_or_else(|| {
+                endpoint_error(
+                    family,
+                    "the authorization query names a client id but the row registers none",
+                )
+            })?,
+            QueryValue::RedirectUri => redirect_uri,
+            QueryValue::Scope => scope.as_str(),
+            QueryValue::Challenge => challenge,
+            QueryValue::State => state,
+        };
+        pairs.push((*name, text));
+    }
     with_query(endpoint_url, &pairs, family, query_encoding(oauth.hook))
 }
 
-/// Whether sign-in is followed by a best-effort model-list fetch.
+/// The token release endpoint a hook's sign-in polls, for the poll grant
+/// only. No wildcard: a new hook must choose.
+const fn poll_url(hook: Hook) -> Option<&'static str> {
+    match hook {
+        Hook::CursorPoll => Some(cursor_auth::POLL_URL),
+        Hook::CodexAccount
+        | Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::GitLabDuo
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::DevinCliToken
+        | Hook::GoogleCloudCodeAssist
+        | Hook::GoogleAntigravity
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => None,
+    }
+}
+
+/// The Cloud Code Assist surface a hook's project discovery targets, for the
+/// two Cloud Code Assist hooks only; it is `Some` exactly when
+/// [`Hook::binds_project`] is true. No wildcard: a new hook must choose.
+const fn project_surface(hook: Hook) -> Option<Surface<'static>> {
+    match hook {
+        Hook::GoogleCloudCodeAssist => Some(Surface::GeminiCli),
+        Hook::GoogleAntigravity => Some(Surface::Antigravity {
+            client_version: antigravity::CLIENT_VERSION,
+        }),
+        Hook::CodexAccount
+        | Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::GitLabDuo
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::DevinCliToken
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => None,
+    }
+}
+
+/// Whether a paste row whose registered callback port is busy may move its
+/// callback to any free loopback port. Devin's authorize page rejects every
+/// redirect but its one registered URI, so a busy port keeps that URI and
+/// leaves the sign-in to a pasted value. No wildcard: a new hook must choose.
+const fn callback_port_fallback(hook: Hook) -> bool {
+    match hook {
+        Hook::DevinCliToken => false,
+        Hook::CodexAccount
+        | Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::GitLabDuo
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::GoogleCloudCodeAssist
+        | Hook::GoogleAntigravity
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => true,
+    }
+}
+
+/// Whether the vendor echoes the `state` this row's authorize query sends.
+/// A row whose query sends none (`OpenRouter`) has nothing to compare, so
+/// [`callback_path`] binds the callback to the attempt instead.
+fn sends_state(oauth: &OAuthSpec) -> bool {
+    oauth
+        .query
+        .iter()
+        .any(|(_, value)| *value == QueryValue::State)
+}
+
+/// The path the callback listener serves: the row's registered `redirect`
+/// path, extended with the attempt's random `state` value when the vendor
+/// echoes no state. That unguessable suffix is what keeps another local
+/// process or a web page from completing, or failing, a sign-in it did not
+/// start.
+fn callback_path(oauth: &OAuthSpec, redirect: Redirect, nonce: &str) -> String {
+    if sends_state(oauth) {
+        redirect.path.to_owned()
+    } else {
+        format!("{}/{nonce}", redirect.path.trim_end_matches('/'))
+    }
+}
+
+/// Whether sign-in is followed by a best-effort model-list fetch against the
+/// row's base (moved under the loopback server by the test seam). A failed
+/// fetch is typed inside the catalog and never fails the committed sign-in.
 fn fetches_models(hook: Hook) -> bool {
-    matches!(hook, Hook::CodexAccount)
+    matches!(hook, Hook::CodexAccount | Hook::CursorPoll)
 }
 
 /// Whether the new grant is checked against the vendor's session endpoint
@@ -1639,14 +2351,14 @@ fn verifies_session(hook: Hook) -> bool {
 /// The client id a row's requests carry: the trimmed value of its override
 /// variable in the captured environment when that is not blank, else the
 /// row's pinned id. A blank value counts as unset.
-fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> String {
+fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> Option<String> {
     oauth
         .client_id_env
         .and_then(|name| env.get(name))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(oauth.client_id)
-        .to_owned()
+        .or(oauth.client_id)
+        .map(str::to_owned)
 }
 
 /// The variable that replaces a row's registered redirect URI, for the rows
@@ -1654,7 +2366,18 @@ fn effective_client_id(oauth: &OAuthSpec, env: &EnvSnapshot) -> String {
 const fn redirect_env(hook: Hook) -> Option<&'static str> {
     match hook {
         Hook::GitLabDuo => Some("GITLAB_REDIRECT_URI"),
-        Hook::CodexAccount | Hook::ClaudeCode | Hook::WorkOsDevice => None,
+        Hook::CodexAccount
+        | Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::DevinCliToken
+        | Hook::GoogleCloudCodeAssist
+        | Hook::GoogleAntigravity
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => None,
     }
 }
 
@@ -1675,6 +2398,15 @@ const fn loopback_prefix(hook: Hook) -> &'static str {
         Hook::ClaudeCode => "claude/",
         Hook::WorkOsDevice => "workos/",
         Hook::GitLabDuo => "gitlab/",
+        Hook::RadiusGateway => "radius/",
+        Hook::OpenRouterKey => "openrouter/",
+        Hook::CursorPoll => "cursor/",
+        Hook::DevinCliToken => "devin/",
+        Hook::GoogleCloudCodeAssist => "cloud-code-assist/",
+        Hook::GoogleAntigravity => "antigravity/",
+        Hook::XaiDevice => "xai/",
+        Hook::MetaMuse => "meta/",
+        Hook::KimiCodeDevice => "kimi/",
     }
 }
 
@@ -1691,7 +2423,18 @@ fn loopback_path(prefix: &str, path: &str) -> String {
 const fn query_encoding(hook: Hook) -> QueryEncoding {
     match hook {
         Hook::CodexAccount => QueryEncoding::Percent20,
-        Hook::ClaudeCode | Hook::WorkOsDevice | Hook::GitLabDuo => QueryEncoding::Form,
+        Hook::ClaudeCode
+        | Hook::WorkOsDevice
+        | Hook::GitLabDuo
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::DevinCliToken
+        | Hook::GoogleCloudCodeAssist
+        | Hook::GoogleAntigravity
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => QueryEncoding::Form,
     }
 }
 
@@ -1700,9 +2443,21 @@ const fn query_encoding(hook: Hook) -> QueryEncoding {
 fn flow_state(hook: Hook, verifier: &str) -> String {
     match hook {
         Hook::ClaudeCode => verifier.to_owned(),
-        Hook::CodexAccount | Hook::WorkOsDevice | Hook::GitLabDuo => new_state(),
+        Hook::CodexAccount
+        | Hook::WorkOsDevice
+        | Hook::GitLabDuo
+        | Hook::RadiusGateway
+        | Hook::OpenRouterKey
+        | Hook::CursorPoll
+        | Hook::DevinCliToken
+        | Hook::GoogleCloudCodeAssist
+        | Hook::GoogleAntigravity
+        | Hook::XaiDevice
+        | Hook::MetaMuse
+        | Hook::KimiCodeDevice => new_state(),
     }
 }
+
 #[derive(Clone, Copy)]
 enum QueryEncoding {
     Form,
@@ -1730,8 +2485,9 @@ fn with_query(
     Ok(result)
 }
 
-fn redirect_uri(redirect: Redirect, port: u16) -> String {
-    format!("http://{}:{port}{}", redirect.host, redirect.path)
+/// The loopback redirect URI of `redirect`'s host on `port`, at `path`.
+fn redirect_uri(redirect: Redirect, port: u16, path: &str) -> String {
+    format!("http://{}:{port}{path}", redirect.host)
 }
 
 /// Where a browser sign-in receives its authorization result.
@@ -1746,22 +2502,44 @@ struct Landing {
 }
 
 impl Landing {
-    /// Opens the landing of `row`: the environment's redirect override when
-    /// one is set, otherwise the registered redirect on its preferred port or,
-    /// when that is busy, on any free loopback port.
-    async fn open(row: &RowEndpoints) -> Result<Self, ProviderError> {
+    /// Opens the landing of `row` at `path` (see [`callback_path`]): the
+    /// environment's redirect override when one is set, otherwise the
+    /// `registered` redirect on its preferred port or, when that is busy, on
+    /// any free loopback port. A vendor that rejects any other port
+    /// ([`callback_port_fallback`] false, Devin) keeps its registered URI on a
+    /// busy port and completes by paste only. A row with no registered port
+    /// (port zero) that cannot bind any port fails with
+    /// [`ProviderError::CallbackBind`]:
+    /// a redirect URI naming port zero would be useless to the vendor.
+    async fn open(
+        row: &RowEndpoints,
+        registered: Redirect,
+        path: String,
+    ) -> Result<Self, ProviderError> {
         if let Some(redirect) = &row.redirect_override {
             return Self::overridden(redirect).await;
         }
-        let (listener, port) = match bind_callback_with_fallback(row.callback_port).await {
-            Ok((listener, port)) => (Some(listener), port),
-            Err(_) => (None, row.callback_port),
+        let bound = if callback_port_fallback(row.oauth.hook) {
+            bind_callback_with_fallback(row.callback_port).await
+        } else {
+            bind_loopback(row.callback_port).await
         };
-        Ok(Self {
-            uri: redirect_uri(row.oauth.redirect, port),
-            path: row.oauth.redirect.path.to_owned(),
-            listener,
-        })
+        match bound {
+            Ok((listener, port)) => Ok(Self {
+                uri: redirect_uri(registered, port, &path),
+                path,
+                listener: Some(listener),
+            }),
+            Err(error) if row.callback_port == 0 => Err(ProviderError::CallbackBind {
+                port: 0,
+                reason: error.to_string(),
+            }),
+            Err(_) => Ok(Self {
+                uri: redirect_uri(registered, row.callback_port, &path),
+                path,
+                listener: None,
+            }),
+        }
     }
 
     /// An explicit override is advertised verbatim and served only where it
@@ -1827,7 +2605,7 @@ fn host_of(url: &str) -> String {
         .unwrap_or_default()
 }
 
-fn new_pkce_verifier() -> String {
+pub(crate) fn new_pkce_verifier() -> String {
     let mut bytes = [0_u8; 32];
     bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
     bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -1876,12 +2654,24 @@ async fn bind_loopback(port: u16) -> std::io::Result<(TcpListener, u16)> {
     Ok((listener, bound))
 }
 
+/// A short-lived guard that keeps a `Radius` or `OpenRouter` callback listener
+/// alive through the token exchange and answers a duplicate callback with
+/// `409 Conflict`. Dropping the guard aborts its task, so cancellation never
+/// leaves a callback server behind.
+type CallbackGuard = tokio::task::JoinSet<()>;
+
+/// Serves `listener` until a request on `path` carries an authorization code.
+/// With `expected_state` the request must echo it; `None` (a vendor that
+/// echoes no state) relies on the unguessable `path` alone. `Radius` and
+/// `OpenRouter` keep the listener alive after their first successful request so
+/// a duplicate receives `409 Conflict` while the exchange is in flight.
 async fn callback_code(
     listener: TcpListener,
     path: &str,
-    expected_state: &str,
+    expected_state: Option<&str>,
     family: Family,
-) -> Result<String, ProviderError> {
+    strict_callback: bool,
+) -> Result<(String, Option<CallbackGuard>), ProviderError> {
     loop {
         let (mut stream, _) =
             listener
@@ -1906,14 +2696,76 @@ async fn callback_code(
                     callback_response(&mut stream, "400 Bad Request", RESPONSE_BAD_REQUEST).await;
                 return Err(error);
             }
-            Ok(None) | Err(_) => {
+            Ok(None) => {
+                let status =
+                    if strict_callback && callback_target_path(&request).as_deref() == Some(path) {
+                        "400 Bad Request"
+                    } else {
+                        "404 Not Found"
+                    };
+                let _response = callback_response(&mut stream, status, RESPONSE_BAD_REQUEST).await;
+                continue;
+            }
+            Err(_) => {
                 let _response =
                     callback_response(&mut stream, "404 Not Found", RESPONSE_BAD_REQUEST).await;
                 continue;
             }
         };
         let _response = callback_response(&mut stream, "200 OK", RESPONSE_HTML).await;
-        return Ok(code);
+        let guard = strict_callback.then(|| {
+            let mut tasks = CallbackGuard::new();
+            tasks.spawn(duplicate_callback(
+                listener,
+                path.to_owned(),
+                expected_state.map(str::to_owned),
+                family,
+            ));
+            tasks
+        });
+        return Ok((code, guard));
+    }
+}
+
+fn callback_target_path(request: &str) -> Option<String> {
+    let target = request.lines().next()?.split_ascii_whitespace().nth(1)?;
+    Url::parse(&format!("http://localhost{target}"))
+        .ok()
+        .map(|url| url.path().to_owned())
+}
+
+async fn duplicate_callback(
+    listener: TcpListener,
+    path: String,
+    expected_state: Option<String>,
+    family: Family,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let Ok(Ok((mut stream, _))) = timeout_at(deadline, listener.accept()).await else {
+            return;
+        };
+        let Some(request) = timeout(
+            Duration::from_secs(2),
+            read_callback_request(&mut stream, family),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok) else {
+            continue;
+        };
+        if callback_target_path(&request).as_deref() != Some(path.as_str()) {
+            let _ = callback_response(&mut stream, "404 Not Found", RESPONSE_BAD_REQUEST).await;
+            continue;
+        }
+        if let Some(expected) = expected_state.as_deref()
+            && let Err(ProviderError::StateMismatch) =
+                parse_callback_target(&request, &path, Some(expected))
+        {
+            let _ = callback_response(&mut stream, "400 Bad Request", RESPONSE_BAD_REQUEST).await;
+            continue;
+        }
+        let _ = callback_response(&mut stream, "409 Conflict", RESPONSE_BAD_REQUEST).await;
     }
 }
 
@@ -1970,7 +2822,7 @@ async fn read_callback_request(
 fn parse_callback_target(
     request: &str,
     expected_path: &str,
-    expected_state: &str,
+    expected_state: Option<&str>,
 ) -> Result<Option<String>, ProviderError> {
     let Some(line) = request.lines().next() else {
         return Ok(None);
@@ -2000,7 +2852,7 @@ fn parse_callback_target(
             _ => {}
         }
     }
-    if state.as_deref() != Some(expected_state) {
+    if expected_state.is_some_and(|expected| state.as_deref() != Some(expected)) {
         return Err(ProviderError::StateMismatch);
     }
     if authorization_error {
@@ -2009,17 +2861,23 @@ fn parse_callback_target(
     Ok(code.filter(|value| !value.is_empty()))
 }
 
+/// The authorization code a pasted value carries: `code#state`, a redirect
+/// URL, a query, or a bare code. With `expected_state` every form that names
+/// a state must match it and a redirect URL must name one; `None` (a vendor
+/// that echoes no state) accepts a URL, a query, or a bare code without one.
 fn parse_pasted_code(
     input: &str,
-    expected_state: &str,
+    expected_state: Option<&str>,
     family: Family,
 ) -> Result<String, ProviderError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(endpoint_error(family, "pasted authorization code is empty"));
     }
-    if let Some((code, state)) = input.split_once('#') {
-        if state != expected_state {
+    if let Some(expected) = expected_state
+        && let Some((code, state)) = input.split_once('#')
+    {
+        if state != expected {
             return Err(ProviderError::StateMismatch);
         }
         return nonempty_code(code, family);
@@ -2044,7 +2902,7 @@ fn parse_pasted_code(
 fn parse_query(
     query: &str,
     require_state: bool,
-    expected_state: &str,
+    expected_state: Option<&str>,
     family: Family,
 ) -> Result<String, ProviderError> {
     let mut code = None;
@@ -2056,12 +2914,12 @@ fn parse_query(
             _ => {}
         }
     }
-    if let Some(state) = state {
-        if state != expected_state {
-            return Err(ProviderError::StateMismatch);
+    if let Some(expected) = expected_state {
+        match state {
+            Some(state) if state != expected => return Err(ProviderError::StateMismatch),
+            None if require_state => return Err(ProviderError::StateMismatch),
+            _ => {}
         }
-    } else if require_state {
-        return Err(ProviderError::StateMismatch);
     }
     code.filter(|value| !value.is_empty())
         .ok_or_else(|| endpoint_error(family, "pasted authorization result has no code"))

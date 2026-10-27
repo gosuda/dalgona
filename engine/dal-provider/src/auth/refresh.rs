@@ -20,8 +20,10 @@
 //!   token against the Factory session endpoint between the exchange and the
 //!   commit; a failed check is advisory and the tokens are still committed.
 //!
-//! The request body is JSON for the Claude and Codex rows and form-encoded for
-//! the Factory Droid and `GitLab` Duo rows. Each row's client id is resolved
+//! The request body is JSON for the Claude, Codex, and Cursor rows and
+//! form-encoded for the Factory Droid, `GitLab` Duo, and Radius rows; a Cursor
+//! answer is read by the family's own decoder, whose `shouldLogout` ends the
+//! sign-in. The `OpenRouter` key and the Devin token are never refreshed. Each row's client id is resolved
 //! once, from the environment the binary captured, when the refresher is
 //! built, so a token issued to a configured application is refreshed as that
 //! application. A committed `GitLab` Duo refresh drops the replaced and the new

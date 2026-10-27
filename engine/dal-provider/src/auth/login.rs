@@ -18,7 +18,7 @@ use dal_core::Family;
 
 use crate::{
     AuthStore, Credential, CredentialKind, EnvSnapshot, LoginEndpoints, LoginFlow, LoginProgress,
-    PROVIDERS, ProviderDef, ProviderError, ProviderSet, SecretString,
+    PROVIDERS, ProviderDef, ProviderError, ProviderIdentity, ProviderSet, SecretString,
     auth::oauth::{logout_with_grants, store_api_key_unless_cancelled_with_grants, unix_now},
     family::{
         copilot::{
@@ -123,6 +123,7 @@ impl LoginIo {
 pub struct LoginSite {
     auth_path: PathBuf,
     cache_dir: PathBuf,
+    identity: ProviderIdentity,
     user_agent: String,
     endpoints: LoginEndpoints,
     gitlab_grants: Option<Arc<DirectAccessCache>>,
@@ -134,6 +135,7 @@ impl fmt::Debug for LoginSite {
             .debug_struct("LoginSite")
             .field("auth_path", &self.auth_path)
             .field("cache_dir", &self.cache_dir)
+            .field("identity", &self.identity)
             .field("user_agent", &self.user_agent)
             .field("endpoints", &self.endpoints)
             .field("gitlab_grants", &self.gitlab_grants.is_some())
@@ -144,10 +146,15 @@ impl fmt::Debug for LoginSite {
 impl LoginSite {
     /// Creates a site that talks to the pinned production endpoints.
     ///
-    /// `env` is the environment the binary captured at startup. A row that
-    /// names a client-id override variable (`GitLab` Duo) signs in, exchanges,
-    /// and revokes with that variable's non-blank value instead of its pinned
-    /// id, and honors its redirect override the same way.
+    /// `identity` is the host platform the binary captured at startup: it
+    /// renders the `User-Agent` every sign-in request sends and names the
+    /// platform in the Cloud Code Assist project discovery. `env` is the
+    /// environment the binary captured at startup. A row that names a
+    /// client-id override variable (`GitLab` Duo) signs in, exchanges, and
+    /// revokes with that variable's non-blank value instead of its pinned id,
+    /// and honors its redirect override the same way; the Cloud Code Assist
+    /// rows read their Google Cloud project variables from it. The library
+    /// reads neither the process environment nor the platform itself.
     ///
     /// # Errors
     /// Returns a typed transport error when a production endpoint cannot be
@@ -155,13 +162,14 @@ impl LoginSite {
     pub fn new(
         auth_path: impl Into<PathBuf>,
         cache_dir: impl Into<PathBuf>,
-        user_agent: impl Into<String>,
+        identity: &ProviderIdentity,
         env: &EnvSnapshot,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
             auth_path: auth_path.into(),
             cache_dir: cache_dir.into(),
-            user_agent: user_agent.into(),
+            user_agent: identity.user_agent(),
+            identity: identity.clone(),
             endpoints: LoginEndpoints::production(env)?,
             gitlab_grants: None,
         })
@@ -694,6 +702,7 @@ async fn run_flow(
     if method == Method::Device {
         flow = flow.with_device_auth();
     }
+    flow = flow.with_identity(site.identity.clone());
     // Clone-only, no second allocation; `None` keeps standalone flows valid.
     flow = flow.with_gitlab_grants(site.gitlab_grants.clone());
     let flow_paste = flow.take_paste_sender();

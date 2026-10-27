@@ -68,7 +68,22 @@ impl Server {
     pub(super) async fn start(
         handler: impl Fn(&Request) -> Reply + Send + Sync + 'static,
     ) -> Result<Self, std::io::Error> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::start_on("127.0.0.1:0", handler).await
+    }
+
+    /// The same server bound to the IPv6 loopback, so a fixture can prove the
+    /// sign-in client reaches its issuer over `::1`.
+    pub(super) async fn start_v6(
+        handler: impl Fn(&Request) -> Reply + Send + Sync + 'static,
+    ) -> Result<Self, std::io::Error> {
+        Self::start_on("[::1]:0", handler).await
+    }
+
+    async fn start_on(
+        address: &str,
+        handler: impl Fn(&Request) -> Reply + Send + Sync + 'static,
+    ) -> Result<Self, std::io::Error> {
+        let listener = TcpListener::bind(address).await?;
         let base = format!("http://{}", listener.local_addr()?);
         let log = Arc::new(Mutex::new(Vec::new()));
         let (arrived, arrivals) = mpsc::channel(ARRIVAL_CAPACITY);

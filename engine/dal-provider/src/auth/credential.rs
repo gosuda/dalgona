@@ -223,6 +223,12 @@ pub struct OAuthCredential {
     pub id_token: Option<String>,
     /// The `ChatGPT` account id; `None` for every other sign-in.
     pub account_id: Option<String>,
+    /// The Google Cloud project a Cloud Code Assist sign-in (Gemini CLI,
+    /// Antigravity) discovered at login ([`Hook::binds_project`]); `None` for
+    /// every other sign-in. It is an identifier, not a secret, so `Debug`
+    /// prints it. The sign-in stores it only after discovery named a project,
+    /// and a refresh keeps it unchanged.
+    pub project_id: Option<String>,
 }
 
 impl OAuthCredential {
@@ -258,6 +264,7 @@ impl fmt::Debug for OAuthCredential {
             .field("expires_at", &self.expires_at)
             .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
             .field("account_id", &self.account_id)
+            .field("project_id", &self.project_id)
             .finish()
     }
 }
@@ -450,12 +457,14 @@ impl AuthStore {
                     expires_at,
                     id_token,
                     account_id,
+                    project_id,
                 } => Credential::OAuth(OAuthCredential {
                     access_token: access_token.clone(),
                     refresh_token: refresh_token.clone(),
                     expires_at: *expires_at,
                     id_token: id_token.as_ref().map(|token| token.expose().to_owned()),
                     account_id: account_id.clone(),
+                    project_id: project_id.clone(),
                 }),
             })
     }
@@ -484,7 +493,8 @@ impl AuthStore {
     /// Returns [`ProviderError::AuthWrite`] when `provider` is not a table
     /// provider or the credential kind does not fit its row: an API key needs
     /// a key row, and an OAuth sign-in needs an OAuth row, carrying an ID
-    /// token and account id exactly when the row's hook binds an account.
+    /// token and account id exactly when the row's hook binds an account, and
+    /// a non-blank Google Cloud project exactly when it binds a project.
     pub fn set(&mut self, provider: &str, credential: Credential) -> Result<(), ProviderError> {
         let Some(def) = find(provider) else {
             return Err(ProviderError::AuthWrite {
@@ -499,12 +509,14 @@ impl AuthStore {
                 expires_at,
                 id_token,
                 account_id,
+                project_id,
             }) => Stored::Oauth {
                 access_token,
                 refresh_token,
                 expires_at,
                 id_token: id_token.map(SecretString::from),
                 account_id,
+                project_id,
             },
             Credential::None => {
                 return Err(ProviderError::AuthWrite {
@@ -647,25 +659,47 @@ enum Stored {
             deserialize_with = "present"
         )]
         account_id: Option<String>,
+        /// The Google Cloud project of a Cloud Code Assist sign-in. Absent for
+        /// every other member, so every `auth.json` written before the field
+        /// existed still reads; written only when set.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        project_id: Option<String>,
     },
 }
 
 impl Stored {
     /// Whether `def` can hold this member: an API key needs a key row, and an
-    /// OAuth sign-in needs an OAuth row whose hook decides whether the grant
-    /// carries an ID token and account id (both or neither). Only the Codex
-    /// sign-in binds an account; the Claude, `WorkOS` device, and GitLab Duo
-    /// sign-ins carry neither.
+    /// OAuth sign-in needs an OAuth row whose hook stores a token pair
+    /// ([`Hook::stores_oauth`]: an `OpenRouter` sign-in stores a plain API
+    /// key, never an OAuth credential; a Devin sign-in stores one it never
+    /// refreshes) and decides whether the grant carries an ID token and
+    /// account id (both or neither). Only the Codex sign-in binds an account;
+    /// the Claude, `WorkOS` device, GitLab Duo, Radius, Cursor, and Devin
+    /// sign-ins carry neither. The hook also decides whether the grant
+    /// carries a Google Cloud project ([`Hook::binds_project`]): the two
+    /// Cloud Code Assist sign-ins must hold a non-blank one, because they
+    /// store a credential only after discovery named it, and every other
+    /// sign-in must hold none.
     fn fits(&self, def: &ProviderDef) -> bool {
         match self {
             Self::ApiKey { .. } => def.key.is_some(),
             Self::Oauth {
                 id_token,
                 account_id,
+                project_id,
                 ..
             } => def.oauth.is_some_and(|oauth| {
                 let account = oauth.hook == Hook::CodexAccount;
-                id_token.is_some() == account && account_id.is_some() == account
+                let project = oauth.hook.binds_project();
+                oauth.hook.stores_oauth()
+                    && id_token.is_some() == account
+                    && account_id.is_some() == account
+                    && project_id.is_some() == project
+                    && project_id.as_deref().is_none_or(|id| !id.trim().is_empty())
             }),
         }
     }

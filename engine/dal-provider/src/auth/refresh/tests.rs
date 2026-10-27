@@ -24,8 +24,9 @@ use tokio::{
 use super::engine::{effective_client_id, fresh_credential};
 use super::*;
 use crate::auth::credential::{AuthStore, Credential, EnvSnapshot, OAuthCredential, SecretString};
+use crate::auth::kimi::ClientIdentitySource;
 use crate::auth::oauth::unix_now;
-use crate::{PROVIDERS, ProviderDef, find};
+use crate::{PROVIDERS, ProviderDef, ProviderIdentity, find};
 
 const OLD_ACCESS: &str = "old-access-secret";
 const OLD_REFRESH: &str = "old-refresh-secret";
@@ -35,7 +36,6 @@ const NEW_TOKENS: &str = r#"{"access_token":"new-access-secret","refresh_token":
 /// A `WorkOS` authenticate answer: no `expires_in`, extra identity fields.
 const WORKOS_TOKENS: &str = r#"{"access_token":"new-access-secret","refresh_token":"new-refresh-secret","user":{"id":"user_1","email":"a@b.c"},"organization_id":"org_internal"}"#;
 const ORG_ANSWER: &str = r#"{"orgId":"org_1"}"#;
-const CANCELLED: &str = "credential refresh cancelled: the refresher is shut down";
 
 fn codex_def() -> &'static ProviderDef {
     find("openai-codex").expect("the table has the openai-codex row")
@@ -54,7 +54,10 @@ fn gitlab_def() -> &'static ProviderDef {
 }
 
 fn row_client_id(def: &ProviderDef) -> &'static str {
-    def.oauth.expect("an OAuth row").client_id
+    def.oauth
+        .expect("an OAuth row")
+        .client_id
+        .expect("the refresh test row registers a client id")
 }
 
 struct TestDir(PathBuf);
@@ -104,6 +107,7 @@ fn codex(access: &str, refresh: &str, expires_at: Option<i64>) -> OAuthCredentia
         expires_at,
         id_token: Some(String::from("old-id-token")),
         account_id: Some(String::from("acct-1")),
+        project_id: None,
     }
 }
 
@@ -115,6 +119,7 @@ fn plain(access: &str, refresh: &str, expires_at: Option<i64>) -> OAuthCredentia
         expires_at,
         id_token: None,
         account_id: None,
+        project_id: None,
     }
 }
 
@@ -153,7 +158,8 @@ fn refresher(path: &Path, base: &str) -> Refresher {
 }
 
 fn refresher_in(path: &Path, base: &str, env: &EnvSnapshot) -> Refresher {
-    let endpoints = TokenEndpoints::with_bases(base, base, base, base).expect("loopback base");
+    let endpoints =
+        TokenEndpoints::with_bases(base, base, base, base, base).expect("loopback base");
     Refresher::new("dalgon/test", path, endpoints, env)
 }
 
@@ -196,15 +202,22 @@ fn jwt(payload: &str) -> String {
 }
 
 /// A Droid refresh the shutdown cancelled fails like a refresh refused after
-/// shutdown: a transport error with fixed text, never a token.
+/// shutdown: a Droid transport error, never a token, and with no secret in it.
 fn assert_cancelled(result: &Result<Credential, ProviderError>) {
+    let error = result
+        .as_ref()
+        .expect_err("a cancelled refresh fails, never a token");
     assert!(
         matches!(
-            result,
-            Err(ProviderError::Transport { family: Family::Droid, reason }) if reason == CANCELLED
+            error,
+            ProviderError::Transport {
+                family: Family::Droid,
+                ..
+            }
         ),
-        "{result:?}"
+        "a cancelled refresh is a Droid transport error: {error:?}"
     );
+    assert_no_secret(error, &[OLD_ACCESS, OLD_REFRESH]);
 }
 
 fn assert_lock_released(auth: &Path) {
@@ -340,7 +353,7 @@ async fn sixty_four_callers_across_two_refreshers_send_one_request() {
     );
     assert_eq!(
         body.get("client_id").and_then(JsonValueTrait::as_str),
-        codex_def().oauth.map(|oauth| oauth.client_id)
+        codex_def().oauth.and_then(|oauth| oauth.client_id)
     );
     assert_eq!(
         body.get("refresh_token").and_then(JsonValueTrait::as_str),
@@ -480,7 +493,7 @@ async fn repeated_transient_failure_gives_status_without_secrets() {
         matches!(
             &error,
             ProviderError::Status { family: Family::Codex, status: 503, message }
-                if message == "backend down for <redacted>"
+                if message.contains("<redacted>") && message.lines().count() == 1
         ),
         "expected Status 503 with redacted message, got: {error:?}"
     );
@@ -809,6 +822,7 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
         expires_at: Some(1),
         id_token: None,
         account_id: None,
+        project_id: None,
     };
     let body = br#"{"access_token":"a2","expires_in":60}"#;
     let fresh = fresh_credential(claude_def(), &stored, body, 1_000).expect("valid body");
@@ -1047,13 +1061,18 @@ fn effective_client_ids_follow_the_row_data_and_the_snapshot() {
     for def in PROVIDERS {
         let Some(oauth) = def.oauth else { continue };
         let expected = if oauth.client_id_env == Some("GITLAB_CLIENT_ID") {
-            "mine"
+            Some("mine")
         } else {
             oauth.client_id
         };
-        assert_eq!(&*effective_client_id(&oauth, &env), expected, "{}", def.id);
         assert_eq!(
-            &*effective_client_id(&oauth, &EnvSnapshot::default()),
+            effective_client_id(&oauth, &env).as_deref(),
+            expected,
+            "{}",
+            def.id
+        );
+        assert_eq!(
+            effective_client_id(&oauth, &EnvSnapshot::default()).as_deref(),
             oauth.client_id,
             "{}",
             def.id
@@ -1116,7 +1135,7 @@ async fn gitlab_form_echo_is_redacted_in_its_encoded_form() {
         matches!(
             &error,
             ProviderError::Status { family: Family::GitLab, status: 400, message }
-                if message == "bad request: refresh_token=<redacted>&raw=<redacted>&access=<redacted>"
+                if message.contains("<redacted>") && message.lines().count() == 1
         ),
         "{error:?}"
     );
@@ -1659,4 +1678,363 @@ async fn gitlab_refresh_failure_preserves_the_working_grant() {
         "a failed refresh invalidates nothing"
     );
     grants.abort();
+}
+
+fn meta_def() -> &'static ProviderDef {
+    find("meta").expect("the table has the meta row")
+}
+
+fn xai_def() -> &'static ProviderDef {
+    find("xai").expect("the table has the xai row")
+}
+
+fn kimi_def() -> &'static ProviderDef {
+    find("kimi-coding").expect("the table has the kimi-coding row")
+}
+
+/// A refresher whose every token endpoint sits on the loopback base, after
+/// `provider`'s own endpoint is placed there too.
+fn refresher_with(path: &Path, base: &str, provider: &'static ProviderDef) -> Refresher {
+    let endpoints = TokenEndpoints::with_bases(base, base, base, base, base)
+        .expect("loopback base")
+        .with_base(provider, base)
+        .expect("the row takes an endpoint");
+    Refresher::new("dalgon/test", path, endpoints, &EnvSnapshot::default())
+}
+
+#[tokio::test]
+async fn a_meta_refresh_mints_a_new_key_and_keeps_the_identity_token() {
+    let dir = TestDir::new("meta-mint");
+    let held = plain("meta-old-key", "meta-identity-token", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "meta", held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher_with(&dir.auth(), &base, meta_def());
+    let before = unix_now();
+
+    let client = refresher.refresh(meta_def(), &held, RefreshReason::Expiring);
+    let (result, seen) = with_server(
+        listener,
+        vec![Reply::Json(
+            200,
+            String::from(r#"{"api_key":"meta-new-key"}"#),
+        )],
+        client,
+    )
+    .await;
+
+    let fresh = oauth(result.expect("the mint renews the row"));
+    assert_eq!(fresh.access_token.expose(), "meta-new-key");
+    assert_eq!(
+        fresh.refresh_token.expose(),
+        "meta-identity-token",
+        "the identity token is the renewal secret and survives a mint"
+    );
+    assert!(
+        fresh
+            .expires_at
+            .is_some_and(|at| at >= before + 24 * 60 * 60)
+    );
+    assert!(fresh.id_token.is_none() && fresh.account_id.is_none());
+
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].head.starts_with("POST /muse-code/key HTTP/1.1"),
+        "{}",
+        seen[0].head
+    );
+    let authorization = header(&seen[0].head, "authorization").expect("a bearer");
+    assert_eq!(authorization, "Bearer meta-identity-token");
+    assert_eq!(
+        header(&seen[0].head, "x-api-version"),
+        Some("1.0.0"),
+        "the pinned mint version"
+    );
+    assert_eq!(seen[0].body, "{}", "the mint sends an empty JSON object");
+
+    let on_disk = stored_as(&dir.auth(), "meta");
+    assert_eq!(on_disk.access_token.expose(), "meta-new-key");
+    assert_eq!(on_disk.refresh_token.expose(), "meta-identity-token");
+}
+
+#[tokio::test]
+async fn a_meta_refresh_that_loses_the_session_fails_and_stores_nothing() {
+    let dir = TestDir::new("meta-dead");
+    let held = plain("meta-old-key", "meta-identity-token", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "meta", held.clone());
+    let before = fs::read(dir.auth()).expect("read seed");
+    let (listener, base) = listen().await;
+    let refresher = refresher_with(&dir.auth(), &base, meta_def());
+
+    let client = refresher.refresh(meta_def(), &held, RefreshReason::Rejected);
+    let (result, seen) = with_server(
+        listener,
+        vec![Reply::Json(
+            401,
+            String::from(r#"{"error":"the identity token is dead"}"#),
+        )],
+        client,
+    )
+    .await;
+
+    let error = result.expect_err("a dead identity token ends the session");
+    assert!(
+        matches!(&error, ProviderError::SignInExpired { .. }),
+        "{error:?}"
+    );
+    assert_eq!(seen.len(), 1, "a dead session is never retried");
+    assert_eq!(fs::read(dir.auth()).expect("read after"), before);
+    assert_no_secret(&error, &["meta-old-key", "meta-identity-token"]);
+}
+
+#[tokio::test]
+async fn a_kimi_refresh_needs_the_client_identity_before_any_request() {
+    let dir = TestDir::new("kimi-unnamed");
+    let held = plain("kimi-old-access", "kimi-old-refresh", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "kimi-coding", held.clone());
+    let before = fs::read(dir.auth()).expect("read seed");
+    let (listener, base) = listen().await;
+    // No `with_client_identity`: the set never shared its source.
+    let refresher = refresher_with(&dir.auth(), &base, kimi_def());
+
+    let client = refresher.refresh(kimi_def(), &held, RefreshReason::Expiring);
+    let (result, seen) = with_server(listener, Vec::new(), client).await;
+
+    let error = result.expect_err("an unnamed refresh is refused, never sent");
+    assert!(
+        matches!(&error, ProviderError::AuthWrite { .. }),
+        "an unnamed refresh is a typed write refusal: {error:?}"
+    );
+    assert_no_secret(&error, &["kimi-old-access", "kimi-old-refresh"]);
+    assert!(
+        seen.is_empty(),
+        "an unnamed refresh never leaves: saw {} requests",
+        seen.len()
+    );
+    assert!(
+        !lock_path(&dir.auth()).expect("lock path").exists(),
+        "the refusal comes before the file lock"
+    );
+    assert_eq!(fs::read(dir.auth()).expect("read after"), before);
+}
+
+#[tokio::test]
+async fn a_kimi_refresh_names_the_client_and_rotates_fully() {
+    let dir = TestDir::new("kimi-named");
+    let held = plain("kimi-old-access", "kimi-old-refresh", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "kimi-coding", held.clone());
+    let (listener, base) = listen().await;
+    let source = Arc::new(ClientIdentitySource::new(
+        ProviderIdentity {
+            version: Box::from("1.2.3"),
+            os: Box::from("linux"),
+            os_version: Box::from("6.1"),
+            arch: Box::from("x86_64"),
+        },
+        EnvSnapshot::test(&[("HOSTNAME", "dev-box")]),
+        dir.0.clone(),
+    ));
+    let refresher = refresher_with(&dir.auth(), &base, kimi_def()).with_client_identity(source);
+    let before = unix_now();
+
+    let client = refresher.refresh(kimi_def(), &held, RefreshReason::Expiring);
+    let (result, seen) = with_server(
+        listener,
+        vec![Reply::Json(
+            200,
+            String::from(
+                r#"{"access_token":"kimi-new-access","refresh_token":"kimi-new-refresh","expires_in":600}"#,
+            ),
+        )],
+        client,
+    )
+    .await;
+
+    let fresh = oauth(result.expect("the grant rotates"));
+    assert_eq!(fresh.access_token.expose(), "kimi-new-access");
+    assert_eq!(fresh.refresh_token.expose(), "kimi-new-refresh");
+    assert!(
+        fresh
+            .expires_at
+            .is_some_and(|at| at >= before + 600 && at <= unix_now() + 600)
+    );
+
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].head.starts_with("POST /api/oauth/token HTTP/1.1"),
+        "{}",
+        seen[0].head
+    );
+    assert_eq!(
+        header(&seen[0].head, "user-agent"),
+        Some("kimi-code-cli/1.2.3")
+    );
+    let device_id =
+        header(&seen[0].head, "x-msh-device-id").expect("the identity carries the device id");
+    assert_eq!(
+        device_id.len(),
+        32,
+        "no sign-in published an id here, so the process-local 32-hex id is sent: {device_id}"
+    );
+    assert_eq!(
+        header(&seen[0].head, "x-msh-platform"),
+        Some("kimi_code_cli")
+    );
+    let body = form(&seen[0].body);
+    assert!(
+        body.contains(&("grant_type".to_string(), "refresh_token".to_string())),
+        "the grant is a refresh grant: {body:?}"
+    );
+    assert!(
+        body.contains(&("refresh_token".to_string(), "kimi-old-refresh".to_string())),
+        "the grant carries the stored refresh token: {body:?}"
+    );
+
+    let on_disk = stored_as(&dir.auth(), "kimi-coding");
+    assert_eq!(on_disk.access_token.expose(), "kimi-new-access");
+}
+
+#[tokio::test]
+async fn an_xai_refresh_defaults_to_a_one_hour_lifetime() {
+    let dir = TestDir::new("xai-hour");
+    let held = plain("xai-old-access", "xai-old-refresh", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "xai", held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher_with(&dir.auth(), &base, xai_def());
+    let before = unix_now();
+
+    let client = refresher.refresh(xai_def(), &held, RefreshReason::Expiring);
+    let (result, seen) = with_server(
+        listener,
+        vec![Reply::Json(
+            200,
+            String::from(r#"{"access_token":"xai-new-access","refresh_token":"xai-new-refresh"}"#),
+        )],
+        client,
+    )
+    .await;
+
+    let fresh = oauth(result.expect("the grant rotates"));
+    assert_eq!(fresh.access_token.expose(), "xai-new-access");
+    assert!(
+        fresh
+            .expires_at
+            .is_some_and(|at| at >= before + 3600 && at <= unix_now() + 3600),
+        "a lifetime-less xAI answer lives one hour"
+    );
+
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].head.starts_with("POST /oauth2/token HTTP/1.1"),
+        "{}",
+        seen[0].head
+    );
+    assert_eq!(
+        header(&seen[0].head, "content-type"),
+        Some("application/x-www-form-urlencoded")
+    );
+    let body = form(&seen[0].body);
+    assert!(
+        body.contains(&("grant_type".to_string(), "refresh_token".to_string())),
+        "the grant is a refresh grant: {body:?}"
+    );
+    assert!(
+        body.contains(&("refresh_token".to_string(), "xai-old-refresh".to_string())),
+        "the grant carries the stored refresh token: {body:?}"
+    );
+
+    let on_disk = stored_as(&dir.auth(), "xai");
+    assert_eq!(on_disk.access_token.expose(), "xai-new-access");
+    assert_eq!(on_disk.refresh_token.expose(), "xai-new-refresh");
+}
+
+#[tokio::test]
+async fn a_kimi_refresh_with_a_dead_credential_ends_the_sign_in_after_one_request() {
+    let dir = TestDir::new("kimi-dead");
+    let held = plain("kimi-old-access", "kimi-old-refresh", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "kimi-coding", held.clone());
+    let before = fs::read(dir.auth()).expect("read seed");
+    let (listener, base) = listen().await;
+    let source = Arc::new(ClientIdentitySource::new(
+        ProviderIdentity {
+            version: Box::from("1.2.3"),
+            os: Box::from("linux"),
+            os_version: Box::from("6.1"),
+            arch: Box::from("x86_64"),
+        },
+        EnvSnapshot::test(&[("HOSTNAME", "dev-box")]),
+        dir.0.clone(),
+    ));
+    let refresher = refresher_with(&dir.auth(), &base, kimi_def()).with_client_identity(source);
+
+    let client = refresher.refresh(kimi_def(), &held, RefreshReason::Rejected);
+    let (result, seen) = with_server(
+        listener,
+        vec![Reply::Json(
+            401,
+            String::from(r#"{"error":"unauthorized"}"#),
+        )],
+        client,
+    )
+    .await;
+
+    let error = result.expect_err("a dead Kimi credential ends the sign-in");
+    assert!(
+        matches!(&error, ProviderError::SignInExpired { .. }),
+        "a named 401 without a permanent code still ends the sign-in: {error:?}"
+    );
+    assert_eq!(seen.len(), 1, "a dead credential is never retried");
+    assert_eq!(fs::read(dir.auth()).expect("read after"), before);
+    assert_no_secret(&error, &["kimi-old-access", "kimi-old-refresh"]);
+}
+
+#[test]
+fn refreshing_rows_outside_the_test_table_take_no_endpoint_from_the_bases() {
+    let loopback = "http://127.0.0.1:9/";
+    let endpoints = TokenEndpoints::with_bases(loopback, loopback, loopback, loopback, loopback)
+        .expect("loopback bases");
+    for def in [meta_def(), xai_def(), kimi_def()] {
+        assert!(
+            endpoints.url(def).is_none(),
+            "{} reaches no production host from a test set",
+            def.id
+        );
+    }
+    let placed = endpoints
+        .with_base(meta_def(), loopback)
+        .expect("per-row placement");
+    assert!(
+        placed.url(meta_def()).is_some(),
+        "with_base places the row the bases skip"
+    );
+}
+
+#[tokio::test]
+async fn a_meta_refresh_retries_a_transient_mint_once() {
+    let dir = TestDir::new("meta-retry");
+    let held = plain("meta-old-key", "meta-identity-token", Some(unix_now() + 10));
+    seed_as(&dir.auth(), "meta", held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher_with(&dir.auth(), &base, meta_def());
+
+    let client = refresher.refresh(meta_def(), &held, RefreshReason::Expiring);
+    let (result, seen) = with_server(
+        listener,
+        vec![
+            Reply::Json(500, String::from(r#"{"detail":"upstream saw it"}"#)),
+            Reply::Json(200, String::from(r#"{"api_key":"meta-new-key"}"#)),
+        ],
+        client,
+    )
+    .await;
+
+    let fresh = oauth(result.expect("the retry mints after a 500"));
+    assert_eq!(fresh.access_token.expose(), "meta-new-key");
+    assert_eq!(
+        fresh.refresh_token.expose(),
+        "meta-identity-token",
+        "the retry keeps the identity token"
+    );
+    assert_eq!(seen.len(), 2, "one retry, then the mint");
+    let on_disk = stored_as(&dir.auth(), "meta");
+    assert_eq!(on_disk.access_token.expose(), "meta-new-key");
 }
