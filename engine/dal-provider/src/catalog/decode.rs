@@ -5,7 +5,7 @@
 
 use dal_core::{Family, ModelPrice, RawJson, ThinkingLevel};
 use serde::Deserialize;
-use sonic_rs::{JsonValueTrait, Value};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use super::{
     CatalogEntry, ImageProfile, Listing, ToolSupport,
@@ -551,6 +551,127 @@ struct GeminiCard {
     input_token_limit: Option<Value>,
     #[serde(default, rename = "outputTokenLimit")]
     output_token_limit: Option<Value>,
+}
+
+/// Whether a quota model id is in the Gemini class of the pinned taxonomy: its
+/// last `/` segment is `gemini`, or starts with it followed by `-`, `_`, `.`,
+/// `:`, or a digit, ignoring ASCII case.
+fn is_gemini_class(id: &str) -> bool {
+    const TOKEN: &[u8] = b"gemini";
+    let bare = id.rsplit('/').next().unwrap_or(id).as_bytes();
+    bare.len() >= TOKEN.len()
+        && bare[..TOKEN.len()].eq_ignore_ascii_case(TOKEN)
+        && bare
+            .get(TOKEN.len())
+            .is_none_or(|next| matches!(*next, b'-' | b'_' | b'.' | b':' | b'0'..=b'9'))
+}
+
+/// Decodes the Cloud Code Assist `retrieveUserQuota` reply into catalog rows.
+///
+/// Follows the reference discovery: the reply is an object whose `buckets`
+/// array names the account's `modelId`s. A bucket that is not an object or
+/// names no non-blank string `modelId` is dropped, an id outside the Gemini
+/// class is skipped, and a repeated id keeps one row; rows come back sorted
+/// by id. The reply carries ids only, so each row is the family's typed row:
+/// the reference fills the context window, the output limit, image input,
+/// and a price from its bundled catalog or its own defaults, and none of that
+/// is data this reply provides, so none is invented here. A valid reply that
+/// names no Gemini model is a successful, empty list: the wire says the
+/// account has none.
+///
+/// # Errors
+///
+/// [`ProviderError::Protocol`] when the body is not a JSON object.
+pub(crate) fn decode_cloud_code_quota(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let root: Value = decode_json(provider.family, bytes, "Cloud Code Assist quota")?;
+    if root.as_object().is_none() {
+        return Err(protocol(
+            provider.family,
+            "Cloud Code Assist quota is not a JSON object",
+        ));
+    }
+    let buckets = root.get("buckets").and_then(|buckets| buckets.as_array());
+    let mut rows = std::collections::BTreeMap::new();
+    for bucket in buckets.into_iter().flat_map(|buckets| buckets.iter()) {
+        let Some(id) = bucket
+            .get("modelId")
+            .and_then(|id| id.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && is_gemini_class(id))
+        else {
+            continue;
+        };
+        let id = sanitize_identifier(id);
+        rows.entry(id.clone())
+            .or_insert_with(|| default_entry(provider, &id));
+    }
+    Ok(rows.into_values().collect())
+}
+
+/// The Antigravity roster ids the pinned discovery drops: two internal chat
+/// ids and the Gemini 2.5 Pro id the agent surface does not serve.
+const ANTIGRAVITY_DENYLIST: [&str; 3] = ["chat_20706", "chat_23310", "gemini-2.5-pro"];
+
+/// Decodes the Antigravity `fetchAvailableModels` reply into catalog rows.
+///
+/// Follows the reference discovery: `models` is an object keyed by wire id.
+/// An entry that is not an object, is flagged `isInternal`, or is on the
+/// reference denylist is dropped. `displayName` names the row, `maxTokens`
+/// and `maxOutputTokens` become the context window and output limit when
+/// positive integers (anything else is unknown, never a default), and
+/// `supportsImages` decides image input. The roster names no price, so a row
+/// has none, and its thinking support stays the family default: the request
+/// adapter, not the roster, owns the wire spelling. Rows come back sorted by
+/// id. A missing or non-object `models` member, like a roster with no usable
+/// model, is a successful, empty list, as in the reference.
+///
+/// # Errors
+///
+/// [`ProviderError::Protocol`] when the body is not a JSON object.
+pub(crate) fn decode_antigravity_models(
+    provider: &ProviderEntry,
+    bytes: &[u8],
+) -> Result<Vec<CatalogEntry>, ProviderError> {
+    let root: Value = decode_json(provider.family, bytes, "Antigravity model list")?;
+    if root.as_object().is_none() {
+        return Err(protocol(
+            provider.family,
+            "Antigravity model list is not a JSON object",
+        ));
+    }
+    let models = root.get("models").and_then(|models| models.as_object());
+    let mut rows = std::collections::BTreeMap::new();
+    for (name, model) in models.into_iter().flat_map(|models| models.iter()) {
+        let id = sanitize_identifier(name.trim());
+        let internal = model
+            .get("isInternal")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+            == Some(true);
+        if id.is_empty() || !model.is_object() || internal || ANTIGRAVITY_DENYLIST.contains(&&*id) {
+            continue;
+        }
+        let mut entry = default_entry(provider, &id);
+        if let Some(display) = model
+            .get("displayName")
+            .and_then(|display| display.as_str())
+            .map(str::trim)
+            .filter(|display| !display.is_empty())
+        {
+            entry.display = sanitize_identifier(display);
+        }
+        entry.context_window = gemini_limit(model.get("maxTokens"));
+        entry.max_output = gemini_limit(model.get("maxOutputTokens"));
+        entry.image_input = model
+            .get("supportsImages")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+            == Some(true);
+        bind_family_capabilities(&mut entry, provider.family);
+        rows.insert(id, entry);
+    }
+    Ok(rows.into_values().collect())
 }
 
 /// Decodes the pi-messages gateway config (`GET <gateway>/v1/config`) into

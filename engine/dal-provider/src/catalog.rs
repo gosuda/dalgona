@@ -5,12 +5,15 @@ use std::path::Path;
 use dal_core::{Family, ModelPrice, ModelRoute, ThinkingLevel};
 
 use crate::{
-    auth::credential::Credential, error::ProviderError, provider::ProviderEntry,
+    auth::credential::{Credential, EnvSnapshot},
+    error::ProviderError,
+    provider::ProviderEntry,
     thinking::ThinkingSupport,
 };
 
 mod builtin;
 mod cache;
+mod cursor;
 mod decode;
 mod fetch;
 mod prices;
@@ -19,7 +22,7 @@ mod resolve;
 pub use builtin::built_in_entries;
 pub use fetch::load_models;
 pub use prices::{compiled_price, compiled_temperature, price_source};
-pub use resolve::{resolve, resolve_route};
+pub use resolve::{price_candidates, resolve, resolve_route};
 
 /// One complete catalog-owned image budget for a model.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -172,6 +175,7 @@ impl ToolSupport {
                 | Family::GoogleGenerativeAi
                 | Family::GoogleVertex
                 | Family::GoogleGeminiCli
+                | Family::GoogleCloudCodeAssist
                 | Family::GoogleAntigravity
                 | Family::Mistral
                 | Family::Ollama
@@ -283,6 +287,9 @@ pub struct ModelFetch<'a> {
     pub credential: &'a Credential,
     /// The dal cache directory; `models.json` is created inside it.
     pub cache_dir: &'a Path,
+    /// The captured environment the row's endpoint template renders from.
+    /// The library never reads the process environment.
+    pub env: &'a EnvSnapshot,
     /// The per-request user-agent value.
     pub user_agent: &'a str,
     /// The client version sent to the Codex catalog endpoint.

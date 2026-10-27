@@ -21,18 +21,22 @@ use super::{
     resolve::capability_row,
 };
 use crate::{
-    auth::credential::{OAuthCredential, SecretString},
+    auth::credential::{EnvSnapshot, OAuthCredential, SecretString},
     error::ResolveError,
     family::devin::proto::{
         ClientModelConfig, GetCliModelConfigsResponse, ModelFeatures, ModelInfo,
     },
-    provider::{AuthStyle, ProviderSettings, Transport},
+    provider::{AuthStyle, Origin, Origins, ProviderSettings, Transport},
     thinking::{BeforeRequestPatch, Effort},
 };
 use prost::Message as _;
 
+mod authored_seeds;
+mod cloud_code_discovery;
+mod cursor_discovery;
 mod mistral_discovery;
 mod ollama_discovery;
+mod wire_resolution;
 
 fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
     ProviderEntry {
@@ -44,8 +48,21 @@ fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
         key_env: None,
         auth: AuthStyle::Bearer,
         max_concurrent_requests: 1,
+        origins: Origins {
+            api: Origin::RowDefault,
+            base: Origin::RowDefault,
+            auth: Origin::RowDefault,
+        },
         settings: ProviderSettings::default(),
     }
+}
+
+/// A shared empty captured-environment snapshot for fetch tests: no row
+/// under test renders a template, so the snapshot is never read.
+fn empty_env() -> &'static EnvSnapshot {
+    static EMPTY: std::sync::LazyLock<EnvSnapshot> =
+        std::sync::LazyLock::new(|| EnvSnapshot::test(&[]));
+    &EMPTY
 }
 
 fn row(provider: &str, id: &str, context_window: Option<u32>) -> CatalogEntry {
@@ -195,6 +212,11 @@ fn route_retry_serves_every_family_through_its_single_owner() {
             "https://aiplatform.googleapis.com",
         ),
         (Family::GoogleGeminiCli, "my-gemini", "http://127.0.0.1:1"),
+        (
+            Family::GoogleCloudCodeAssist,
+            "my-cloud-code",
+            "http://127.0.0.1:1",
+        ),
         (
             Family::GoogleAntigravity,
             "my-antigravity",
@@ -1442,24 +1464,6 @@ fn harness_references_resolve_by_id_and_no_configured_provider_can_shadow_them()
 
 #[test]
 fn tool_support_allows_exactly_its_documented_family_and_level_cells() {
-    const FAMILIES: [Family; 16] = [
-        Family::Chat,
-        Family::Responses,
-        Family::Codex,
-        Family::Anthropic,
-        Family::Bedrock,
-        Family::Cursor,
-        Family::Devin,
-        Family::Droid,
-        Family::GitLab,
-        Family::GoogleGenerativeAi,
-        Family::GoogleVertex,
-        Family::GoogleGeminiCli,
-        Family::GoogleAntigravity,
-        Family::Mistral,
-        Family::Ollama,
-        Family::PiMessages,
-    ];
     const LEVELS: [ThinkingLevel; 7] = [
         ThinkingLevel::Off,
         ThinkingLevel::Minimal,
@@ -1469,7 +1473,7 @@ fn tool_support_allows_exactly_its_documented_family_and_level_cells() {
         ThinkingLevel::Xhigh,
         ThinkingLevel::Max,
     ];
-    for family in FAMILIES {
+    for family in Family::ALL {
         for level in LEVELS {
             let cell = format!("{family:?}/{level:?}");
             assert!(!ToolSupport::None.allows(family, level), "None {cell}");
@@ -1877,6 +1881,7 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
 
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
@@ -1896,6 +1901,42 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
         ["claude-one", "claude-two"]
     );
 }
+
+#[tokio::test]
+async fn bedrock_catalog_is_typed_only_without_a_live_fetch_or_cache_write() {
+    let directory = TestDir::new();
+    let provider = provider(
+        "amazon-bedrock",
+        Family::Bedrock,
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+        env: empty_env(),
+    };
+
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(fetched.entries.is_empty());
+    assert!(
+        fetched.live_error.is_none(),
+        "a typed-only provider reports no live failure: {fetched:?}"
+    );
+    assert!(
+        directory.path().join("models.json").metadata().is_err(),
+        "a typed-only provider writes no cache file"
+    );
+}
+
 #[tokio::test]
 async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_window() {
     let directory = TestDir::new();
@@ -1915,6 +1956,7 @@ async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_wind
         expires_at: None,
         id_token: None,
         account_id: Some(String::from("account")),
+        project_id: None,
     });
     let client = reqwest::Client::new();
     let fetch = ModelFetch {
@@ -1924,6 +1966,7 @@ async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_wind
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let other_provider_row = row("anthropic", "claude-sonnet-5", Some(200_000));
     write_cache_async(
@@ -2142,6 +2185,7 @@ async fn fetch_headers(
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(
@@ -2167,6 +2211,7 @@ fn oauth(account_id: Option<&str>) -> Credential {
         expires_at: None,
         id_token: None,
         account_id: account_id.map(String::from),
+        project_id: None,
     })
 }
 
@@ -2254,6 +2299,7 @@ async fn codex_model_fetch_with_an_api_key_is_refused_before_any_request() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Typed);
@@ -2282,6 +2328,7 @@ async fn codex_model_fetch_without_an_account_id_fails_before_any_request() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Typed);
@@ -2689,6 +2736,7 @@ async fn devin_fetch_posts_unary_discovery_without_http_auth() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, headers) = server.join().expect("serve the discovery body");
@@ -2711,7 +2759,51 @@ async fn devin_fetch_posts_unary_discovery_without_http_auth() {
 }
 
 #[tokio::test]
-async fn devin_fetch_without_an_api_key_is_refused_before_any_request() {
+async fn devin_fetch_presents_an_oauth_access_token_as_the_session_token() {
+    // An OAuth sign-in rides the same discovery request as an API key: the
+    // access token is the session token `discovery_body` embeds (its
+    // embedding is pinned by the family tests), where the old ladder
+    // refused this credential outright.
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog replay listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_binary(
+        listener,
+        devin_discovery_body(vec![devin_config("devin-oauth-1")]),
+        "application/proto",
+    );
+    let provider = provider(
+        "my-devin",
+        Family::Devin,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &oauth(None),
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+        env: empty_env(),
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    let (request_line, headers) = server.join().expect("serve the discovery body");
+    assert_eq!(fetched.source, CatalogSource::Live);
+    assert_eq!(fetched.entries.len(), 1);
+    assert_eq!(fetched.entries[0].id.as_ref(), "devin-oauth-1");
+    assert!(
+        request_line.starts_with("POST /exa.api_server_pb.ApiServerService/GetCliModelConfigs "),
+        "{request_line}"
+    );
+    assert_eq!(header(&headers, "authorization"), None);
+}
+
+#[tokio::test]
+async fn devin_fetch_without_usable_credentials_is_refused_before_any_request() {
     let directory = TestDir::new();
     let refused = RefusedLoopback::bind();
     let port = refused.port();
@@ -2721,7 +2813,14 @@ async fn devin_fetch_without_an_api_key_is_refused_before_any_request() {
         &format!("http://127.0.0.1:{port}"),
     );
     let client = reqwest::Client::new();
-    for credential in [Credential::None, oauth(None)] {
+    // An OAuth sign-in is now a usable credential, so only no credential at
+    // all and a blank session token are refused here, before any request.
+    for credential in [
+        Credential::None,
+        Credential::ApiKey {
+            key: SecretString::from(String::from("   ")),
+        },
+    ] {
         let fetch = ModelFetch {
             client: &client,
             provider: &provider,
@@ -2729,6 +2828,7 @@ async fn devin_fetch_without_an_api_key_is_refused_before_any_request() {
             cache_dir: directory.path(),
             user_agent: "dalgon/test",
             version: "test",
+            env: empty_env(),
         };
         let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
         assert_eq!(fetched.source, CatalogSource::Typed);
@@ -2765,6 +2865,7 @@ async fn devin_fetch_with_a_malformed_body_falls_back_typed() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     server.join().expect("serve the malformed body");
@@ -2807,6 +2908,7 @@ async fn ollama_fetch_trims_api_suffix_and_lists_tags_without_auth() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, headers) = server.join().expect("serve the tags body");
@@ -2852,6 +2954,7 @@ async fn ollama_fetch_with_a_malformed_body_falls_back_typed() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, headers) = server.join().expect("serve the malformed body");
@@ -3324,6 +3427,7 @@ async fn mistral_fetch_lists_models_with_bearer_auth() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, headers) = server.join().expect("serve the mistral body");
@@ -3365,6 +3469,7 @@ async fn mistral_fetch_with_a_malformed_body_falls_back_typed() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     server.join().expect("serve the malformed body");
@@ -3590,6 +3695,7 @@ async fn radius_fetch_reads_the_gateway_config_at_the_origin_with_bearer_auth() 
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, headers) = server.join().expect("serve the radius config");
@@ -3634,6 +3740,7 @@ async fn radius_fetch_with_a_malformed_body_falls_back_typed() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     server.join().expect("serve the malformed config");
@@ -3720,6 +3827,7 @@ async fn copilot_fetch_lists_account_models_with_cli_identity() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Live);
@@ -3869,6 +3977,7 @@ async fn gemini_cli_has_no_live_discovery() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Typed);
@@ -3959,6 +4068,7 @@ async fn gemini_refresh(
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     (fetched, server.join().expect("serve the gemini replies"))
@@ -4334,6 +4444,7 @@ async fn gemini_fetch_without_a_usable_key_is_refused_before_any_request() {
             cache_dir: directory.path(),
             user_agent: "dalgon/test",
             version: "test",
+            env: empty_env(),
         };
         let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
         assert_eq!(fetched.source, CatalogSource::Typed);
@@ -4356,6 +4467,7 @@ async fn gemini_fetch_without_a_usable_key_is_refused_before_any_request() {
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Typed);
@@ -4370,10 +4482,9 @@ async fn gemini_fetch_without_a_usable_key_is_refused_before_any_request() {
 }
 
 #[tokio::test]
-async fn vertex_and_antigravity_list_no_models_and_say_why_while_typed_ids_resolve() {
+async fn vertex_and_gemini_cli_list_no_models_and_say_why_while_typed_ids_resolve() {
     let cases = [
         (Family::GoogleVertex, "my-vertex", "publisher models"),
-        (Family::GoogleAntigravity, "my-antigravity", "OAuth"),
         (Family::GoogleGeminiCli, "my-gemini", "gemini CLI"),
     ];
     for (family, id, reason) in cases {
@@ -4388,6 +4499,7 @@ async fn vertex_and_antigravity_list_no_models_and_say_why_while_typed_ids_resol
             cache_dir: directory.path(),
             user_agent: "dalgon/test",
             version: "test",
+            env: empty_env(),
         };
         let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
         assert_eq!(fetched.source, CatalogSource::Typed, "{family:?}");
@@ -4597,6 +4709,7 @@ async fn stale_derived_cache_without_billing_refreshes_through_typed_fallback() 
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     assert_eq!(fetched.source, CatalogSource::Typed);
@@ -4665,6 +4778,7 @@ async fn anthropic_refresh(
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     (fetched, server.join().expect("serve the anthropic replies"))
@@ -4937,6 +5051,7 @@ async fn codex_model_fetch_sends_the_client_version_as_one_encoded_query_value()
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version,
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     let (request_line, _) = server.join().expect("serve the codex list");
@@ -4985,6 +5100,7 @@ async fn openai_compatible_fetch_gets_models_with_bearer_auth_and_a_copilot_look
             cache_dir: directory.path(),
             user_agent: "dalgon/test",
             version: "test",
+            env: empty_env(),
         };
         let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
         let (request_line, headers) = server.join().expect("serve the model list");
@@ -5022,13 +5138,13 @@ async fn openai_compatible_fetch_gets_models_with_bearer_auth_and_a_copilot_look
 
 #[tokio::test]
 async fn families_without_discovery_fall_back_typed_and_still_resolve_typed_ids() {
+    // Cursor is absent: its two unary model-list RPCs now join in
+    // `cursor_discovery`, so it no longer belongs among the discovery-less
+    // families. Bedrock is absent too: `load_models` short-circuits it to
+    // the typed-only contract with no live failure, which
+    // `bedrock_catalog_is_typed_only_without_a_live_fetch_or_cache_write`
+    // pins.
     for (family, id, base) in [
-        (
-            Family::Bedrock,
-            "my-bedrock",
-            "https://bedrock-runtime.us-east-1.amazonaws.com",
-        ),
-        (Family::Cursor, "my-cursor", "https://api.cursor.com"),
         (Family::Droid, "factory-droid", "https://api.factory.ai"),
         (Family::GitLab, "gitlab-duo", "https://gitlab.com"),
     ] {
@@ -5043,6 +5159,7 @@ async fn families_without_discovery_fall_back_typed_and_still_resolve_typed_ids(
             cache_dir: directory.path(),
             user_agent: "dalgon/test",
             version: "test",
+            env: empty_env(),
         };
         let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
         assert_eq!(fetched.source, CatalogSource::Typed, "{family:?}");
@@ -5091,6 +5208,7 @@ async fn a_cache_write_failure_never_discards_the_live_rows() {
         cache_dir: &blocker,
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     server.join().expect("serve the mistral list");
@@ -5109,7 +5227,7 @@ async fn a_cache_write_failure_never_discards_the_live_rows() {
 }
 
 #[tokio::test]
-async fn a_live_refresh_over_a_corrupt_cache_succeeds_reports_the_damage_and_repairs_the_file() {
+async fn a_live_refresh_reports_and_preserves_a_damaged_cache() {
     let directory = TestDir::new();
     let cache_path = directory.path().join("models.json");
     fs::write(&cache_path, b"{ not json").expect("write the corrupt cache");
@@ -5136,6 +5254,7 @@ async fn a_live_refresh_over_a_corrupt_cache_succeeds_reports_the_damage_and_rep
         cache_dir: directory.path(),
         user_agent: "dalgon/test",
         version: "test",
+        env: empty_env(),
     };
     let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
     server.join().expect("serve the mistral list");
@@ -5149,11 +5268,11 @@ async fn a_live_refresh_over_a_corrupt_cache_succeeds_reports_the_damage_and_rep
         "the damaged cache is reported, not silently replaced: {:?}",
         fetched.cache_error
     );
-    let repaired = read_cache_async(cache_path)
-        .await
-        .expect("the fresh rows replaced the corrupt file");
-    assert_eq!(repaired.len(), 1);
-    assert_eq!(repaired[0].id.as_ref(), "mistral-live");
+    let preserved = fs::read(&cache_path).expect("read the damaged cache");
+    assert_eq!(
+        preserved, b"{ not json",
+        "the damaged cache is preserved, not overwritten"
+    );
 }
 
 #[tokio::test]
@@ -5208,7 +5327,7 @@ async fn a_refresh_replaces_the_providers_old_rows_and_keeps_every_other_provide
 }
 
 #[tokio::test]
-async fn a_corrupt_or_unsupported_cache_is_replaced_by_the_fresh_rows_and_the_damage_is_reported() {
+async fn a_corrupt_or_unsupported_cache_fails_the_write_and_preserves_the_damaged_file() {
     for damaged in [
         &b"{ not json"[..],
         br#"{"version":1,"entries":[{"provider":"anth"#,
@@ -5227,17 +5346,17 @@ async fn a_corrupt_or_unsupported_cache_is_replaced_by_the_fresh_rows_and_the_da
             "{}: {outcome:?}",
             String::from_utf8_lossy(damaged)
         );
-        let repaired = read_cache_async(cache_path)
-            .await
-            .expect("the fresh rows replaced the damaged file");
-        assert_eq!(repaired.len(), 1);
-        assert_eq!(repaired[0].id.as_ref(), "fresh");
-        assert_eq!(repaired[0].context_window, Some(7));
+        assert_eq!(
+            fs::read(&cache_path).expect("the damaged cache stays readable"),
+            damaged,
+            "a failed read must never overwrite the cache bytes"
+        );
     }
 
     let directory = TestDir::new();
     let cache_path = directory.path().join("models.json");
-    fs::write(&cache_path, br#"{"version":9,"entries":[]}"#).expect("write the future cache");
+    let future: &[u8] = br#"{"version":9,"entries":[]}"#;
+    fs::write(&cache_path, future).expect("write the future cache");
     let outcome = write_cache_async(
         cache_path.clone(),
         "anthropic".into(),
@@ -5249,11 +5368,9 @@ async fn a_corrupt_or_unsupported_cache_is_replaced_by_the_fresh_rows_and_the_da
         "{outcome:?}"
     );
     assert_eq!(
-        read_cache_async(cache_path)
-            .await
-            .expect("the fresh rows replaced the future file")
-            .len(),
-        1
+        fs::read(&cache_path).expect("the future cache stays readable"),
+        future,
+        "a failed read must never overwrite the cache bytes"
     );
 }
 

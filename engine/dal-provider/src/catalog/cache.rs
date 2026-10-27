@@ -80,20 +80,15 @@ fn write_cache(
         .open(lock_path)?;
     lock_file.lock()?;
 
-    let (mut entries, read_error) = match read_cache(path) {
-        Ok(entries) => (entries, None),
-        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            (Vec::new(), None)
-        }
-        Err(error) => (Vec::new(), Some(error)),
+    let mut entries = match read_cache(path) {
+        Ok(entries) => entries,
+        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
     };
     entries.retain(|entry| entry.provider.as_ref() != provider);
     entries.extend(fresh_rows);
     let bytes = encode_cache(&entries)?;
     dal_store::write_atomic(path, &bytes, dal_store::FileMode::Mode0600)?;
-    if let Some(error) = read_error {
-        return Err(error);
-    }
     Ok(())
 }
 
@@ -340,5 +335,156 @@ impl CachedEntry {
             premium_multiplier: billing.premium_multiplier,
             price: billing.price,
         })
+    }
+}
+
+#[cfg(test)]
+mod write_cache_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "dal-provider-cache-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn cache(&self) -> PathBuf {
+            self.0.join("models.json")
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entry(provider: &str, id: &str) -> CatalogEntry {
+        CatalogEntry {
+            provider: Box::from(provider),
+            id: Box::from(id),
+            display: Box::from(id),
+            listing: Listing::Listed,
+            context_window: None,
+            max_output: None,
+            thinking: ThinkingSupport::Budget { can_disable: false },
+            image_input: false,
+            image_profile: None,
+            remote_compact: false,
+            supports_reasoning_summaries: false,
+            tool_support: ToolSupport::None,
+            custom_grammar: false,
+            temperature_allowed: true,
+            display_supported: false,
+            premium_multiplier: None,
+            price: None,
+        }
+    }
+
+    #[test]
+    fn corrupt_cache_fails_and_keeps_bytes_exact() {
+        let dir = TestDir::new("corrupt");
+        let path = dir.cache();
+        let original = br#"{"version":1,"entries":[{"provider":"alpha""#;
+        fs::write(&path, original).expect("write corrupt cache");
+
+        let error = write_cache(&path, "fresh", vec![entry("fresh", "m1")])
+            .expect_err("corrupt cache must fail the write");
+
+        assert!(
+            matches!(error, CacheError::Json(_)),
+            "expected Json error, got {error:?}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("corrupt cache stays readable"),
+            original,
+            "a failed read must never overwrite the cache bytes"
+        );
+    }
+
+    #[test]
+    fn unknown_version_fails_and_keeps_bytes_exact() {
+        let dir = TestDir::new("version");
+        let path = dir.cache();
+        let original = br#"{"version":999,"entries":[]}"#;
+        fs::write(&path, original).expect("write future-version cache");
+
+        let error = write_cache(&path, "fresh", vec![entry("fresh", "m1")])
+            .expect_err("unknown cache version must fail the write");
+
+        assert!(
+            matches!(error, CacheError::Version(999)),
+            "expected Version(999), got {error:?}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("version-mismatched cache stays readable"),
+            original,
+            "a failed read must never overwrite the cache bytes"
+        );
+    }
+
+    #[test]
+    fn missing_cache_writes_fresh_rows() {
+        let dir = TestDir::new("missing");
+        let path = dir.cache();
+
+        write_cache(
+            &path,
+            "fresh",
+            vec![entry("fresh", "m1"), entry("fresh", "m2")],
+        )
+        .expect("fresh cache writes");
+
+        let entries = read_cache(&path).expect("fresh cache reads back");
+        let ids: Vec<_> = entries.iter().map(|row| row.id.as_ref()).collect();
+        assert_eq!(ids, ["m1", "m2"]);
+    }
+
+    #[test]
+    fn merge_keeps_other_providers_and_refreshes_requested() {
+        let dir = TestDir::new("merge");
+        let path = dir.cache();
+        fs::write(
+            &path,
+            encode_cache(&[
+                entry("alpha", "a1"),
+                entry("alpha", "a2"),
+                entry("beta", "b1"),
+            ])
+            .expect("seed cache encodes"),
+        )
+        .expect("seed cache writes");
+
+        write_cache(&path, "alpha", vec![entry("alpha", "a9")]).expect("merge writes");
+
+        let entries = read_cache(&path).expect("merged cache reads back");
+        let alpha: Vec<_> = entries
+            .iter()
+            .filter(|row| row.provider.as_ref() == "alpha")
+            .map(|row| row.id.as_ref())
+            .collect();
+        assert_eq!(
+            alpha,
+            ["a9"],
+            "requested provider must refresh to fresh rows"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|row| row.provider.as_ref() == "beta" && row.id.as_ref() == "b1"),
+            "unrelated provider rows must survive the merge"
+        );
     }
 }

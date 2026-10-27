@@ -193,6 +193,7 @@ async fn refresh(provider: &ProviderEntry, credential: &Credential, cache: &Path
         provider,
         credential,
         cache_dir: cache,
+        env: empty_env(),
         user_agent: "dalgon/test",
         version: "test",
     };
