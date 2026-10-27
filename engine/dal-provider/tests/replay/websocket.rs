@@ -36,13 +36,13 @@ use std::{
 };
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose, RequestParams, SessionId,
-    ThinkingLevel,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose,
+    RequestParams, SessionId, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, EventStream, Listing, NoticeSink, Provider,
-    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings,
-    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    CatalogEntry, EnvSnapshot, EventStream, Listing, NoticeSink, Provider, ProviderConfig,
+    ProviderError, ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent,
+    ThinkingSupport, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -202,26 +202,16 @@ fn start_set(name: &str, base: &str) -> (ProviderSet, PathBuf) {
         std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))
             .expect("lock auth.json");
     }
-    let config = ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 5,
-        providers: vec![ProviderEntry {
-            id: "openai-codex".into(),
-            def: None,
-            family: Family::Codex,
-            base_url: base.into(),
-            transport: Transport::Websocket,
-            key_env: None,
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    };
-    let set = ProviderSet::new(&config, identity(), EnvSnapshot::test(&[]), &dir, &dir)
+    let table = format!("[providers.openai-codex]\nbase_url = '{base}'\n");
+    let config =
+        Config::load(ConfigProduct::Dalgon, &dir, "", Some(&table)).expect("provider table parses");
+    let mut providers = ProviderConfig::from_config(&config).expect("providers decode");
+    providers.request_max_retries = 0;
+    providers.stream_max_retries = 5;
+    providers
+        .providers
+        .retain(|provider| &*provider.id == "openai-codex");
+    let set = ProviderSet::new(&providers, identity(), EnvSnapshot::test(&[]), &dir, &dir)
         .expect("provider set builds");
     (set, dir)
 }

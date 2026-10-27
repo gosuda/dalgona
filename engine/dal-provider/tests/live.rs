@@ -40,14 +40,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dal_core::{
-    AssistantPart, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part, Purpose,
-    RawJson, ReplaySource, RequestParams, ThinkingLevel,
+    AssistantPart, Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute,
+    ModelToolSpec, Part, Purpose, RawJson, ReplaySource, RequestParams, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStore, AuthStyle, Capture, CompactOutcome, CredentialKind, EnvSnapshot, NoticeSink,
-    Provider, ProviderConfig, ProviderEntry, ProviderIdentity, ProviderSet, ProviderSettings,
-    ReplayPayload, ResolvedModel, StopReason, StreamEvent, ToolArgs, ToolCall, Transport, find,
-    items_for, record,
+    AuthStore, Capture, CompactOutcome, CredentialKind, EnvSnapshot, NoticeSink, Provider,
+    ProviderConfig, ProviderEntry, ProviderIdentity, ProviderSet, ReplayPayload, ResolvedModel,
+    StopReason, StreamEvent, ToolArgs, ToolCall, Transport, items_for, record,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -131,54 +130,67 @@ fn live_config(entries: Vec<ProviderEntry>) -> ProviderConfig {
 
 /// The built-in Codex row with an explicit transport per case.
 fn codex_entry(transport: Transport) -> ProviderEntry {
-    let def = find("openai-codex").expect("builtin openai-codex row");
-    ProviderEntry {
-        id: def.id.into(),
-        def: Some(def),
-        family: def.family,
-        base_url: def.base_url.into(),
-        transport,
-        key_env: None,
-        auth: AuthStyle::Bearer,
-        max_concurrent_requests: 4,
-        settings: ProviderSettings::default(),
-    }
+    let wire = match transport {
+        Transport::Https => "https",
+        Transport::Websocket => "websocket",
+    };
+    let table = format!("[providers.openai-codex]\ntransport = \"{wire}\"\n");
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-live"),
+        "",
+        Some(&table),
+    )
+    .expect("provider table parses");
+    ProviderConfig::from_config(&core)
+        .expect("providers decode")
+        .providers
+        .into_iter()
+        .find(|provider| &*provider.id == "openai-codex")
+        .expect("openai-codex decoded")
 }
 
 /// The built-in Anthropic row.
 fn anthropic_entry() -> ProviderEntry {
-    let def = find("anthropic").expect("builtin anthropic row");
-    ProviderEntry {
-        id: def.id.into(),
-        def: Some(def),
-        family: def.family,
-        base_url: def.base_url.into(),
-        transport: Transport::Https,
-        key_env: None,
-        auth: AuthStyle::XApiKey,
-        max_concurrent_requests: 4,
-        settings: ProviderSettings::default(),
-    }
+    let table = "[providers.anthropic]\n";
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-live"),
+        "",
+        Some(table),
+    )
+    .expect("provider table parses");
+    ProviderConfig::from_config(&core)
+        .expect("providers decode")
+        .providers
+        .into_iter()
+        .find(|provider| &*provider.id == "anthropic")
+        .expect("anthropic decoded")
 }
 
 /// Zenmux uses a separate base URL for the Anthropic family.
 fn zenmux_entry(family: Family) -> ProviderEntry {
-    let (base_url, auth) = if family == Family::Anthropic {
-        ("https://zenmux.ai/api/anthropic", AuthStyle::XApiKey)
+    let (api, base_url, auth) = if family == Family::Anthropic {
+        ("anthropic", "https://zenmux.ai/api/anthropic", "x-api-key")
     } else {
-        ("https://zenmux.ai/api/v1", AuthStyle::Bearer)
+        ("openai_chat", "https://zenmux.ai/api/v1", "bearer")
     };
-    ProviderEntry {
-        id: "zenmux".into(),
-        def: None,
-        family,
-        base_url: base_url.into(),
-        transport: Transport::Https,
-        key_env: Some("ZENMUX_API_KEY".into()),
-        auth,
-        max_concurrent_requests: 4,
-        settings: ProviderSettings::default(),
-    }
+    let table = format!(
+        "[providers.zenmux]\napi = \"{api}\"\nbase_url = \"{base_url}\"\nkey_env = \"ZENMUX_API_KEY\"\nauth = \"{auth}\"\ntransport = \"https\"\nmax_concurrent_requests = 4\n"
+    );
+    let core = Config::load(
+        ConfigProduct::Dalgon,
+        std::path::Path::new("/tmp/dal-provider-live"),
+        "",
+        Some(&table),
+    )
+    .expect("provider table parses");
+    ProviderConfig::from_config(&core)
+        .expect("providers decode")
+        .providers
+        .into_iter()
+        .find(|provider| &*provider.id == "zenmux")
+        .expect("zenmux decoded")
 }
 
 /// One isolated host per case: its own config, snapshot, and cache.

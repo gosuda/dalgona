@@ -781,6 +781,7 @@ fn codex(payload: &str) -> Credential {
         expires_at: None,
         id_token: Some(jwt(payload)),
         account_id: Some(String::from("account-a")),
+        project_id: None,
     })
 }
 
@@ -968,6 +969,7 @@ async fn api_keys_fedramp_and_non_codex_sign_ins_send_nothing() {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     });
     let key = Credential::ApiKey {
         key: SecretString::from("sk-test"),

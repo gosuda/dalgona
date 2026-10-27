@@ -10,14 +10,14 @@ use super::replay_server;
 use std::sync::{Arc, Mutex};
 
 use dal_core::{
-    ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose, RequestParams, SessionId,
-    ThinkingLevel,
+    Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute, Part, Purpose,
+    RequestParams, SessionId, ThinkingLevel,
 };
 use dal_provider::{
-    AuthStore, AuthStyle, BeforeRequest, BeforeRequestInput, BeforeRequestPatch, CatalogEntry,
-    CompactOutcome, Credential, EnvSnapshot, Listing, NoticeSink, OAuthCredential, ProviderConfig,
-    ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel,
-    SecretString, StopReason, StreamEvent, ThinkingSupport, ToolSupport, Transport,
+    AuthStore, BeforeRequest, BeforeRequestInput, BeforeRequestPatch, CatalogEntry, CompactOutcome,
+    Credential, EnvSnapshot, Listing, NoticeSink, OAuthCredential, ProviderConfig, ProviderError,
+    ProviderIdentity, ProviderSet, ResolvedModel, SecretString, StopReason, StreamEvent,
+    ThinkingSupport, ToolSupport,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -131,6 +131,7 @@ fn seed_auth(dir: &std::path::Path) {
                 expires_at: None,
                 id_token: Some(String::from(ID_TOKEN)),
                 account_id: Some(String::from(ACCOUNT_ID)),
+                project_id: None,
             }),
         )
         .expect("fake codex credential stores");
@@ -151,26 +152,30 @@ fn temp_dir(case: &str) -> std::path::PathBuf {
     dir
 }
 
-fn config(base: &str) -> ProviderConfig {
-    ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 2,
-        stream_max_retries: 2,
-        providers: vec![ProviderEntry {
-            id: "openai-codex".into(),
-            def: None,
-            family: Family::Codex,
-            base_url: base.into(),
-            transport: Transport::Https,
-            key_env: None,
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    }
+fn config(dir: &std::path::Path, base: &str) -> ProviderConfig {
+    // The Codex entry decodes from the effective TOML through the public
+    // `ProviderConfig::from_config` route: the loopback base stays explicit,
+    // the Codex `api` and bearer style stay explicit, and the HTTPS
+    // transport stays explicit because the row default is a WebSocket. The
+    // absent `key_env` stays omitted, so the OAuth store remains the only
+    // credential source and no API-key identity is invented.
+    let table = format!(
+        "[retry]\nrequest_max_retries = 2\nstream_max_retries = 2\n\
+         [providers.openai-codex]\napi = \"openai_codex\"\nbase_url = \"{base}\"\n\
+         transport = \"https\"\nauth = \"bearer\"\n"
+    );
+    let host = Config::load(ConfigProduct::Dalgon, dir, "", Some(&table))
+        .expect("replay provider table parses");
+    let mut config = ProviderConfig::from_config(&host).expect("replay providers decode");
+    config
+        .providers
+        .retain(|candidate| candidate.id.as_ref() == "openai-codex");
+    assert_eq!(
+        config.providers.len(),
+        1,
+        "replay decodes exactly the openai-codex entry"
+    );
+    config
 }
 
 /// Binds one Codex provider against the replay server. The set is returned
@@ -180,8 +185,14 @@ fn setup(
     dir: &std::path::Path,
     entry: CatalogEntry,
 ) -> (ProviderSet, dal_provider::Provider) {
-    let set = ProviderSet::new(&config(base), identity(), EnvSnapshot::test(&[]), dir, dir)
-        .expect("provider set builds");
+    let set = ProviderSet::new(
+        &config(dir, base),
+        identity(),
+        EnvSnapshot::test(&[]),
+        dir,
+        dir,
+    )
+    .expect("provider set builds");
     let resolved = ResolvedModel {
         provider: "openai-codex".into(),
         route: ModelRoute::Api {

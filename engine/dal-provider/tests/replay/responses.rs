@@ -23,14 +23,14 @@ use super::replay_server;
 use std::sync::{Arc, Mutex};
 
 use dal_core::{
-    AssistantPart, CallId, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
-    Purpose, RawJson, ReplaySource, RequestParams, SessionId, ThinkingLevel, Usage,
+    AssistantPart, CallId, Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute,
+    ModelToolSpec, Part, Purpose, RawJson, ReplaySource, RequestParams, SessionId, ThinkingLevel,
+    Usage,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, CompactOutcome, EnvSnapshot, EventStream, Listing, NoticeSink,
-    ProviderConfig, ProviderEntry, ProviderError, ProviderIdentity, ProviderSet, ProviderSettings,
-    ResolvedModel, StopReason, StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
-    Transport,
+    CatalogEntry, CompactOutcome, EnvSnapshot, EventStream, Listing, NoticeSink, ProviderConfig,
+    ProviderError, ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent,
+    ThinkingSupport, ToolArgs, ToolCall, ToolSupport,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -285,27 +285,19 @@ impl Harness {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let config = ProviderConfig {
-            default_model: None,
-            thinking: ThinkingLevel::Medium,
-            aliases: Vec::new(),
-            request_max_retries,
-            stream_max_retries,
-            providers: vec![ProviderEntry {
-                id: "responses-test".into(),
-                def: None,
-                family: Family::Responses,
-                base_url: base.into_boxed_str(),
-                transport: Transport::Https,
-                key_env: Some("RESP_TEST_KEY".into()),
-                auth: AuthStyle::Bearer,
-                max_concurrent_requests: 4,
-                settings: ProviderSettings::default(),
-            }],
-            scripted: None,
-        };
+        let table = format!(
+            "[providers.responses-test]\napi = 'openai_responses'\nbase_url = '{base}'\nkey_env = 'RESP_TEST_KEY'\nauth = 'bearer'\n"
+        );
+        let config = Config::load(ConfigProduct::Dalgon, &dir, "", Some(&table))
+            .expect("provider table parses");
+        let mut providers = ProviderConfig::from_config(&config).expect("providers decode");
+        providers.request_max_retries = request_max_retries;
+        providers.stream_max_retries = stream_max_retries;
+        providers
+            .providers
+            .retain(|provider| &*provider.id == "responses-test");
         let set = ProviderSet::new(
-            &config,
+            &providers,
             identity(),
             EnvSnapshot::test(&[("RESP_TEST_KEY", "resp-secret")]),
             &dir,

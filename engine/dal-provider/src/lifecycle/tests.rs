@@ -269,6 +269,7 @@ fn oauth(token: &str) -> Credential {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     })
 }
 
@@ -1897,4 +1898,46 @@ async fn a_websocket_close_after_delivery_keeps_its_code_and_before_it_is_retrie
         Some(Ok(StreamEvent::Stop { .. }))
     ));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+#[tokio::test]
+async fn retry_after_seconds_sleeps_two_seconds_and_announces_attempt_one_of_five() {
+    let (url, mut server) = loopback_server(vec![
+        response(429, &[("Retry-After", "2")], "slow down"),
+        response(200, &[], "ok"),
+    ])
+    .await;
+    let clock = TestClock::new(timestamp(FIXED_NOW));
+    let notices = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&notices);
+    let mut retrying = plan(
+        clock.clone(),
+        5,
+        Arc::new(Semaphore::new(1)),
+        CancellationToken::new(),
+    );
+    retrying.notices = Arc::new(move |notice| lock(&sink).push(notice));
+    let output = request(
+        retrying,
+        api_key(),
+        move |credential, cancel| get_once(url.clone(), credential, cancel),
+        |oauth| async move { Ok(Credential::OAuth(oauth)) },
+    )
+    .await
+    .expect("a Retry-After of 2 s is inside the budget");
+    assert_eq!(output, Some(200));
+    assert_eq!(clock.sleeps(), vec![Duration::from_secs(2)]);
+    assert_eq!(
+        lock(&notices).clone(),
+        vec![String::from("Retrying in 2.0s (attempt 1/5).")],
+        "the header value is waited exactly and announced"
+    );
+    assert_eq!(
+        server
+            .join_next()
+            .await
+            .expect("server completes")
+            .expect("server completes")
+            .len(),
+        2
+    );
 }

@@ -16,13 +16,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_core::{
-    AssistantPart, CallId, ContextItem, Family, ModelRequest, ModelRoute, ModelToolSpec, Part,
-    Purpose, RawJson, ReplaySource, RequestParams, ThinkingLevel, Usage,
+    AssistantPart, CallId, Config, ConfigProduct, ContextItem, Family, ModelRequest, ModelRoute,
+    ModelToolSpec, Part, Purpose, RawJson, ReplaySource, RequestParams, ThinkingLevel, Usage,
 };
 use dal_provider::{
-    AuthStyle, CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderEntry,
-    ProviderError, ProviderIdentity, ProviderSet, ProviderSettings, ResolvedModel, StopReason,
-    StreamEvent, ThinkingSupport, ToolArgs, ToolCall, ToolSupport, Transport,
+    CatalogEntry, EnvSnapshot, Listing, NoticeSink, ProviderConfig, ProviderError,
+    ProviderIdentity, ProviderSet, ResolvedModel, StopReason, StreamEvent, ThinkingSupport,
+    ToolArgs, ToolCall, ToolSupport,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -61,26 +61,28 @@ fn entry() -> CatalogEntry {
     }
 }
 
-fn config(base: &str) -> ProviderConfig {
-    ProviderConfig {
-        default_model: None,
-        thinking: ThinkingLevel::Medium,
-        aliases: Vec::new(),
-        request_max_retries: 0,
-        stream_max_retries: 0,
-        providers: vec![ProviderEntry {
-            id: "chat-test".into(),
-            def: None,
-            family: Family::Chat,
-            base_url: base.into(),
-            transport: Transport::Https,
-            key_env: Some("CHAT_TEST_KEY".into()),
-            auth: AuthStyle::Bearer,
-            max_concurrent_requests: 4,
-            settings: ProviderSettings::default(),
-        }],
-        scripted: None,
-    }
+fn config(dir: &std::path::Path, base: &str) -> ProviderConfig {
+    // The named Chat entry decodes from the effective TOML through the
+    // public `ProviderConfig::from_config` route: the loopback base and the
+    // bearer style stay explicit, so the turn can never reach a public
+    // endpoint when the captured environment is silent.
+    let table = format!(
+        "[retry]\nrequest_max_retries = 0\nstream_max_retries = 0\n\
+         [providers.chat-test]\napi = \"openai_chat\"\nbase_url = \"{base}\"\n\
+         key_env = \"CHAT_TEST_KEY\"\nauth = \"bearer\"\n"
+    );
+    let host = Config::load(ConfigProduct::Dalgon, dir, "", Some(&table))
+        .expect("replay provider table parses");
+    let mut config = ProviderConfig::from_config(&host).expect("replay providers decode");
+    config
+        .providers
+        .retain(|candidate| candidate.id.as_ref() == "chat-test");
+    assert_eq!(
+        config.providers.len(),
+        1,
+        "replay decodes exactly the chat-test entry"
+    );
+    config
 }
 
 fn resolved() -> ResolvedModel {
@@ -231,7 +233,7 @@ async fn harness(case: &str, tag: &str) -> Harness {
         .expect("replay server starts");
     let dir = temp_dir(tag);
     let set = ProviderSet::new(
-        &config(&server.base_url()),
+        &config(&dir, &server.base_url()),
         identity(),
         EnvSnapshot::test(&[("CHAT_TEST_KEY", "chat-secret")]),
         &dir,
