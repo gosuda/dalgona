@@ -446,6 +446,15 @@ struct CcaRequest<'a> {
     session_id: &'a str,
 }
 
+/// The plain Cloud Code Assist envelope (Gemini CLI): `project`, `model`,
+/// then the flat request body, and nothing else.
+#[derive(Serialize)]
+struct CcaPlainBody<'a> {
+    project: &'a str,
+    model: &'a str,
+    request: Body<'a>,
+}
+
 /// The CCA `labels` map, serialized as a JSON object in insertion order.
 struct Labels<'a>(&'a [(String, String)]);
 
@@ -479,6 +488,17 @@ pub(crate) struct GoogleRequest<'a> {
     pub(crate) dialect: Dialect<'a>,
 }
 
+/// How the plain Cloud Code Assist dialect spells an explicit thinking-off:
+/// omitting `thinkingConfig` re-applies the backend's per-id default, so a
+/// flagged model must say it on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThinkingOff {
+    /// Level models: `{"includeThoughts":false,"thinkingLevel":"MINIMAL"}`.
+    Level,
+    /// Budget models: `{"includeThoughts":false,"thinkingBudget":0}`.
+    Budget,
+}
+
 /// Which wire dialect one request lowers to.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Dialect<'a> {
@@ -504,6 +524,16 @@ pub(crate) enum Dialect<'a> {
         /// per-wire-id Antigravity profile); `None` falls back to the
         /// request's `max_output_tokens`.
         max_output_tokens: Option<u32>,
+    },
+    /// The plain Cloud Code Assist envelope (Gemini CLI): exactly
+    /// `{project, model, request}`, where `request` is the flat
+    /// `generateContent` body without safety settings.
+    CloudCodePlain {
+        /// The Google Cloud project id the request names.
+        project: &'a str,
+        /// The explicit thinking-off spelling; `None` keeps whatever the plan
+        /// maps to (an omitted `thinkingConfig` for `off`).
+        off: Option<ThinkingOff>,
     },
 }
 
@@ -538,7 +568,9 @@ pub(crate) fn request_body(input: &GoogleRequest<'_>) -> Result<Vec<u8>, GoogleB
     let generation = GenerationConfig {
         temperature: input.thinking.temperature,
         max_output_tokens: match input.dialect {
-            Dialect::Flat { .. } => input.request.params.max_output_tokens,
+            Dialect::Flat { .. } | Dialect::CloudCodePlain { .. } => {
+                input.request.params.max_output_tokens
+            }
             Dialect::CloudCodeAssist {
                 max_output_tokens, ..
             } => max_output_tokens.or(input.request.params.max_output_tokens),
@@ -582,6 +614,19 @@ pub(crate) fn request_body(input: &GoogleRequest<'_>) -> Result<Vec<u8>, GoogleB
             request_type: "agent",
         })
         .map_err(encode)?,
+        Dialect::CloudCodePlain { project, .. } => sonic_rs::to_vec(&CcaPlainBody {
+            project,
+            model,
+            request: Body {
+                contents,
+                system_instruction: system_instruction(input, None),
+                tools,
+                tool_config,
+                safety_settings: None,
+                generation_config: generation,
+            },
+        })
+        .map_err(encode)?,
     };
     Ok(body)
 }
@@ -599,6 +644,20 @@ fn encode(error: sonic_rs::Error) -> GoogleBodyError {
 /// member: the server default then applies, and models that cannot disable
 /// thinking are clamped upstream by the capability row.
 fn thinking_config(input: &GoogleRequest<'_>) -> Option<ThinkingConfig> {
+    if let Dialect::CloudCodePlain { off: Some(off), .. } = input.dialect {
+        return Some(match off {
+            ThinkingOff::Level => ThinkingConfig {
+                include_thoughts: false,
+                thinking_level: Some("MINIMAL"),
+                thinking_budget: None,
+            },
+            ThinkingOff::Budget => ThinkingConfig {
+                include_thoughts: false,
+                thinking_level: None,
+                thinking_budget: Some(0),
+            },
+        });
+    }
     match input.thinking.wire {
         WireThinking::OpenAi { effort } => match effort {
             Some("minimal") => Some(level("MINIMAL")),
@@ -2058,7 +2117,7 @@ pub(crate) struct GoogleWire {
     /// Headers in send order; names are lowercase.
     pub(crate) headers: Vec<(&'static str, String)>,
     /// The `user-agent` the request must send instead of the dalgon one;
-    /// set only for Antigravity.
+    /// set by the Cloud Code Assist surfaces (Antigravity and Gemini CLI).
     pub(crate) user_agent: Option<String>,
     /// The JSON body.
     pub(crate) body: Vec<u8>,

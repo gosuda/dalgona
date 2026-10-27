@@ -16,3 +16,4 @@ pub(crate) mod ollama;
 pub(crate) mod pi_messages;
 mod process;
 pub(crate) mod responses;
+pub(crate) mod schema;

@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     auth::credential::Credential,
     error::ProviderError,
+    family::schema::{self, ToolSchemas},
     provider::AuthStyle,
     sse::SseEvent,
     stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
@@ -46,6 +47,35 @@ const DONE: &str = "[DONE]";
 /// The status an in-stream failure reports: the 200 of the stream response.
 const IN_STREAM_STATUS: u16 = 200;
 
+/// What a Responses host does with the caller's requested output cap
+/// (`RequestParams::max_output_tokens`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutputCap {
+    /// The host rejects the member, or its native requests omit it: the Codex
+    /// backend, and Droid `gpt-*` models. A requested cap changes nothing on
+    /// the wire.
+    Omit,
+    /// The host takes `max_output_tokens`: the requested cap held to
+    /// `ceiling`, the catalog row's hard cap when it is known. A request with
+    /// no cap sends no member, so the host applies its own default.
+    Honor {
+        /// The catalog row's output ceiling, when it states one.
+        ceiling: Option<u32>,
+    },
+}
+
+/// The body-level policies that differ between Responses wire hosts.
+///
+/// `output_cap` retains the existing per-route `Omit`/`Honor` decision. The
+/// schema policy is independent: ordinary Responses hosts preserve the
+/// caller's schema, while B.AI's Responses wire uses the shared
+/// OpenAI-compatible lowering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BodyPolicy {
+    pub(crate) output_cap: OutputCap,
+    pub(crate) tool_schemas: ToolSchemas,
+}
+
 /// A Responses request ready for HTTPS or the shared WebSocket state machine.
 ///
 /// This type intentionally has no `Debug` implementation because it retains a
@@ -57,6 +87,8 @@ pub(crate) struct ResponsesRequest<'a> {
     pub(crate) thinking: WireThinking,
     /// Whether the resolved model supports reasoning summaries.
     pub(crate) reasoning_summary: bool,
+    /// The catalog row's output ceiling, the hard cap of a requested cap.
+    pub(crate) max_output: Option<u32>,
     /// API-key header style configured for this provider.
     pub(crate) auth: AuthStyle,
     /// Credential resolved for this request.
@@ -65,6 +97,8 @@ pub(crate) struct ResponsesRequest<'a> {
     pub(crate) session_id: SessionId,
     /// Already-rendered provider user-agent.
     pub(crate) user_agent: &'a str,
+    /// Schema lowering selected by the resolved Responses wire.
+    pub(crate) tool_schemas: ToolSchemas,
 }
 
 /// A Responses request lowered into its body and configured authentication.
@@ -97,6 +131,8 @@ struct Body<'a> {
     tool_choice: &'static str,
     parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Reasoning>,
     store: bool,
     stream: bool,
@@ -111,7 +147,7 @@ struct Tool<'a> {
     kind: &'static str,
     name: Cow<'a, str>,
     description: &'a str,
-    parameters: &'a RawJson,
+    parameters: Cow<'a, RawJson>,
 }
 
 #[derive(Serialize)]
@@ -315,12 +351,19 @@ fn input_items<'a>(
 /// Writes the Responses body of `request`.
 ///
 /// Members appear in this order: `model`, `instructions` (the system text),
-/// `input`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning`,
+/// `input`, `tools`, `tool_choice`, `parallel_tool_calls`,
+/// `max_output_tokens` (only when `cap` sends one), `reasoning`,
 /// `store: false`, `stream: true`, `include: ["reasoning.encrypted_content"]`,
 /// and `prompt_cache_key` (the request cache key, normally the session id).
 /// `tools`, `tool_choice`, and `parallel_tool_calls` are always present, even
 /// when there are no tools; tools keep registration order and are sent without
 /// `strict`.
+///
+/// `policy.output_cap` decides the `max_output_tokens` member:
+/// [`OutputCap::Honor`] sends `request.params.max_output_tokens` held to its
+/// `ceiling` (a zero is sent as zero; no floor), [`OutputCap::Omit`] and a
+/// request with no cap send none. `policy.tool_schemas` selects the shared
+/// schema lowering; `Verbatim` keeps the original `RawJson` borrowed.
 ///
 /// `thinking` is the fragment from [`crate::plan`]: an effort of
 /// `"none"` sends `{"effort":"none"}`, another effort sends it with
@@ -343,6 +386,7 @@ pub(crate) fn request_body(
     request: &ModelRequest,
     thinking: WireThinking,
     reasoning_summary: bool,
+    policy: BodyPolicy,
 ) -> Result<Vec<u8>, ProviderError> {
     let ModelRoute::Api { family, model, .. } = &request.model else {
         return Err(invalid("a Responses body needs an API model route"));
@@ -358,6 +402,13 @@ pub(crate) fn request_body(
         ));
     };
     let model: &str = model;
+    let max_output_tokens = match policy.output_cap {
+        OutputCap::Omit => None,
+        OutputCap::Honor { ceiling } => request
+            .params
+            .max_output_tokens
+            .map(|ask| ceiling.map_or(ask, |hard| ask.min(hard))),
+    };
     let body = Body {
         model,
         instructions: &request.system,
@@ -365,15 +416,20 @@ pub(crate) fn request_body(
         tools: request
             .tools
             .iter()
-            .map(|tool| Tool {
-                kind: "function",
-                name: wire_name(&tool.name, WIRE_NAME_MAX),
-                description: &tool.description,
-                parameters: &tool.parameters,
+            .map(|tool| {
+                let parameters = schema::lower(&tool.name, &tool.parameters, policy.tool_schemas)
+                    .map_err(|error| invalid(error.to_string()))?;
+                Ok(Tool {
+                    kind: "function",
+                    name: wire_name(&tool.name, WIRE_NAME_MAX),
+                    description: &tool.description,
+                    parameters,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, ProviderError>>()?,
         tool_choice: "auto",
         parallel_tool_calls: true,
+        max_output_tokens,
         reasoning: effort.map(|effort| Reasoning {
             effort,
             summary: (reasoning_summary && effort != "none").then_some("auto"),
@@ -405,7 +461,17 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
             "a Responses wire needs an openai_responses model route",
         ));
     };
-    let body = request_body(input.request, input.thinking, input.reasoning_summary)?;
+    let body = request_body(
+        input.request,
+        input.thinking,
+        input.reasoning_summary,
+        BodyPolicy {
+            output_cap: OutputCap::Honor {
+                ceiling: input.max_output,
+            },
+            tool_schemas: input.tool_schemas,
+        },
+    )?;
     if input.auth == AuthStyle::None && !matches!(input.credential, Credential::None) {
         return Err(invalid("credential-less entries carry no auth header"));
     }
@@ -416,6 +482,13 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
                 AuthStyle::Bearer => ("authorization", format!("Bearer {}", secret.as_ref())),
                 AuthStyle::XApiKey => ("x-api-key", secret.to_string()),
                 AuthStyle::ApiKey => ("api-key", secret.to_string()),
+                // The Cloudflare gateway key rides its own header only:
+                // never `authorization` or `x-api-key` beside it, and an
+                // explicit entry `auth` already overrode this style upstream.
+                AuthStyle::CfAigAuthorization => (
+                    "cf-aig-authorization",
+                    format!("Bearer {}", secret.as_ref()),
+                ),
                 AuthStyle::None => {
                     return Err(invalid("credential-less entries carry no auth header"));
                 }
@@ -423,7 +496,10 @@ pub(crate) fn wire(input: &ResponsesRequest<'_>) -> Result<ResponsesWire, Provid
             (Some(auth_header), false, secret)
         }
         Credential::OAuth(credential) => {
-            if input.auth == AuthStyle::ApiKey {
+            if matches!(
+                input.auth,
+                AuthStyle::ApiKey | AuthStyle::CfAigAuthorization
+            ) {
                 return Err(invalid(
                     "an OAuth credential cannot use the api-key header style",
                 ));

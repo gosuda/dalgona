@@ -182,6 +182,7 @@ fn bearer_gate_refuses_api_keys_and_empty_tokens() {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     });
     assert_eq!(require_bearer(&oauth).unwrap(), "tok");
 }

@@ -89,7 +89,16 @@ pub(crate) fn build(input: &CodexRequest<'_>) -> Result<CodexWire, ProviderError
             })?;
 
     let session_id = input.session_id.to_string();
-    let body = responses::request_body(input.request, input.thinking, input.reasoning_summaries)?;
+    // The Codex backend rejects a caller-supplied output cap.
+    let body = responses::request_body(
+        input.request,
+        input.thinking,
+        input.reasoning_summaries,
+        responses::BodyPolicy {
+            output_cap: responses::OutputCap::Omit,
+            tool_schemas: crate::family::schema::ToolSchemas::Verbatim,
+        },
+    )?;
     let mut bearer = String::from("Bearer ");
     bearer.push_str(input.credential.access_token.expose());
     let headers = vec![

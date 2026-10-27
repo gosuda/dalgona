@@ -7,10 +7,12 @@
 //! 1. **`OAuth2` bearer (standard).** `Authorization: Bearer <access_token>`
 //!    against
 //!    `https://{host}/v1/projects/{project}/locations/{location}/publishers/google/models/{id}:streamGenerateContent?alt=sse`.
-//!    Token provenance is out-of-band (service-account file, gcloud user
-//!    ADC, impersonation, or the metadata server, cached and refreshed
-//!    skew-side); dal carries only the opaque token string. No
-//!    `jsonwebtoken`/RS256 stack lives in dal.
+//!    Token provenance is a pre-minted captured bearer, a stored sign-in, or
+//!    the set-owned ADC resolver, which exchanges authorized-user refresh
+//!    tokens and service-account JWTs (RS256 through the rustls/aws-lc
+//!    signing stack in dal) and reads the metadata server, cached and
+//!    refreshed skew-side; dal carries only the opaque token string on the
+//!    wire.
 //! 2. **Express Mode (API key).** `x-goog-api-key` against
 //!    `https://{host}/v1/publishers/google/models/{id}:streamGenerateContent?alt=sse`
 //!    (`GOOGLE_CLOUD_API_KEY`), with the regional/global host resolution
@@ -63,12 +65,26 @@ fn valid_project(project: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+/// The endpoint authority of one Vertex request. The attempt owner derives
+/// it from the entry's own `base_url_defaulted`: `Regional` only when the
+/// table named no base.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum VertexEndpoint {
+    /// The location selects the host (global, the `eu`/`us` multi-region
+    /// hosts, or `{location}-aiplatform`); the Express residency fallback
+    /// applies exactly as before.
+    Regional,
+    /// The configured provider base is the authority: no override is
+    /// allocated and no residency fallback exists.
+    ConfiguredProviderBase,
+}
+
 /// How one Vertex AI request authenticates, resolved from the credential
 /// store and the provider entry before lowering.
 #[derive(Clone, Copy)]
 pub(crate) enum VertexAuth<'a> {
-    /// An `OAuth2` access token with its project and location; the token was
-    /// minted and is refreshed outside dal.
+    /// An `OAuth2` access token with its project and location; the token
+    /// was pre-minted, stored, or minted by the set-owned ADC resolver.
     Bearer {
         /// The current access token.
         access_token: &'a str,
@@ -125,6 +141,8 @@ pub(crate) struct VertexRequest<'a> {
     pub(crate) auth: VertexAuth<'a>,
     /// Whether the catalog entry accepts image input.
     pub(crate) image_input: bool,
+    /// The endpoint authority chosen by the attempt owner.
+    pub(crate) endpoint: VertexEndpoint,
 }
 
 /// The wire policy for one Vertex AI model id: no function-part ids and no
@@ -174,11 +192,17 @@ pub(crate) fn build(input: &VertexRequest<'_>) -> Result<GoogleWire, ProviderErr
                     message: format!("vertex location {location:?} is not usable"),
                 });
             }
+            // A configured provider base is the endpoint authority: no
+            // regional override is allocated and none is derived.
+            let base_override = match input.endpoint {
+                VertexEndpoint::Regional => Some(format!("https://{}", endpoint_host(location))),
+                VertexEndpoint::ConfiguredProviderBase => None,
+            };
             Ok(GoogleWire {
                 path: format!(
                     "{API_VERSION}/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
                 ),
-                base_override: Some(format!("https://{}", endpoint_host(location))),
+                base_override,
                 headers: vec![("authorization", format!("Bearer {access_token}"))],
                 user_agent: None,
                 body,
@@ -193,7 +217,8 @@ pub(crate) fn build(input: &VertexRequest<'_>) -> Result<GoogleWire, ProviderErr
             // An ambient env-derived region falls back to the global
             // endpoint so a stray location never breaks a previously-working
             // global-only request; an explicit region is honored and a 404
-            // surfaces.
+            // surfaces. A configured provider base is the authority: the
+            // location only shapes the residency and no fallback exists.
             let location = location.unwrap_or("global");
             if !valid_location(location) {
                 return Err(ProviderError::InvalidRequest {
@@ -203,20 +228,27 @@ pub(crate) fn build(input: &VertexRequest<'_>) -> Result<GoogleWire, ProviderErr
             let path = format!(
                 "{API_VERSION}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
             );
-            let host = endpoint_host(location);
-            let regional = host != "aiplatform.googleapis.com";
+            let (base_override, fallback) = match input.endpoint {
+                VertexEndpoint::Regional => {
+                    let host = endpoint_host(location);
+                    let regional = host != "aiplatform.googleapis.com";
+                    let fallback = (!explicit_location && regional).then(|| FallbackTarget {
+                        base_override: Some(String::from("https://aiplatform.googleapis.com")),
+                        path: format!(
+                            "{API_VERSION}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
+                        ),
+                    });
+                    (Some(format!("https://{host}")), fallback)
+                }
+                VertexEndpoint::ConfiguredProviderBase => (None, None),
+            };
             Ok(GoogleWire {
                 path,
-                base_override: Some(format!("https://{host}")),
+                base_override,
                 headers: vec![(super::gemini::API_KEY_HEADER, api_key.to_owned())],
                 user_agent: None,
                 body,
-                fallback: (!explicit_location && regional).then(|| FallbackTarget {
-                    base_override: Some(String::from("https://aiplatform.googleapis.com")),
-                    path: format!(
-                        "{API_VERSION}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
-                    ),
-                }),
+                fallback,
             })
         }
     }

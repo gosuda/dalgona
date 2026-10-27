@@ -9,6 +9,7 @@ use dal_core::{
     AssistantPart, CallId, ContextItem, ModelRoute, ModelToolSpec, Part, Purpose, RawJson,
     RequestParams, ThinkingLevel,
 };
+#[cfg(unix)]
 use futures::StreamExt;
 
 use super::*;

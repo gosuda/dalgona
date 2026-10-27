@@ -20,8 +20,8 @@
 //! `400/1/40/fround(0.95)` with caller stop sequences only, bare-UUID
 //! assistant ids, and 40-char sanitized tool-call ids.
 //!
-//! Layout: [`proto`] holds the prost message transcriptions, [`connect`]
-//! the Connect framing, [`history`] the context lowering, [`request`] the
+//! Layout: [`auth`] holds the CLI sign-in exchange, [`proto`] the prost
+//! message transcriptions, [`connect`] the Connect framing, [`history`] the context lowering, [`request`] the
 //! RPC body builders, [`decode`] the response decoder and discovery
 //! normalization, [`terminal`] the exactly-one-terminal latch. This module
 //! owns no transport: the join sends the bodies over `http::send` in the
@@ -30,6 +30,7 @@
 //!
 //! [`decode_chunks`]: decode::decode_chunks
 
+pub(crate) mod auth;
 pub(crate) mod connect;
 pub(crate) mod decode;
 pub(crate) mod history;

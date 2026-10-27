@@ -1811,6 +1811,50 @@ fn a_known_output_limit_below_the_cap_is_the_max_tokens_and_larger_ones_are_capp
 }
 
 #[test]
+fn a_requested_output_cap_is_the_max_tokens_held_to_the_catalog_ceiling() {
+    // (catalog ceiling, requested cap, `max_tokens` sent).
+    for (max_output, requested, sent) in [
+        // Below the 32000 default, with and without a known ceiling.
+        (Some(64_000), Some(2_048), 2_048_u64),
+        (None, Some(2_048), 2_048),
+        // Above the default but within the ceiling: the caller asked for it.
+        (Some(64_000), Some(40_000), 40_000),
+        (Some(64_000), Some(64_000), 64_000),
+        // Beyond the ceiling the catalog is the hard cap.
+        (Some(64_000), Some(64_001), 64_000),
+        (Some(8_192), Some(100_000), 8_192),
+        // Zero is valid for Anthropic (it pre-warms the prompt cache without
+        // generating): it is sent as asked, not treated as "no cap".
+        (Some(64_000), Some(0), 0),
+        // No requested cap keeps the default of the known ceiling.
+        (Some(64_000), None, 32_000),
+        (Some(4_096), None, 4_096),
+        (None, None, 32_000),
+    ] {
+        let mut ask = request(history(), vec![tool("read")]);
+        ask.params.max_output_tokens = requested;
+        let input = AnthropicRequest {
+            request: &ask,
+            max_output,
+            thinking: AnthropicThinking::Omit,
+            effort: None,
+            display_supported: false,
+            temperature: None,
+            compaction: None,
+            summarize: false,
+        };
+        let wire = build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap();
+        let body: sonic_rs::Value = sonic_rs::from_slice(&wire.body).unwrap();
+        assert_eq!(
+            body.get("max_tokens")
+                .and_then(sonic_rs::JsonValueTrait::as_u64),
+            Some(sent),
+            "ceiling {max_output:?}, requested {requested:?}"
+        );
+    }
+}
+
+#[test]
 fn thinking_tokens_split_the_output_count_and_hostile_counters_saturate() {
     let usage_of = |start: &str, delta: &str| {
         let start = format!(r#"{{"type":"message_start","message":{{"usage":{start}}}}}"#);
@@ -1854,4 +1898,93 @@ fn thinking_tokens_split_the_output_count_and_hostile_counters_saturate() {
         (hostile.cached_input_tokens, hostile.cache_write_tokens),
         (5, 7)
     );
+}
+
+#[test]
+fn gateway_key_sends_only_the_gateway_header_and_redacts_it() {
+    let request = request(vec![user_item("hi")], vec![]);
+    let input = AnthropicRequest {
+        request: &request,
+        max_output: None,
+        thinking: AnthropicThinking::Omit,
+        effort: None,
+        display_supported: false,
+        temperature: None,
+        compaction: None,
+        summarize: false,
+    };
+    let wire = build(&input, AnthropicAuth::GatewayKey { key: "gw-key" }).unwrap();
+    assert_eq!(
+        wire.headers,
+        vec![
+            ("anthropic-version", "2023-06-01".to_owned()),
+            ("cf-aig-authorization", "Bearer gw-key".to_owned()),
+        ]
+    );
+    assert_eq!(header(&wire, "authorization"), None);
+    assert_eq!(header(&wire, "x-api-key"), None);
+    assert_eq!(wire.user_agent, None);
+    let debug = format!("{wire:?}");
+    assert!(!debug.contains("gw-key"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+    let auth_debug = format!("{:?}", AnthropicAuth::GatewayKey { key: "gw-key" });
+    assert_eq!(auth_debug, "GatewayKey(<redacted>)");
+    // The gateway arm is a header policy only: the same input under an API
+    // key lowers to the same body on the key header.
+    let keyed = build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap();
+    assert_eq!(wire.body, keyed.body);
+    assert_eq!(header(&keyed, "cf-aig-authorization"), None);
+}
+
+#[test]
+fn client_bearer_carries_the_vendor_identity_without_the_claude_fingerprint() {
+    let vendor_headers = [("x-kimi-agent", String::from("kimi-code"))];
+    let request = request(vec![user_item("hi")], vec![tool("read")]);
+    let input = AnthropicRequest {
+        request: &request,
+        max_output: None,
+        thinking: AnthropicThinking::Omit,
+        effort: None,
+        display_supported: false,
+        temperature: None,
+        compaction: None,
+        summarize: false,
+    };
+    let wire = build(
+        &input,
+        AnthropicAuth::ClientBearer {
+            access_token: "kimi-access",
+            user_agent: "kimi-code/1.0",
+            headers: &vendor_headers,
+        },
+    )
+    .unwrap();
+    assert_eq!(header(&wire, "authorization"), Some("Bearer kimi-access"));
+    assert_eq!(header(&wire, "x-api-key"), None);
+    assert_eq!(header(&wire, "cf-aig-authorization"), None);
+    assert_eq!(header(&wire, "x-kimi-agent"), Some("kimi-code"));
+    assert_eq!(wire.user_agent.as_deref(), Some("kimi-code/1.0"));
+    assert_eq!(header(&wire, "x-app"), None);
+    assert_eq!(
+        wire.headers,
+        vec![
+            ("anthropic-version", "2023-06-01".to_owned()),
+            ("authorization", "Bearer kimi-access".to_owned()),
+            ("x-kimi-agent", "kimi-code".to_owned()),
+        ]
+    );
+    let body = String::from_utf8(wire.body).unwrap();
+    assert!(!body.contains("You are Claude Code"), "{body}");
+    assert!(body.contains(r#""name":"read""#), "{body}");
+    assert!(!body.contains(r#""name":"_read""#), "{body}");
+    let auth_debug = format!(
+        "{:?}",
+        AnthropicAuth::ClientBearer {
+            access_token: "kimi-access",
+            user_agent: "kimi-code/1.0",
+            headers: &vendor_headers,
+        }
+    );
+    assert!(!auth_debug.contains("kimi-access"), "{auth_debug}");
+    assert!(auth_debug.contains("kimi-code/1.0"), "{auth_debug}");
 }

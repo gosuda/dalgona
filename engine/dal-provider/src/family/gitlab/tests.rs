@@ -360,6 +360,24 @@ fn gitlab_assistant_replays_on_the_responses_route() {
 }
 
 #[test]
+fn a_requested_output_cap_reaches_the_duo_responses_body_held_to_the_catalog_ceiling() {
+    let plan = open_plan();
+    let access = grant();
+    let sent = |cap: Option<u32>| {
+        let mut ask = request("duo-chat-gpt-5-codex", vec![user("hi")]);
+        ask.params.max_output_tokens = cap;
+        let wire = build_proxy(&proxy_request(&ask, &plan, &access, SessionId::new_v7())).unwrap();
+        let body: sonic_rs::Value = sonic_rs::from_slice(&wire.body).unwrap();
+        body.get("max_output_tokens")
+            .and_then(sonic_rs::JsonValueTrait::as_u64)
+    };
+    // `proxy_request` gives the model a 16000-token catalog ceiling.
+    assert_eq!(sent(Some(1_024)), Some(1_024));
+    assert_eq!(sent(Some(70_000)), Some(16_000));
+    assert_eq!(sent(None), None);
+}
+
+#[test]
 fn grant_parsing_validates_token_and_headers() {
     let body = br#"{"token":"t","headers":{"x-a":"b"}}"#;
     let grant = parse_direct_access(body).unwrap();
@@ -413,6 +431,7 @@ fn token_gate_accepts_keys_and_sign_ins() {
         expires_at: None,
         id_token: None,
         account_id: None,
+        project_id: None,
     });
     assert_eq!(require_token(&oauth).unwrap(), "tok");
     assert!(require_token(&Credential::None).is_err());
