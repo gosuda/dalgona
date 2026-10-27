@@ -341,17 +341,32 @@ async fn malformed_request_json_is_a_typed_rejection() {
             text.contains("duplicate key") || text.contains("53-bit"),
             "{request}: {text}"
         );
+        assert_eq!(run.begins(), 0, "{request} must not mint an invocation");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_53_bit_integer_bounds_are_inclusive() {
-    for request in [
-        "{\"code\":\"data\",\"uses\":[],\"data\":9007199254740991}",
-        "{\"code\":\"data\",\"uses\":[],\"data\":-9007199254740991}",
-    ] {
-        let run = eval_raw(request, &[], Vec::new()).await;
+    // `data` crosses the request decoder, the script heap, and the result
+    // encoder. The cell returns the integer itself, its Starlark type, and the
+    // script's own rendering of it, so a truncated or sign-flipped endpoint is
+    // seen whether the loss happens on the way in or on the way out.
+    const CELL: &str = "[data, type(data), str(data)]";
+    for digits in ["9007199254740991", "-9007199254740991"] {
+        let request = format!("{{\"code\":\"{CELL}\",\"uses\":[],\"data\":{digits}}}");
+        let run = eval_raw(&request, &[], Vec::new()).await;
+        let expected = format!("\"value\":[{digits},\"int\",\"{digits}\"],\"prints\"");
         assert_eq!(run.envelope().status, "completed", "{request}");
+        assert!(
+            run.completed_text().contains(&expected),
+            "{request}: {}",
+            run.completed_text()
+        );
+        assert_eq!(
+            (run.begins(), run.finishes(), run.calls()),
+            (1, 1, 0),
+            "{request}"
+        );
     }
 }
 

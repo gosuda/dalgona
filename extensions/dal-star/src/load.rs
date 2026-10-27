@@ -18,7 +18,7 @@ use starlark::{
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
-use crate::engine::{Limits, MAX_CODE, MAX_NESTING, globals};
+use crate::engine::{LOAD_KEYS, Limits, MAX_CODE, MAX_NESTING, globals, name_exceeded_limit};
 use crate::error::LoadError;
 use crate::sdk::{DAL_V1, dal_v1_module};
 use crate::system::PluginGeneration;
@@ -539,7 +539,9 @@ fn try_evaluate(
                 })?;
             evaluator
                 .eval_module(ast.clone(), globals)
-                .map_err(|error| load_eval_error(display_path, &error.to_string()))?;
+                .map_err(|error| {
+                    load_eval_error(display_path, &name_exceeded_limit(&error, LOAD_KEYS))
+                })?;
         }
         module.freeze().map_err(|error| LoadError::Eval {
             path: display_path.to_path_buf(),

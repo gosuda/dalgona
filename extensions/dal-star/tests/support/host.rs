@@ -6,7 +6,7 @@
     reason = "integration tests use unwrap/expect/panic freely per repo test convention"
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -101,6 +101,11 @@ pub enum HostRecord {
         /// The finished invocation.
         invocation: InvocationId,
     },
+    /// An invocation was abandoned: its owner dropped it mid-run.
+    Abandon {
+        /// The abandoned invocation.
+        invocation: InvocationId,
+    },
 }
 
 /// A host misbehavior injected into the async half of a host call.
@@ -120,6 +125,7 @@ pub struct RecordingHost {
     replies: Mutex<HashMap<OpId, OpOutcome>>,
     adoptable: Mutex<HashMap<Box<str>, ReadView>>,
     submitted: Mutex<Vec<(TaskId, ScopeId, OpId)>>,
+    abandoned: Mutex<HashSet<InvocationId>>,
     records: Mutex<Vec<HostRecord>>,
     next_scope_id: AtomicU64,
     next_task_id: AtomicU64,
@@ -177,6 +183,7 @@ impl RecordingHost {
             replies: Mutex::new(replies.into_iter().collect()),
             adoptable: Mutex::new(HashMap::new()),
             submitted: Mutex::new(Vec::new()),
+            abandoned: Mutex::new(HashSet::new()),
             records: Mutex::new(Vec::new()),
             next_scope_id: AtomicU64::new(1),
             next_task_id: AtomicU64::new(1),
@@ -220,6 +227,26 @@ impl RecordingHost {
     fn record(&self, item: HostRecord) {
         self.records.lock().expect("host records lock").push(item);
     }
+
+    /// Reports whether one invocation was abandoned by its owner.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the abandoned-invocation lock is poisoned.
+    #[must_use]
+    pub fn abandoned(&self, invocation: InvocationId) -> bool {
+        self.abandoned
+            .lock()
+            .expect("host abandoned lock")
+            .contains(&invocation)
+    }
+
+    fn is_abandoned(&self, invocation: &Invocation) -> bool {
+        self.abandoned
+            .lock()
+            .expect("host abandoned lock")
+            .contains(&invocation.id())
+    }
 }
 
 impl ScriptHost for RecordingHost {
@@ -261,6 +288,11 @@ impl ScriptHost for RecordingHost {
             op: request.op.clone(),
             args: request.args.clone(),
         });
+        if self.is_abandoned(invocation) {
+            // A terminal cancel closed this invocation's effect gate: the
+            // attempt is observed, but no effect may start.
+            return Box::pin(async { OpOutcome::Terminal(HostTerminal::Cancelled) });
+        }
         let reply = self
             .replies
             .lock()
@@ -286,6 +318,9 @@ impl ScriptHost for RecordingHost {
         invocation: &Arc<Invocation>,
         spec: ScopeSpec,
     ) -> Result<ScopeId, HostTerminal> {
+        if self.is_abandoned(invocation) {
+            return Err(HostTerminal::Cancelled);
+        }
         let scope = ScopeId::new(allocate_id(&self.next_scope_id, "scope ids")?);
         self.record(HostRecord::OpenScope {
             invocation: invocation.id(),
@@ -296,6 +331,9 @@ impl ScriptHost for RecordingHost {
     }
 
     fn submit(&self, invocation: &Arc<Invocation>, scope: ScopeId, request: OpRequest) -> Submit {
+        if self.is_abandoned(invocation) {
+            return Submit::Terminal(HostTerminal::Cancelled);
+        }
         let op = request.op.clone();
         self.record(HostRecord::Submit {
             invocation: invocation.id(),
@@ -325,6 +363,9 @@ impl ScriptHost for RecordingHost {
             invocation: invocation.id(),
             which,
         });
+        if self.is_abandoned(invocation) {
+            return Box::pin(async { Err(HostTerminal::Cancelled) });
+        }
         let explode = self.fault == Some(Fault::Collect);
         // A task settles only when its operation has a scripted reply: the
         // others stay unanswered, like a host that never finished them.
@@ -390,6 +431,21 @@ impl ScriptHost for RecordingHost {
                 observer_errors: Box::default(),
             }
         })
+    }
+
+    fn abandon(&self, invocation: &Arc<Invocation>) {
+        // The real cancellation boundary for a dropped invoke future: the
+        // invocation token cancels synchronously, the invocation latches as
+        // abandoned so every later call, scope, submit, and collect refuses,
+        // and the abandonment is recorded in call order.
+        invocation.cancel().cancel();
+        self.abandoned
+            .lock()
+            .expect("host abandoned lock")
+            .insert(invocation.id());
+        self.record(HostRecord::Abandon {
+            invocation: invocation.id(),
+        });
     }
 }
 
@@ -490,6 +546,13 @@ impl Services for NoServices {
     fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
         unused()
     }
+    fn judge_ask(&self, _who: &Caller, _question: String) -> ServiceFuture<'_, bool> {
+        unused()
+    }
+    fn judge_batch(&self, _who: &Caller, _questions: Vec<String>) -> ServiceFuture<'_, Vec<bool>> {
+        unused()
+    }
+    fn set_judge_transport(&self, _backend: Arc<dyn dal_agent::ext::services::JudgeTransport>) {}
     fn private_outcomes(&self, _who: &Caller) -> ServiceFuture<'_, Vec<dal_core::PrivateEffect>> {
         unused()
     }

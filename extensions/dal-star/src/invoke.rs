@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dal_agent::ext::script::{
-    Cleanup, Entry, FailureCode, HostTerminal, OpFailure, Parent, ScriptCx,
+    Cleanup, Entry, FailureCode, HostTerminal, Invocation, OpFailure, Parent, ScriptCx, ScriptHost,
 };
 use dal_core::RawJson;
-use dal_core::ext::{ExportId, OpId, Phase, ViewNode};
+use dal_core::ext::{ExportId, NativeOp, OpId, Phase, ViewNode};
 use starlark::PrintHandler;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
@@ -27,9 +27,12 @@ use starlark::syntax::AstModule;
 use starlark::values::{FrozenValue, Heap, Value};
 use tokio::time::Instant;
 
-use crate::context::{Frame, alloc_ctx};
+use crate::adapter::OpAdapter;
+use crate::context::{Frame, alloc_ctx, frame_of};
 use crate::descriptor::{DomainErr, DomainOk, OutputValue};
-use crate::engine::{CELL_WALL, Limits, globals};
+use crate::engine::{
+    CELL_KEYS, CELL_WALL, HANDLER_KEYS, LimitKeys, Limits, globals, name_exceeded_limit,
+};
 use crate::error::{ApiError, api_error};
 use crate::evidence::view_node_from;
 use crate::hooks::{Event, EventValue, Minted, minted_of};
@@ -92,9 +95,7 @@ impl fmt::Display for InvokeFailure {
             Self::Terminal(terminal) => write!(f, "{terminal}"),
             Self::Api(message) | Self::Eval(message) => f.write_str(message),
             Self::Cancelled => f.write_str("cancelled"),
-            Self::Timeout => {
-                f.write_str("plugin handler timed out; narrow the request or raise the limit")
-            }
+            Self::Timeout => f.write_str("plugin handler timed out; narrow the request"),
             Self::Worker => f.write_str("worker failed"),
         }
     }
@@ -135,7 +136,7 @@ impl PrintHandler for PrintSink {
 }
 
 /// Classifies a raised `starlark::Error` into the caller-facing failure.
-fn classify(error: &starlark::Error, cancelled: bool) -> InvokeFailure {
+fn classify(error: &starlark::Error, cancelled: bool, keys: LimitKeys) -> InvokeFailure {
     if cancelled {
         return InvokeFailure::Cancelled;
     }
@@ -153,7 +154,7 @@ fn classify(error: &starlark::Error, cancelled: bool) -> InvokeFailure {
     {
         return InvokeFailure::Api(api.0.to_string().into());
     }
-    InvokeFailure::Eval(error.to_string().into())
+    InvokeFailure::Eval(name_exceeded_limit(error, keys).into())
 }
 
 /// What one evaluation runs: a frozen handler or a cell module.
@@ -179,6 +180,13 @@ enum Body {
 }
 
 impl Body {
+    fn limit_keys(&self) -> LimitKeys {
+        match self {
+            Self::Run { .. } => HANDLER_KEYS,
+            Self::Cell { .. } => CELL_KEYS,
+        }
+    }
+
     /// Evaluates the body with `ctx` bound; the result lives on the module
     /// heap.
     fn evaluate<'v>(
@@ -198,8 +206,12 @@ impl Body {
                     .into_starlark(heap)
                     .map_err(|error| api_error(format!("data: {error}")))?;
                 let tools = ctx.get_attr_error("tools", heap)?;
+                let judge = cell_entry(evaluator, heap, NativeOp::JudgeAsk)?;
+                let judge_batch = cell_entry(evaluator, heap, NativeOp::JudgeBatch)?;
                 module.set("ctx", ctx);
                 module.set("tools", tools);
+                module.set("judge", judge);
+                module.set("judge_batch", judge_batch);
                 module.set("data", data);
                 evaluator.eval_module(ast, &globals())
             }
@@ -223,6 +235,7 @@ async fn evaluate_on_worker(
     if cancel.is_cancelled() {
         return Err(InvokeFailure::Cancelled);
     }
+    let keys = body.limit_keys();
     let wall = deadline.into_std();
     let worker = tokio::task::spawn_blocking(move || {
         let cancelled = cancel.clone();
@@ -252,7 +265,7 @@ async fn evaluate_on_worker(
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let output = match result {
-                Err(error) => return Err(classify(&error, cancel.is_cancelled())),
+                Err(error) => return Err(classify(&error, cancel.is_cancelled(), keys)),
                 Ok(output) => output,
             };
             let returned = unwrap_returned(output)?;
@@ -334,6 +347,34 @@ impl<'v> Returned<'v> {
     }
 }
 
+/// Mints one bare cell entry (`judge`, `judge_batch`) from the live frame.
+///
+/// The adapter carries the frame's invocation identity, host seam, and
+/// runtime, so the call crosses exactly the invocation that owns the cell;
+/// a handle from another invocation fails the frame check instead of
+/// leaking authority.
+fn cell_entry<'v>(
+    evaluator: &Evaluator<'v, '_, '_>,
+    heap: Heap<'v>,
+    op: NativeOp,
+) -> starlark::Result<Value<'v>> {
+    let Some(frame) = frame_of(evaluator) else {
+        return Err(api_error(format!(
+            "{op}: operations need a live invocation"
+        )));
+    };
+    Ok(heap.alloc(OpAdapter {
+        inv: frame.inv.id(),
+        op: OpId::Native(op),
+        invocation: Arc::clone(&frame.inv),
+        host: Arc::clone(&frame.host),
+        scheduled: None,
+        loaded: frame.loaded.clone(),
+        script: frame.script.clone(),
+        runtime: frame.runtime.clone(),
+    }))
+}
+
 /// The argument a handler receives after `ctx`.
 pub(crate) enum Arg {
     /// Validated data in transport form.
@@ -376,8 +417,9 @@ fn domain_failure(err: &DomainErr<'_>) -> Result<InvokeFailure, InvokeFailure> {
 
 /// Evaluates one cell module and returns its final expression value.
 ///
-/// The cell sees `ctx`, `tools` (the same facade as `ctx.tools`), and
-/// `data`; no `load` is needed for ordinary work.
+/// The cell sees `ctx`, `tools` (the same facade as `ctx.tools`), the
+/// `judge` and `judge_batch` entries, and `data`; no `load` is needed for
+/// ordinary work.
 pub(crate) async fn cell(
     ast: AstModule,
     frame: Frame,
@@ -413,6 +455,34 @@ pub(crate) struct Finished {
     pub(crate) cleanup: Cleanup,
 }
 
+/// Owns the invocation's cancellation and cleanup while the caller may drop
+/// the enter future, such as a hook that ran out of its deadline. The normal
+/// path disarms it only after the host finish future has completed, so a
+/// finished invocation is never abandoned. The guard holds no runtime
+/// handle and never spawns: dropping it armed synchronously cancels the
+/// invocation through the host's [`ScriptHost::abandon`], which
+/// terminalizes owned scopes and hands the cleanup drain to the
+/// invocation's existing task owner.
+struct FinishGuard {
+    host: Arc<dyn ScriptHost>,
+    invocation: Arc<Invocation>,
+    armed: bool,
+}
+
+impl FinishGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.host.abandon(&self.invocation);
+        }
+    }
+}
+
 /// Begins an invocation for `handler`, runs it with `args`, and finishes the
 /// invocation.
 ///
@@ -436,6 +506,11 @@ pub(crate) async fn enter(
         .host
         .begin(parent, entry)
         .map_err(InvokeFailure::Terminal)?;
+    let mut finish_guard = FinishGuard {
+        host: Arc::clone(&script.host),
+        invocation: Arc::clone(&inv),
+        armed: true,
+    };
     let frame = Frame {
         inv: Arc::clone(&inv),
         host: Arc::clone(&script.host),
@@ -451,6 +526,7 @@ pub(crate) async fn enter(
     };
     let outcome = evaluate_on_worker(frame, config, handler.plugin.limits, deadline, body).await;
     let cleanup = script.host.finish(&inv).await;
+    finish_guard.disarm();
     Ok(Finished { outcome, cleanup })
 }
 

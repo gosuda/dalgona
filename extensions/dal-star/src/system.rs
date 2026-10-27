@@ -200,10 +200,12 @@ impl PluginSystem {
     }
 
     /// Converts the current snapshot and hands over the user-origin plugin
-    /// extensions for host publication: the `/reload` one-path flow calls
-    /// [`reload`](Self::reload) first, then passes this set to the host
-    /// publication entry point. Bundled entries stay with the host's
-    /// current set because their frozen modules are reused across reloads.
+    /// extensions. Direct adapter consumers read the visible snapshot here;
+    /// the `/reload` product flow converts its invisible candidate through
+    /// [`user_extensions_of`](Self::user_extensions_of) instead, so a
+    /// failure never moves the visible snapshot ahead of the live host
+    /// generation. Bundled entries stay with the host's current set because
+    /// their frozen modules are reused across reloads.
     ///
     /// # Errors
     ///
@@ -213,6 +215,50 @@ impl PluginSystem {
             .into_iter()
             .filter(|ext| ext.origin() == Origin::User)
             .collect())
+    }
+
+    /// Runs the load pipeline into a candidate generation without touching
+    /// the visible snapshot. The caller converts, settles, validates, and
+    /// publishes the candidate through the host first; only a successful
+    /// publication may call [`promote`](Self::promote).
+    ///
+    /// # Errors
+    ///
+    /// Returns a command error triple if loading fails.
+    pub fn reload_candidate(
+        &self,
+    ) -> Result<Arc<PluginGeneration>, dal_core::command::ErrorTriple> {
+        match crate::load::load(&self.roots, &self.cfg) {
+            Ok(generation) => Ok(Arc::new(generation)),
+            Err(error) => Err(reload_failed(&error, "plugin load failed")),
+        }
+    }
+
+    /// Converts one candidate and hands over its user-origin plugin
+    /// extensions for host publication. Bundled entries stay with the
+    /// host's current set because their frozen modules are reused across
+    /// reloads. This takes no receiver: conversion depends only on the
+    /// candidate, never on adapter state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Registration`] at the offending declaration site.
+    pub fn user_extensions_of(
+        candidate: &PluginGeneration,
+    ) -> Result<Vec<dal_agent::ext::Extension>, crate::LoadError> {
+        Ok(crate::convert::convert_all(candidate)?
+            .into_iter()
+            .filter(|ext| ext.origin() == Origin::User)
+            .collect())
+    }
+
+    /// Swaps the adapter snapshot to a candidate the host already
+    /// published: the one visible swap, on success only.
+    pub fn promote(&self, candidate: Arc<PluginGeneration>) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate;
     }
 
     /// Re-runs load and conversion, swaps the snapshot only on full

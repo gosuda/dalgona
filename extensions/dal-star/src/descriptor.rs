@@ -171,7 +171,8 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for HookValueGen<V> {
 #[starlark::values::starlark_value(type = "hook")]
 impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for HookValueGen<V> where Self: ProvidesStaticType<'v> {}
 
-/// `dal.skill(description, path, letter2image=False)`.
+/// `dal.skill(description, path, letter2image=False, replace=False,
+/// battery=<owner>)`; `battery` is written only with `replace=True`.
 #[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct SkillValue {
     /// One-line description.
@@ -180,6 +181,13 @@ pub(crate) struct SkillValue {
     pub(crate) path: String,
     /// Whether the skill may carry the image-letter form.
     pub(crate) letter2image: bool,
+    /// Whether the skill explicitly replaces the owner's record of the same
+    /// name; `False` unless the script wrote `replace = True`.
+    pub(crate) replace: bool,
+    /// The bundled extension named as the record's owner, or `None` when the
+    /// keyword was omitted. The SDK constructor requires it with
+    /// `replace = True` and refuses it without.
+    pub(crate) battery: Option<String>,
 }
 
 starlark_simple_value!(SkillValue);
@@ -197,7 +205,9 @@ impl std::fmt::Display for SkillValue {
 )]
 impl<'v> StarlarkValue<'v> for SkillValue {}
 
-/// `dal.rule(...)`; scoping fields stay as written until validation.
+/// `dal.rule(..., replace=False, battery=<owner>)`; scoping fields stay as
+/// written until validation. The `replace`/`battery` pair is the same strict
+/// declaration as on `dal.skill`.
 #[repr(C)]
 #[derive(Debug, Trace, Coerce, Freeze, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct RuleValueGen<V: ValueLifetimeless> {
@@ -217,6 +227,12 @@ pub(crate) struct RuleValueGen<V: ValueLifetimeless> {
     pub(crate) repeat_mode: Option<String>,
     /// Deltas between repeated applications.
     pub(crate) repeat_gap: Option<u32>,
+    /// Whether the rule explicitly replaces the owner's record of the same
+    /// name; `False` unless the script wrote `replace = True`.
+    pub(crate) replace: bool,
+    /// The bundled extension named as the record's owner; paired with
+    /// `replace` exactly as on [`SkillValue`].
+    pub(crate) battery: Option<String>,
 }
 
 starlark_complex_value!(pub(crate) RuleValue);

@@ -119,8 +119,8 @@ fn tool_local_name_grammar_pins_ascii_boundary() {
 
 // --- (2) service vocabulary --------------------------------------------------
 
-const TWELVE_SERVICES: &str =
-    "fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer";
+const THIRTEEN_SERVICES: &str =
+    "fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer, judge";
 
 #[test]
 fn inject_unknown_service_pins_boundary_wrapped_vocabulary_text() {
@@ -135,7 +135,7 @@ fn inject_unknown_service_pins_boundary_wrapped_vocabulary_text() {
     assert_eq!(
         message.as_ref(),
         format!(
-            "plugin inject: unknown service \"future\"; the service vocabulary is {TWELVE_SERVICES}"
+            "plugin inject: unknown service \"future\"; the service vocabulary is {THIRTEEN_SERVICES}"
         )
         .as_str(),
         "{message}"

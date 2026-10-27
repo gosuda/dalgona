@@ -406,7 +406,8 @@ fn load_tick_budget_stops_a_spinning_module_and_reports_the_applied_limit() {
     };
     assert_eq!(
         message.as_ref(),
-        "Execution duration limit of 1000 ticks has been exceeded"
+        "Execution duration limit of 1000 ticks has been exceeded; raise limits.plugins.load_ticks \
+         to allow more"
     );
 }
 

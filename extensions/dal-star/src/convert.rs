@@ -1,13 +1,16 @@
 //! Generation feed-in: validated plugins become host extensions.
 //!
 //! Conversion never publishes. The host validates the whole batch and owns
-//! conflict tables, so a rejection anywhere rejects the generation.
+//! conflict tables, so a rejection anywhere rejects the generation. A record
+//! that declared `replace = True, battery = ...` registers through the
+//! builder's replacing constructors; binding the claim to the named bundled
+//! owner is the host settlement's decision, never this crate's.
 
 use std::sync::Arc;
 
 use dal_agent::ext::generation::catalog::ExportSpec;
 use dal_agent::ext::{Extension, ExtensionBuilder, ModelRecord, PromptOrder, PromptSection};
-use dal_core::{HookEvent, Site};
+use dal_core::{HookEvent, ReplaceKind, Site};
 
 use crate::error::LoadError;
 use crate::hooks::ScriptHook;
@@ -96,10 +99,16 @@ fn convert(plugin: &Arc<LoadedPlugin>) -> Result<Extension, LoadError> {
         };
     }
     for skill in &plugin.skills {
-        builder = builder.skill(skill.clone());
+        builder = match plugin.claim_for(ReplaceKind::Skill, &skill.name) {
+            Some(owner) => builder.skill_replacing(skill.clone(), owner.clone()),
+            None => builder.skill(skill.clone()),
+        };
     }
     for rule in &plugin.rules {
-        builder = builder.rule(rule.clone());
+        builder = match plugin.claim_for(ReplaceKind::Rule, &rule.name) {
+            Some(owner) => builder.rule_replacing(rule.clone(), owner.clone()),
+            None => builder.rule(rule.clone()),
+        };
     }
     for file in &plugin.rule_files {
         builder = builder.rule_file(file.clone());
