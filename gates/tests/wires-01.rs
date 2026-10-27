@@ -26,7 +26,10 @@ use tokio::{
 };
 
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
-use support::{TestDir, dalgon_binary};
+use support::{
+    SCOPE_SAVE_SEED, TestDir, assert_scope_save_landed, dalgon_binary, initialize_params,
+    scope_save_params,
+};
 
 fn stdio_request(
     binary: &std::path::Path,
@@ -1932,4 +1935,214 @@ fn acp_stream_survives_tool_child_writing_to_process_stdout()
         "tool output aimed at the process stdout must land on stderr; stderr: {stderr_text}"
     );
     Ok(())
+}
+
+/// A persistent `dalgon rpc` stdio child: one JSON frame per line, replies
+/// matched by id, notifications skipped. The child and its reader thread are
+/// reaped when the value drops, whatever the test returned.
+struct StdioRpc {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<String>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StdioRpc {
+    fn spawn(
+        binary: &std::path::Path,
+        home: &std::path::Path,
+        workspace: &std::path::Path,
+        data_home: &std::path::Path,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        use std::io::{BufRead, BufReader};
+
+        let mut child = Command::new(binary)
+            .current_dir(workspace)
+            .env_clear()
+            .envs(support::captured_shell_vars())
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", data_home)
+            .env("NO_COLOR", "1")
+            .arg("rpc")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take().ok_or("rpc stdin was not piped")?;
+        let stdout = child.stdout.take().ok_or("rpc stdout was not piped")?;
+        let (sender, lines) = std::sync::mpsc::sync_channel::<String>(256);
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            stdin: Some(stdin),
+            lines,
+            reader: Some(reader),
+        })
+    }
+
+    fn call(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: &sonic_rs::Value,
+    ) -> Result<sonic_rs::Value, Box<dyn Error + Send + Sync>> {
+        let frame =
+            sonic_rs::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let stdin = self.stdin.as_mut().ok_or("rpc stdin is closed")?;
+        writeln!(stdin, "{}", sonic_rs::to_string(&frame)?)?;
+        stdin.flush()?;
+        loop {
+            let line = self
+                .lines
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .map_err(|error| format!("no rpc frame for {method} within 30s: {error}"))?;
+            let value: sonic_rs::Value = sonic_rs::from_str(&line)?;
+            if value.get("id").and_then(sonic_rs::Value::as_u64) == Some(id)
+                && value.get("method").is_none()
+            {
+                return Ok(value);
+            }
+        }
+    }
+}
+
+impl Drop for StdioRpc {
+    fn drop(&mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// An editor or remote client talking to `dalgon rpc` over stdio saves its
+/// model scope into the user's `dal.toml`: the wire host knows where the
+/// user file lives, the save keeps the user's own text, and the reply says
+/// what was saved.
+#[test]
+fn rpc_stdio_scope_save_reaches_the_users_dal_toml() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    let config = home.join(".config/dal/dal.toml");
+    fs::write(&config, SCOPE_SAVE_SEED)?;
+    let mut rpc = StdioRpc::spawn(dalgon_binary()?, &home, &workspace, &data_home)?;
+    rpc.call(1, "initialize", &initialize_params())?;
+    let workspace_text = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    let opened = rpc.call(
+        2,
+        "session/open",
+        &sonic_rs::json!({"ref": {"type": "new", "workspace": workspace_text}}),
+    )?;
+    let session = opened
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(sonic_rs::Value::as_str)
+        .ok_or_else(|| format!("session/open returned no session: {opened}"))?
+        .to_owned();
+    let saved = rpc.call(3, "session/submit", &scope_save_params(&session))?;
+    assert_scope_save_landed(&saved, &config)
+}
+
+/// A client of the local-socket `dalgon rpc --socket` endpoint saves its
+/// model scope into the user's `dal.toml`: the second wire host start
+/// (`local_socket`) knows where the user file lives, like the stdio one.
+#[cfg(unix)]
+#[tokio::test]
+async fn rpc_socket_scope_save_reaches_the_users_dal_toml()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    // The default socket lives under the data root; the deep BSD temp root
+    // would push the endpoint past SUN_LEN.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    let config = home.join(".config/dal/dal.toml");
+    fs::write(&config, SCOPE_SAVE_SEED)?;
+    let _server = spawn_rpc(dalgon_binary()?, &home, &workspace, &data_home, None)?;
+    let socket = data_home.join("dal/rpc/dal.sock");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stream = loop {
+        match UnixStream::connect(&socket).await {
+            Ok(stream) => break stream,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    socket_call(&mut write, &mut lines, 1, "initialize", initialize_params()).await?;
+    let workspace_text = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    let opened = socket_call(
+        &mut write,
+        &mut lines,
+        2,
+        "session/open",
+        sonic_rs::json!({"ref": {"type": "new", "workspace": workspace_text}}),
+    )
+    .await?;
+    let session = opened
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(sonic_rs::Value::as_str)
+        .ok_or_else(|| format!("session/open returned no session: {opened}"))?
+        .to_owned();
+    let saved = socket_call(
+        &mut write,
+        &mut lines,
+        3,
+        "session/submit",
+        scope_save_params(&session),
+    )
+    .await?;
+    assert_scope_save_landed(&saved, &config)
+}
+
+/// One request over a connected local socket and its matching reply;
+/// notifications in between are skipped.
+#[cfg(unix)]
+async fn socket_call(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    id: u64,
+    method: &str,
+    params: sonic_rs::Value,
+) -> Result<sonic_rs::Value, Box<dyn Error + Send + Sync>> {
+    let frame = sonic_rs::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    write
+        .write_all(sonic_rs::to_string(&frame)?.as_bytes())
+        .await?;
+    write.write_all(b"\n").await?;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await?
+                .ok_or("local RPC closed before it replied")?;
+            let value: sonic_rs::Value = sonic_rs::from_str(&line)?;
+            if value.get("id").and_then(sonic_rs::Value::as_u64) == Some(id)
+                && value.get("method").is_none()
+            {
+                return Ok::<_, Box<dyn Error + Send + Sync>>(value);
+            }
+        }
+    })
+    .await??;
+    Ok(reply)
 }

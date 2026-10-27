@@ -182,3 +182,56 @@ impl Drop for TestDir {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
+
+/// The `initialize` params of a JSON-RPC client that wants sessions.
+pub(crate) fn initialize_params() -> sonic_rs::Value {
+    sonic_rs::json!({
+        "protocolVersion": 1,
+        "clientInfo": {"name": "gate", "version": "1"},
+        "capabilities": ["sessions", "host.updates", "blobs", "docs", "auth", "models"],
+    })
+}
+
+/// A `session/submit` of two scoped model ids.
+pub(crate) fn scope_save_params(session: &str) -> sonic_rs::Value {
+    sonic_rs::json!({
+        "sessionId": session,
+        "command": {"type": "set_scoped_models", "scopedModels": ["beta/gpt-4o", "alpha/mini"]},
+    })
+}
+
+/// The user file every scope-save gate starts from: a comment and a default
+/// that a save must leave in place.
+pub(crate) const SCOPE_SAVE_SEED: &str = "# kept note\nthinking = \"high\"\n";
+
+/// The reply to [`scope_save_params`] is text that says what was saved, and
+/// the user's file at `config` keeps its own text beside the new key.
+pub(crate) fn assert_scope_save_landed(
+    saved: &sonic_rs::Value,
+    config: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use sonic_rs::JsonValueTrait;
+
+    let output = saved
+        .get("result")
+        .and_then(|result| result.get("output"))
+        .ok_or_else(|| format!("session/submit returned no output: {saved}"))?;
+    assert_eq!(
+        output.get("type").and_then(|kind| kind.as_str()),
+        Some("text"),
+        "the save must answer with text: {saved}"
+    );
+    let said = output
+        .get("value")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("2 scoped models saved."),
+        "the save must report what it saved: {said}"
+    );
+    let file = std::fs::read_to_string(config)?;
+    for kept in ["# kept note", "thinking = \"high\"", "scoped_models"] {
+        assert!(file.contains(kept), "{kept:?} is missing: {file}");
+    }
+    Ok(())
+}

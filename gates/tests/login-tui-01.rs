@@ -379,6 +379,7 @@ fn login_openai_masks_the_key_and_logout_all_asks_first() -> Fallible<()> {
             expires_at: None,
             id_token: None,
             account_id: None,
+            project_id: None,
         }),
     )?;
     seeded.store()?;

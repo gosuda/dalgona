@@ -58,8 +58,9 @@ impl ModelHandler for Fusion {
                 tools: None,
                 workspace: None,
             };
-            let member = scope.agent(start).expect("member handle admitted");
-            let denied = member.result().await.err();
+            // The router relay has no session, so member creation is refused
+            // immediately: there is no handle to await.
+            let denied = scope.agent(start).err();
             self.log.lock().unwrap().push(format!("member {denied:?}"));
             let mut request = request;
             request.model = ModelRoute::Api {

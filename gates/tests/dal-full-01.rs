@@ -1,5 +1,5 @@
 #![cfg_attr(unix, expect(clippy::unwrap_used, reason = "SC test"))]
-#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::expect_used, clippy::panic, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real process and filesystem boundaries"
@@ -49,12 +49,14 @@ use dal_agent::{
 };
 use dal_core::ext::{BeforeRequest, BeforeTurn, TurnEnd};
 use dal_core::{
-    AgentReport, AgentStart, Budget, CallId, CancelScope, Caps, ClientId, Command, Config,
-    ConfigProduct, ContextItem, Effect, EntryKind, Event, Expect, HookEvent, HookOutcome,
-    HookVerdict, InputEvent, InputVerdict, ModelId, ModelRequest, ModelRoute, OnError, PageReq,
-    Part, Phase, Product as StoreProduct, RawJson, Record, Reply, Save, ScopeSpec, ServiceSet,
-    Session, SessionEnd, SessionId, SessionStart, Settled, Stop, StreamVerdict, ToolCallEvent,
-    ToolCallVerdict, ToolResultEvent, TurnId, TurnState, Usage, Workspace,
+    AgentReport, AgentStart, Answer, Budget, CallId, CancelScope, Caps, ClientId, Command, Config,
+    ConfigProduct, ContextItem, Effect, EntryKind, Event, Expect, Family, HookEvent, HookOutcome,
+    HookVerdict, Inference, InputEvent, InputVerdict, ModelId, ModelRequest, ModelRoute, Name,
+    OnError, Owner, PageReq, Part, Phase, Preview, Product as StoreProduct, Question, RawJson,
+    Record, Reply, Request, RequestId, ResolutionCause, ResolvedCall, Save, ScopeSpec, ServiceSet,
+    Session, SessionEnd, SessionId, SessionStart, Settled, SettledOutcome, Stop, StreamVerdict,
+    ToolCallEvent, ToolCallVerdict, ToolClass, ToolResultEvent, TurnId, TurnState, Usage,
+    Workspace,
 };
 use dal_provider::{EventStream, StopReason, StreamEvent, ToolArgs, ToolCall};
 use dal_store::Store;
@@ -72,10 +74,9 @@ const PROCESS_JOBS: usize = 201;
 const CANCELLATIONS: usize = 100;
 const WEBSOCKET_CLIENTS: usize = 8;
 const RESOURCE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
-// ~700 live sessions hold ≈3 handles each (journal, job log, workspace
-// dir) plus harness overhead; the end-of-scenario parity check against the
-// pre-run count is the actual leak guard — this bounds unbounded growth.
-const HANDLE_LIMIT: usize = 4096;
+// The end-of-scenario parity check against the pre-run count is the actual
+// leak guard — this bounds unbounded growth.
+const HANDLE_LIMIT: usize = 2048;
 const CANCEL_P99: Duration = Duration::from_millis(250);
 const ROOT_MODEL: &str = "gate-stress/children";
 const NESTED_MODEL: &str = "gate-stress/nested";
@@ -2820,9 +2821,14 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
 
     // Shuttle controls every task poll in this half. No Tokio runtime, file
     // shard, process, or network handle crosses the Shuttle continuation.
+    // shuttle_race_suite: 1000 schedules of cancel/steer/answer/follow-up
+    // over a scripted turn with 2 tool runs and 1 approval (see
+    // agent-loop-host.md). The fold plus the in-memory journal stay fast
+    // enough for the full count; lower it only with a measured reason.
     #[cfg(not(all(windows, target_arch = "aarch64")))]
     {
         const DEFAULT_SHUTTLE_SEED: u64 = 0x5eed_01a7_0c70_5e5d;
+        const SHUTTLE_SCHEDULES: usize = 1000;
         // Keep one real actor smoke run beside the pure scheduler run. The
         // scheduler run is deliberately limited to Shuttle-aware futures and
         // the in-memory journal.
@@ -2830,7 +2836,7 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(DEFAULT_SHUTTLE_SEED);
-        shuttle::check_random_with_seed(shuttle_actor_schedule, seed, 32);
+        shuttle::check_random_with_seed(shuttle_actor_schedule, seed, SHUTTLE_SCHEDULES);
     }
 }
 
@@ -2932,6 +2938,19 @@ struct ShuttleActorState {
     shutting_down: bool,
     accepted: Vec<(String, dal_core::Receipt)>,
     tracked_tasks: usize,
+    // shuttle_race_suite scripted turn: two tool runs plus one approval.
+    // Consistency needs linearizability on the turn end: exactly one winner
+    // closes the turn, every other racer observes the rejection, and the
+    // journal records each settlement once (consumers stay idempotent, so a
+    // retried settle never duplicates its record).
+    call_a: CallId,
+    call_b: CallId,
+    approval: RequestId,
+    calls_resolved: bool,
+    settled_calls: Vec<CallId>,
+    approval_answers: Vec<Answer>,
+    steers_applied: usize,
+    followups_queued: usize,
 }
 
 #[cfg(not(all(windows, target_arch = "aarch64")))]
@@ -2940,10 +2959,16 @@ type StoreJournal = dal_store::Journal;
 type ShuttleActor = Arc<ShuttleMutex<ShuttleActorState>>;
 
 #[cfg(not(all(windows, target_arch = "aarch64")))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the schedule drives every racer in one protocol walk"
+)]
 fn shuttle_actor_schedule() {
-    // The futures below deliberately overlap all four gate races: turn
+    // The futures below deliberately overlap the gate races: turn
     // cancellation with a journal receipt, mailbox delivery with shutdown,
-    // two terminal-end attempts, and tracked-task drain at shutdown. Every
+    // two terminal-end attempts, tracked-task drain at shutdown, plus the
+    // shuttle_race_suite tool-run/approval races (ordered tool dispatch,
+    // approval answer, steer, follow-up) over the scripted turn. Every
     // shared access uses ShuttleMutex, so sampled Shuttle schedules exercise
     // serialized access while the assertions below check durable behavior;
     // this is not an exhaustive race-freedom proof.
@@ -2961,6 +2986,12 @@ fn shuttle_actor_schedule() {
         let double_end_b = shuttle_future::spawn(shuttle_cancel_task(Arc::clone(&actor)));
         let tracked_a = shuttle_future::spawn(shuttle_tracked_task(Arc::clone(&actor)));
         let tracked_b = shuttle_future::spawn(shuttle_tracked_task(Arc::clone(&actor)));
+        let resolve_race = shuttle_future::spawn(shuttle_resolve_task(Arc::clone(&actor)));
+        let settle_a_race = shuttle_future::spawn(shuttle_settle_a_task(Arc::clone(&actor)));
+        let settle_b_race = shuttle_future::spawn(shuttle_settle_b_task(Arc::clone(&actor)));
+        let answer_race = shuttle_future::spawn(shuttle_answer_task(Arc::clone(&actor)));
+        let steer_race = shuttle_future::spawn(shuttle_steer_task(Arc::clone(&actor)));
+        let followup_race = shuttle_future::spawn(shuttle_followup_task(Arc::clone(&actor)));
         let _ = futures::join!(
             receipt_race,
             cancel_race,
@@ -2970,6 +3001,12 @@ fn shuttle_actor_schedule() {
             double_end_b,
             tracked_a,
             tracked_b,
+            resolve_race,
+            settle_a_race,
+            settle_b_race,
+            answer_race,
+            steer_race,
+            followup_race,
         );
     });
 
@@ -3017,6 +3054,166 @@ fn shuttle_actor_schedule() {
         1,
         "the actor wrote a double turn-end record"
     );
+    // shuttle_race_suite: every call settles once, in call order. The journal
+    // is a snapshot read here; each ToolResult is written once by the single
+    // fold linearization, and idempotent consumers dedupe on (turn, call).
+    let mut tool_order: Vec<CallId> = Vec::new();
+    for record in actor.journal.records() {
+        if let Record::ToolResult(entry) = record
+            && let EntryKind::ToolResult { call, .. } = &entry.kind
+            && (*call == actor.call_a || *call == actor.call_b)
+        {
+            tool_order.push(call.clone());
+        }
+    }
+    assert_eq!(
+        tool_order
+            .iter()
+            .filter(|call| **call == actor.call_a)
+            .count(),
+        1,
+        "call-a settled more or less than once: {tool_order:?}"
+    );
+    assert_eq!(
+        tool_order
+            .iter()
+            .filter(|call| **call == actor.call_b)
+            .count(),
+        1,
+        "call-b settled more or less than once: {tool_order:?}"
+    );
+    assert_eq!(
+        tool_order,
+        vec![actor.call_a.clone(), actor.call_b.clone()],
+        "tool results left call order: {tool_order:?}"
+    );
+    // shuttle_race_suite: the approval request settles exactly once. Cancel
+    // and answer linearize on the open question; the loser observes the
+    // resolution and records nothing.
+    let approval_resolutions = actor
+        .journal
+        .records()
+        .iter()
+        .filter(|record| match record {
+            Record::Resolved { request, .. } => *request == actor.approval,
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        approval_resolutions, 1,
+        "approval {} resolved {approval_resolutions} times, expected exactly once",
+        actor.approval
+    );
+    // shuttle_race_suite: the approval answer travels the call path. At most
+    // one client answer wins, and a clean exec result exists only under a
+    // journaled Approve recorded before the call's ToolResult: the settle
+    // observes the approval in the same linearization, so no schedule runs
+    // the gated call past its approval.
+    assert!(
+        actor.approval_answers.len() <= 1,
+        "approval answered {} times by clients",
+        actor.approval_answers.len()
+    );
+    let mut approval_idx = None;
+    let mut approval_answer = None;
+    let mut result_b_idx = None;
+    let mut result_b_error = None;
+    for (index, record) in actor.journal.records().iter().enumerate() {
+        match record {
+            Record::Resolved {
+                request, answer, ..
+            } if *request == actor.approval => {
+                approval_idx = Some(index);
+                approval_answer = Some(answer.clone());
+            }
+            Record::ToolResult(entry) => {
+                if let EntryKind::ToolResult { call, error, .. } = &entry.kind
+                    && *call == actor.call_b
+                {
+                    result_b_idx = Some(index);
+                    result_b_error = Some(*error);
+                }
+            }
+            _ => {}
+        }
+    }
+    if actor.approval_answers == [Answer::Approve] {
+        assert_eq!(
+            approval_answer,
+            Some(Answer::Approve),
+            "client Approve did not land as the journaled approval answer"
+        );
+    }
+    if result_b_error == Some(false) {
+        assert_eq!(
+            approval_answer,
+            Some(Answer::Approve),
+            "exec ran clean without an Approve: {approval_answer:?}"
+        );
+        match (approval_idx, result_b_idx) {
+            (Some(approved), Some(settled)) => assert!(
+                approved < settled,
+                "exec settled clean before its Approve landed"
+            ),
+            _ => panic!("exec clean without both approval and result records"),
+        }
+    }
+    for call in &actor.settled_calls {
+        let ok_in_journal = actor.journal.records().iter().any(|record| {
+            if let Record::ToolResult(entry) = record
+                && let EntryKind::ToolResult {
+                    call: settled,
+                    error,
+                    ..
+                } = &entry.kind
+                && *settled == *call
+                && !*error
+            {
+                true
+            } else {
+                false
+            }
+        });
+        assert!(
+            ok_in_journal,
+            "tracked clean settle for {call} has no journal ToolResult"
+        );
+    }
+    assert!(
+        actor.steers_applied <= 1,
+        "steer applied {} times",
+        actor.steers_applied
+    );
+    assert!(
+        actor.followups_queued <= 1,
+        "follow-up queued {} times",
+        actor.followups_queued
+    );
+    // shuttle_race_suite: a stale turn command changes nothing. The fold
+    // rejects it without state or journal effects (linearizability: the
+    // rejection observes the ended turn).
+    let settled_session = actor.session.clone();
+    let settled_records = actor.journal.records().len();
+    let ended_turn = actor.turn;
+    let mut ignored = Vec::new();
+    let stale = actor.session.step(
+        Event::Cancel {
+            scope: CancelScope::Turn(ended_turn),
+            partial: None,
+        },
+        stamp(),
+        &mut ignored,
+    );
+    assert!(stale.is_err(), "cancel on the ended turn must be rejected");
+    assert_eq!(
+        actor.session, settled_session,
+        "a rejected cancel changed fold state"
+    );
+    assert_eq!(
+        actor.journal.records().len(),
+        settled_records,
+        "a rejected cancel appended journal records"
+    );
     assert_eq!(
         actor.tracked_tasks, 0,
         "SessionTasks leaked at actor shutdown"
@@ -3041,6 +3238,10 @@ fn shuttle_actor_schedule() {
 }
 
 #[cfg(not(all(windows, target_arch = "aarch64")))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the state seeds every scripted worker in one fixture"
+)]
 fn shuttle_actor_state() -> ShuttleActorState {
     let workspace = Workspace::new(if cfg!(windows) {
         PathBuf::from("C:/shuttle-workspace")
@@ -3088,6 +3289,84 @@ fn shuttle_actor_state() -> ShuttleActorState {
         )
         .expect("Shuttle guard fold");
     append_effect_records(&effects, &mut records);
+    effects.clear();
+    // Scripted turn body: one model response carrying two tool calls, then
+    // one approval request gating the exec call. Racers below settle, answer,
+    // steer, follow up, or cancel around this fixed setup.
+    let call_a = CallId::new("shuttle-call-a");
+    let call_b = CallId::new("shuttle-call-b");
+    let inference = Inference {
+        events: vec![
+            dal_core::StreamEvent::Usage(usage()),
+            dal_core::StreamEvent::ToolCall {
+                call: call_a.clone(),
+                name: "shuttle-read".into(),
+                args: RawJson::parse("{}").expect("empty shuttle args parse"),
+            },
+            dal_core::StreamEvent::ToolCall {
+                call: call_b.clone(),
+                name: "shuttle-exec".into(),
+                args: RawJson::parse("{}").expect("empty shuttle args parse"),
+            },
+            dal_core::StreamEvent::Stop(Stop::EndTurn),
+        ],
+    };
+    session
+        .step(
+            Event::RequestStarted {
+                turn,
+                model: synthetic_route(SHUTTLE_ROOT_MODEL),
+                family: Family::Chat,
+            },
+            stamp(),
+            &mut effects,
+        )
+        .expect("Shuttle request-started fold");
+    append_effect_records(&effects, &mut records);
+    effects.clear();
+    session
+        .step(
+            Event::StreamEnded {
+                turn,
+                model: synthetic_route(SHUTTLE_ROOT_MODEL),
+                family: Family::Chat,
+                result: Ok(inference),
+                partial: None,
+            },
+            stamp(),
+            &mut effects,
+        )
+        .expect("Shuttle stream-ended fold");
+    append_effect_records(&effects, &mut records);
+    effects.clear();
+    let approval = Request {
+        id: RequestId::new_v7(),
+        turn: Some(turn),
+        owner: Owner::Core,
+        question: Question::Approval {
+            tool: "shuttle-exec".into(),
+            preview: Preview {
+                title: "shuttle".into(),
+                body: "run shuttle-exec".into(),
+                digest: None,
+            },
+            grant: None,
+            call: Some(call_b.clone()),
+        },
+        timeout: Duration::from_secs(30),
+        default: Answer::Decline,
+    };
+    session
+        .step(
+            Event::RequestOpened {
+                request: approval.clone(),
+            },
+            stamp(),
+            &mut effects,
+        )
+        .expect("Shuttle approval-open fold");
+    append_effect_records(&effects, &mut records);
+    effects.clear();
     shuttle_future::block_on(journal.append(records)).expect("Shuttle journal bootstrap");
     ShuttleActorState {
         session,
@@ -3100,6 +3379,14 @@ fn shuttle_actor_state() -> ShuttleActorState {
         shutting_down: false,
         accepted: Vec::new(),
         tracked_tasks: 2,
+        call_a,
+        call_b,
+        approval: approval.id,
+        calls_resolved: false,
+        settled_calls: Vec::new(),
+        approval_answers: Vec::new(),
+        steers_applied: 0,
+        followups_queued: 0,
     }
 }
 
@@ -3187,4 +3474,348 @@ async fn shuttle_tracked_task(actor: ShuttleActor) {
     shuttle_future::yield_now().await;
     let mut actor = actor.lock().expect("Shuttle actor state lock");
     actor.tracked_tasks = actor.tracked_tasks.saturating_sub(1);
+}
+
+/// The journal is the transactional outbox here: tasks read it (under the
+/// same lock that writes it) to observe the single fold linearization, so a
+/// settle observes the approval exactly when the journal does.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+fn shuttle_turn_ended(actor: &ShuttleActorState) -> bool {
+    let turn = actor.turn;
+    actor.journal.records().iter().any(|record| match record {
+        Record::TurnEnd { turn: ended, .. } => *ended == turn,
+        _ => false,
+    })
+}
+
+/// The journaled answer for the scripted approval, if it resolved yet.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+fn shuttle_approval_answer(actor: &ShuttleActorState) -> Option<Answer> {
+    let approval = actor.approval;
+    actor
+        .journal
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::Resolved {
+                request, answer, ..
+            } if *request == approval => Some(answer.clone()),
+            _ => None,
+        })
+}
+
+/// Whether one emitted batch journaled a clean `ToolResult` for `call`.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+fn shuttle_batch_settled_ok(records: &[Record], call: &CallId) -> bool {
+    records.iter().any(|record| {
+        if let Record::ToolResult(entry) = record
+            && let EntryKind::ToolResult {
+                call: settled,
+                error,
+                ..
+            } = &entry.kind
+            && *settled == *call
+            && !*error
+        {
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// `shuttle_race_suite` dispatch: resolves the two scripted calls in call order
+/// and starts both. Single attempt: losing to cancel just returns, and the
+/// fold leaves rejected state untouched.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_resolve_task(actor: ShuttleActor) {
+    shuttle_future::yield_now().await;
+    let mut actor = actor.lock().expect("Shuttle actor state lock");
+    if actor.shutting_down || actor.calls_resolved {
+        return;
+    }
+    let turn = actor.turn;
+    let starts = [actor.call_a.clone(), actor.call_b.clone()];
+    let calls = vec![
+        ResolvedCall {
+            call: starts[0].clone(),
+            name: Name::parse("shuttle-read").expect("shuttle tool name parses"),
+            promoted: false,
+            result: Ok(ToolClass::Read),
+        },
+        ResolvedCall {
+            call: starts[1].clone(),
+            name: Name::parse("shuttle-exec").expect("shuttle tool name parses"),
+            promoted: false,
+            result: Ok(ToolClass::Exec {
+                read_only: false,
+                grant: None,
+            }),
+        },
+    ];
+    let mut effects = Vec::new();
+    if actor
+        .session
+        .step(
+            Event::Resolved {
+                turn,
+                calls,
+                answerer_attached: true,
+            },
+            stamp(),
+            &mut effects,
+        )
+        .is_err()
+    {
+        return;
+    }
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Dispatch { .. }))
+    {
+        actor.calls_resolved = true;
+    }
+    let mut records = Vec::new();
+    append_effect_records(&effects, &mut records);
+    for call in starts {
+        effects.clear();
+        if actor
+            .session
+            .step(Event::CallStarted { turn, call }, stamp(), &mut effects)
+            .is_err()
+        {
+            break;
+        }
+        append_effect_records(&effects, &mut records);
+    }
+    if !records.is_empty() {
+        shuttle_future::block_on(actor.journal.append(records))
+            .expect("Shuttle resolve journal append");
+    }
+}
+
+/// `shuttle_race_suite` read run: settles call-a, which needs no approval.
+/// Retries while the turn is open so a schedule that polls this task before
+/// dispatch still settles it.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_settle_a_task(actor: ShuttleActor) {
+    for _ in 0..4 {
+        shuttle_future::yield_now().await;
+        let mut actor = actor.lock().expect("Shuttle actor state lock");
+        let turn = actor.turn;
+        let call = actor.call_a.clone();
+        if actor.shutting_down || actor.settled_calls.contains(&call) {
+            return;
+        }
+        if shuttle_turn_ended(&actor) {
+            return;
+        }
+        let mut effects = Vec::new();
+        if actor
+            .session
+            .step(
+                Event::Settled {
+                    turn,
+                    call: call.clone(),
+                    outcome: SettledOutcome::Ok {
+                        text: "shuttle ok".into(),
+                        data: None,
+                    },
+                    elapsed_ms: None,
+                },
+                stamp(),
+                &mut effects,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let mut records = Vec::new();
+        append_effect_records(&effects, &mut records);
+        if !records.is_empty() {
+            let ok = shuttle_batch_settled_ok(&records, &call);
+            shuttle_future::block_on(actor.journal.append(records))
+                .expect("Shuttle settle-a journal append");
+            if ok {
+                actor.settled_calls.push(call);
+            }
+        }
+        return;
+    }
+}
+
+/// `shuttle_race_suite` approval-gated run: settles call-b (exec) only under a
+/// journaled Approve. Without one the call stays pending and the turn-end
+/// path owns it, so no schedule executes the gated call past its approval.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_settle_b_task(actor: ShuttleActor) {
+    for _ in 0..4 {
+        shuttle_future::yield_now().await;
+        let mut actor = actor.lock().expect("Shuttle actor state lock");
+        let turn = actor.turn;
+        let call = actor.call_b.clone();
+        if actor.shutting_down || actor.settled_calls.contains(&call) {
+            return;
+        }
+        match shuttle_approval_answer(&actor) {
+            Some(Answer::Approve) => {}
+            Some(_) => return,
+            None => {
+                if shuttle_turn_ended(&actor) {
+                    return;
+                }
+                continue;
+            }
+        }
+        let mut effects = Vec::new();
+        if actor
+            .session
+            .step(
+                Event::Settled {
+                    turn,
+                    call: call.clone(),
+                    outcome: SettledOutcome::Ok {
+                        text: "shuttle ok".into(),
+                        data: None,
+                    },
+                    elapsed_ms: None,
+                },
+                stamp(),
+                &mut effects,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let mut records = Vec::new();
+        append_effect_records(&effects, &mut records);
+        if !records.is_empty() {
+            let ok = shuttle_batch_settled_ok(&records, &call);
+            shuttle_future::block_on(actor.journal.append(records))
+                .expect("Shuttle settle-b journal append");
+            if ok {
+                actor.settled_calls.push(call);
+            }
+        }
+        return;
+    }
+}
+
+/// `shuttle_race_suite` approval answer: approves the scripted request. The fold
+/// resolves each question once (first answer or turn-end terminal wins; later
+/// resolutions observe the existing record and emit nothing), so answering
+/// into a cancelled turn is a safe no-op.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_answer_task(actor: ShuttleActor) {
+    shuttle_future::yield_now().await;
+    let mut actor = actor.lock().expect("Shuttle actor state lock");
+    if actor.shutting_down {
+        return;
+    }
+    let mut effects = Vec::new();
+    let request = actor.approval;
+    if actor
+        .session
+        .step(
+            Event::GrantResolved {
+                request,
+                answer: Answer::Approve,
+                by: Some(ClientId::new("shuttle-answer")),
+                was_default: false,
+                cause: ResolutionCause::Answered,
+            },
+            stamp(),
+            &mut effects,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let mut records = Vec::new();
+    append_effect_records(&effects, &mut records);
+    // GrantResolved reports Ok even for an already-resolved question, so
+    // only a batch that actually journals the approval counts as the answer.
+    let landed = records.iter().any(|record| match record {
+        Record::Resolved { request, .. } => *request == actor.approval,
+        _ => false,
+    });
+    shuttle_future::block_on(actor.journal.append(records)).expect("Shuttle answer journal append");
+    if landed {
+        actor.approval_answers.push(Answer::Approve);
+    }
+}
+
+/// `shuttle_race_suite` steer: queues text into the running turn, or observes
+/// the `WrongTurn` rejection once the turn is gone.
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_steer_task(actor: ShuttleActor) {
+    shuttle_future::yield_now().await;
+    let mut actor = actor.lock().expect("Shuttle actor state lock");
+    if actor.shutting_down {
+        return;
+    }
+    let mut effects = Vec::new();
+    let turn = actor.turn;
+    if actor
+        .session
+        .step(
+            Event::Steer {
+                turn,
+                text: "shuttle steer".into(),
+            },
+            stamp(),
+            &mut effects,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let mut records = Vec::new();
+    append_effect_records(&effects, &mut records);
+    if !records.is_empty() {
+        shuttle_future::block_on(actor.journal.append(records))
+            .expect("Shuttle steer journal append");
+    }
+    actor.steers_applied += 1;
+}
+
+/// `shuttle_race_suite` follow-up: queues the next turn behind the running one.
+/// Queueing never ends turn 1 by itself, so the shutdown cancel still writes
+/// the single terminal record (a cancelled turn discards the queued input
+/// with its discarded notice).
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+async fn shuttle_followup_task(actor: ShuttleActor) {
+    shuttle_future::yield_now().await;
+    let mut actor = actor.lock().expect("Shuttle actor state lock");
+    if actor.shutting_down {
+        return;
+    }
+    let mut effects = Vec::new();
+    let turn = actor.turn;
+    if actor
+        .session
+        .step(
+            Event::Command {
+                cmd: Command::FollowUp {
+                    turn,
+                    content: vec![Part::Text {
+                        text: "shuttle follow-up".into(),
+                    }],
+                },
+                by: ClientId::new("shuttle"),
+            },
+            stamp(),
+            &mut effects,
+        )
+        .is_err()
+    {
+        return;
+    }
+    let mut records = Vec::new();
+    append_effect_records(&effects, &mut records);
+    if !records.is_empty() {
+        shuttle_future::block_on(actor.journal.append(records))
+            .expect("Shuttle follow-up journal append");
+    }
+    actor.followups_queued += 1;
 }

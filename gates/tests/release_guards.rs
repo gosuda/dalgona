@@ -6,7 +6,9 @@
 )]
 mod support;
 
-use std::{error::Error, path::PathBuf};
+use std::error::Error;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 #[test]
 fn release_presence_gate_accepts_matching_version() -> Result<(), Box<dyn Error>> {

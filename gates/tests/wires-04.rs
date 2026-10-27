@@ -18,7 +18,10 @@ use std::{
 
 use futures::{SinkExt, StreamExt};
 use sonic_rs::JsonValueTrait;
-use support::{TestDir, dalgon_binary};
+use support::{
+    SCOPE_SAVE_SEED, TestDir, assert_scope_save_landed, dalgon_binary, initialize_params,
+    scope_save_params,
+};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -358,4 +361,108 @@ async fn loopback_websocket_accepts_connections_without_a_token()
         "loopback WebSocket must answer without a token"
     );
     Ok(())
+}
+
+/// One request over a connected websocket and its matching reply;
+/// notifications in between are skipped.
+async fn websocket_call(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    id: u64,
+    method: &str,
+    params: sonic_rs::Value,
+    dir_path: &std::path::Path,
+) -> Result<sonic_rs::Value, Box<dyn Error + Send + Sync>> {
+    let frame = sonic_rs::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    socket
+        .send(Message::Text(sonic_rs::to_string(&frame)?.into()))
+        .await
+        .map_err(|error| serve_failure(dir_path, method, &error))?;
+    let reply = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .ok_or("websocket closed before it replied")??;
+            let Message::Text(text) = frame else {
+                continue;
+            };
+            let value: sonic_rs::Value = sonic_rs::from_str(&text)?;
+            if value.get("id").and_then(sonic_rs::Value::as_u64) == Some(id)
+                && value.get("method").is_none()
+            {
+                return Ok::<_, Box<dyn Error + Send + Sync>>(value);
+            }
+        }
+    })
+    .await
+    .map_err(|error| serve_failure(dir_path, method, &error))??;
+    Ok(reply)
+}
+
+/// A client of `dalgon serve` over a websocket saves its model scope into the
+/// user's `dal.toml`: the serve host start knows where the user file lives and
+/// the save keeps the user's own text. Loopback serve needs no token.
+#[tokio::test]
+async fn serve_websocket_scope_save_reaches_the_users_dal_toml()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    let data_root = data_home.join("dal");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    let config = home.join(".config/dal/dal.toml");
+    fs::write(&config, SCOPE_SAVE_SEED)?;
+
+    let child = Command::new(dalgon_binary()?)
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", &data_home)
+        .env("NO_COLOR", "1")
+        .args(["serve", "--bind", "127.0.0.1", "--port", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(fs::File::create(
+            dir.path().join("serve-ws.log"),
+        )?))
+        .spawn()?;
+    let _guard = ChildGuard(Some(child));
+
+    let url = advertisement_websocket(&data_root).await?;
+    let dir_path = dir.path().to_owned();
+    let (mut socket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(websocket_request(&url)?),
+    )
+    .await
+    .map_err(|error| serve_failure(&dir_path, "scope-connect", &error))?
+    .map_err(|error| serve_failure(&dir_path, "scope-connect", &error))?;
+    websocket_call(&mut socket, 1, "initialize", initialize_params(), &dir_path).await?;
+    let workspace_text = workspace.to_str().ok_or("workspace path is not UTF-8")?;
+    let opened = websocket_call(
+        &mut socket,
+        2,
+        "session/open",
+        sonic_rs::json!({"ref": {"type": "new", "workspace": workspace_text}}),
+        &dir_path,
+    )
+    .await?;
+    let session = opened
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(sonic_rs::Value::as_str)
+        .ok_or_else(|| format!("session/open returned no session: {opened}"))?
+        .to_owned();
+    let saved = websocket_call(
+        &mut socket,
+        3,
+        "session/submit",
+        scope_save_params(&session),
+        &dir_path,
+    )
+    .await?;
+    assert_scope_save_landed(&saved, &config)
 }
