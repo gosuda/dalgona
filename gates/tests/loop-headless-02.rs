@@ -99,7 +99,16 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     assert!(cancelled, "exec must have started before cancellation");
     assert_eq!(turn_ends, 1);
     let pid = fs::read_to_string(pid_file)?.trim().parse::<u32>()?;
-    assert!(!support::process_named_alive(pid, "sleep"));
+    // The kill propagates asynchronously: the turn ends before the reaper
+    // finishes the tree, so the process check polls until the grandchild is
+    // really gone inside a bound.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while support::process_named_alive(pid, "sleep") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("grandchild {pid} still alive 10 s after cancellation"))?;
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }
