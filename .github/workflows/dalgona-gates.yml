@@ -100,9 +100,23 @@ jobs:
               --test "$1" "$2" -- --nocapture --exact 2>&1 | tee "$log"
             grep -F "stress-scenario-ok: $3" "$log"
           }
+          run_scenario_multi() {
+            log="$(mktemp)"
+            cargo test --locked -p dalgona-gates --release \
+              --test "$1" "$2" -- --nocapture --exact 2>&1 | tee "$log"
+            shift 2
+            for marker in "$@"; do
+              grep -F "stress-scenario-ok: $marker" "$log"
+            done
+          }
           run_scenario dalgona-orchestration-09 stress_500_pool_items_finish_within_the_process_contract scale500
           run_scenario dalgona-orchestration-09 stress_v9_silent_and_throttled_over_loopback_provider v9-loopback
           run_scenario dalgona-orchestration-10 exec_jobs_and_monitors_end_clean_within_the_process_contract held200
           run_scenario dalgona-orchestration-10 fake_clock_sleep_detach_one_hundred_jobs fake-clock100
           run_scenario dalgona-orchestration-10 subagent_exec_cancel_kills_every_process_tree cancel-20x10
           run_scenario dalgona-orchestration-10 parent_fast_jobs_complete_and_deliver_once fast200
+          run_scenario dalgona-orchestration-01 stress_500_subagents_and_200_jobs_hold_the_process_contract composite500x200ws8
+          run_scenario_multi dalgona-orchestration-01 stress_cancel_p99_under_250ms_idle_and_under_full_load cancel-p99-idle100 cancel-p99-loaded100
+          run_scenario dalgona-orchestration-01 stress_rss_stays_below_256_mib rss-peak-256mib
+          run_scenario dalgona-orchestration-01 stress_open_fds_stay_below_2048 fds-peak-2048
+          run_scenario dalgona-orchestration-01 stress_tui_keypress_echo_p99_stays_below_24ms keypress-p99-24ms

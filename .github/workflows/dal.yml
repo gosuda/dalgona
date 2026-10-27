@@ -91,6 +91,11 @@ jobs:
         with:
           tool: cargo-auditable@latest
       - run: cargo test --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-features --locked
+      # The example replays a local fixture in an in-memory session: no
+      # credentials, no network, nothing written under the checkout. It exits
+      # non-zero on a rejected prompt, a non-EndTurn stop, empty assistant
+      # text, or a host that does not close its session.
+      - run: cargo run --locked -p dalgon --example sdk
 
   deny:
     runs-on: ubuntu-24.04
@@ -120,3 +125,9 @@ jobs:
           persist-credentials: false
       - run: rustup update stable --no-self-update
       - run: cargo test --locked -p dal-gates --release -- stress_
+      # The first-frame harness is Unix-only (`#![cfg(unix)]`): on Windows the
+      # target compiles zero tests, so a Windows run would pass without
+      # measuring. Windows stays unmeasured, not green.
+      - name: First frame within one second on the idle machine
+        if: runner.os != 'Windows'
+        run: cargo test -p dal-gates --release --test loop-tui-03 -- --ignored
