@@ -37,9 +37,16 @@ pub enum Family {
     /// Google Vertex AI API.
     #[serde(rename = "google-vertex")]
     GoogleVertex,
-    /// Google Gemini CLI API.
+    /// Google Gemini CLI API: the local `gemini` subprocess, which holds no
+    /// dal credential.
     #[serde(rename = "google-gemini-cli")]
     GoogleGeminiCli,
+    /// Google Cloud Code Assist API: the native HTTPS stream, authorized by a
+    /// Google OAuth credential that names a Cloud project. It is a separate
+    /// family from the local [`Family::GoogleGeminiCli`] subprocess, so a
+    /// stored `google-gemini-cli` record keeps its meaning.
+    #[serde(rename = "google-cloud-code-assist")]
+    GoogleCloudCodeAssist,
     /// Google Antigravity API.
     #[serde(rename = "google-antigravity")]
     GoogleAntigravity,
@@ -57,7 +64,7 @@ pub enum Family {
 
 impl Family {
     /// Every family, in declaration order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Chat,
         Self::Responses,
         Self::Codex,
@@ -70,6 +77,7 @@ impl Family {
         Self::GoogleGenerativeAi,
         Self::GoogleVertex,
         Self::GoogleGeminiCli,
+        Self::GoogleCloudCodeAssist,
         Self::GoogleAntigravity,
         Self::Mistral,
         Self::Ollama,
@@ -93,6 +101,7 @@ impl Family {
             Self::GoogleGenerativeAi => "google-generative-ai",
             Self::GoogleVertex => "google-vertex",
             Self::GoogleGeminiCli => "google-gemini-cli",
+            Self::GoogleCloudCodeAssist => "google-cloud-code-assist",
             Self::GoogleAntigravity => "google-antigravity",
             Self::Mistral => "mistral",
             Self::Ollama => "ollama",
@@ -310,7 +319,8 @@ impl ModelRoute {
     /// API families use their persisted provider prefix (`openai-chat`,
     /// `openai-responses`, `openai-codex`, `anthropic`, `bedrock`, `cursor`,
     /// `devin`, `droid`, `gitlab`, `google-generative-ai`, `google-vertex`,
-    /// `google-gemini-cli`, `google-antigravity`, `mistral`, `ollama`,
+    /// `google-gemini-cli`, `google-cloud-code-assist`, `google-antigravity`,
+    /// `mistral`, `ollama`,
     /// `radius` for [`Family::PiMessages`]); synthetic and harness routes
     /// render as their bare id. This is the legacy `model` string mirror:
     /// best-effort for old readers, never the authoritative decode. The

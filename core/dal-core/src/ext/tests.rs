@@ -266,7 +266,7 @@ fn service_set_has_stable_order_and_excludes_ask_from_grants() -> TestResult {
     let requested = ServiceSet::from_names(reverse)?;
     let expected = [
         "fs.read", "fs.write", "net", "run", "env", "ask", "mcp", "agents", "jobs", "turn",
-        "sidecar", "infer",
+        "sidecar", "infer", "judge",
     ];
     assert_eq!(
         requested.iter().map(Service::as_str).collect::<Vec<_>>(),
@@ -292,7 +292,7 @@ fn service_set_has_stable_order_and_excludes_ask_from_grants() -> TestResult {
         .ok_or("unknown service accepted")?;
     assert_eq!(
         unknown.to_string(),
-        "unknown service \"nope\"; the service vocabulary is fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer"
+        "unknown service \"nope\"; the service vocabulary is fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer, judge"
     );
     let duplicate = ServiceSet::from_names(["run", "run"])
         .err()

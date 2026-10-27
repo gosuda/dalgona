@@ -37,11 +37,28 @@ pub enum Service {
     Sidecar,
     /// Invoke model inference from an extension.
     Infer,
+    /// Ask the session judge one question from an eval cell.
+    Judge,
+}
+
+/// The exact denial a cell sees when it calls the judge without the inject.
+pub const JUDGE_DENIED: &str = "judge: denied (declare \"judge\" in the cell's inject)";
+
+/// The caller facts a judge backend needs, without importing the agent
+/// caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JudgeAuth {
+    /// Whether the caller injected the judge service.
+    pub injected: bool,
+    /// Whether the caller is an eval cell.
+    pub cell: bool,
+    /// The caller's turn, when the minting entry carried one.
+    pub turn: Option<TurnId>,
 }
 
 impl Service {
     /// Every service in the canonical vocabulary order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::FsRead,
         Self::FsWrite,
         Self::Net,
@@ -54,6 +71,7 @@ impl Service {
         Self::Turn,
         Self::Sidecar,
         Self::Infer,
+        Self::Judge,
     ];
 
     /// Returns the service's literal injection name.
@@ -72,6 +90,7 @@ impl Service {
             Self::Turn => "turn",
             Self::Sidecar => "sidecar",
             Self::Infer => "infer",
+            Self::Judge => "judge",
         }
     }
 
@@ -104,6 +123,7 @@ impl Service {
             Self::Turn => Some(Capability::Turn),
             Self::Sidecar => Some(Capability::Sidecar),
             Self::Infer => Some(Capability::Infer),
+            Self::Judge => Some(Capability::Judge),
         }
     }
 
@@ -148,6 +168,8 @@ pub enum Capability {
     Sidecar,
     /// Invoke model inference from an extension.
     Infer,
+    /// Ask the session judge from an eval cell.
+    Judge,
 }
 
 /// A requested set of services, distinct from an authorization grant.
@@ -370,6 +392,100 @@ impl fmt::Display for Claimant {
     }
 }
 
+/// The record kind an explicit replacement claims.
+///
+/// The set is closed: only `skill` and `rule` records are replaceable, so
+/// every consumer matches both variants exhaustively.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReplaceKind {
+    /// A `skill` record served at `skill://<name>`.
+    Skill,
+    /// A `rule` record watched by the rules owner.
+    Rule,
+}
+
+impl ReplaceKind {
+    /// The kind word a conflict or refusal renders.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Rule => "rule",
+        }
+    }
+}
+
+impl fmt::Display for ReplaceKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One explicit per-record replacement a user extension claims.
+///
+/// The claim names the one record the extension registers under it and the
+/// bundled extension that must own that record. The extension name itself is
+/// never replaceable, and the owner is never implied: `replace` without
+/// `battery` is a strict input refusal at the declaring constructor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplaceClaim {
+    /// The record kind the claim takes over.
+    pub kind: ReplaceKind,
+    /// The record name the extension registers under this claim.
+    pub record: Name,
+    /// The bundled extension the extension names as the record's owner.
+    pub owner: Name,
+}
+
+/// Why an explicit per-record replacement claim is refused.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReplaceRefusal {
+    /// The product ships no bundled extension of that name.
+    #[error("this product ships no bundled extension \"{owner}\"")]
+    NoBattery {
+        /// The owner the extension named.
+        owner: Name,
+    },
+    /// The named bundled extension exists but does not register the record,
+    /// and no other extension does either.
+    #[error("bundled extension \"{owner}\" does not register it")]
+    NotOwned {
+        /// The owner the extension named.
+        owner: Name,
+    },
+    /// The named bundled extension exists but does not register the record;
+    /// another extension does.
+    #[error("bundled extension \"{owner}\" does not register it; it is registered by {actual}")]
+    NotOwnedElsewhere {
+        /// The owner the extension named.
+        owner: Name,
+        /// The extension that actually registers the record.
+        actual: Claimant,
+    },
+    /// The named owner is a built-in extension, never a battery.
+    #[error("extension \"{owner}\" is a built-in extension")]
+    OwnerBuiltin {
+        /// The owner the extension named.
+        owner: Name,
+    },
+    /// The named owner is a user plugin, never a battery.
+    #[error("extension \"{owner}\" is a user plugin")]
+    OwnerUser {
+        /// The owner the extension named.
+        owner: Name,
+    },
+    /// Only a user plugin may replace a battery record.
+    #[error("only a user plugin replaces a battery record")]
+    ClaimerNotUser,
+    /// Another user plugin already replaced the record.
+    #[error("already replaced by plugin \"{holder}\"")]
+    AlreadyReplaced {
+        /// The plugin whose replacement settled first.
+        holder: Name,
+    },
+}
+
 /// A registration declaration or identity is invalid or already claimed.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -402,7 +518,7 @@ pub enum RegistrationError {
     },
     /// A requested service is not in the service vocabulary.
     #[error(
-        "unknown service \"{service}\"; the service vocabulary is fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer"
+        "unknown service \"{service}\"; the service vocabulary is fs.read, fs.write, net, run, env, ask, mcp, agents, jobs, turn, sidecar, infer, judge"
     )]
     UnknownService {
         /// The rejected service name.
@@ -434,6 +550,21 @@ pub enum RegistrationError {
         claimant: Claimant,
         /// The extension that attempted the duplicate registration.
         rival: Claimant,
+    },
+    /// An explicit per-record replacement claim is refused.
+    #[error("{site}: {kind} \"{record}\" cannot be replaced by plugin \"{replacer}\": {reason}")]
+    CannotReplace {
+        /// The record kind the claim takes over.
+        kind: ReplaceKind,
+        /// The record name the extension asked to replace.
+        record: Name,
+        /// The plugin that claimed the replacement.
+        replacer: Name,
+        /// Where the claim was declared; user plugins always carry their
+        /// `plugin.star` site, so the refusal points at the claiming line.
+        site: Site,
+        /// Why the claim is refused.
+        reason: ReplaceRefusal,
     },
     /// A plugin attempted to declare a prompt section more than once.
     #[error("dal.prompt_section may be called once per plugin")]

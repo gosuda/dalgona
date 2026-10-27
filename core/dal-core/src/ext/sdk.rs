@@ -73,11 +73,15 @@ pub enum NativeOp {
     EnvRead,
     /// Call one registered MCP tool.
     McpCall,
+    /// Ask the session judge one question from an eval cell.
+    JudgeAsk,
+    /// Ask the session judge a batch of questions from an eval cell.
+    JudgeBatch,
 }
 
 impl NativeOp {
     /// Every native operation, in catalog order.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 30] = [
         Self::ToolsRead,
         Self::ToolsSearch,
         Self::ToolsPatch,
@@ -106,6 +110,8 @@ impl NativeOp {
         Self::TurnIsIdle,
         Self::EnvRead,
         Self::McpCall,
+        Self::JudgeAsk,
+        Self::JudgeBatch,
     ];
 
     /// Returns the operation's exact `uses` id.
@@ -140,6 +146,8 @@ impl NativeOp {
             Self::TurnIsIdle => "turn.is_idle",
             Self::EnvRead => "env.read",
             Self::McpCall => "mcp.call",
+            Self::JudgeAsk => "judge.ask",
+            Self::JudgeBatch => "judge.batch",
         }
     }
 
@@ -178,6 +186,7 @@ impl NativeOp {
             }
             Self::EnvRead => Some(Service::Env),
             Self::McpCall => Some(Service::Mcp),
+            Self::JudgeAsk | Self::JudgeBatch => Some(Service::Judge),
         }
     }
 
@@ -191,6 +200,9 @@ impl NativeOp {
                 | Self::ToolsPatch
                 | Self::ToolsExec
                 | Self::ModelsInfer
+                | Self::ModelsForward
+                | Self::AgentsStart
+                | Self::AgentsWait
                 | Self::NetFetch
         )
     }
@@ -203,6 +215,8 @@ impl NativeOp {
             Self::ToolsRead => Some("path"),
             Self::ToolsSearch => Some("pattern"),
             Self::ToolsExec => Some("command"),
+            Self::JudgeAsk => Some("question"),
+            Self::JudgeBatch => Some("questions"),
             _ => None,
         }
     }
@@ -525,14 +539,20 @@ impl Phase {
     /// Reports whether the phase may ever request the operation.
     ///
     /// This is the closed phase allowlist P, one of the four authority sets
-    /// of the entry rule. It says nothing about `uses`, grants, or approval. Tool,
-    /// command, eval, and model phases allow every declared operation except
-    /// `models.forward`, which only an inference handler may call.
+    /// of the entry rule. It says nothing about `uses`, grants, or approval.
+    /// Tool, command, eval, and model phases allow every declared operation
+    /// except `models.forward`, which only an inference handler may call, and
+    /// `judge.ask` and `judge.batch`, which only an eval cell may declare.
     /// An export-to-export entry follows the entry rule, not part of this mask.
     #[must_use]
     pub fn permits(self, op: &OpId) -> bool {
         match (self, op) {
             (_, OpId::Native(NativeOp::ModelsForward)) => matches!(self, Self::Model),
+            // The judge answers only eval cells: the transport refuses every
+            // other caller, so no other phase may even declare it.
+            (_, OpId::Native(NativeOp::JudgeAsk | NativeOp::JudgeBatch)) => {
+                matches!(self, Self::Eval)
+            }
             (Self::Tool | Self::Command | Self::Eval | Self::Model, _) => true,
             (Self::Hook(event), _) => permits_in_hook(event, op),
         }
