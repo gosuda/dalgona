@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use dal_agent::{Env, Host, Product};
+use dal_agent::{Env, Product};
 use dal_core::Screen as ConfigScreen;
 use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
@@ -14,7 +14,7 @@ use dal_wire::{RemoteEndpoint, RemoteHost};
 use crate::cli::{self, ColorArg};
 use crate::edge;
 use crate::exit;
-use crate::{ProductFactory, Startup, VarsMap, host_exit, session_ref, two_lines};
+use crate::{ProductFactory, Startup, VarsMap, session_ref, two_lines};
 
 mod remote;
 mod settings;
@@ -252,9 +252,9 @@ pub(crate) async fn interactive(
     #[cfg(feature = "test-support")]
     let login_endpoints = match super::login::test_login_endpoints(&vars) {
         Ok(endpoints) => endpoints,
-        Err(error) => return host_exit(&dal_agent::HostError::Provider(error), &data_root),
+        Err(error) => return crate::host_exit(&dal_agent::HostError::Provider(error), &data_root),
     };
-    let host = match Host::start(
+    let host = match super::start_host(
         product,
         config,
         Env {
@@ -262,19 +262,20 @@ pub(crate) async fn interactive(
             cwd,
             sandbox_helper: helper,
         },
+        &data_root,
+        &config_path,
     )
     .await
     {
         Ok(host) => host,
-        Err(error) => return host_exit(&error, &data_root),
+        Err(code) => return code,
     };
-    host.set_config_path(config_path);
     #[cfg(feature = "test-support")]
     if let Some(endpoints) = login_endpoints
         && let Err(error) = host.set_login_endpoints(endpoints)
     {
         let _ = host.shutdown(std::time::Duration::from_secs(3)).await;
-        return host_exit(&error, &data_root);
+        return crate::host_exit(&error, &data_root);
     }
     let shutdown = host.clone();
     let model_host = host.clone();
@@ -428,10 +429,8 @@ fn remote_model_option(
         label: format!("{} · {shown}", model.name),
         command: dal_core::Command::SetModel {
             model: route,
-            // A remote host never writes its own defaults (`serve` and wire
-            // hosts refuse the save), so a remote selection is session-only:
-            // `SessionAndDefault` would change the model and still report an
-            // error.
+            // A remote selection stays session-only: this terminal cannot
+            // save a default into the remote host's own `dal.toml`.
             save: dal_core::command::Save::SessionOnly,
         },
         scoped_id,

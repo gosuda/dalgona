@@ -84,15 +84,68 @@ fn row_of<'a>(rows: &'a [StatusRow], provider: &str) -> Result<&'a StatusRow, Bo
         .ok_or_else(|| format!("no status row for {provider}").into())
 }
 
-/// The provider the sign-in hint names. The hint must be exactly one line,
-/// `Run dalgon login <provider> to sign in.`, so a user can copy the command.
-fn sole_hint_provider(stderr: &[u8]) -> Result<String, Box<dyn Error>> {
+/// Whether `line` tells the reader to run a `login` command of one of the
+/// product's binaries, however the command is quoted or punctuated. A remedy
+/// for a provider that no `login` command can sign in to (`aws sso login`, say)
+/// is not one.
+fn names_login_command(line: &str) -> bool {
+    let words: Vec<&str> = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words
+        .windows(2)
+        .any(|pair| matches!(pair, ["dalgon" | "dal" | "dalgona" | "dl", "login"]))
+}
+
+/// The one provider the stderr of a `login status` run tells the user to
+/// sign in to, checked against the `rows` that run printed on stdout.
+///
+/// The first line must be exactly one copyable command,
+/// `Run dalgon login <provider> to sign in.`. Any later line is a remedy for
+/// a Bedrock provider, whose credential comes from the AWS credential chain
+/// rather than a sign-in. It is a whole non-blank line that names AWS and
+/// never a second `login` command, so stderr cannot point the user at two
+/// providers. Remedies appear exactly when a Bedrock-family sign-in-table row
+/// reads `not configured`; any other extra line fails. These fixtures
+/// configure no Bedrock provider of their own, so the table is the only source.
+fn sign_in_provider(stderr: &[u8], rows: &[StatusRow]) -> Result<String, Box<dyn Error>> {
     let text = std::str::from_utf8(stderr)?;
-    let provider = text
+    let mut lines = text.split_inclusive('\n');
+    let command = lines.next().ok_or("stderr holds no sign-in hint")?;
+    let provider = command
         .strip_prefix("Run dalgon login ")
         .and_then(|rest| rest.strip_suffix(" to sign in.\n"))
-        .filter(|provider| !provider.contains(char::is_whitespace))
-        .ok_or_else(|| format!("stderr is not exactly one sign-in hint: {text:?}"))?;
+        .filter(|provider| !provider.is_empty() && !provider.contains(char::is_whitespace))
+        .ok_or_else(|| format!("stderr does not open with one sign-in command: {text:?}"))?;
+    let mut remedies = 0_usize;
+    for line in lines {
+        let remedy = line
+            .strip_suffix('\n')
+            .filter(|remedy| !remedy.is_empty())
+            .ok_or_else(|| format!("stderr holds a blank or unterminated line: {text:?}"))?;
+        assert!(
+            !names_login_command(remedy),
+            "stderr names a second sign-in command: {text:?}"
+        );
+        assert!(
+            remedy.contains("AWS"),
+            "stderr holds a line that is neither the sign-in command nor an AWS remedy: {text:?}"
+        );
+        remedies += 1;
+    }
+    let mut bedrock_missing = false;
+    for def in login_providers() {
+        if def.family == dal_core::Family::Bedrock && row_of(rows, def.id)?.state == NOT_CONFIGURED
+        {
+            bedrock_missing = true;
+        }
+    }
+    assert_eq!(
+        remedies > 0,
+        bedrock_missing,
+        "an AWS remedy appears exactly when a Bedrock provider is not configured: {text:?}"
+    );
     Ok(provider.to_owned())
 }
 
@@ -196,9 +249,8 @@ fn headless_codex_login_uses_login_needs_terminal_error() -> Result<(), Box<dyn 
 fn status_reports_oauth_expiry_without_exposing_tokens() -> Result<(), Box<dyn Error>> {
     let fixture = CliFixture::new()?;
     // `expires_at` 1790380800 is 2026-09-26T00:00:00Z, long past for any run.
-    fixture.write_auth(
-        r#"{"openai-codex":{"kind":"oauth","access_token":"access-secret","refresh_token":"refresh-secret","expires_at":1790380800,"id_token":"id-secret","account_id":"account-1"}}"#,
-    )?;
+    let stored = r#"{"openai-codex":{"kind":"oauth","access_token":"access-secret","refresh_token":"refresh-secret","expires_at":1790380800,"id_token":"id-secret","account_id":"account-1"}}"#;
+    fixture.write_auth(stored)?;
 
     let output = fixture.output(&["login", "status"])?;
 
@@ -224,7 +276,16 @@ fn status_reports_oauth_expiry_without_exposing_tokens() -> Result<(), Box<dyn E
         .iter()
         .find(|row| row.state == NOT_CONFIGURED)
         .ok_or("status lists a provider with no credential")?;
-    assert_eq!(sole_hint_provider(&output.stderr)?, first_missing.provider);
+    assert_eq!(
+        sign_in_provider(&output.stderr, &rows)?,
+        first_missing.provider
+    );
+    // Reading the status never rewrites the stored credentials.
+    assert_eq!(
+        fs::read(fixture.auth_file())?,
+        stored.as_bytes(),
+        "status rewrote the credential file"
+    );
 
     Ok(())
 }
@@ -250,7 +311,12 @@ fn status_with_no_credentials_prints_the_first_login_hint() -> Result<(), Box<dy
     }
     // The hint names the first provider the table lists.
     let first = rows.first().ok_or("status printed no rows")?;
-    assert_eq!(sole_hint_provider(&output.stderr)?, first.provider);
+    assert_eq!(sign_in_provider(&output.stderr, &rows)?, first.provider);
+    // Reading the status never creates a credential file.
+    assert!(
+        !fixture.auth_file().exists(),
+        "status created a credential file"
+    );
 
     Ok(())
 }
