@@ -692,6 +692,23 @@ pub fn run_scripted_print(
     steps: &[String],
     prompt: &str,
 ) -> TestResult<String> {
+    run_scripted_print_with_env(scratch, top_level_toml, steps, prompt, &[])
+}
+
+/// Runs `dalgona -p` with additional child-process environment variables.
+///
+/// The child starts from a cleared environment. The supplied values are scoped
+/// to that process and are useful for deterministic fixture transports.
+///
+/// # Errors
+/// Returns the same setup, process, and journal errors as [`run_scripted_print`].
+pub fn run_scripted_print_with_env(
+    scratch: &Scratch,
+    top_level_toml: &str,
+    steps: &[String],
+    prompt: &str,
+    environment: &[(&str, &str)],
+) -> TestResult<String> {
     let config_home = scratch.path().join("xdg-config");
     let data_home = scratch.path().join("xdg-data");
     std::fs::create_dir_all(config_home.join("dalgona"))?;
@@ -705,16 +722,19 @@ pub fn run_scripted_print(
             fixture.to_string_lossy()
         ),
     )?;
-    let output = run_command(
-        std::process::Command::new(dalgona_binary()?)
-            .args(["-p", "--json", "--approval", "all", prompt])
-            .current_dir(scratch.path())
-            .env_clear()
-            .env("HOME", scratch.path())
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("XDG_CONFIG_HOME", &config_home)
-            .env("XDG_DATA_HOME", &data_home),
-    )?;
+    let mut command = std::process::Command::new(dalgona_binary()?);
+    command
+        .args(["-p", "--json", "--approval", "all", prompt])
+        .current_dir(scratch.path())
+        .env_clear()
+        .env("HOME", scratch.path())
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home);
+    for &(key, value) in environment {
+        command.env(key, value);
+    }
+    let output = run_command(&mut command)?;
     if !output.status.success() {
         return Err(format!(
             "dalgona -p failed: {}{}",
@@ -724,6 +744,97 @@ pub fn run_scripted_print(
         .into());
     }
     read_one_journal(&data_home.join("dalgona/sessions"))
+}
+
+/// One owned `dalgona rpc` child: `Drop` kills and waits, so every launch
+/// path cleans up even on early return.
+pub struct RpcChild {
+    child: Option<std::process::Child>,
+}
+
+impl Drop for RpcChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl RpcChild {
+    /// Polls the RPC child without blocking, surfacing the exit status when
+    /// it has already exited.
+    ///
+    /// # Errors
+    /// Returns the underlying poll failure.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self.child.as_mut() {
+            Some(child) => child.try_wait(),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Spawns the deterministic `dalgona rpc` stdio child for
+/// `scratch`: the current-tree binary from [`dalgona_binary`], working
+/// directory and `HOME` at the scratch root, cleared environment plus the
+/// fixed allowlist (`PATH`, `TERM`, `LANG`, `XDG_*`) and the loopback proxy
+/// URL on the `*_PROXY` variables only (`NO_PROXY`/`no_proxy` empty),
+/// `stdin`/`stdout` piped for JSONL RPC and `stderr` to `rpc.log` under
+/// scratch. No caller-chosen program, arguments, directory, or environment:
+/// the only input is the loopback proxy URL scoped to this child. Returns
+/// the owned child guard plus its actual piped `stdin`/`stdout` handles.
+///
+/// # Errors
+/// Returns the binary-resolution, log-creation, or spawn failure.
+pub fn spawn_dalgona_rpc(
+    scratch: &Scratch,
+    proxy_url: &str,
+) -> TestResult<(
+    RpcChild,
+    std::process::ChildStdin,
+    std::process::ChildStdout,
+)> {
+    let config_home = scratch.path().join("xdg-config");
+    let data_home = scratch.path().join("xdg-data");
+    let cache_home = scratch.path().join("xdg-cache");
+    let log_path = scratch.path().join("rpc.log");
+    let log_err = std::fs::File::create(&log_path)?;
+    let mut child = std::process::Command::new(dalgona_binary()?)
+        .args(["rpc"])
+        .current_dir(scratch.path())
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env(
+            "TERM",
+            std::env::var_os("TERM").unwrap_or("xterm-256color".into()),
+        )
+        .env("LANG", "C.UTF-8")
+        .env("HOME", scratch.path())
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("HTTP_PROXY", proxy_url)
+        .env("http_proxy", proxy_url)
+        .env("ALL_PROXY", proxy_url)
+        .env("all_proxy", proxy_url)
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(log_err))
+        .spawn()?;
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the RPC child has no piped stdin".into());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the RPC child has no piped stdout".into());
+    };
+    Ok((RpcChild { child: Some(child) }, stdin, stdout))
 }
 
 /// Reads the one `journal.jsonl` under `dir`.
@@ -1540,6 +1651,20 @@ impl SubscriberLedger {
         }
         Ok(())
     }
+}
+
+/// Computes the nearest-rank 99th percentile without interpolating samples.
+///
+/// # Errors
+/// Returns an error when the sample set is empty.
+pub fn nearest_rank_p99(samples: &[std::time::Duration]) -> TestResult<std::time::Duration> {
+    if samples.is_empty() {
+        return Err("cannot compute p99 of an empty sample set".into());
+    }
+    let mut ordered = samples.to_vec();
+    ordered.sort_unstable();
+    let rank = (ordered.len() * 99).div_ceil(100).max(1);
+    Ok(ordered[rank - 1])
 }
 
 /// The directory holding one session's `journal.jsonl`: the child session

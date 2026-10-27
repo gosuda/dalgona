@@ -52,6 +52,7 @@ toml.workspace = true
 clap = { version = "=4.6.7", features = ["derive", "string"] }
 clap_mangen = "=0.3.3"
 dal-ext.workspace = true
+dal-star.workspace = true
 regex = "=1.13.1"
 
 [[bin]]

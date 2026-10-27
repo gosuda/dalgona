@@ -106,6 +106,63 @@ fn close_ends_the_battery_within_5s_and_holds_the_last_mode() -> support::TestRe
     })?;
     Ok(())
 }
+fn stress_runtime() -> support::TestResult<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
+}
+
+#[test]
+fn stress_500_subagents_and_200_jobs_hold_the_process_contract() -> support::TestResult<()> {
+    if !support::stress_enabled() {
+        return Ok(());
+    }
+    stress_runtime()?.block_on(dalgona_gates::stress::run_composite())?;
+    eprintln!("{}", support::scenario_marker("composite500x200ws8"));
+    Ok(())
+}
+
+#[test]
+fn stress_cancel_p99_under_250ms_idle_and_under_full_load() -> support::TestResult<()> {
+    if !support::stress_enabled() {
+        return Ok(());
+    }
+    stress_runtime()?.block_on(dalgona_gates::stress::run_cancel_p99())?;
+    eprintln!("{}", support::scenario_marker("cancel-p99-idle100"));
+    eprintln!("{}", support::scenario_marker("cancel-p99-loaded100"));
+    Ok(())
+}
+
+#[test]
+fn stress_rss_stays_below_256_mib() -> support::TestResult<()> {
+    if !support::stress_enabled() {
+        return Ok(());
+    }
+    stress_runtime()?.block_on(dalgona_gates::stress::run_rss())?;
+    eprintln!("{}", support::scenario_marker("rss-peak-256mib"));
+    Ok(())
+}
+
+#[test]
+fn stress_open_fds_stay_below_2048() -> support::TestResult<()> {
+    if !support::stress_enabled() {
+        return Ok(());
+    }
+    stress_runtime()?.block_on(dalgona_gates::stress::run_fds())?;
+    eprintln!("{}", support::scenario_marker("fds-peak-2048"));
+    Ok(())
+}
+
+#[test]
+fn stress_tui_keypress_echo_p99_stays_below_24ms() -> support::TestResult<()> {
+    if !support::stress_enabled() {
+        return Ok(());
+    }
+    stress_runtime()?.block_on(dalgona_gates::stress::run_keypress())?;
+    eprintln!("{}", support::scenario_marker("keypress-p99-24ms"));
+    Ok(())
+}
+
 fn paused_controller(sessions: &std::path::Path) -> support::TestResult<String> {
     let mut goal_file = None;
     let mut stack = vec![sessions.to_path_buf()];

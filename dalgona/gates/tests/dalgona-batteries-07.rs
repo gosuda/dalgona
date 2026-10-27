@@ -174,3 +174,72 @@ async fn plan_and_todos_commands_use_a_real_session_journal() -> support::TestRe
     host.shutdown(Duration::from_secs(2)).await;
     Ok(())
 }
+
+#[tokio::test]
+async fn todo_state_survives_resume() -> support::TestResult<()> {
+    let scratch = support::Scratch::new("todo-survives-resume")?;
+    let root = scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("workspace"))?;
+    let workspace = Workspace::new(root.join("workspace"))?;
+
+    // One write on a fresh session; capture the exact rendered bytes.
+    let write = support::tool_step(
+        "todo-1",
+        "todo",
+        r#"{"action":"write","todos":[{"subject":"Gate packing list","state":"in_progress"}]}"#,
+    );
+    let host = work_host(&root, &[write, support::text_step("done")]).await?;
+    let (agent, mut subscription) = {
+        let agent = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: Some("todo-survives".into()),
+                },
+                ClientId::new("dalgona-todo-survives"),
+            )
+            .await?;
+        let subscription = agent.subscribe(None)?;
+        (agent, subscription)
+    };
+    prompt(&agent, &mut subscription, "track the packing list").await?;
+    let before = run_command(&agent, "todos", "").await?;
+    let before_text = output_text(&before);
+    assert!(
+        before_text.contains("Gate packing list"),
+        "the written list reads back in-session: {before:?}"
+    );
+    let key = agent.view(PageReq::default())?.session.id;
+    host.close(key).await?;
+    drop(subscription);
+    drop(agent);
+    host.shutdown(Duration::from_secs(2)).await;
+
+    // Reopen the same session root and journal; the restored list must be
+    // byte-equal, not just present.
+    let host = work_host(&root, &[support::text_step("done")]).await?;
+    let agent = host
+        .open(
+            SessionRef::Resume {
+                workspace,
+                key: "todo-survives".into(),
+            },
+            ClientId::new("dalgona-todo-survives"),
+        )
+        .await?;
+    let after = run_command(&agent, "todos", "").await?;
+    assert_eq!(
+        output_text(&after),
+        before_text,
+        "resume restores byte-equal todo state: before={before:?} after={after:?}"
+    );
+    assert_eq!(
+        after, before,
+        "resume restores the identical todo output value"
+    );
+    let key = agent.view(PageReq::default())?.session.id;
+    host.close(key).await?;
+    drop(agent);
+    host.shutdown(Duration::from_secs(2)).await;
+    Ok(())
+}

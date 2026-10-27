@@ -65,7 +65,7 @@ jobs:
       - run: cargo clippy --package dalgona --package dalgona-batteries --package dalgona-gates --all-targets --locked -- -D warnings
       - run: cargo check --package dalgona --package dalgona-batteries --package dalgona-gates --locked --no-default-features
       - run: cargo test --package dalgona --package dalgona-batteries --all-features --locked
-      - run: cargo test --package dalgona-gates --lib --all-features --locked
+      - run: cargo test --package dalgona-gates --all-features --locked
 
   deny:
     runs-on: ubuntu-24.04

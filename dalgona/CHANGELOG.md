@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Pause automatic turns at the 20-in-a-row wake limit instead of stopping
+  them: dalgona announces the pause once, keeps pending job reports and
+  goals queued, and your next message resumes the turns and delivers what
+  was held.
 - Support host-filtered reasoning levels in `/thinking` and the live settings
   thinking row. Default, alias, and remote model routes supply their supported
   levels to the picker, choices revalidate through the `/thinking` command, and
