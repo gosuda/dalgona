@@ -22,13 +22,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    admission::FdPermit,
     error::{DenyReason, ToolError},
     ext::Approved,
 };
 
 mod capture;
 pub(crate) mod sandbox;
+mod snapshot;
 mod stop;
 #[cfg(test)]
 mod tests;
@@ -36,6 +36,7 @@ mod tests;
 mod windows;
 
 use capture::{CaptureResult, run_capture};
+pub(crate) use snapshot::{ProcessLease, SnapshotCoordinator};
 use stop::{
     hard_kill, outcome_for, process_exit_status, process_failure, soft_kill, status_for,
     sweep_process_group, sweep_recorded,
@@ -196,7 +197,7 @@ type CaptureSet = JoinSet<Result<CaptureResult, io::Error>>;
 /// test wrapper pair in `proc::tests`, so ordering assertions observe the
 /// production paths rather than a disconnected model. Never installed outside
 /// `#[cfg(test)]`; production signaling still targets the real spawned group.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug)]
 pub(crate) struct TestOrdering {
     /// Released by the test to let the native leader wait complete.
@@ -229,7 +230,7 @@ pub(crate) struct TestOrdering {
     pub fail_outer: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl TestOrdering {
     pub(crate) fn new() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
@@ -262,8 +263,7 @@ pub struct Proc {
     job: JobId,
     log_path: PathBuf,
     launcher_profile: Option<PathBuf>,
-    process_permit: Option<Permit>,
-    fd_permit: Option<FdPermit>,
+    lease: Option<ProcessLease>,
     capture: Option<CaptureSet>,
     live_tail: tokio::sync::watch::Receiver<VecDeque<u8>>,
     progress: Option<Arc<dyn ProgressPort>>,
@@ -272,7 +272,7 @@ pub struct Proc {
     timeout: Option<Duration>,
     started_at: Instant,
     result: Option<ProcResult>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     test_ordering: Option<std::sync::Arc<TestOrdering>>,
 }
 
@@ -326,7 +326,7 @@ impl Proc {
         let Some(pid) = self.leader_pid else {
             return;
         };
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         if let Some(ordering) = &self.test_ordering {
             ordering.note_sweep();
         }
@@ -456,13 +456,13 @@ impl Proc {
         // escapes the process group, and reparents to init the instant its
         // bridge exits — the post-exit `/proc` sweep can no longer find it,
         // so the only reachable point for detached descendants is now.
-        let doomed = self.recorded_descendants().await;
+        let doomed = self.recorded_descendants().await?;
         soft_kill(&mut self.child)?;
         let status =
             if let Ok(waited) = time::timeout(KILL_GRACE, leader_wait(&mut self.child)).await {
                 let _ = waited.map_err(|error| process_failure(&error))?;
-                let outcome = self.sweep_after_exit().await;
                 sweep_recorded(&doomed);
+                let outcome = self.sweep_after_exit_without_descendant_scan().await;
                 outcome?;
                 status_for(reason)
             } else {
@@ -470,32 +470,41 @@ impl Proc {
                 let _ = leader_wait(&mut self.child)
                     .await
                     .map_err(|error| process_failure(&error))?;
-                let outcome = self.sweep_after_exit().await;
                 sweep_recorded(&doomed);
+                let outcome = self.sweep_after_exit_without_descendant_scan().await;
                 outcome?;
                 status_for(reason)
             };
         self.finish(status).await
     }
 
-    /// Records live descendants for the post-exit `setsid` sweep.
+    /// Records live descendants for the post-signal `setsid` sweep.
+    ///
+    /// The pre-signal snapshot is the coalesced admission-batch census: a
+    /// lost census is a typed failure the stop ladder propagates instead
+    /// of signaling a leader whose detached descendants are unknown.
     #[cfg(target_os = "linux")]
-    async fn recorded_descendants(&mut self) -> Vec<u32> {
-        if let Some(pid) = self.leader_pid {
-            return tokio::task::spawn_blocking(move || stop::proc_descendants(pid))
-                .await
-                .unwrap_or_default();
-        }
-        Vec::new()
+    async fn recorded_descendants(&mut self) -> Result<Vec<u32>, ToolError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Err(ToolError::Failed(Box::new(io::Error::other(
+                "the process lease was released before its stop ladder",
+            ))));
+        };
+        let Some(pid) = self.leader_pid else {
+            return Ok(Vec::new());
+        };
+        let snapshots = Arc::clone(lease.snapshots());
+        snapshots.snapshot(pid).await
     }
 
-    /// Records live descendants for the post-exit `setsid` sweep.
+    /// Records live descendants for the post-signal `setsid` sweep.
     #[cfg(not(target_os = "linux"))]
-    fn recorded_descendants(&mut self) -> std::future::Ready<Vec<u32>> {
-        // Non-Linux platforms have no /proc descendant source; the leader
-        // pid stays read so the field contract matches the Linux arm.
+    fn recorded_descendants(&mut self) -> std::future::Ready<Result<Vec<u32>, ToolError>> {
+        // Non-Linux platforms have no /proc descendant source; the lease
+        // stays read so the field contract matches the Linux arm.
+        let _ = self.lease;
         let _ = self.leader_pid;
-        std::future::ready(Vec::new())
+        std::future::ready(Ok(Vec::new()))
     }
 
     /// Returns the currently retained tail without reading the full log.
@@ -525,8 +534,7 @@ impl Proc {
         // The child already exited: release the session slot and schedule
         // profile cleanup before the fallible capture join, so a capture
         // fault cannot hold a slot or leak a profile file.
-        self.process_permit.take();
-        self.fd_permit.take();
+        self.lease.take();
         if let Some(profile) = self.launcher_profile.take() {
             let _ = tokio::task::spawn_blocking(move || fs::remove_file(profile)).await;
         }
@@ -573,23 +581,36 @@ impl Proc {
     /// fault with `result` still unset would re-signal a possibly recycled
     /// pid (or its group). A `Proc` dropped before any reap keeps its pid,
     /// so the close-abort sweep in `abort_group` still runs.
-    #[cfg(target_os = "linux")]
     async fn sweep_after_exit(&mut self) -> Result<(), ToolError> {
-        let Some(pid) = self.leader_pid.take() else {
+        let Some(pid) = self.group_reap().await? else {
             return Ok(());
         };
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
+        let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
+        Ok(())
+    }
+
+    async fn sweep_after_exit_without_descendant_scan(&mut self) -> Result<(), ToolError> {
+        self.group_reap().await.map(|_| ())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn group_reap(&mut self) -> Result<Option<u32>, ToolError> {
+        let Some(pid) = self.leader_pid.take() else {
+            return Ok(None);
+        };
+        #[cfg(all(test, unix))]
         if let Some(ordering) = &self.test_ordering {
             ordering.note_sweep();
         }
         sweep_process_group(pid);
-        let outer = self
-            .child
+        self.child
             .wait()
             .await
-            .map_err(|error| process_failure(&error));
-        let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
-        outer.map(|_| ())
+            .map_err(|error| process_failure(&error))?;
+        Ok(Some(pid))
     }
 
     /// Reaps descendants the exited leader may have left running.
@@ -598,24 +619,33 @@ impl Proc {
     /// the leader is already reaped at every call site, and only a
     /// never-reaped child may keep its pid for the `Drop` sweep.
     #[cfg(not(target_os = "linux"))]
-    async fn sweep_after_exit(&mut self) -> Result<(), ToolError> {
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "the Windows sweep is synchronous; the Unix arm awaits the child"
+        )
+    )]
+    async fn group_reap(&mut self) -> Result<Option<u32>, ToolError> {
         #[cfg(windows)]
         // TerminateJobObject at once: the leader already exited, so this
         // only reaps descendants still holding pipes open.
         let _ = self.child.start_kill();
-        if let Some(pid) = self.leader_pid.take() {
-            #[cfg(test)]
-            if let Some(ordering) = &self.test_ordering {
-                ordering.note_sweep();
-            }
-            sweep_process_group(pid);
-            #[cfg(unix)]
-            self.child
-                .wait()
-                .await
-                .map_err(|error| process_failure(&error))?;
+        let Some(pid) = self.leader_pid.take() else {
+            return Ok(None);
+        };
+        #[cfg(all(test, unix))]
+        if let Some(ordering) = &self.test_ordering {
+            ordering.note_sweep();
         }
-        Ok(())
+        sweep_process_group(pid);
+        #[cfg(unix)]
+        self.child
+            .wait()
+            .await
+            .map_err(|error| process_failure(&error))?;
+        Ok(Some(pid))
     }
 }
 
@@ -685,8 +715,7 @@ pub(crate) fn spawn_process(
     jobs_dir: &Path,
     env_snapshot: &[(OsString, OsString)],
     launcher: &Launcher,
-    process_permit: Permit,
-    fd_permit: Option<FdPermit>,
+    lease: ProcessLease,
 ) -> Result<Proc, ToolError> {
     check_spawn_request(argv, &opts, approved, &call, preview_digest)?;
     let stdout_prefix_limit = opts.stdout_prefix_limit;
@@ -777,8 +806,7 @@ pub(crate) fn spawn_process(
         job,
         log_path,
         launcher_profile,
-        process_permit: Some(process_permit),
-        fd_permit,
+        lease: Some(lease),
         capture: Some(capture),
         live_tail: tail_rx,
         progress: None,
@@ -787,7 +815,7 @@ pub(crate) fn spawn_process(
         timeout,
         started_at: Instant::now(),
         result: None,
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         test_ordering: None,
     })
 }

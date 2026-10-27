@@ -474,10 +474,11 @@ pub(crate) fn platform_temp(vars: &BTreeMap<OsString, OsString>, home: &Path) ->
     #[cfg(windows)]
     {
         for name in ["TMP", "TEMP"] {
-            if let Some(dir) = vars.get(OsStr::new(name)) {
-                if !dir.is_empty() && Path::new(dir).is_absolute() {
-                    return PathBuf::from(dir);
-                }
+            if let Some(dir) = vars.get(OsStr::new(name))
+                && !dir.is_empty()
+                && Path::new(dir).is_absolute()
+            {
+                return PathBuf::from(dir);
             }
         }
         home.join("AppData").join("Local").join("Temp")
