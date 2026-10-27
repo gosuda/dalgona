@@ -288,7 +288,7 @@ async fn on_batch(
     let refusal = if version == AcpVersion::V1 {
         Err("batches are not supported".to_owned())
     } else {
-        match sonic_rs::from_str::<Vec<Value>>(line) {
+        match crate::json::parse_value_seq_lossless(line) {
             Ok(items) if items.is_empty() => Err("batch is empty".to_owned()),
             Ok(items) => Ok(items),
             Err(error) => Err(format!("frame is not valid JSON: {error}")),

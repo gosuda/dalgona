@@ -55,6 +55,7 @@ fn assistant(content: Vec<Block>, stop: AssistantStop) -> EntryKind {
     EntryKind::Assistant {
         api: Family::Anthropic,
         model: "m".into(),
+        provider: None,
         route: Some(AssistantRoute::Api(Family::Anthropic)),
         content,
         usage: usage(),

@@ -21,12 +21,13 @@ use dal_wire::router::RouterOptions;
 use dal_wire::token::{TokenError, create_token, load_token};
 #[cfg(unix)]
 use dal_wire::{ConnectionFuture, LocalSocketError, default_rpc_path, serve_local};
-use dal_wire::{
-    MemoryPeer, MemoryTransport, RemoteEndpoint, RemoteHost, Transport, serve_acp, serve_codex,
-    serve_router, serve_rpc,
-};
+use dal_wire::{MemoryPeer, MemoryTransport, serve_acp, serve_codex, serve_router, serve_rpc};
+#[cfg(unix)]
+use dal_wire::{RemoteEndpoint, RemoteHost, Transport};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 type Result<T, E = Box<dyn Error + Send + Sync>> = std::result::Result<T, E>;
@@ -823,6 +824,7 @@ async fn websocket_server_pings_an_idle_client() -> Result<()> {
 // --- Reconnect ownership: identity, backoff, resubscribe ---------------------
 
 /// One `initialize` observed by the scripted fake RPC server.
+#[cfg(unix)]
 #[derive(Debug)]
 struct ObservedInit {
     name: String,
@@ -831,6 +833,7 @@ struct ObservedInit {
 
 /// Answers one handshake, records the client identity, and returns the
 /// result every `session/list` caller needs.
+#[cfg(unix)]
 fn init_reply(id: &Value) -> Value {
     sonic_rs::json!({"jsonrpc": "2.0", "id": id, "result": {
         "protocolVersion": 1,
@@ -840,6 +843,7 @@ fn init_reply(id: &Value) -> Value {
     }})
 }
 
+#[cfg(unix)]
 fn record_init(frame: &Value) -> ObservedInit {
     let name = frame["params"]["clientInfo"]["name"]
         .as_str()
@@ -857,6 +861,7 @@ fn record_init(frame: &Value) -> ObservedInit {
 }
 
 /// Reads one non-blank client frame; `None` once the client goes away.
+#[cfg(unix)]
 async fn next_frame(
     lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
 ) -> Result<Option<Value>> {
@@ -870,6 +875,7 @@ async fn next_frame(
     }
 }
 
+#[cfg(unix)]
 async fn send_frame(writer: &mut tokio::net::unix::OwnedWriteHalf, frame: &Value) -> Result<()> {
     let mut text = sonic_rs::to_string(frame)?;
     text.push('\n');
@@ -880,6 +886,7 @@ async fn send_frame(writer: &mut tokio::net::unix::OwnedWriteHalf, frame: &Value
 /// A minimal scripted version-1 server: the first connection drops right
 /// after its handshake to force a client reconnect; the second answers
 /// `session/list` and holds until the client goes away.
+#[cfg(unix)]
 async fn fake_rpc_server(
     listener: tokio::net::UnixListener,
     inits: std::sync::Arc<tokio::sync::Mutex<Vec<ObservedInit>>>,

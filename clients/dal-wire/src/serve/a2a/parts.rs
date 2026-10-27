@@ -170,10 +170,10 @@ pub(crate) fn question_text(question: &Question) -> String {
 ///
 /// Returns an internal failure when the question cannot be encoded.
 pub(crate) fn question_parts(request: &Request) -> Result<Value, Fail> {
-    let question =
-        sonic_rs::to_value(&request.question).map_err(|error| Fail::internal(error.to_string()))?;
-    let default =
-        sonic_rs::to_value(&request.default).map_err(|error| Fail::internal(error.to_string()))?;
+    let question = crate::json::encode_value_lossless(&request.question)
+        .map_err(|error| Fail::internal(error.to_string()))?;
+    let default = crate::json::encode_value_lossless(&request.default)
+        .map_err(|error| Fail::internal(error.to_string()))?;
     Ok(sonic_rs::json!([
         {"text": question_text(&request.question)},
         {"data": {

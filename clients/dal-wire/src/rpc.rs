@@ -673,6 +673,7 @@ pub(crate) const fn family_label(family: dal_core::Family) -> &'static str {
         dal_core::Family::GoogleGenerativeAi => "google-generative-ai",
         dal_core::Family::GoogleVertex => "google-vertex",
         dal_core::Family::GoogleGeminiCli => "google-gemini-cli",
+        dal_core::Family::GoogleCloudCodeAssist => "google-cloud-code-assist",
         dal_core::Family::GoogleAntigravity => "google-antigravity",
         dal_core::Family::Mistral => "mistral",
         dal_core::Family::Ollama => "ollama",

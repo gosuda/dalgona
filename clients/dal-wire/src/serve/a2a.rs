@@ -216,7 +216,7 @@ fn rest_body(body: &[u8]) -> Result<Value, Fail> {
     if text.trim().is_empty() {
         return Ok(sonic_rs::json!({}));
     }
-    let value: Value = sonic_rs::from_str(text)
+    let value: Value = crate::json::parse_value_lossless(text)
         .map_err(|error| Fail::invalid(format!("request body is not valid JSON: {error}")))?;
     if value.is_object() {
         Ok(value)

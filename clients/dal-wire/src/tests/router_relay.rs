@@ -553,27 +553,15 @@ async fn messages_relay_keeps_one_block_open_for_interleaved_calls() {
     assert_eq!(lines, expected);
 }
 
-/// Every API family with its wire namespace.
-fn api_families() -> [(Family, &'static str); 16] {
-    [
-        (Family::Chat, "openai-chat"),
-        (Family::Responses, "openai-responses"),
-        (Family::Codex, "openai-codex"),
-        (Family::Anthropic, "anthropic"),
-        (Family::Bedrock, "bedrock"),
-        (Family::Cursor, "cursor"),
-        (Family::Devin, "devin"),
-        (Family::Droid, "droid"),
-        (Family::GitLab, "gitlab"),
-        (Family::GoogleGenerativeAi, "google-generative-ai"),
-        (Family::GoogleVertex, "google-vertex"),
-        (Family::GoogleGeminiCli, "google-gemini-cli"),
-        (Family::GoogleAntigravity, "google-antigravity"),
-        (Family::Mistral, "mistral"),
-        (Family::Ollama, "ollama"),
-        (Family::PiMessages, "radius"),
-    ]
+/// Every API family with its wire namespace, read from the source's own
+/// list so a new family joins every loop below without a second copy.
+fn api_families() -> [(Family, &'static str); API_FAMILY_COUNT] {
+    Family::ALL.map(|family| (family, family.route_prefix()))
 }
+
+/// The number of families, so the array type above tracks [`Family::ALL`]
+/// without naming a count.
+const API_FAMILY_COUNT: usize = Family::ALL.len();
 
 fn api_route(family: Family) -> ModelRoute {
     ModelRoute::Api {

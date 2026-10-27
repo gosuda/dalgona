@@ -12,6 +12,8 @@ pub mod acp;
 pub mod codex;
 /// Wire error and server lifecycle error types.
 pub mod error;
+/// Lossless JSON envelope parsing shared by every wire transport.
+mod json;
 /// JSON-RPC envelope decoding and encoding.
 pub mod jsonrpc;
 /// Protocol version, capability negotiation, schema, and prompt helpers.

@@ -366,7 +366,18 @@ async fn commands_beyond_the_old_allowlist_run_over_rpc() {
                 }),
             )
             .await;
-        assert_eq!(result(&scoped), &done);
+        // The rig host has no user `dal.toml`, so the scope changes the
+        // session and the reply says the save did not persist.
+        assert_eq!(
+            result(&scoped),
+            &sonic_rs::json!({
+                "type": "done",
+                "output": {
+                    "type": "text",
+                    "value": "Scoped models cleared for this session. It did not persist: cannot save dal.toml: no config path.",
+                },
+            })
+        );
         let queued = rpc
             .call(
                 4,

@@ -63,8 +63,7 @@ pub(super) fn decode<T: DeserializeOwned>(value: &Value, what: &str) -> Result<T
 
 /// Encodes one serde value as a wire value.
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<Value, WireError> {
-    let text = sonic_rs::to_string(value).map_err(|_| WireError::Frame)?;
-    sonic_rs::from_str(&text).map_err(|_| WireError::Frame)
+    crate::json::encode_value_lossless(value).map_err(|_| WireError::Frame)
 }
 
 /// Reads one required string member.
