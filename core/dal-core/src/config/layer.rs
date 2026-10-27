@@ -1,5 +1,5 @@
 use super::limits::parse_plugin_limits;
-use super::parse::parse_layer;
+use super::parse::{SCOPED_MODELS_EXPECTED, parse_layer};
 use super::partial::{
     ParsedLayer, PartialGuard, PartialGuardBands, PartialGuardPolicies, PartialPrice,
 };
@@ -131,6 +131,13 @@ impl Config {
     #[must_use]
     pub fn approval(&self) -> ApprovalMode {
         self.approval
+    }
+
+    /// Returns the ordered `provider/id` models `/model` lists; empty lists
+    /// every model.
+    #[must_use]
+    pub fn scoped_models(&self) -> &[Box<str>] {
+        &self.scoped_models
     }
 
     /// Returns the configured terminal screen.
@@ -351,6 +358,42 @@ impl Config {
         Ok(document.to_string())
     }
 
+    /// Rewrites the user's `scoped_models` list in place, preserving decor.
+    ///
+    /// The list is written in the order given; an empty list writes `[]`,
+    /// which clears the scope for the next start.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidValue`] for an empty id (the next start
+    /// could not load it) or an existing value that is not an array, and
+    /// [`ConfigError::Syntax`] when the user TOML does not parse.
+    pub fn update_scoped_models(
+        &mut self,
+        ids: &[Box<str>],
+        user_toml: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        if ids.iter().any(|id| id.is_empty()) {
+            return Err(invalid_value("scoped_models", "", SCOPED_MODELS_EXPECTED));
+        }
+        let document =
+            super::settings::edit_user_value(
+                user_toml,
+                "scoped_models",
+                |existing| match existing {
+                    Some(value) if !value.is_array() => Err(invalid_value(
+                        "scoped_models",
+                        value.to_string(),
+                        SCOPED_MODELS_EXPECTED,
+                    )),
+                    _ => Ok(toml_edit::Value::Array(
+                        ids.iter().map(AsRef::<str>::as_ref).collect(),
+                    )),
+                },
+            )?;
+        self.scoped_models = ids.to_vec();
+        Ok(document)
+    }
+
     /// Returns settings for the local control endpoint.
     #[must_use]
     pub fn serve(&self) -> &ServeConfig {
@@ -528,6 +571,7 @@ impl Config {
             model: None,
             thinking: crate::model::ThinkingLevel::Medium,
             approval: ApprovalMode::Ask,
+            scoped_models: Vec::new(),
             screen: Screen::Inline,
             theme: Box::<str>::from("auto"),
             sandbox: false,
@@ -580,6 +624,7 @@ impl Config {
         if let Some(value) = layer.approval.take() {
             self.approval = value;
         }
+        replace_if_present(&mut self.scoped_models, layer.scoped_models.take());
         if let Some(value) = layer.screen.take() {
             self.screen = value;
         }

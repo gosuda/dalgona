@@ -3,13 +3,12 @@ use super::{DATA_ROOT, load};
 use crate::ext::{NativeOp, OpId, OpSet};
 use std::fmt::Write as _;
 use std::path::Path;
-
 fn sixty_four_ids() -> Vec<String> {
     let mut ids: Vec<String> = NativeOp::ALL
         .iter()
         .map(|op| op.as_str().to_string())
         .collect();
-    for n in 0..36 {
+    for n in ids.len()..64 {
         ids.push(format!("tools.p{n:02}.l"));
     }
     ids
@@ -48,7 +47,7 @@ fn eval_accepts_exactly_64_ids() {
     assert_eq!(config.eval_uses().iter().count(), 64);
     let read = OpId::parse("tools.read").expect("native id parses");
     assert!(config.eval_uses().contains(&read));
-    let export = OpId::parse("tools.p00.l").expect("export id parses");
+    let export = OpId::parse("tools.p30.l").expect("export id parses");
     assert!(config.eval_uses().contains(&export));
 }
 
