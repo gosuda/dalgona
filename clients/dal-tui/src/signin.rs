@@ -598,7 +598,14 @@ fn url_chunks(url: &str, width: usize, mode: WidthMode) -> Vec<String> {
 /// providers list one row per method carrying that method, so device
 /// sign-in stays selectable without a typed method argument.
 pub(crate) fn login_picker(filter: &str) -> PickerUi {
-    let options = login_providers()
+    let mut defs = login_providers();
+    // An exact provider id in the filter answers the pick: it is listed first
+    // so Enter cannot activate a longer id that merely contains it.
+    if !filter.is_empty() {
+        let needle = filter.to_lowercase();
+        defs.sort_by_key(|def| def.id != needle);
+    }
+    let options = defs
         .iter()
         .flat_map(|def| {
             let methods: Vec<Method> = def.methods().collect();
