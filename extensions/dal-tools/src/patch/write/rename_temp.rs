@@ -314,7 +314,7 @@ mod platform {
         FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
-    /// Holding all directory handles without FILE_SHARE_DELETE prevents a
+    /// Holding all directory handles without `FILE_SHARE_DELETE` prevents a
     /// parent from being replaced between validation and publication.
     /// The handles pin directories only; access mode 0 requests no data
     /// access, so a parent the caller can write but not read still opens.
@@ -450,6 +450,10 @@ mod platform {
             }
         }
 
+        #[expect(
+            clippy::unused_self,
+            reason = "directory handles pin parents against replacement with access 0 so cannot be flushed; durability comes from the staged file sync; &self keeps the Unix call signature"
+        )]
         pub(crate) fn sync_dir(&self) {}
     }
 }
@@ -644,6 +648,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixture: std has no junction API; cmd mklink is scoped to this Windows test"
+    )]
     fn linked_workspace_root_is_resolved_once() {
         let root = tempfile::tempdir().expect("test root");
         let real = root.path().join("real");

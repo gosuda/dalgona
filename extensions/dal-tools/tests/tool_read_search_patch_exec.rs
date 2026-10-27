@@ -27,7 +27,9 @@
     reason = "tool boundary tests fail loudly at their setup boundary"
 )]
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dal_agent::ext::services::ServiceFuture;
