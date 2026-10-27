@@ -141,6 +141,7 @@ fn assistant_pair(id: u64) -> Vec<Record> {
             kind: EntryKind::Assistant {
                 api: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Chat)),
                 content: vec![Block::ToolCall {
                     id: CallId::new(format!("call-{id}")),

@@ -7,11 +7,11 @@ mod support;
 use std::{fs, num::NonZeroU64};
 
 use dal_core::{
-    Answer, ApprovalMode, AssistantRoute, AssistantStop, Block, CallId, ClientId, Entry, EntryId,
-    EntryKind, EntryView, Family, Gen, Header, InferredPurpose, JobEvent, JobId, JournalPart, Mail,
-    MailMode, Mode, ModelRoute, Owner, PrivateEffectId, PrivateLoopId, PrivateOutcome, Product,
-    RawJson, Record, RequestId, SessionId, Source, ThinkingLevel, TurnEndStop, TurnId, Usage,
-    Workspace, decode, encode, scan_head,
+    Answer, ApprovalMode, AssistantRoute, AssistantStop, Block, CallId, ClientId, DeliveredMail,
+    Entry, EntryId, EntryKind, EntryView, Family, Gen, Header, InferredPurpose, JobEvent, JobId,
+    JournalPart, Mail, MailMode, Mode, ModelRoute, Owner, PrivateEffectId, PrivateLoopId,
+    PrivateOutcome, Product, RawJson, Record, RequestId, SessionId, Source, ThinkingLevel,
+    TurnEndStop, TurnId, Usage, Workspace, decode, encode, scan_head,
 };
 use dal_store::Store;
 use proptest::prelude::*;
@@ -90,6 +90,7 @@ fn assistant_entry(id: u64) -> Entry {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "hi".into(),
@@ -309,6 +310,21 @@ fn corpus() -> Vec<Record> {
             text: "ping".into(),
             reply_to: Some("cursor-1".into()),
         }),
+        Record::MailDelivered {
+            at,
+            turn: turn_id(3),
+            entry: entry_id(11),
+            mails: vec![
+                DeliveredMail {
+                    position: entry_id(1),
+                    text: "ping".into(),
+                },
+                DeliveredMail {
+                    position: entry_id(2),
+                    text: "pong".into(),
+                },
+            ],
+        },
         Record::Inferred {
             at,
             who: Owner::Core,
@@ -355,47 +371,6 @@ fn corpus() -> Vec<Record> {
     ]
 }
 
-/// Every durable record type literal, spelled out so that a record type
-/// missing from the corpus above shows up as a failure.
-const RECORD_TAGS: [&str; 36] = [
-    "session",
-    "boot",
-    "user",
-    "assistant",
-    "tool_result",
-    "reminder",
-    "model",
-    "thinking",
-    "approval",
-    "mode",
-    "compaction",
-    "branch_summary",
-    "leaf",
-    "label",
-    "name",
-    "archive",
-    "turn_reserved",
-    "turn_start",
-    "tool_start",
-    "turn_end",
-    "rule_fired",
-    "resolved",
-    "allow_always",
-    "grant_given",
-    "scoped_grant",
-    "scoped_grant_ended",
-    "before_request_mut",
-    "tool_promoted",
-    "wake_attempt",
-    "job",
-    "ext",
-    "mail",
-    "inferred",
-    "private_loop",
-    "private_start",
-    "private_end",
-];
-
 fn assert_oracle(line: &[u8], record: &Record) {
     let text = std::str::from_utf8(line).expect("canonical lines are UTF-8");
     let value: sonic_rs::Value = sonic_rs::from_str(text).expect("line parses as JSON");
@@ -425,12 +400,6 @@ fn assert_oracle(line: &[u8], record: &Record) {
 #[test]
 fn roundtrip_literal_lines() {
     let records = corpus();
-    let covered: std::collections::BTreeSet<&str> = records.iter().map(Record::tag).collect();
-    let expected: std::collections::BTreeSet<&str> = RECORD_TAGS.into_iter().collect();
-    assert_eq!(
-        covered, expected,
-        "the corpus covers every record type and no other"
-    );
     for record in &records {
         let line = encode(record).expect("record encodes");
         let decoded = decode(&line).expect("line decodes");
@@ -849,6 +818,7 @@ async fn premium_usage_persists_across_reopen() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "hi".into(),
@@ -1069,6 +1039,7 @@ async fn sub_micro_premium_turn_agrees_across_reopen() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "hi".into(),

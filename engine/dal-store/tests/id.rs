@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use dal_core::SessionId;
+use uuid::{Timestamp, Uuid};
 
 fn shape(text: &str) {
     assert_eq!(text.len(), 36, "canonical UUID text is 36 characters");
@@ -180,4 +181,45 @@ fn parse_accepts_exactly_the_rfc4122_variant_nibbles() {
             .unwrap_or_else(|error| panic!("variant nibble {nibble} must parse: {error}"));
         assert_eq!(id.to_string(), text, "variant nibble {nibble} round-trips");
     }
+}
+
+/// Seeded `UUIDv7` generation orders by timestamp: the deterministic half of
+/// the shape-and-order contract. Wall-clock sampling lives in
+/// `uuidv7_id_shape`; burst uniqueness lives in
+/// `burst_of_ids_is_unique_strictly_increasing_and_round_trips`.
+#[test]
+fn uuidv7_id_shape_and_order() {
+    // Explicit 42-bit counters sit above the random tail, so two ids minted
+    // in the same millisecond order by counter and a later millisecond always
+    // orders after, regardless of the random bits.
+    let earlier_same_ms = Timestamp::from_unix_time(1_700_000_000, 0, 1, 42);
+    let later_same_ms = Timestamp::from_unix_time(1_700_000_000, 0, 2, 42);
+    let later_ms = Timestamp::from_unix_time(1_700_000_001, 0, 1, 42);
+    let texts = [
+        Uuid::new_v7(earlier_same_ms).hyphenated().to_string(),
+        Uuid::new_v7(later_same_ms).hyphenated().to_string(),
+        Uuid::new_v7(later_ms).hyphenated().to_string(),
+    ];
+    for text in &texts {
+        shape(text);
+        assert_eq!(
+            SessionId::parse(text)
+                .expect("seeded v7 id parses")
+                .to_string(),
+            *text,
+            "parse round-trips the seeded id"
+        );
+    }
+    assert!(
+        texts[0] < texts[1],
+        "same-millisecond ids order by counter: {} before {}",
+        texts[0],
+        texts[1]
+    );
+    assert!(
+        texts[1] < texts[2],
+        "a later timestamp orders after: {} before {}",
+        texts[1],
+        texts[2]
+    );
 }

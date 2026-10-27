@@ -53,6 +53,7 @@ fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: calls
                 .iter()
@@ -817,6 +818,7 @@ async fn clone_preserves_assistant_replay_verbatim() {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: "test-model".into(),
+            provider: None,
             route: Some(AssistantRoute::Api(Family::Chat)),
             content: vec![Block::Text {
                 text: "kept".into(),
@@ -937,6 +939,7 @@ async fn cancelled_message_rejects_tool_call() {
             kind: EntryKind::Assistant {
                 api: Family::Chat,
                 model: "test-model".into(),
+                provider: None,
                 route: Some(AssistantRoute::Api(Family::Chat)),
                 content: vec![Block::ToolCall {
                     id: CallId::new("x"),
@@ -1008,8 +1011,14 @@ async fn ephemeral_session_leaves_no_trace() {
 
 #[tokio::test]
 async fn fork_and_clone_edge_matrix() {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            unused_variables,
+            reason = "temp dir keep-alive; path read only on linux"
+        )
+    )]
     let (temp, store) = setup("life-fork");
-    let data_root = temp.path().join("data");
     let id = SessionId::new_v7();
     let mut journal = store.create_session(id);
     journal
@@ -1157,6 +1166,7 @@ async fn fork_and_clone_edge_matrix() {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
+        let data_root = temp.path().join("data");
         let blob_name = dal_core::BlobId::parse(&digest)
             .expect("digest parses")
             .to_string();
@@ -1234,6 +1244,111 @@ async fn mail_records_reopen_in_append_order() {
         mail,
         vec![("one".to_owned(), from, id), ("two".to_owned(), from, id)],
         "mail reopens in append order with its sender and recipient"
+    );
+}
+
+/// Mail reads from one journal byte-offset cursor are repeatable: two reads
+/// return the same records and next cursor, including after close and
+/// reopen. `Journal` exposes no byte-offset read call, so this uses the
+/// closest cursor contract: the durable `Receipt` is the byte-offset cursor
+/// naming a batch in `journal.jsonl`, and reads seek the session file to
+/// that cursor. Line framing comes from the public codec (`encode` writes
+/// one LF-terminated line per record; `decode` reads one line), and the
+/// cursor itself selects the bytes, so ignoring it reads the wrong batch.
+#[tokio::test]
+async fn mail_cursor_reads_without_consuming() {
+    let (_temp, store) = setup("life-mail-cursor-reread");
+    let id = SessionId::new_v7();
+    let peer = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    let user_receipt = match journal
+        .append(vec![user(1, "start")])
+        .await
+        .expect("user appends")
+    {
+        dal_store::AppendOutcome::Durable(receipt) => receipt,
+        outcome => panic!("user append must be durable, got {outcome:?}"),
+    };
+    let mail = |text: &str| {
+        Record::Mail(dal_core::Mail {
+            at: timestamp(),
+            from: peer,
+            to: id,
+            mode: dal_core::MailMode::NextTurn,
+            text: text.into(),
+            reply_to: None,
+        })
+    };
+    let mail_receipt = match journal
+        .append(vec![mail("one"), mail("two")])
+        .await
+        .expect("mail appends")
+    {
+        dal_store::AppendOutcome::Durable(receipt) => receipt,
+        outcome => panic!("mail append must be durable, got {outcome:?}"),
+    };
+    assert_eq!(
+        mail_receipt.offset,
+        user_receipt.offset + user_receipt.len,
+        "receipts are byte-offset cursors: the mail batch starts where the user batch ended"
+    );
+    // Reads the mail texts in the journal byte range [cursor, end),
+    // returning them with the next cursor.
+    let read_range = |cursor: u64, end: u64| {
+        let bytes = fs::read(store.session_file(id)).expect("journal file reads");
+        let start = usize::try_from(cursor).expect("cursor fits in memory");
+        let stop = usize::try_from(end).expect("end fits in memory");
+        let mut mails = Vec::new();
+        for line in bytes[start..stop]
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            if let Record::Mail(mail) = dal_core::decode(line).expect("journal line decodes").record
+            {
+                mails.push(mail.text.to_string());
+            }
+        }
+        (mails, end)
+    };
+    let file_len = || {
+        u64::try_from(
+            fs::read(store.session_file(id))
+                .expect("journal file reads")
+                .len(),
+        )
+        .expect("journal fits in memory")
+    };
+    let expected = vec!["one".to_owned(), "two".to_owned()];
+    let end = mail_receipt.offset + mail_receipt.len;
+    let first = read_range(mail_receipt.offset, end);
+    assert_eq!(first.0, expected, "first read returns both mails in order");
+    let second = read_range(mail_receipt.offset, end);
+    assert_eq!(
+        second, first,
+        "second read from the same cursor returns the same records and next cursor"
+    );
+    assert!(
+        read_range(end, file_len()).0.is_empty(),
+        "the next cursor advances past the mail: nothing follows the batch yet"
+    );
+    journal.close().await.expect("session closes");
+    let (_reopened, _) = store.open_session(id).await.expect("session reopens");
+    let reread = read_range(mail_receipt.offset, end);
+    assert_eq!(
+        reread.0, expected,
+        "mail re-reads from the same cursor after reopen in append order"
+    );
+    assert_eq!(
+        reread.1, first.1,
+        "the next cursor is unchanged after close and reopen"
+    );
+    assert!(
+        file_len() > end,
+        "reopen appends its recovery boot past the cursor"
+    );
+    assert!(
+        read_range(end, file_len()).0.is_empty(),
+        "the cursor still advances past the mail after reopen"
     );
 }
 

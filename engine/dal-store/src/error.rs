@@ -176,7 +176,9 @@ pub enum JournalError {
     /// A named file operation failed.
     #[error("{op} {}: {source}", .path.display())]
     Io {
-        /// One of `create`, `open`, `write`, `sync`, `truncate`, `read`, `quarantine`.
+        /// One of `create`, `open`, `write`, `sync`, `truncate`, `read`, `quarantine`,
+        /// `admit` (shard queue admission timed out), or `register` (the shard
+        /// worker did not acknowledge a journal registration in time).
         op: &'static str,
         /// The path of the failed call.
         path: PathBuf,
