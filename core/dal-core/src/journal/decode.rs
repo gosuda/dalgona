@@ -1,7 +1,7 @@
 use super::scan::{Member, Members, scan_items, scan_members};
 use super::{
-    Block, CallId, DecodeError, Deserialize, EntryId, InferredPurpose, JournalPart, ModelRoute,
-    NonZeroU64, Owner, RawJson, Usage,
+    Block, CallId, DecodeError, DeliveredMail, Deserialize, EntryId, InferredPurpose, JournalPart,
+    ModelRoute, NonZeroU64, Owner, RawJson, Usage,
 };
 
 // Decode side: one member scan, `"v"` before `"type"`. Record members a
@@ -225,6 +225,38 @@ pub(super) fn decode_part(value: &str, offset: usize) -> Result<JournalPart, Dec
         }),
         (kind, _) => Err(invalid(offset, format!("unknown part type `{kind}`"))),
     }
+}
+
+pub(super) fn delivered_mails_member(
+    member: &Member<'_>,
+) -> Result<Vec<DeliveredMail>, DecodeError> {
+    let (offset, raw) = (member.offset, member.value);
+    let mut mails = Vec::new();
+    for (item_offset, item) in scan_items(raw, offset)? {
+        mails.push(decode_delivered_mail(item, item_offset)?);
+    }
+    Ok(mails)
+}
+
+/// Reads one delivered mail: exactly `position` plus `text`. Unknown
+/// members are invalid, so an ack never grows silent extra payloads.
+pub(super) fn decode_delivered_mail(
+    value: &str,
+    offset: usize,
+) -> Result<DeliveredMail, DecodeError> {
+    let mut members = object_members(value, offset, &["position", "text"])?;
+    let position = want(&mut members, "position")
+        .map(|member| entry_id_member(&member, "position"))
+        .transpose()?
+        .ok_or_else(|| invalid(offset, "a delivered mail needs a `position` member"))?;
+    let text = want(&mut members, "text")
+        .map(|member| text_member(&member, "text"))
+        .transpose()?
+        .ok_or_else(|| invalid(offset, "a delivered mail needs a `text` member"))?;
+    if !members.is_empty() {
+        return Err(invalid(offset, "unknown member in a delivered mail"));
+    }
+    Ok(DeliveredMail { position, text })
 }
 
 pub(super) fn blocks_member(member: &Member<'_>) -> Result<Vec<Block>, DecodeError> {

@@ -116,6 +116,10 @@ pub(super) struct AssistantWire<'a> {
     pub(super) at: TsWire<'a>,
     pub(super) api: Family,
     pub(super) model: &'a str,
+    /// The configured provider id, written only when the response names one so
+    /// provider-less records keep their exact bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<&'a str>,
     pub(super) content: AssistantBlocksWire<'a>,
     pub(super) usage: UsageWire<'a>,
     pub(super) stop: AssistantStopWire<'a>,
@@ -466,6 +470,21 @@ pub(super) struct MailRecordWire<'a> {
     pub(super) mode: MailMode,
     pub(super) text: &'a str,
     pub(super) reply_to: &'a Option<Box<str>>,
+}
+
+#[derive(Serialize)]
+pub(super) struct MailDeliveredWire<'a> {
+    pub(super) r#type: &'static str,
+    pub(super) at: TsWire<'a>,
+    pub(super) turn: TurnId,
+    pub(super) entry: EntryId,
+    pub(super) mails: &'a [DeliveredMailWire<'a>],
+}
+
+#[derive(Serialize)]
+pub(super) struct DeliveredMailWire<'a> {
+    pub(super) position: EntryId,
+    pub(super) text: &'a str,
 }
 
 #[derive(Serialize)]

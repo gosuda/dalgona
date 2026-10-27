@@ -43,6 +43,7 @@ impl Record {
             Self::Job { .. } => "job",
             Self::Ext { .. } => "ext",
             Self::Mail(_) => "mail",
+            Self::MailDelivered { .. } => "mail_delivered",
             Self::Inferred { .. } => "inferred",
             Self::PrivateLoop { .. } => "private_loop",
             Self::PrivateStart { .. } => "private_start",

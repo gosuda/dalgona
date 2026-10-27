@@ -73,6 +73,7 @@ fn assistant_entry(model: &str, route: Option<AssistantRoute>) -> Entry {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: model.into(),
+            provider: None,
             content: Vec::new(),
             usage: Usage {
                 input_tokens: 1,
@@ -1429,6 +1430,7 @@ fn assistant_with_replay(content: Vec<Block>, replay: Option<RawJson>) -> Record
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "m".into(),
+            provider: None,
             content,
             usage: Usage {
                 input_tokens: 1,
@@ -1487,6 +1489,7 @@ fn present_replay_payloads_survive_byte_for_byte() -> Result<(), Box<dyn std::er
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "m".into(),
+            provider: None,
             content: vec![
                 Block::Text {
                     text: "hi".into(),

@@ -1,7 +1,7 @@
 use super::{
-    Answer, CallId, ClientId, Entry, EntryId, FileChange, Gen, Header, InferredPurpose, JobEvent,
-    JobId, JournalPart, Mail, Owner, RawJson, RequestId, RouteError, TurnEndStop, TurnId, Usage,
-    fmt,
+    Answer, CallId, ClientId, DeliveredMail, Entry, EntryId, FileChange, Gen, Header,
+    InferredPurpose, JobEvent, JobId, JournalPart, Mail, Owner, RawJson, RequestId, RouteError,
+    TurnEndStop, TurnId, Usage, fmt,
 };
 use crate::id::{PrivateEffectId, PrivateLoopId};
 use crate::update::ResolutionCause;
@@ -241,6 +241,21 @@ pub enum Record {
     },
     /// A mailbox delivery.
     Mail(Mail),
+    /// Waiting `NextTurn` mail a turn start incorporated into its durable
+    /// input. One record is the whole delivery: it materializes the user
+    /// entry it names and consumes the mail positions it lists, so a crash
+    /// can neither split input from ack nor duplicate a delivery.
+    MailDelivered {
+        /// When the delivery was recorded.
+        at: jiff::Timestamp,
+        /// The turn whose input incorporated the mail.
+        turn: TurnId,
+        /// The user entry the delivery materializes into the tree; its
+        /// parent is the leaf this record appended after.
+        entry: EntryId,
+        /// The delivered mail, oldest first.
+        mails: Vec<DeliveredMail>,
+    },
     /// An attributed synthetic inner inference.
     Inferred {
         /// When the inference was recorded.

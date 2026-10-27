@@ -47,6 +47,7 @@ fn assistant_with_stop(stop: AssistantStop) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "m".into(),
+            provider: None,
             content: Vec::new(),
             usage: test_usage(),
             stop,
@@ -91,6 +92,7 @@ fn tool_call_id_survives_the_journal_codec() {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "m".into(),
+            provider: None,
             content: vec![Block::ToolCall {
                 id: CallId::new("toolu_01"),
                 name: "read".into(),

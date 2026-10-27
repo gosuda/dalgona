@@ -371,6 +371,16 @@ pub enum EntryKind {
         api: Family,
         /// The model identifier.
         model: Box<str>,
+        /// The configured provider id that served this response, when known.
+        ///
+        /// Legacy records predate the member: it is omitted when unknown
+        /// and absent means unattributed, never a default provider. A present
+        /// id is preserved exactly and never inferred from `api`, `model`,
+        /// or `route`; synthetic and harness routes must not name one.
+        /// An explicit `null`, an empty id, or a non-string is rejected
+        /// by the journal codec, like `route` and `replay`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<Box<str>>,
         /// The response content blocks.
         content: Vec<Block>,
         /// The normalized token usage.

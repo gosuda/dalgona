@@ -14,10 +14,10 @@ use std::num::NonZeroU64;
 
 use dal_core::{
     AssistantRoute, AssistantStop, BEFORE_TURN_SOURCE, BranchError, BranchMode, CallId,
-    DecodeError, EncodeError, Entry, EntryId, EntryKind, Family, Header, InferredPurpose,
-    JOURNAL_VERSION, JournalPart, MAX_RECORD, Mail, MailMode, ModelRoute, Owner, Product, RawJson,
-    Record, RequestId, ResolutionCause, SessionId, Source, Timestamp, TurnId, Usage, Workspace,
-    branch, decode, encode, scan_head,
+    DecodeError, DeliveredMail, EncodeError, Entry, EntryId, EntryKind, Family, Header,
+    InferredPurpose, JOURNAL_VERSION, JournalPart, MAX_RECORD, Mail, MailMode, ModelRoute, Owner,
+    Product, RawJson, Record, RequestId, ResolutionCause, SessionId, Source, Timestamp, TurnId,
+    Usage, Workspace, branch, decode, encode, scan_head,
 };
 
 fn nz(value: u64) -> NonZeroU64 {
@@ -83,6 +83,7 @@ fn assistant_record(model: &str, route: Option<AssistantRoute>) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: model.into(),
+            provider: None,
             content: Vec::new(),
             usage: usage(),
             stop: AssistantStop::Done,
@@ -417,6 +418,53 @@ fn mail_mode_is_a_closed_three_tag_set() {
 }
 
 #[test]
+fn mail_delivered_round_trips_and_validates_its_members() {
+    let record = Record::MailDelivered {
+        at: stamp(),
+        turn: tid(7),
+        entry: eid(6),
+        mails: vec![
+            DeliveredMail {
+                position: eid(1),
+                text: "one".into(),
+            },
+            DeliveredMail {
+                position: eid(2),
+                text: "two".into(),
+            },
+        ],
+    };
+    let line = encode(&record).expect("mail delivered encodes");
+    let text = std::str::from_utf8(&line).expect("utf8");
+    assert!(text.contains("\"type\":\"mail_delivered\""), "{text}");
+    assert!(text.contains("\"entry\":6"), "{text}");
+    assert!(
+        text.contains(
+            "\"mails\":[{\"position\":1,\"text\":\"one\"},{\"position\":2,\"text\":\"two\"}]"
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        decode(&line).expect("mail delivered decodes").record,
+        record
+    );
+    // Missing members, an empty mail, a zero position, an unknown nested
+    // member, and a null turn are invalid records, never defaults.
+    for bad in [
+        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6}"#,
+        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{}]}"#,
+        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":0,"text":"one"}]}"#,
+        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":1,"text":"one","extra":2}]}"#,
+        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":null,"entry":6,"mails":[{"position":1,"text":"one"}]}"#,
+    ] {
+        assert!(
+            matches!(decode(bad.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn leaf_to_none_is_valid_and_inferred_purpose_is_strict() {
     let record = Record::Leaf {
         at: stamp(),
@@ -535,6 +583,38 @@ fn known_routes_round_trip_and_check_the_model_grammar() {
     ));
 }
 
+// An old record keeps the local subprocess tag and the native tag is a
+// separate identity: each line reads back as its own family, with and without
+// a route member, and re-encodes byte for byte.
+#[test]
+fn gemini_cli_and_cloud_code_assist_journal_tags_stay_distinct() {
+    for (tag, family) in [
+        ("google-gemini-cli", Family::GoogleGeminiCli),
+        ("google-cloud-code-assist", Family::GoogleCloudCodeAssist),
+    ] {
+        for route_member in [String::new(), format!(",\"route\":{{\"api\":\"{tag}\"}}")] {
+            let line = assistant_line("gemini-3-pro", &route_member)
+                .replace("\"api\":\"anthropic\"", &format!("\"api\":\"{tag}\""));
+            let decoded = decode(line.as_bytes()).expect("google family line decodes");
+            let Record::Assistant(entry) = &decoded.record else {
+                panic!("expected assistant");
+            };
+            let EntryKind::Assistant { api, route, .. } = &entry.kind else {
+                panic!("expected assistant kind");
+            };
+            assert_eq!(*api, family);
+            assert_eq!(
+                *route,
+                (!route_member.is_empty()).then_some(AssistantRoute::Api(family))
+            );
+            assert_eq!(
+                encode(&decoded.record).expect("re-encode").as_slice(),
+                line.as_bytes()
+            );
+        }
+    }
+}
+
 #[test]
 fn present_null_and_malformed_routes_are_rejected() {
     for route in [
@@ -568,6 +648,7 @@ fn encode_rejects_empty_model_ids() {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "".into(),
+            provider: None,
             content: Vec::new(),
             usage: usage(),
             stop: AssistantStop::Done,
@@ -760,6 +841,7 @@ fn fork_rejects_non_user_anchors_and_unknown_ids() {
         kind: EntryKind::Assistant {
             api: Family::Anthropic,
             model: "dalgona/fusion".into(),
+            provider: None,
             content: Vec::new(),
             usage: usage(),
             stop: AssistantStop::Done,

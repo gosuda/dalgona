@@ -62,7 +62,7 @@ pub use branch::{Branch, BranchError, BranchMode, branch};
 pub use decode_records::{decode, scan_head};
 pub use encode::encode;
 pub(crate) use encode::encoded_len;
-pub use entries::{Entry, InferredPurpose, JobEvent, JobKind, JobOutcome, Mail};
+pub use entries::{DeliveredMail, Entry, InferredPurpose, JobEvent, JobKind, JobOutcome, Mail};
 pub use records::{
     DecodeError, Decoded, EncodeError, PrivateOutcome, Record, ScannedHead, TreeKind,
 };

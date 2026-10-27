@@ -1,8 +1,9 @@
 use super::decode::{
-    blocks_member, bool_member, entry_id_member, i32_member, invalid, is_null, json_member,
-    model_id_member, model_route_members, need, object_members, opt_entry_id_member,
-    opt_raw_json_member, opt_text_member, opt_usage_with_premium, owner_member, parts_member,
-    purpose_member, raw_json_member, text_member, u64_member, usage_with_premium, want,
+    blocks_member, bool_member, delivered_mails_member, entry_id_member, i32_member, invalid,
+    is_null, json_member, model_id_member, model_route_members, need, object_members,
+    opt_entry_id_member, opt_raw_json_member, opt_text_member, opt_usage_with_premium,
+    owner_member, parts_member, provider_id_member, purpose_member, raw_json_member, text_member,
+    u64_member, usage_with_premium, want,
 };
 use super::scan::{Member, Members};
 use super::{
@@ -518,6 +519,7 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
             | "before_request_mut"
             | "tool_promoted"
             | "wake_attempt"
+            | "mail_delivered"
     ) {
         return None;
     }
@@ -592,6 +594,12 @@ fn decode_control(kind: &str, members: &mut Members<'_>) -> Option<Result<Record
                     Some(member) => json_member(&member)?,
                     None => Vec::new(),
                 },
+            }),
+            "mail_delivered" => Ok(Record::MailDelivered {
+                at: json_member(&need(members, "at")?)?,
+                turn: json_member(&need(members, "turn")?)?,
+                entry: entry_id_member(&need(members, "entry")?, "entry")?,
+                mails: delivered_mails_member(&need(members, "mails")?)?,
             }),
             _ => unreachable!("the tag filter above admits only this group's kinds"),
         }
@@ -782,9 +790,26 @@ pub(super) fn decode_entry_kind(
             let route = want(members, "route")
                 .map(|member| assistant_route_member(&member, &model))
                 .transpose()?;
+            let provider_member = want(members, "provider");
+            let provider_offset = provider_member.as_ref().map(|member| member.offset);
+            let provider = provider_member
+                .map(|member| provider_id_member(&member))
+                .transpose()?;
+            if provider.is_some()
+                && matches!(
+                    route,
+                    Some(AssistantRoute::Synthetic | AssistantRoute::Harness)
+                )
+            {
+                return Err(invalid(
+                    provider_offset.unwrap_or(0),
+                    "member `provider` cannot appear with a synthetic or harness route",
+                ));
+            }
             EntryKind::Assistant {
                 api: json_member(&need(members, "api")?)?,
                 model,
+                provider,
                 content: blocks_member(&need(members, "content")?)?,
                 usage: usage_with_premium(members)?,
                 stop: assistant_stop_member(&need(members, "stop")?)?,
