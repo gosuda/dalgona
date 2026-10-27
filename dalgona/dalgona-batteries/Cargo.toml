@@ -44,6 +44,10 @@ shuttle.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 unicode-segmentation = "=1.13.3"
 
+[[test]]
+name = "tools"
+path = "tests/tools/main.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

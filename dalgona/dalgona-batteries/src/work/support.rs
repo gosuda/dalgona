@@ -498,6 +498,18 @@ impl ScriptedWorkHost {
         (snapshot.quiet, snapshot.text.map(Into::into))
     }
 
+    /// Samples the plan status the way the runtime sweep does: one fold over
+    /// the leaf records feeds the human text and the structured payload.
+    pub(crate) fn sample(&self) -> dal_agent::ext::StatusSample {
+        let bodies = self.services.leaf_bodies(todo::TODO_KIND);
+        let items = todo::fold(bodies.as_slice());
+        let phase = self.state.phase(self.session);
+        dal_agent::ext::StatusSample {
+            snapshot: super::status_snapshot(phase, &items),
+            payload: super::status_payload(phase, &items),
+        }
+    }
+
     pub(crate) async fn guard(
         &self,
         tool: &str,

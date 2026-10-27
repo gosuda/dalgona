@@ -3,7 +3,7 @@
 //! session owner against a scripted host.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use dal_agent::error::ServiceError;
@@ -90,19 +90,123 @@ struct Script {
     commits: Vec<Vec<JobId>>,
     /// The ids of every release the host served.
     releases: Vec<Vec<JobId>>,
+    /// A gate the next wake holds: the call first answers this battery's
+    /// before-turn hook reentrantly, then waits on the gate before it
+    /// records the wake. The test releases it.
+    wake_gate: Option<Arc<Gate>>,
+    /// A gate the next wake holds after it recorded the wake, keeping the
+    /// reply back; the test releases it.
+    wake_reply_gate: Option<Arc<Gate>>,
+    /// A failure the host answers the next wake with by losing its task:
+    /// the call panics before it records anything.
+    wake_panic: Option<&'static str>,
+    /// The idle answer the host gives from here on; tests set it so a wake
+    /// whose call never answered classifies against a busy or idle host.
+    idle_answer: Option<bool>,
     /// A refusal the host answers the next wake with.
     wake_refusal: Option<&'static str>,
     /// A wake-limit denial the host answers the next wake with, the way the
     /// core answers once a session passes its automatic-turn cutoff. The
-    /// count itself stays core-owned; the battery proves only stop-on-denial.
+    /// count itself stays core-owned; the battery proves only pause-on-denial.
     wake_denied_limit: bool,
     /// A failure the host answers the next release with.
     release_fail: Option<&'static str>,
+    /// A gate the next release holds on after its ids are recorded, so the
+    /// service effect has landed while the reply stays back past the close
+    /// deadline. The test releases it or holds it past the bound.
+    release_gate: Option<Arc<Gate>>,
+    /// A gate the next commit holds on after its ids are recorded, same
+    /// landed-then-held shape as `release_gate`.
+    commit_gate: Option<Arc<Gate>>,
+    /// A gate the next retained-worktree artifact holds on before it is
+    /// recorded, so nothing is durable while the call parks. Entry is
+    /// observable through `events` as `artifact_hold_entered`.
+    artifact_gate: Option<Arc<Gate>>,
     /// The host's durable held set; `Hold` and `Unhold` change it and answer
     /// with all of it, the way the real jobs service does.
     held: Vec<JobId>,
     /// A failure the host answers the next hold or unhold with.
     held_error: Option<&'static str>,
+}
+
+/// A one-way gate a scripted service call holds on. `dropped_held` records
+/// that the call was dropped while still held, the way an aborted task
+/// ends; a released call leaves it false.
+struct Gate {
+    open: AtomicBool,
+    dropped_held: AtomicBool,
+    /// Signals a held call's drop, so a test observes an aborted task end
+    /// under a bounded wait instead of a sleep.
+    dropped: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            open: AtomicBool::new(false),
+            dropped_held: AtomicBool::new(false),
+            dropped: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Lets the held call through; later holds pass at once.
+    fn release(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+
+    /// Holds the caller until the gate is released. The waiter registers
+    /// before the drop guard arms, so a release that races the hold never
+    /// strands the call.
+    async fn hold(&self) {
+        struct Held<'a>(&'a Gate);
+        impl Drop for Held<'_> {
+            fn drop(&mut self) {
+                // An unreleased gate means the call was dropped while held,
+                // the way an aborted task ends.
+                if !self.0.open.load(Ordering::SeqCst) {
+                    self.0.dropped_held.store(true, Ordering::SeqCst);
+                    // The permit is stored, so a waiter that starts after
+                    // the drop still observes it.
+                    self.0.dropped.notify_one();
+                }
+            }
+        }
+        if self.open.load(Ordering::SeqCst) {
+            return;
+        }
+        let wait = self.release.notified();
+        tokio::pin!(wait);
+        wait.as_mut().enable();
+        let held = Held(self);
+        wait.await;
+        // A released call is not a dropped-held call; the guard drops with
+        // the gate open and records nothing.
+        drop(held);
+    }
+
+    fn dropped_held(&self) -> bool {
+        self.dropped_held.load(Ordering::SeqCst)
+    }
+
+    /// The signal a held call fires when it is dropped while the gate is
+    /// still closed, so a test can await the end of an aborted task.
+    fn dropped_held_signal(&self) -> &tokio::sync::Notify {
+        &self.dropped
+    }
+}
+
+/// Releases its gate when dropped, so a failed assert cannot strand the
+/// held call behind the test. Tests hold one in a lexical scope for the
+/// whole close they drive.
+struct ReleaseOnDrop(Arc<Gate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 /// How the scripted host answers one commit.
@@ -700,8 +804,36 @@ impl Services for Host {
                 }
             }
             JobsOp::Take { limit } => Ok(Self::take_reports(&mut script, limit)),
-            JobsOp::Commit { ids } => Self::commit_reports(&mut script, ids),
-            JobsOp::Release { ids } => Self::release_reports(&mut script, ids),
+            JobsOp::Commit { ids } => {
+                let gate = script.commit_gate.take();
+                let reply = Self::commit_reports(&mut script, ids);
+                match (reply, gate) {
+                    (Ok(ok), Some(gate)) => {
+                        drop(script);
+                        self.changed.notify_waiters();
+                        return Box::pin(async move {
+                            gate.hold().await;
+                            Ok(ok)
+                        });
+                    }
+                    (reply, _) => reply,
+                }
+            }
+            JobsOp::Release { ids } => {
+                let gate = script.release_gate.take();
+                let reply = Self::release_reports(&mut script, ids);
+                match (reply, gate) {
+                    (Ok(ok), Some(gate)) => {
+                        drop(script);
+                        self.changed.notify_waiters();
+                        return Box::pin(async move {
+                            gate.hold().await;
+                            Ok(ok)
+                        });
+                    }
+                    (reply, _) => reply,
+                }
+            }
             JobsOp::Hold { id } => Self::hold_job(&mut script, id),
             JobsOp::Unhold { id } => Self::unhold_job(&mut script, id),
             _ => Err(ServiceError::failed(None, "unscripted job operation")),
@@ -733,7 +865,7 @@ impl Services for Host {
                 let mut script = locked(&self.script);
                 let reply = match script.turn_idle_error.take() {
                     Some(message) => Err(ServiceError::failed(None, message)),
-                    None => Ok(TurnOpReply::Idle(true)),
+                    None => Ok(TurnOpReply::Idle(script.idle_answer.unwrap_or(true))),
                 };
                 Box::pin(async move { reply })
             }
@@ -741,6 +873,10 @@ impl Services for Host {
             TurnOp::Wake { text, .. } => {
                 let mut script = locked(&self.script);
                 script.events.push("wake");
+                if let Some(message) = script.wake_panic.take() {
+                    drop(script);
+                    return Box::pin(async move { panic!("{message}") });
+                }
                 if script.wake_denied_limit {
                     script.wake_denied_limit = false;
                     return Box::pin(async move {
@@ -750,10 +886,61 @@ impl Services for Host {
                 if let Some(message) = script.wake_refusal.take() {
                     return Box::pin(async move { Err(ServiceError::failed(None, message)) });
                 }
-                script.wakes.push(text.into());
+                let (gate, reply_gate) = (script.wake_gate.take(), script.wake_reply_gate.take());
+                if gate.is_none() && reply_gate.is_none() {
+                    script.wakes.push(text.into());
+                    drop(script);
+                    self.changed.notify_waiters();
+                    return Box::pin(async { Ok(TurnOpReply::Woken) });
+                }
                 drop(script);
-                self.changed.notify_waiters();
-                Box::pin(async { Ok(TurnOpReply::Woken) })
+                let this = self.this.clone();
+                Box::pin(async move {
+                    let Some(host) = this.upgrade() else {
+                        return Ok(TurnOpReply::Woken);
+                    };
+                    if let Some(gate) = gate.as_ref() {
+                        // The real wake opening runs the session's
+                        // before-turn hook, which only the owner loop can
+                        // answer; a loop parked on this call would strand
+                        // the hook until its budget ends it.
+                        let Some((runtime, session)) = locked(&host.runtime).clone() else {
+                            return Ok(TurnOpReply::Woken);
+                        };
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                        let hook = runtime
+                            .hook_request(session, deadline, CancellationToken::new(), |reply| {
+                                super::Message::BeforeTurn(reply)
+                            })
+                            .await;
+                        {
+                            let mut script = locked(&host.script);
+                            if hook.is_ok() {
+                                script.events.push("hook_answered");
+                            } else {
+                                script.events.push("hook_failed");
+                            }
+                        }
+                        host.changed.notify_waiters();
+                        if let Err(error) = hook {
+                            return Err(ServiceError::failed(
+                                None,
+                                format!("the before-turn hook went unanswered: {error}"),
+                            ));
+                        }
+                        gate.hold().await;
+                    }
+                    {
+                        let mut script = locked(&host.script);
+                        script.wakes.push(text.into());
+                    }
+                    host.changed.notify_waiters();
+                    if let Some(reply_gate) = reply_gate.as_ref() {
+                        reply_gate.hold().await;
+                    }
+                    Ok(TurnOpReply::Woken)
+                })
             }
             _ => unavailable(),
         }
@@ -772,6 +959,22 @@ impl Services for Host {
                 if let Some(message) = script.artifact_fail.take() {
                     drop(script);
                     return Box::pin(async move { Err(ServiceError::failed(None, message)) });
+                }
+                if file == ArtifactFile::RetainedJson
+                    && let Some(gate) = script.artifact_gate.take()
+                {
+                    script.events.push("artifact_hold_entered");
+                    drop(script);
+                    self.changed.notify_waiters();
+                    return Box::pin(async move {
+                        gate.hold().await;
+                        let mut script = locked(&self.script);
+                        script.salvage_order.push("artifact:other");
+                        script.artifacts.push((job, file, bytes));
+                        drop(script);
+                        self.changed.notify_waiters();
+                        Ok(None)
+                    });
                 }
                 script.salvage_order.push(match file {
                     ArtifactFile::DeltaPatch => "artifact:delta_patch",
@@ -3331,11 +3534,12 @@ async fn a_confirmed_wake_commits_once_and_a_refused_wake_releases_and_requeues_
 }
 
 /// The core answers one wake past its automatic-turn cutoff with a
-/// wake-limit denial; the battery stops its controller and keeps the report
-/// queued instead of waking again. The twenty-turn count itself stays
-/// core-owned: this proves only the stop-on-denial arm, never the number.
+/// wake-limit denial; the battery pauses its controller, announces the
+/// pause once, and keeps the report queued instead of waking again. The
+/// twenty-turn count itself stays core-owned: this proves only the
+/// pause-on-denial arm, never the number.
 #[tokio::test(start_paused = true)]
-async fn a_wake_limit_denial_stops_automatic_wakes_and_keeps_the_report() -> TestResult {
+async fn a_wake_limit_denial_pauses_automatic_wakes_and_notifies_once() -> TestResult {
     let fixture = Fixture::open().await?;
     let job = fixture.done_job("cutoff report");
     fixture.script().wake_denied_limit = true;
@@ -3356,7 +3560,7 @@ async fn a_wake_limit_denial_stops_automatic_wakes_and_keeps_the_report() -> Tes
                 .filter(|event| **event == "wake")
                 .count(),
             1,
-            "the denied wake is attempted once, never retried: the controller stopped"
+            "the denied wake is attempted once, never retried while paused"
         );
         assert!(
             script.wakes.is_empty(),
@@ -3372,17 +3576,53 @@ async fn a_wake_limit_denial_stops_automatic_wakes_and_keeps_the_report() -> Tes
             "the report stays queued for the next user turn"
         );
     }
+    let status = fixture
+        .runtime
+        .snapshot(fixture.session)
+        .ok_or("status absent")?
+        .text
+        .ok_or("status text absent")?;
+    assert!(
+        status.ends_with(" · paused"),
+        "the controller pauses, it does not stop: {status}"
+    );
     let delivery: Vec<_> = fixture
         .host
         .notices()
         .into_iter()
         .filter(|notice| &*notice.kind == "orchestration.delivery")
         .collect();
+    assert_eq!(delivery.len(), 1, "the cutoff pause is announced once");
     assert!(
-        delivery.is_empty(),
-        "a cutoff stop is silent: the report waits, no failure is reported"
+        delivery[0].text.contains("20 in a row"),
+        "{}",
+        delivery[0].text
     );
-    // The stop persists: a second report ending later starts no new wake.
+    assert!(
+        delivery[0].text.contains("next message delivers the rest"),
+        "{}",
+        delivery[0].text
+    );
+    Ok(())
+}
+
+/// A wake-limit pause persists while the controller is paused: a later
+/// report starts no new wake. The next user prompt resumes the controller,
+/// and the held reports are then delivered exactly once each, with the
+/// pause notice never repeated.
+#[tokio::test(start_paused = true)]
+async fn a_user_prompt_resumes_a_wake_limit_pause_and_delivers_the_held_reports() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("cutoff report");
+    fixture.script().wake_denied_limit = true;
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    fixture.pump().await;
+    for _ in 0..6 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        fixture.pump().await;
+    }
     // The one-shot denial is consumed, so any further wake would succeed;
     // a paused controller never attempts one.
     let second = fixture.done_job("later report");
@@ -3392,35 +3632,81 @@ async fn a_wake_limit_denial_stops_automatic_wakes_and_keeps_the_report() -> Tes
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         fixture.pump().await;
     }
-    let script = fixture.script();
-    assert_eq!(
-        script
-            .events
-            .iter()
-            .filter(|event| **event == "wake")
-            .count(),
-        1,
-        "the cutoff stop persists: the later report starts no new wake"
-    );
-    assert!(
-        script.wakes.is_empty(),
-        "no wake reached the session past the cutoff"
-    );
-    assert!(
-        !script.delivered.contains(&second),
-        "the later report also waits for the next user turn"
-    );
-    drop(script);
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script
+                .events
+                .iter()
+                .filter(|event| **event == "wake")
+                .count(),
+            1,
+            "the cutoff pause persists: the later report starts no new wake"
+        );
+        assert!(
+            !script.delivered.contains(&second),
+            "the later report also waits for the next user turn"
+        );
+    }
+    fixture.user_input().await?;
+    let mut ticks = 0;
+    loop {
+        let both_delivered = {
+            let script = fixture.script();
+            script.delivered.contains(&job) && script.delivered.contains(&second)
+        };
+        if both_delivered {
+            break;
+        }
+        assert!(
+            ticks < 16,
+            "the held reports were not delivered after the prompt resumed the controller"
+        );
+        ticks += 1;
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        fixture.pump().await;
+    }
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script
+                .events
+                .iter()
+                .filter(|event| **event == "wake")
+                .count(),
+            2,
+            "exactly one wake follows the resume"
+        );
+        assert!(
+            script
+                .wakes
+                .iter()
+                .any(|text| text.contains("cutoff report"))
+                && script
+                    .wakes
+                    .iter()
+                    .any(|text| text.contains("later report")),
+            "the resumed wake carries both held reports: {}",
+            script.wakes.join("\n---\n")
+        );
+        assert_eq!(
+            script.commits.len(),
+            1,
+            "one commit call commits both reports together"
+        );
+        assert_eq!(
+            script.commits[0].len(),
+            2,
+            "each report is committed exactly once"
+        );
+    }
     let delivery: Vec<_> = fixture
         .host
         .notices()
         .into_iter()
         .filter(|notice| &*notice.kind == "orchestration.delivery")
         .collect();
-    assert!(
-        delivery.is_empty(),
-        "the persistent stop stays silent: no failure is reported"
-    );
+    assert_eq!(delivery.len(), 1, "the pause notice is never repeated");
     Ok(())
 }
 
@@ -4710,7 +4996,7 @@ fn timeout_dirs() -> (String, String) {
     (top_text, data_text)
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_timeout_abort_retains_the_dirty_worktree() -> TestResult {
     let setup = tokio::task::spawn_blocking(timeout_dirs)
         .await
@@ -4767,23 +5053,18 @@ async fn a_timeout_abort_retains_the_dirty_worktree() -> TestResult {
         .join(task.to_string());
     let dirty = worktree.join("dirty.txt");
     tokio::fs::write(&dirty, b"dirty work").await?;
-    let ((), ()) = tokio::join!(
-        async {
-            fixture
-                .runtime
-                .close(
-                    fixture.session,
-                    dal_core::ext::SessionEnd {
-                        session: fixture.session,
-                        reason: "close".into(),
-                    },
-                )
-                .await;
-        },
-        async {
-            tokio::time::advance(std::time::Duration::from_secs(5)).await;
-        }
-    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.runtime.close(
+            fixture.session,
+            dal_core::ext::SessionEnd {
+                session: fixture.session,
+                reason: "close".into(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "the close exceeded its bounded grace")?;
     stage.release.add_permits(1);
     let retained: RetainedRecord =
         sonic_rs::from_slice(&fixture.task_artifact(ArtifactFile::RetainedJson)?)?;
@@ -9008,4 +9289,947 @@ mod real_todo_progress {
         );
         Ok(())
     }
+}
+
+/// Waits until `check` holds, polling the scripted host; the bound covers
+/// the two-second quiet rule and the hook budget without asserting any
+/// elapsed time.
+async fn wait_for(
+    fixture: &Fixture,
+    bound: std::time::Duration,
+    why: &'static str,
+    mut check: impl FnMut(&Fixture) -> bool,
+) -> TestResult {
+    tokio::time::timeout(bound, async {
+        loop {
+            if check(fixture) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| why)?;
+    Ok(())
+}
+
+/// Arms an idle-goal wake: an active goal plus one ended report, so the
+/// first delivery after the quiet rule carries both sources and the goal
+/// checkpoint records the delivery before the wake leaves.
+async fn armed_goal_wake(fixture: &Fixture, text: &str) -> TestResult {
+    fixture.create_goal("write the parser").await?;
+    fixture.done_job(text);
+    Ok(())
+}
+
+/// A wake whose service call holds before it records anything leaves the
+/// owner loop answering its before-turn hook. The production hook budget is
+/// five seconds: a loop parked on the wake call would strand the hook until
+/// that budget ends it, so the hook answering under a held call is the
+/// liveness proof, and no elapsed time is compared.
+#[tokio::test]
+async fn a_wake_held_on_its_service_call_leaves_the_loop_answering_before_turn() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("report while held");
+    let gate = Gate::new();
+    fixture.script().wake_gate = Some(Arc::clone(&gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(5),
+        "the owner never answered the wake's before-turn hook while the call was held",
+        |fixture| fixture.script().events.contains(&"hook_answered"),
+    )
+    .await?;
+    assert!(
+        fixture.script().wakes.is_empty(),
+        "the call is still held before the gate releases"
+    );
+    gate.release();
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(5),
+        "the released wake never settled",
+        |fixture| !fixture.script().commits.is_empty(),
+    )
+    .await?;
+    let script = fixture.script();
+    assert_eq!(script.wakes, vec!["report while held".to_owned()]);
+    assert_eq!(script.commits, vec![vec![job]]);
+    assert!(!gate.dropped_held(), "a released call is not dropped");
+    Ok(())
+}
+
+/// Closing while the wake call is still held cancels it inside the close
+/// grace, joins the task, and restores the whole load exactly once: the
+/// reports go back to the host, the goal checkpoint undoes the recorded
+/// delivery, and no task outlives the owner.
+#[tokio::test]
+async fn close_cancels_an_unanswered_wake_and_restores_its_load_exactly_once() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    armed_goal_wake(&fixture, "held wake report").await?;
+    let job = fixture
+        .script()
+        .jobs
+        .first()
+        .map(|(job, _, _)| job.id)
+        .ok_or("the armed report is missing")?;
+    let before = fixture.counters()?;
+    let gate = Gate::new();
+    fixture.script().wake_gate = Some(Arc::clone(&gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the held wake never opened",
+        |fixture| fixture.script().events.contains(&"hook_answered"),
+    )
+    .await?;
+    fixture
+        .runtime
+        .close(
+            fixture.session,
+            SessionEnd {
+                session: fixture.session,
+                reason: "close".into(),
+            },
+        )
+        .await;
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script.releases,
+            vec![vec![job]],
+            "the reports went back once"
+        );
+        assert!(script.commits.is_empty(), "nothing was acknowledged");
+        assert!(script.wakes.is_empty(), "the wake never landed");
+        assert!(
+            script
+                .events
+                .iter()
+                .filter(|event| **event == "sidecar")
+                .count()
+                >= 2,
+            "the checkpoint wrote before the wake and the restore wrote after"
+        );
+    }
+    let after = fixture.counters()?;
+    assert_eq!(
+        after.unattended, before.unattended,
+        "the restored checkpoint undoes the recorded delivery"
+    );
+    assert!(gate.dropped_held(), "close reaped the held call");
+    // Close joined the wake child before it returned, so the owner is gone
+    // from the map and no session or wake task outlives it.
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed the ended owner"
+        );
+    }
+    Ok(())
+}
+
+/// Closing after the host accepted the wake but before the settle ran
+/// applies the actual result: the delivery commits exactly once, nothing is
+/// released or repeated, and the recorded goal delivery stands.
+#[tokio::test]
+async fn close_settles_a_wake_the_host_already_accepted_without_repeating_it() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    armed_goal_wake(&fixture, "accepted wake report").await?;
+    let job = fixture
+        .script()
+        .jobs
+        .first()
+        .map(|(job, _, _)| job.id)
+        .ok_or("the armed report is missing")?;
+    let gate = Gate::new();
+    fixture.script().wake_reply_gate = Some(Arc::clone(&gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the wake never reached the session",
+        |fixture| fixture.wake_count() == 1,
+    )
+    .await?;
+    // The wake opened its turn: the host is busy from here on.
+    {
+        fixture.script().idle_answer = Some(false);
+    }
+    // The close runs in an owned task set the test drains. The wake was
+    // already accepted; the close task signals once it is running, and only
+    // then is the reply released, so the close is always in flight while
+    // the wake is still unsettled. No timer decides the path.
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let close_started = Arc::new(tokio::sync::Notify::new());
+    {
+        let runtime = fixture.runtime.clone();
+        let session = fixture.session;
+        let close_started = Arc::clone(&close_started);
+        closer.spawn(async move {
+            close_started.notify_one();
+            runtime
+                .close(
+                    session,
+                    SessionEnd {
+                        session,
+                        reason: "close".into(),
+                    },
+                )
+                .await;
+        });
+    }
+    close_started.notified().await;
+    gate.release();
+    while closer.join_next().await.is_some() {}
+    {
+        let script = fixture.script();
+        assert_eq!(script.commits, vec![vec![job]], "the delivery commits once");
+        assert!(
+            script.releases.is_empty(),
+            "an accepted wake is never re-released"
+        );
+        assert_eq!(script.wakes.len(), 1, "the wake is never repeated");
+    }
+    assert_eq!(
+        fixture.counters()?.unattended,
+        1,
+        "the recorded delivery stands"
+    );
+    assert!(!gate.dropped_held(), "the call finished before the close");
+    // Close joined the accepted wake before it returned, so the owner is
+    // gone from the map and no session or wake task outlives it.
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed the ended owner"
+        );
+    }
+    Ok(())
+}
+
+/// An outer abort of the session owner ends the held wake call instead of
+/// detaching it. The owner's supervision handle is abort-on-drop, so an
+/// owner aborted from outside drops `PendingWake` inside the owner
+/// future's teardown; the wake handle aborts the child there, and the
+/// child's held service future drops before the owner's abort join
+/// reports the cancel. Tokio's abort on drop only requests the cancel —
+/// it is not a synchronous poll — so the proof is the held future's drop
+/// signal under bounded waits: no sleep, and no join of the child is
+/// claimed, because none is performed.
+#[tokio::test]
+async fn an_owner_abort_ends_the_held_wake_task_instead_of_detaching_it() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let _ = fixture.done_job("held wake report");
+    let gate = Gate::new();
+    fixture.script().wake_gate = Some(Arc::clone(&gate));
+    let _release_on_drop = ReleaseOnDrop(Arc::clone(&gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the held wake never opened",
+        |fixture| fixture.script().events.contains(&"hook_answered"),
+    )
+    .await?;
+
+    // The controlled owner abort: remove the real owner from the map and
+    // abort its actual supervision handle — the same cancel the runtime
+    // performs by dropping it. Sender, snapshot, and gauge stay live in
+    // their bindings so only the supervision handle is consumed.
+    let (_sender, _snapshot, _pressure, _effects, parent) = {
+        let mut owners = locked(&fixture.runtime.owners);
+        let owner = owners
+            .remove(&fixture.session)
+            .ok_or("the session owner is gone")?;
+        let super::Owner {
+            sender,
+            services,
+            caller,
+            snapshot,
+            _run: run,
+            mailbox_pressure,
+        } = owner;
+        (
+            sender,
+            snapshot,
+            mailbox_pressure,
+            (services, caller),
+            run.detach(),
+        )
+    };
+    parent.abort();
+
+    // Drive the runtime until the held service future actually drops,
+    // before the owner's abort join is read.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gate.dropped_held_signal().notified(),
+    )
+    .await
+    .map_err(|_| "the aborted owner detached the wake task: its held future never dropped")?;
+    assert!(
+        gate.dropped_held(),
+        "the held call ended dropped, not released"
+    );
+
+    // The owner's abort join then reports the cancel: the child ended
+    // first, and nothing settled behind the owner.
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), parent)
+        .await
+        .map_err(|_| "the aborted owner never finished")?;
+    assert!(
+        matches!(&join, Err(err) if err.is_cancelled()),
+        "the owner ended by abort, not by a panic or an early return"
+    );
+    {
+        let script = fixture.script();
+        assert!(script.wakes.is_empty(), "the aborted wake never landed");
+        assert!(script.commits.is_empty(), "nothing was acknowledged");
+        assert!(
+            script.releases.is_empty(),
+            "an owner abort releases nothing; the load ended with the owner"
+        );
+    }
+    Ok(())
+}
+
+/// A wake task that ends without a reply is reported through the delivery
+/// channel, abandons its load exactly once, and never wedges the poll: the
+/// abandoned report wakes again and delivers once.
+#[tokio::test(start_paused = true)]
+async fn a_wake_task_that_ends_without_a_reply_reports_and_redelivers_once() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("panicked wake redelivers");
+    fixture.script().wake_panic = Some("the wake service is broken");
+    fixture.run_ticks(14).await;
+    let notices = fixture.delivery_notices();
+    assert_eq!(notices.len(), 1, "the lost reply is reported once");
+    assert!(
+        notices[0].text.contains("ended without a reply"),
+        "the notice carries the actual task failure: {}",
+        notices[0].text
+    );
+    // The release may redeliver inside the same window, so only the
+    // release itself is pinned here.
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script.releases,
+            vec![vec![job]],
+            "the reports went back once"
+        );
+    }
+    fixture.run_ticks(14).await;
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1, "the poll recovered and woke again");
+    assert!(
+        script.wakes[0].contains("panicked wake redelivers"),
+        "{}",
+        script.wakes[0]
+    );
+    assert_eq!(script.commits, vec![vec![job]], "delivered exactly once");
+    assert!(script.delivered.contains(&job));
+    Ok(())
+}
+
+/// An already-expired outer close deadline leaves the held wake unsettled
+/// without fabricating an outcome: the owner still answers its Close reply
+/// within a bound, aborts the held child (observed through the gate's drop
+/// signal), terminates (observed through the mailbox close), commits and
+/// releases nothing, emits the existing unknown-outcome notice, and keeps
+/// the recorded goal checkpoint byte-identical and recoverable.
+/// Opens a goal session with one wake parked on `wake_gate` and waits for
+/// the owner's reentrant before-turn hook, so the wake call is held inside
+/// the service while the loop stays answering.
+async fn held_goal_wake(
+    text: &str,
+) -> Result<(Fixture, JobId, Arc<Gate>, ReleaseOnDrop), Box<dyn std::error::Error>> {
+    let fixture = Fixture::open_goal().await?;
+    armed_goal_wake(&fixture, text).await?;
+    let job = fixture
+        .script()
+        .jobs
+        .first()
+        .map(|(job, _, _)| job.id)
+        .ok_or("the armed report is missing")?;
+    let gate = Gate::new();
+    fixture.script().wake_gate = Some(Arc::clone(&gate));
+    let guard = ReleaseOnDrop(Arc::clone(&gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the held wake never opened",
+        |fixture| fixture.script().events.contains(&"hook_answered"),
+    )
+    .await?;
+    Ok((fixture, job, gate, guard))
+}
+
+/// Asserts an unknown close settled nothing: no commit or release, the wake
+/// never landed, the report stays taken and undelivered, exactly the
+/// unknown-outcome notice fired, and the goal checkpoint plus its write
+/// count are byte-identical.
+fn assert_unknown_unsettled(
+    fixture: &Fixture,
+    job: JobId,
+    checkpointed: &Counters,
+    sidecar_before: usize,
+) -> TestResult {
+    {
+        let script = fixture.script();
+        assert!(
+            script.commits.is_empty(),
+            "unknown commits nothing: {:?}",
+            script.commits
+        );
+        assert!(
+            script.releases.is_empty(),
+            "unknown releases nothing: {:?}",
+            script.releases
+        );
+        assert!(
+            script.wakes.is_empty(),
+            "held wake never landed: {:?}",
+            script.wakes
+        );
+        assert!(script.taken.contains(&job), "held report stays taken");
+        assert!(
+            !script.delivered.contains(&job),
+            "unknown never invents delivery"
+        );
+    }
+    {
+        let notices = fixture.host.notices();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.text.contains("outcome is unknown")
+                    && notice.text.contains("committed and released nothing")),
+            "expired close emits unknown-outcome notice: {:?}",
+            notices
+                .iter()
+                .map(|notice| &notice.text)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        &fixture.counters()?,
+        checkpointed,
+        "unknown keeps checkpoint"
+    );
+    assert_eq!(
+        fixture
+            .script()
+            .events
+            .iter()
+            .filter(|event| **event == "sidecar")
+            .count(),
+        sidecar_before,
+        "unknown writes no restore over checkpoint"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn close_with_an_already_expired_deadline_leaves_the_held_wake_unsettled() -> TestResult {
+    let (fixture, job, gate, _guard) = held_goal_wake("held wake with an expired close").await?;
+    let checkpointed = fixture.counters()?;
+    let sidecar_writes_before = fixture
+        .script()
+        .events
+        .iter()
+        .filter(|event| **event == "sidecar")
+        .count();
+    let sender = fixture
+        .runtime
+        .sender(fixture.session)
+        .ok_or("the session owner is gone")?;
+    let probe = sender.clone();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let expired = tokio::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(tokio::time::Instant::now);
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    closer.spawn(async move {
+        let _ = sender
+            .send(super::Message::Close {
+                deadline: expired,
+                report_deadline: expired,
+                reply: reply_tx,
+            })
+            .await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while closer.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "the expired close send never completed")?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx)
+        .await
+        .map_err(|_| "the expired close never answered its reply within the bound")?
+        .map_err(|_| "the owner dropped the expired close reply without answering")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gate.dropped_held_signal().notified(),
+    )
+    .await
+    .map_err(|_| "the expired close detached the held wake instead of aborting it")?;
+    assert!(
+        gate.dropped_held(),
+        "the expired close ends the held call dropped, not released"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe.closed())
+        .await
+        .map_err(|_| "the owner never terminated after its expired close reply")?;
+    assert_unknown_unsettled(&fixture, job, &checkpointed, sidecar_writes_before)?;
+    Ok(())
+}
+
+/// An accepted wake that is lost at close with a failing idle probe stays
+/// unknown: the host saw the wake, but the probe error cannot prove it was
+/// never accepted, so close commits and releases nothing, keeps the taken
+/// report and the recorded checkpoint, emits exactly the unknown notice,
+/// and removes the owner. The unit reply is liveness only.
+#[tokio::test]
+async fn close_with_accepted_wake_and_failing_probe_releases_nothing_and_reports_unknown()
+-> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    armed_goal_wake(&fixture, "accepted wake with failing probe").await?;
+    let job = fixture
+        .script()
+        .jobs
+        .first()
+        .map(|(job, _, _)| job.id)
+        .ok_or("the armed report is missing")?;
+    let reply_gate = Gate::new();
+    fixture.script().wake_reply_gate = Some(Arc::clone(&reply_gate));
+    let _guard = ReleaseOnDrop(Arc::clone(&reply_gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the wake was never accepted",
+        |fixture| fixture.wake_count() == 1,
+    )
+    .await?;
+    fixture.script().turn_idle_error = Some("idle probe is down");
+    let checkpointed = fixture.counters()?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fixture.runtime.close(
+            fixture.session,
+            SessionEnd {
+                session: fixture.session,
+                reason: "close".into(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "close hung past its caller bound with a failing probe")?;
+    {
+        let script = fixture.script();
+        assert!(
+            script.commits.is_empty(),
+            "unknown commits nothing: {:?}",
+            script.commits
+        );
+        assert!(
+            script.releases.is_empty(),
+            "a failing probe releases nothing: {:?}",
+            script.releases
+        );
+        assert_eq!(script.wakes.len(), 1, "the accepted wake is never repeated");
+        assert!(script.taken.contains(&job), "held report stays taken");
+        assert!(
+            !script.delivered.contains(&job),
+            "unknown never invents delivery"
+        );
+    }
+    {
+        let unknown = fixture
+            .host
+            .notices()
+            .into_iter()
+            .filter(|notice| {
+                notice.text.contains("outcome is unknown")
+                    && notice.text.contains("committed and released nothing")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unknown.len(), 1, "exactly one unknown-outcome notice");
+    }
+    assert_eq!(
+        fixture.counters()?,
+        checkpointed,
+        "unknown keeps checkpoint"
+    );
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed owner"
+        );
+    }
+    Ok(())
+}
+
+/// A close that times out waiting for a landed release reports an
+/// interrupted settlement, not a false quiet success: the release ids are
+/// already recorded on the host, so claiming nothing was committed or
+/// released would be false. The owner is still removed within its bound.
+#[tokio::test]
+async fn close_interrupted_during_release_reports_partial_settlement_not_nothing() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("held for partial release");
+    let wake_gate = Gate::new();
+    fixture.script().wake_gate = Some(Arc::clone(&wake_gate));
+    let _wake_guard = ReleaseOnDrop(Arc::clone(&wake_gate));
+    fixture.script().idle_answer = Some(true);
+    let release_gate = Gate::new();
+    fixture.script().release_gate = Some(Arc::clone(&release_gate));
+    let _release_guard = ReleaseOnDrop(Arc::clone(&release_gate));
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(8),
+        "the held wake never opened",
+        |fixture| fixture.script().events.contains(&"hook_answered"),
+    )
+    .await?;
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    {
+        let runtime = fixture.runtime.clone();
+        let session = fixture.session;
+        closer.spawn(async move {
+            runtime
+                .close(
+                    session,
+                    SessionEnd {
+                        session,
+                        reason: "close".into(),
+                    },
+                )
+                .await;
+        });
+    }
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(5),
+        "the release never landed before the close deadline",
+        |fixture| !fixture.script().releases.is_empty(),
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while closer.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "close hung past its caller bound with a held release")?;
+    {
+        let script = fixture.script();
+        assert_eq!(
+            script.releases,
+            vec![vec![job]],
+            "the landed release stays visible"
+        );
+    }
+    {
+        let notices = fixture.host.notices();
+        assert!(
+            notices.iter().any(|notice| {
+                let text = notice.text.to_lowercase();
+                text.contains("interrupt") && text.contains("partial")
+            }),
+            "interrupted close reports partial settlement: {:?}",
+            notices
+                .iter()
+                .map(|notice| &notice.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.text.contains("committed and released nothing")),
+            "interrupted close never claims nothing happened"
+        );
+    }
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed owner"
+        );
+    }
+    Ok(())
+}
+
+/// A full owner mailbox never strands the caller: the close enqueue is
+/// bounded by the drain deadline, so `Runtime::close` still returns within
+/// its caller bound and removes the owner instead of waiting for space
+/// behind a parked owner. The pre-fix unbounded send hangs here.
+#[tokio::test]
+async fn close_with_full_mailbox_still_returns_within_its_bound_and_removes_the_owner() -> TestResult
+{
+    use super::super::constants::BATTERY_MAILBOX;
+    let fixture = Fixture::open().await?;
+    let gate = fixture.runtime.parking_gate();
+    gate.arm();
+    let mut parked: tokio::task::JoinSet<Result<String, ServiceError>> =
+        tokio::task::JoinSet::new();
+    parked.spawn(list_agents_call(
+        fixture.runtime.clone(),
+        fixture.session,
+        fixture.caller(),
+        CallId::new("park"),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while gate.parked() < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "the owner never parked at the jobs list")?;
+    let mut producers: tokio::task::JoinSet<Result<String, ServiceError>> =
+        tokio::task::JoinSet::new();
+    for index in 0..(BATTERY_MAILBOX + 144) {
+        producers.spawn(list_agents_call(
+            fixture.runtime.clone(),
+            fixture.session,
+            fixture.caller(),
+            CallId::new(format!("flood-{index}")),
+        ));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while fixture.runtime.mailbox_fill_now(fixture.session) != Some(BATTERY_MAILBOX) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "the mailbox never filled to capacity behind the parked owner")?;
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    {
+        let runtime = fixture.runtime.clone();
+        let session = fixture.session;
+        closer.spawn(async move {
+            runtime
+                .close(
+                    session,
+                    SessionEnd {
+                        session,
+                        reason: "close".into(),
+                    },
+                )
+                .await;
+        });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while closer.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "close hung behind a full mailbox past its caller bound")?;
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed owner despite full mailbox"
+        );
+    }
+    gate.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while parked.join_next().await.is_some() {}
+        while producers.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "parked and flooded deliveries never drained after close")?;
+    Ok(())
+}
+
+/// Builds the real-git timeout fixture parked on `git add -A` with one
+/// dirty worktree task, for retention close tests. The stage stays held
+/// across the close drain; the caller sets `artifact_gate` to park the
+/// retained-record write and observes entry through `artifact_hold_entered`.
+async fn retention_fixture(
+    artifact_gate: Option<Arc<Gate>>,
+) -> Result<(Fixture, Arc<ApplyGate>, String, String), Box<dyn std::error::Error>> {
+    let (top_text, data_text) = tokio::task::spawn_blocking(timeout_dirs)
+        .await
+        .expect("setup joins");
+    let mut config = isolation_config()?;
+    config.data_root = Some(std::path::PathBuf::from(data_text.as_str()));
+    let runtime = Runtime::new(config)?;
+    let stage = Arc::new(ApplyGate::new());
+    let host = Arc::new_cyclic(|this| Host {
+        this: this.clone(),
+        stage_gate: Some(Arc::clone(&stage)),
+        passthrough_git: true,
+        ..Host::default()
+    });
+    let session = SessionId::new_v7();
+    *locked(&host.runtime) = Some((runtime.clone(), session));
+    let services: Arc<dyn Services> = host.clone();
+    let workspace = dal_core::Workspace::new(std::path::PathBuf::from(top_text.as_str()))
+        .expect("absolute workspace");
+    runtime
+        .open(
+            SessionStart {
+                session,
+                workspace,
+                resumed: false,
+            },
+            HookCx::for_test(services, session, None),
+        )
+        .await?;
+    let fixture = Fixture {
+        runtime,
+        host,
+        session,
+    };
+    fixture.user_input().await?;
+    fixture.tool(ISOLATED_WRITE).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), stage.entered(1))
+        .await
+        .expect("staging reached");
+    let task = {
+        let script = fixture.script();
+        script
+            .jobs
+            .iter()
+            .find(|(_, parent, _)| parent.is_some())
+            .ok_or("task absent")?
+            .0
+            .id
+    };
+    let dirty = std::path::PathBuf::from(data_text.as_str())
+        .join("worktrees")
+        .join(session.to_string())
+        .join(task.to_string())
+        .join("dirty.txt");
+    tokio::fs::write(&dirty, b"dirty work").await?;
+    if let Some(gate) = artifact_gate {
+        fixture.script().artifact_gate = Some(gate);
+    }
+    Ok((fixture, stage, top_text, data_text))
+}
+
+/// The `orchestration.cancel` notices of one fixture, in order.
+fn cancel_notices(fixture: &Fixture) -> Vec<Notice> {
+    fixture
+        .host
+        .notices()
+        .into_iter()
+        .filter(|notice| &*notice.kind == "orchestration.cancel")
+        .collect()
+}
+
+/// Retention released before its report deadline still writes: the sidecar
+/// hold spans the drain, the test releases it quickly, and the retained
+/// record is durable when close returns. Positive control for the bound.
+#[tokio::test]
+async fn close_retention_released_before_its_report_deadline_writes_the_retained_record()
+-> TestResult {
+    let artifact_gate = Gate::new();
+    let (fixture, stage, top_text, data_text) =
+        retention_fixture(Some(Arc::clone(&artifact_gate))).await?;
+    let _guard = ReleaseOnDrop(Arc::clone(&artifact_gate));
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    {
+        let runtime = fixture.runtime.clone();
+        let session = fixture.session;
+        closer.spawn(async move {
+            runtime
+                .close(
+                    session,
+                    SessionEnd {
+                        session,
+                        reason: "close".into(),
+                    },
+                )
+                .await;
+        });
+    }
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(5),
+        "retention never reached its sidecar write",
+        |fixture| fixture.script().events.contains(&"artifact_hold_entered"),
+    )
+    .await?;
+    artifact_gate.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while closer.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "close hung past its caller bound after retention was released")?;
+    let bytes = fixture
+        .task_artifact(ArtifactFile::RetainedJson)
+        .map_err(|_| "retention released in time must write its retained record")?;
+    assert!(!bytes.is_empty(), "the retained record is durable");
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed owner"
+        );
+    }
+    stage.release.add_permits(1);
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&data_text)).await;
+    Ok(())
+}
+
+/// Retention held past its report deadline never strands the caller: the
+/// owner bounds the retention write, still sends its final cancel notice,
+/// and returns within the caller bound with nothing durable. Red before the
+/// bound, green after.
+#[tokio::test]
+async fn close_retention_held_past_its_report_deadline_still_notifies_before_the_caller_returns()
+-> TestResult {
+    let artifact_gate = Gate::new();
+    let (fixture, stage, top_text, data_text) =
+        retention_fixture(Some(Arc::clone(&artifact_gate))).await?;
+    let _guard = ReleaseOnDrop(Arc::clone(&artifact_gate));
+    let mut closer: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    {
+        let runtime = fixture.runtime.clone();
+        let session = fixture.session;
+        closer.spawn(async move {
+            runtime
+                .close(
+                    session,
+                    SessionEnd {
+                        session,
+                        reason: "close".into(),
+                    },
+                )
+                .await;
+        });
+    }
+    wait_for(
+        &fixture,
+        std::time::Duration::from_secs(5),
+        "retention never reached its sidecar write",
+        |fixture| fixture.script().events.contains(&"artifact_hold_entered"),
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while closer.join_next().await.is_some() {}
+    })
+    .await
+    .map_err(|_| "close hung past its caller bound with retention held")?;
+    {
+        let owners = locked(&fixture.runtime.owners);
+        assert!(
+            !owners.contains_key(&fixture.session),
+            "close removed owner despite held retention"
+        );
+    }
+    assert!(
+        !cancel_notices(&fixture).is_empty(),
+        "held retention still sends its final notice before the caller returns"
+    );
+    assert!(
+        fixture.task_artifact(ArtifactFile::RetainedJson).is_err(),
+        "held retention writes nothing durable past its report deadline"
+    );
+    stage.release.add_permits(1);
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&data_text)).await;
+    Ok(())
 }

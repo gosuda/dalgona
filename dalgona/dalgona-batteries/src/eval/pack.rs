@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::text::normalize_ws;
 use dal_ext::judge::JudgeQuestion;
-use dal_star::{CELL_LIMITS, LOAD_LIMITS, Limits, dialect};
+use dal_star::{CELL_LIMITS, LOAD_LIMITS, dialect};
 use starlark::ErrorKind;
 use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
@@ -505,23 +505,6 @@ fn pack_globals() -> Globals {
         .build()
 }
 
-fn apply_limits(evaluator: &mut Evaluator<'_, '_, '_>, limits: Limits) -> Result<(), ScriptError> {
-    fn refused(error: impl std::fmt::Display) -> ScriptError {
-        ScriptError {
-            line: 1,
-            message: error.to_string(),
-        }
-    }
-    let heap = usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX);
-    let depth = usize::try_from(limits.stack_depth).unwrap_or(usize::MAX);
-    evaluator
-        .set_max_tick_count(limits.ticks)
-        .map_err(refused)?;
-    evaluator.set_max_heap_size(heap).map_err(refused)?;
-    evaluator.set_max_callstack_size(depth).map_err(refused)?;
-    Ok(())
-}
-
 fn script_error(error: &starlark::Error) -> ScriptError {
     let line = error
         .span()
@@ -562,7 +545,9 @@ pub fn load(file_name: &str, source: &str) -> Result<Pack, LoadError> {
     let frozen = Module::with_temp_heap(|module| {
         {
             let mut evaluator = Evaluator::new(&module);
-            apply_limits(&mut evaluator, LOAD_LIMITS).map_err(LoadError::Script)?;
+            LOAD_LIMITS
+                .apply(&mut evaluator)
+                .map_err(|error| LoadError::Script(script_error(&error)))?;
             evaluator
                 .eval_module(ast, &pack_globals())
                 .map_err(|error| classify(&error))?;
@@ -718,7 +703,7 @@ impl Check {
             evaluator.set_check_cancelled(Box::new(move || {
                 stop.is_cancelled() || Instant::now() >= deadline
             }));
-            apply_limits(&mut evaluator, CELL_LIMITS).map_err(starlark::Error::new_other)?;
+            CELL_LIMITS.apply(&mut evaluator)?;
             let result = evaluator.eval_module(decode, &globals)?;
             let workspace = heap.alloc(AllocStruct([("read", read.to_value())]));
             let verdict =

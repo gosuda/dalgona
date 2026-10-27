@@ -13,8 +13,8 @@ use dal_agent::ext::{BoxFuture, ExtensionBuilder, HookCx, HookError, ObserveHook
 use dal_agent::{Env, Host, Product, SessionRef};
 use dal_core::ext::SessionStart;
 use dal_core::{
-    ApprovalMode, ClientId, Command, Config, ConfigProduct, Expect, Part, RawJson, Save,
-    ServiceSet, UpdateKind, Workspace,
+    Answer, ApprovalMode, ClientId, Command, Config, ConfigProduct, EntryKind, Expect, PageReq,
+    Part, RawJson, Save, ServiceSet, UpdateKind, Workspace,
 };
 use dal_tools::guard::{GuardConfig, guard_extension};
 use dalgona_batteries::quality::{QualityConfig, offers::Offer, quality};
@@ -214,6 +214,10 @@ async fn quality_session_config(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture walks the approve and decline outcomes end to end"
+)]
 async fn quality_apply_commits_the_approved_offer_in_a_real_session() -> TestResult {
     let root = std::env::temp_dir().join(format!("dalgona-quality-session-{}", std::process::id()));
     let data = root.join("data");
@@ -302,5 +306,139 @@ async fn quality_apply_commits_the_approved_offer_in_a_real_session() -> TestRes
     blocking(move || std::fs::remove_dir_all(root)).await?;
     assert!(ended, "the scripted tool call did not finish the turn");
     assert_eq!(updated, b"header\nkeep = 1\n");
+
+    // Denied branch: the same offer under `ApprovalMode::Ask`, with the
+    // approval declined, leaves the file on disk unchanged and journals no
+    // successful edit. A fresh root replays the identical scripted turn, so
+    // the only difference from the approved run above is the decline.
+    let denied_root = std::env::temp_dir().join(format!(
+        "dalgona-quality-session-denied-{}",
+        std::process::id()
+    ));
+    let denied_data = denied_root.join("data");
+    let denied_workspace = denied_root.join("workspace");
+    let denied_source = denied_workspace.join("src/a.py");
+    let denied_fixture = denied_data.join("script.jsonl");
+    let denied_script = scripted_fixture();
+    blocking({
+        let setup_data = denied_data.clone();
+        let setup_source = denied_source.clone();
+        let setup_fixture = denied_fixture.clone();
+        move || {
+            prepare_quality_session_files(setup_data, setup_source, setup_fixture, denied_script)
+        }
+    })
+    .await?;
+    let denied_config = quality_session_config(denied_data.clone(), &denied_fixture).await?;
+    let denied_quality = quality_extension_with_offer(Offer {
+        id: "q-1-1".to_owned(),
+        codemod: "delete-commented-code".to_owned(),
+        path: "src/a.py".to_owned(),
+        byte_start: 7,
+        byte_end: 18,
+        line_start: 2,
+        line_end: 2,
+        before: "# old code\n".to_owned(),
+        after: String::new(),
+    })?;
+    let denied_product = Product {
+        name: "dal",
+        data_root: denied_data.clone(),
+        defaults: "",
+        extensions: vec![denied_quality],
+        bundled: Vec::new(),
+    };
+    let denied_env = Env {
+        vars: BTreeMap::from([(OsString::from("OPENAI_API_KEY"), OsString::from("sk-test"))]),
+        cwd: denied_workspace.clone(),
+        sandbox_helper: None,
+    };
+    let denied_host = Host::start(denied_product, denied_config, denied_env).await?;
+    let denied_agent = denied_host
+        .open(
+            SessionRef::New {
+                workspace: Workspace::new(denied_workspace)?,
+                name: None,
+            },
+            ClientId::new("quality-decline"),
+        )
+        .await?;
+    let mut denied_subscription = denied_agent.subscribe(None)?;
+    denied_agent
+        .submit(Command::SetApproval {
+            mode: ApprovalMode::Ask,
+            save: Save::SessionOnly,
+        })
+        .await?;
+    let denied_reply = denied_agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "apply the offered edit".into(),
+            }],
+        })
+        .await?;
+    assert!(matches!(denied_reply, dal_core::Reply::Accepted { .. }));
+    let mut declined = 0;
+    let mut denied_ended = false;
+    for _ in 0..600 {
+        let view = denied_agent.view(PageReq::default())?;
+        if let Some(request) = view.open.first() {
+            denied_agent.answer(request.id, Answer::Decline).await?;
+            declined += 1;
+            continue;
+        }
+        let delivery =
+            tokio::time::timeout(Duration::from_secs(30), denied_subscription.next()).await?;
+        let Some(delivery) = delivery else {
+            break;
+        };
+        if let dal_agent::Delivery::Update(update) = delivery
+            && matches!(update.kind, UpdateKind::TurnEnded { .. })
+        {
+            denied_ended = true;
+            break;
+        }
+    }
+    assert!(denied_ended, "the declined turn did not end");
+    assert!(
+        declined > 0,
+        "the declined turn raised no approval to decline"
+    );
+    let denied_bytes = blocking({
+        let denied_source = denied_source.clone();
+        move || std::fs::read(denied_source)
+    })
+    .await?;
+    assert_eq!(
+        denied_bytes, b"header\n# old code\nkeep = 1\n",
+        "a declined approval must not touch the file"
+    );
+    let denied_view = denied_agent.view(PageReq::default())?;
+    let mut applied = false;
+    let mut denied_error = false;
+    for entry in &denied_view.entries.items {
+        if let EntryKind::ToolResult { name, error, .. } = &entry.kind
+            && name.as_ref() == "quality_apply"
+        {
+            if *error {
+                denied_error = true;
+            } else {
+                applied = true;
+            }
+        }
+    }
+    assert!(
+        denied_error,
+        "the declined approval must journal its denial"
+    );
+    assert!(
+        !applied,
+        "a declined approval must journal no successful edit"
+    );
+    drop(denied_subscription);
+    drop(denied_agent);
+    drop(denied_host);
+    blocking(move || std::fs::remove_dir_all(denied_root)).await?;
     Ok(())
 }

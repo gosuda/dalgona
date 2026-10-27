@@ -519,6 +519,19 @@ async fn an_exactly_8192_byte_preview_passes() -> TestResult {
     else {
         return Err("the 8192-byte preview must reach the raise".into());
     };
+
+    // One byte over the cap fails closed with the typed length error before
+    // any question is raised, so the cap is proven from both sides.
+    let over = format!(r#"{TWO_OPTIONS},"preview":"{}""#, "p".repeat(8193));
+    let refused = Host::answering([]);
+    assert_eq!(
+        ask_tool(&refused, &one("single", &over)).await?,
+        "ask: preview must be 1 to 8192 bytes",
+    );
+    assert!(
+        refused.asked().is_empty(),
+        "the 8193-byte preview must not raise"
+    );
     Ok(())
 }
 

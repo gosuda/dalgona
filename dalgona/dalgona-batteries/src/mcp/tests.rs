@@ -14,11 +14,13 @@ use crate::mcp::STDERR_RING;
 #[cfg(unix)]
 use crate::mcp::stdio::{ProcessEnvironment, StdioTransport};
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, TransportError,
+    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
-    tools::{Key, decode_tool_page, fold_tool_name, sanitize_server_text},
+    tools::{decode_tool_page, fold_tool_name, sanitize_server_text},
 };
+#[cfg(unix)]
+use crate::mcp::{TransportError, tools::Key};
 #[cfg(unix)]
 use dal_agent::ext::{ArgError, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::{
@@ -42,6 +44,7 @@ use tokio::{
     sync::{Notify, oneshot},
     task::JoinHandle,
 };
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 
 const SKILL: &str = "weather";
@@ -1740,6 +1743,65 @@ async fn refuse_probe(socket: &mut TcpStream) {
         .await;
 }
 
+/// One connection a TLS fixture's port received, captured for failure
+/// context: the peer plus a bounded request prefix (HTTP header end, 256
+/// bytes, or 100 milliseconds). Captures only ever appear in panicking
+/// assertions; nothing is classified as safe.
+struct CapturedConnection {
+    peer: String,
+    prefix: Vec<u8>,
+}
+
+impl CapturedConnection {
+    async fn capture(socket: &mut TcpStream) -> Self {
+        let peer = socket.peer_addr().map_or_else(
+            |_| "unresolved peer".to_owned(),
+            |address| address.to_string(),
+        );
+        let mut prefix = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(100), async {
+            let mut buffer = [0_u8; 128];
+            loop {
+                let count = match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                prefix.extend_from_slice(&buffer[..count]);
+                if prefix.len() >= 256 || find_header_end(&prefix).is_some() {
+                    break;
+                }
+            }
+        })
+        .await;
+        Self { peer, prefix }
+    }
+
+    /// Whether the capture matches the ambient localhost prober documented
+    /// by `refuse_probe`: a bare root GET with the Go HTTP client agent and
+    /// no MCP or client accept fields. Used only to annotate failure
+    /// context, never to pass a fixture.
+    fn matches_ambient_prober(&self) -> bool {
+        let lowercase = String::from_utf8_lossy(&self.prefix).to_ascii_lowercase();
+        lowercase.starts_with("get / http/1.")
+            && lowercase.contains("\r\nuser-agent: go-http-client/1.1\r\n")
+            && !lowercase.contains("mcp-")
+            && !lowercase.contains("application/json, text/event-stream")
+    }
+
+    fn describe(&self) -> String {
+        let shape = if self.matches_ambient_prober() {
+            " (the documented ambient localhost prober)"
+        } else {
+            ""
+        };
+        format!(
+            "peer {}{shape} request {:?}",
+            self.peer,
+            String::from_utf8_lossy(&self.prefix)
+        )
+    }
+}
+
 fn rpc_result(id: u64, result: &str) -> String {
     format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}")
 }
@@ -2570,9 +2632,12 @@ fn assert_error_census(cases: &[(McpError, &str)]) {
 /// transport's certificate verification is not changed or bypassed.
 #[tokio::test]
 async fn approved_https_declaration_reaches_its_listener_with_tls() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("TLS listener");
+    // The ambient localhost prober documented at `refuse_probe` sweeps every
+    // freshly bound IPv4 loopback listener (captured hitting 127.0.0.1 and
+    // 127.0.0.2 within one burst), so this fixture binds IPv6 ::1, which that
+    // sweep does not cover. The first connection here must therefore be the
+    // declaration's own client; anything else is captured and fails.
+    let listener = TcpListener::bind(("::1", 0)).await.expect("TLS listener");
     let address = listener.local_addr().expect("TLS address");
     let declaration = McpServerDecl::Http {
         endpoint: McpEndpoint::parse(&format!("https://{address}/mcp"))
@@ -2591,9 +2656,26 @@ async fn approved_https_declaration_reaches_its_listener_with_tls() {
     fixture.prompt().await;
     let observe = tokio::time::timeout(Duration::from_secs(5), async move {
         let (mut socket, _) = listener.accept().await.expect("TLS connection accepted");
+        let mut first = [0_u8; 1];
+        if socket.read_exact(&mut first).await.is_err() {
+            let stray = CapturedConnection::capture(&mut socket).await;
+            panic!(
+                "the connection vanished before a TLS record: {}",
+                stray.describe()
+            );
+        }
+        if first[0] != 0x16 {
+            let mut stray = CapturedConnection::capture(&mut socket).await;
+            stray.prefix.insert(0, first[0]);
+            panic!(
+                "the client did not send a TLS handshake: {}",
+                stray.describe()
+            );
+        }
         let mut record = [0_u8; 5];
+        record[0] = first[0];
         socket
-            .read_exact(&mut record)
+            .read_exact(&mut record[1..])
             .await
             .expect("TLS record header");
         record
@@ -2623,9 +2705,10 @@ async fn approved_https_declaration_reaches_its_listener_with_tls() {
 
 #[tokio::test]
 async fn denied_https_declaration_never_connects_to_its_listener() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("TLS listener");
+    // IPv6 ::1 keeps this fixture's port outside the ambient IPv4 prober
+    // sweep documented at `refuse_probe`, so any accepted connection at all
+    // is a denial violation, exactly as the assertion states.
+    let listener = TcpListener::bind(("::1", 0)).await.expect("TLS listener");
     let address = listener.local_addr().expect("TLS address");
     let declaration = McpServerDecl::Http {
         endpoint: McpEndpoint::parse(&format!("https://{address}/mcp"))
@@ -2652,12 +2735,15 @@ async fn denied_https_declaration_never_connects_to_its_listener() {
     // Turn completion and session shutdown precede this bounded negative
     // observation; no sleep is used to guess when a connection would start.
     fixture.shutdown().await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), listener.accept())
-            .await
-            .is_err(),
-        "a denied declaration must not queue a TCP connection"
-    );
+    if let Ok(Ok((mut socket, _))) =
+        tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+    {
+        let stray = CapturedConnection::capture(&mut socket).await;
+        panic!(
+            "a denied declaration must not queue a TCP connection: {}",
+            stray.describe()
+        );
+    }
 }
 
 #[test]
@@ -3854,4 +3940,103 @@ async fn cancelled_stdio_send_leaves_no_pending_slot() {
         .shutdown(Duration::from_secs(1))
         .await
         .expect("fixture transport shuts down");
+}
+
+/// Deferred mapped tools promote to Model only at the next turn boundary: an
+/// entry call lists the tools, but the current turn's tool bytes stay fixed,
+/// and the tools answer from the next turn on — including after replay and
+/// `MoveLeaf`. Removing the deferral (publishing Model immediately) lets the
+/// same-turn call succeed; never promoting (or dropping the tools on a
+/// history operation) fails the later calls.
+#[cfg(unix)]
+#[tokio::test]
+async fn deferred_tool_promotion_timing() {
+    let pid_file = temp_path("deferred-promotion.pid");
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let mut fixture = HostedFixture::new(
+        stdio_decl(&pid_file),
+        vec![
+            scripted_tool_step("entry-deferred", &entry, "{}"),
+            scripted_tool_step("echo-same-turn", &echo, r#"{"message":"hi"}"#),
+            scripted_final_step(),
+            scripted_tool_step("echo-next-turn", &echo, r#"{"message":"hi"}"#),
+            scripted_final_step(),
+            scripted_tool_step("echo-after-leaf", &echo, r#"{"message":"hi"}"#),
+            scripted_final_step(),
+            scripted_tool_step("echo-replay", &echo, r#"{"message":"hi"}"#),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let entry_results = fixture.tool_results(&entry);
+    assert_eq!(
+        entry_results.len(),
+        1,
+        "the entry call lists the server tools"
+    );
+    assert!(
+        !entry_results[0].0,
+        "the entry call succeeds: {entry_results:?}"
+    );
+    let echo_results = fixture.tool_results(&echo);
+    assert_eq!(
+        echo_results.len(),
+        1,
+        "only the same-turn attempt ran so far: {echo_results:?}"
+    );
+    assert!(
+        echo_results[0].0,
+        "the same-turn mapped call fails: {echo_results:?}"
+    );
+    assert!(
+        echo_results[0].1.contains("unknown tool"),
+        "the current turn's tool bytes stay fixed: {}",
+        echo_results[0].1
+    );
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let echo_results = fixture.tool_results(&echo);
+    assert_eq!(echo_results.len(), 2, "{echo_results:?}");
+    assert!(
+        !echo_results[1].0 && echo_results[1].1.contains("stdio-ok"),
+        "the mapped tool answers at the next turn boundary: {echo_results:?}"
+    );
+    let first = fixture
+        .agent
+        .view(PageReq::default())
+        .expect("host view")
+        .entries
+        .items
+        .first()
+        .map(|item| item.id)
+        .expect("a first entry to move the leaf to");
+    fixture
+        .agent
+        .submit(Command::MoveLeaf(first))
+        .await
+        .expect("move the leaf");
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let echo_results = fixture.tool_results(&echo);
+    let last = echo_results.last().expect("an echo result after MoveLeaf");
+    assert!(
+        !last.0 && last.1.contains("stdio-ok"),
+        "the promoted tool survives MoveLeaf: {echo_results:?}"
+    );
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let echo_results = fixture.tool_results(&echo);
+    let last = echo_results
+        .last()
+        .expect("an echo result after the replay");
+    assert!(
+        !last.0 && last.1.contains("stdio-ok"),
+        "the promoted tool answers the replayed exercise: {echo_results:?}"
+    );
+    let _ = fs::remove_file(&pid_file);
+    fixture.shutdown().await;
 }

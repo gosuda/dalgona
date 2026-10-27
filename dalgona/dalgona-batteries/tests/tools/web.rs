@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 
+use std::error::Error as StdError;
+use std::sync::Arc;
 use std::time::Duration;
 
-use super::common::{Host, Net, Received, TestResult, locked, run_tool, serve};
+use super::common::{Host, Net, Received, TestResult, first_connection, locked, run_tool, serve};
 use dal_core::FetchResponse;
 use dalgona_batteries::web::{WebConfig, web};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -349,23 +351,27 @@ async fn private_targets_never_reach_the_net_service() -> TestResult {
 
 #[tokio::test]
 async fn a_live_loopback_listener_sees_no_connection() -> TestResult {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    // The listener binds `::1`: every ambient sweep this host sees targets
+    // 127.0.0.0/8 only, so the denial test keeps its original strictness —
+    // any connection at all fails — without counting that sweep as the
+    // tool's.
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
     let port = listener.local_addr()?.port();
     let host = Host::answering([]);
     *locked(&host.net) = Net::Live { base: None };
     let extension = web(config(30))?;
-    let args = format!(r#"{{"url":"http://127.0.0.1:{port}/admin"}}"#);
+    let args = format!(r#"{{"url":"http://[::1]:{port}/admin"}}"#);
 
-    let (text, connected) = tokio::join!(
+    let (text, intrusion) = tokio::join!(
         run_tool(&extension, &host, "web_fetch", &args),
-        tokio::time::timeout(Duration::from_millis(400), listener.accept()),
+        first_connection(&listener, Duration::from_millis(400)),
     );
     assert_eq!(
         text?,
-        "web_fetch: 127.0.0.1 is a private address; fetch public URLs only."
+        "web_fetch: [::1] is a private address; fetch public URLs only."
     );
-    assert!(
-        connected.is_err(),
+    assert_eq!(
+        intrusion, None,
         "the loopback service must see no connection"
     );
     assert_eq!(requested_urls(&host), Vec::<String>::new());
@@ -419,12 +425,15 @@ async fn a_global_literal_is_requested_unchanged_without_a_host_override() -> Te
 #[tokio::test]
 async fn a_transport_failure_is_a_fetch_network_error() -> TestResult {
     // A closed port: the host answers status 0 when the connection fails.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
+    // This test owns the port: the socket stays bound but never listens, so
+    // the dial is refused while no freed ephemeral port can be rebound by a
+    // concurrent listener mid-test. The binding outlives the tool call.
+    let closed = tokio::net::TcpSocket::new_v4()?;
+    closed.bind("127.0.0.1:0".parse()?)?;
+    let dead = closed.local_addr()?;
     let host = Host::answering([]);
     *locked(&host.net) = Net::Live {
-        base: Some(format!("http://127.0.0.1:{port}")),
+        base: Some(format!("http://{dead}")),
     };
     let extension = web(config(30))?;
     let text = run_tool(
@@ -434,6 +443,7 @@ async fn a_transport_failure_is_a_fetch_network_error() -> TestResult {
         r#"{"url":"http://1.1.1.1/page"}"#,
     )
     .await?;
+    drop(closed);
     assert_eq!(
         text,
         "web_fetch failed: no response from http://1.1.1.1/page"
@@ -487,16 +497,20 @@ async fn a_tavily_config_left_on_the_brave_key_name_reads_the_tavily_variable() 
 
 #[tokio::test]
 async fn a_search_to_a_closed_port_is_a_network_error_without_the_key() -> TestResult {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
+    // This test owns the port: the socket stays bound but never listens, so
+    // the dial is refused while no freed ephemeral port can be rebound by a
+    // concurrent listener mid-test. The binding outlives the tool call.
+    let closed = tokio::net::TcpSocket::new_v4()?;
+    closed.bind("127.0.0.1:0".parse()?)?;
+    let dead = closed.local_addr()?;
     let host = Host::answering([]);
     locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), "BSA-closed-port-key".to_owned());
     *locked(&host.net) = Net::Live {
-        base: Some(format!("http://127.0.0.1:{port}")),
+        base: Some(format!("http://{dead}")),
     };
     let extension = web(config(30))?;
     let text = run_tool(&extension, &host, "web_search", r#"{"query":"parse rust"}"#).await?;
+    drop(closed);
     assert_eq!(
         text,
         "web_search failed: no response from https://api.search.brave.com/res/v1/web/search?q=parse+rust&count=5"
@@ -526,12 +540,40 @@ async fn search_through_listener(
     *locked(&host.net) = Net::Live {
         base: Some(format!("http://127.0.0.1:{port}")),
     };
-    let extension = web(config)?;
-    let (text, received) = tokio::join!(
-        run_tool(&extension, &host, "web_search", args),
-        serve(&listener, status, "application/json", body),
-    );
-    Ok((text?, received))
+    let extension = Arc::new(web(config)?);
+    let task_host = Arc::clone(&host);
+    let task_args = args.to_owned();
+    let mut client = tokio::task::JoinSet::new();
+    client.spawn(async move {
+        run_tool(&extension, &task_host, "web_search", &task_args)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    let received = match serve(&listener, status, "application/json", body, &mut client).await {
+        Ok(received) => received,
+        Err(error) => {
+            client.abort_all();
+            while client.join_next().await.is_some() {}
+            return Err(error);
+        }
+    };
+    let text = match client.join_next().await {
+        Some(Ok(Ok(text))) => text,
+        Some(Ok(Err(error))) => {
+            return Err(Box::<dyn StdError>::from(std::io::Error::other(error)));
+        }
+        Some(Err(join)) => {
+            return Err(Box::<dyn StdError>::from(std::io::Error::other(format!(
+                "the tool task failed: {join}"
+            ))));
+        }
+        None => {
+            return Err(Box::<dyn StdError>::from(std::io::Error::other(
+                "the tool task vanished before its reply",
+            )));
+        }
+    };
+    Ok((text, received))
 }
 
 #[tokio::test]
@@ -794,7 +836,29 @@ async fn a_four_hundred_char_query_is_forwarded() -> TestResult {
     let text = run_tool(&extension, &host, "web_search", &args).await?;
     let result = parse(&text)?;
     assert_eq!(result["provider"].as_str(), Some("brave"));
-    assert_eq!(requested_urls(&host).len(), 1);
+    assert_eq!(
+        requested_urls(&host),
+        [format!(
+            "https://api.search.brave.com/res/v1/web/search?q={query}&count=5"
+        )],
+        "the forwarded url must carry the 400-character query"
+    );
+
+    // One character over the cap is refused before env and net with the
+    // exact typed error, so the cap is proven from both sides.
+    let over = "q".repeat(401);
+    let args = format!(r#"{{"query":"{over}"}}"#);
+    let host = Host::answering([]);
+    let extension = web(config(30))?;
+    let text = run_tool(&extension, &host, "web_search", &args).await?;
+    assert_eq!(
+        text, INVALID_QUERY,
+        "a 401-character query without credentials"
+    );
+    assert!(
+        requested_urls(&host).is_empty(),
+        "a 401-character query reached the net service"
+    );
     Ok(())
 }
 
@@ -937,16 +1001,19 @@ async fn a_missing_content_type_is_an_unsupported_media_error() -> TestResult {
 
 #[tokio::test]
 async fn a_tavily_search_to_a_closed_port_hides_the_key() -> TestResult {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
+    // This test owns the port, like the brave closed-port test: the socket
+    // stays bound but never listens and outlives the tool call.
+    let closed = tokio::net::TcpSocket::new_v4()?;
+    closed.bind("127.0.0.1:0".parse()?)?;
+    let dead = closed.local_addr()?;
     let host = Host::answering([]);
     locked(&host.env_vars).insert("TAVILY_API_KEY".to_owned(), TAVILY_KEY.to_owned());
     *locked(&host.net) = Net::Live {
-        base: Some(format!("http://127.0.0.1:{port}")),
+        base: Some(format!("http://{dead}")),
     };
     let extension = web(tavily_config())?;
     let text = run_tool(&extension, &host, "web_search", r#"{"query":"parse rust"}"#).await?;
+    drop(closed);
     assert_eq!(
         text,
         "web_search failed: no response from https://api.tavily.com/search"
@@ -973,6 +1040,19 @@ async fn a_search_count_of_one_twenty_or_absent_is_forwarded() -> TestResult {
                 "https://api.search.brave.com/res/v1/web/search?q=parse+rust&{expected}"
             )],
             "{args} must forward {expected}"
+        );
+    }
+    for count in [0, 21] {
+        // Missing credentials: the count check must win over the
+        // not-configured path, and nothing may reach the net service.
+        let host = Host::answering([]);
+        let extension = web(config(30))?;
+        let args = format!(r#"{{"query":"parse rust","count":{count}}}"#);
+        let text = run_tool(&extension, &host, "web_search", &args).await?;
+        assert_eq!(text, INVALID_COUNT, "count {count} without credentials");
+        assert!(
+            requested_urls(&host).is_empty(),
+            "count {count} reached the net service"
         );
     }
     Ok(())

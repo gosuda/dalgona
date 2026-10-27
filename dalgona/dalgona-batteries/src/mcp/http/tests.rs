@@ -383,6 +383,7 @@ mod unauthorized_recovery {
     struct CountingServices {
         asked: AtomicUsize,
         answer: Mutex<Option<Answer>>,
+        questions: Mutex<Vec<String>>,
     }
 
     fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
@@ -415,8 +416,14 @@ mod unauthorized_recovery {
             unavailable()
         }
 
-        fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
+        fn ask(&self, _who: &Caller, question: Question) -> ServiceFuture<'_, Option<Answer>> {
             self.asked.fetch_add(1, Ordering::SeqCst);
+            if let Question::Confirm { text, .. } = &question {
+                self.questions
+                    .lock()
+                    .expect("questions")
+                    .push(text.to_string());
+            }
             let answer = self.answer.lock().expect("answer").clone();
             Box::pin(async move { Ok(answer) })
         }
@@ -537,7 +544,14 @@ mod unauthorized_recovery {
         accepted: Mutex<String>,
         token_replies: Mutex<VecDeque<(u16, String)>>,
         token_requests: AtomicUsize,
-        step_up: AtomicBool,
+        step_up_remaining: AtomicUsize,
+        registration: AtomicBool,
+        authorize_iss: Mutex<Option<String>>,
+        seen_paths: Mutex<Vec<String>>,
+        seen_bearers: Mutex<Vec<String>>,
+        dcr_bodies: Mutex<Vec<String>>,
+        token_bodies: Mutex<Vec<String>>,
+        auth_queries: Mutex<Vec<String>>,
     }
 
     fn reply(status: u16, body: &str) -> String {
@@ -562,7 +576,22 @@ mod unauthorized_recovery {
         }
 
         fn require_step_up(&self) {
-            self.step_up.store(true, Ordering::SeqCst);
+            self.step_up_remaining.store(usize::MAX, Ordering::SeqCst);
+        }
+
+        /// Demands scope elevation for exactly `times` more bearer calls.
+        fn require_step_up_times(&self, times: usize) {
+            self.step_up_remaining.store(times, Ordering::SeqCst);
+        }
+
+        /// Advertises a registration endpoint in the authorization metadata.
+        fn enable_registration(&self) {
+            self.registration.store(true, Ordering::SeqCst);
+        }
+
+        /// Answers authorization redirects with `iss` instead of the real issuer.
+        fn spoof_authorize_iss(&self, iss: String) {
+            *self.authorize_iss.lock().expect("authorize iss") = Some(iss);
         }
 
         fn accept_only(&self, token: &str) {
@@ -580,10 +609,60 @@ mod unauthorized_recovery {
             .unwrap_or((500, "{}".to_owned()))
         }
 
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one fixture answers every route in order"
+        )]
         fn respond(&self, headers: &str, body: &str) -> String {
             let line = headers.lines().next().unwrap_or_default();
+            let mut fields = line.split_whitespace();
+            let method = fields.next().unwrap_or_default();
+            let target = fields.next().unwrap_or_default();
+            self.seen_paths
+                .lock()
+                .expect("seen paths")
+                .push(format!("{method} {target}"));
+            if method == "POST" && target == "/register" {
+                self.dcr_bodies
+                    .lock()
+                    .expect("DCR bodies")
+                    .push(body.to_owned());
+                return reply(200, "{\"client_id\":\"fixture-client\"}");
+            }
+            if method == "GET" && target.starts_with("/authorize") {
+                let query = target
+                    .split_once('?')
+                    .map(|(_, query)| query)
+                    .unwrap_or_default();
+                self.auth_queries
+                    .lock()
+                    .expect("authorization queries")
+                    .push(query.to_owned());
+                let callback =
+                    Url::parse(&format!("http://127.0.0.1{target}")).expect("authorization target");
+                let pairs: std::collections::HashMap<String, String> =
+                    callback.query_pairs().into_owned().collect();
+                let redirect = pairs.get("redirect_uri").cloned().unwrap_or_default();
+                let state = pairs.get("state").cloned().unwrap_or_default();
+                let iss = self
+                    .authorize_iss
+                    .lock()
+                    .expect("authorize iss")
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/issuer", self.origin));
+                let separator = if redirect.contains('?') { '&' } else { '?' };
+                let location =
+                    format!("{redirect}{separator}code=fixture-code&state={state}&iss={iss}");
+                return format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
             if line.starts_with("POST /token") {
                 self.token_requests.fetch_add(1, Ordering::SeqCst);
+                self.token_bodies
+                    .lock()
+                    .expect("token bodies")
+                    .push(body.to_owned());
                 let (status, body) = self.next_token_reply();
                 return reply(status, &body);
             }
@@ -598,18 +677,29 @@ mod unauthorized_recovery {
             }
             if line.contains("/.well-known/oauth-authorization-server/issuer") {
                 let origin = &self.origin;
+                let registration = if self.registration.load(Ordering::SeqCst) {
+                    format!("\"registration_endpoint\":\"{origin}/register\",")
+                } else {
+                    String::new()
+                };
                 return reply(
                     200,
                     &format!(
-                        "{{\"issuer\":\"{origin}/issuer\",\"authorization_endpoint\":\"{origin}/authorize\",\"token_endpoint\":\"{origin}/token\",\"code_challenge_methods_supported\":[\"S256\"]}}"
+                        "{{\"issuer\":\"{origin}/issuer\",{registration}\"authorization_endpoint\":\"{origin}/authorize\",\"token_endpoint\":\"{origin}/token\",\"code_challenge_methods_supported\":[\"S256\"]}}"
                     ),
                 );
             }
             if !line.starts_with("POST /mcp") {
                 return reply(404, "{}");
             }
-            if self.step_up.load(Ordering::SeqCst) {
-                return "HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned();
+            let remaining = self.step_up_remaining.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.step_up_remaining
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .expect("step-up budget never grows here");
+                return "HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files:write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned();
             }
             let bearer = headers.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
@@ -617,6 +707,10 @@ mod unauthorized_recovery {
                     .then(|| value.trim().strip_prefix("Bearer ").map(str::to_owned))
                     .flatten()
             });
+            self.seen_bearers
+                .lock()
+                .expect("seen bearers")
+                .push(bearer.clone().unwrap_or_default());
             let accepted = self.accepted.lock().expect("accepted token").clone();
             if bearer.as_deref() != Some(accepted.as_str()) {
                 return "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned();
@@ -710,7 +804,14 @@ mod unauthorized_recovery {
                 accepted: Mutex::new(accepted.to_owned()),
                 token_replies: Mutex::new(replies.into()),
                 token_requests: AtomicUsize::new(0),
-                step_up: AtomicBool::new(false),
+                step_up_remaining: AtomicUsize::new(0),
+                registration: AtomicBool::new(false),
+                authorize_iss: Mutex::new(None),
+                seen_paths: Mutex::new(Vec::new()),
+                seen_bearers: Mutex::new(Vec::new()),
+                dcr_bodies: Mutex::new(Vec::new()),
+                token_bodies: Mutex::new(Vec::new()),
+                auth_queries: Mutex::new(Vec::new()),
             });
             let fixture = Self {
                 server,
@@ -767,6 +868,19 @@ mod unauthorized_recovery {
 
         fn answer(&self, answer: Answer) {
             *self.services.answer.lock().expect("answer") = Some(answer);
+        }
+
+        /// Pops the newest authorization URL the client asked the user to open.
+        fn take_confirm_url(&self) -> Option<String> {
+            self.services
+                .questions
+                .lock()
+                .expect("questions")
+                .pop()
+                .and_then(|text| {
+                    text.find("http")
+                        .map(|start| text[start..].trim_end().to_owned())
+                })
         }
 
         /// Issues one tool call through the real exchange path.
@@ -1048,6 +1162,426 @@ mod unauthorized_recovery {
         };
         with_server(listener, &fixture.server, drain).await;
         assert_eq!(fixture.asked(), 1);
+    }
+
+    /// Plays the system browser: follows the fixture authorization redirect
+    /// into the loopback callback and returns the callback status.
+    async fn complete_browser_authorization(url: &str) -> reqwest::StatusCode {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("browser client")
+            .get(url)
+            .send()
+            .await
+            .expect("authorization redirect reaches the callback")
+            .status()
+    }
+
+    /// Drives one interactive authorization: approves the consent question and
+    /// completes every browser redirect the call opens, expecting `authorizations`
+    /// callbacks in total. Each callback has its own bound so a missing
+    /// question fails fast with a cause instead of burning the fixture budget.
+    async fn drive_browser_authorizations(fixture: &Fixture, authorizations: usize) {
+        for _ in 0..authorizations {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(url) = fixture.take_confirm_url() {
+                        let status = complete_browser_authorization(&url).await;
+                        assert!(
+                            status.is_success(),
+                            "the callback answers the browser redirect"
+                        );
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the consent question opens for the browser");
+        }
+    }
+
+    /// Seeds an access-only credential: no refresh token, so the first 401
+    /// must take the interactive path instead of refreshing.
+    fn seed_access_only(fixture: &Fixture, access: &str, scopes: Vec<String>) {
+        auth::persist_token(
+            &fixture.dir.join("tokens.json"),
+            &fixture.issuer,
+            &fixture.server.resource,
+            TokenRecord {
+                client_id: "client".to_owned(),
+                access_token: access.to_owned(),
+                refresh_token: None,
+                scopes,
+            },
+        )
+        .expect("seed access-only credential");
+    }
+
+    /// Full OAuth loop: discovery order, dynamic registration with a native
+    /// application type, PKCE with a resource-bound challenge and exchange,
+    /// then the bearer on every later POST.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the full OAuth loop asserts every step in one walk"
+    )]
+    async fn oauth_happy_path() {
+        let (fixture, listener) = Fixture::start(
+            "happy-access",
+            vec![tokens_reply("happy-access", "happy-refresh")],
+        )
+        .await;
+        fixture.server.enable_registration();
+        seed_access_only(&fixture, "expired-access", vec!["read".to_owned()]);
+        fixture.answer(Answer::Approve);
+        let transport = fixture.transport();
+        let scenario = async {
+            let (result, ()) = tokio::join!(
+                fixture.call(&transport),
+                drive_browser_authorizations(&fixture, 1)
+            );
+            let response = result.expect("interactive authorization succeeds");
+            assert!(
+                response.as_str().contains("happy-access"),
+                "the retried call carries the new bearer"
+            );
+            let again = fixture
+                .call(&transport)
+                .await
+                .expect("a later call reuses the bearer");
+            assert!(again.as_str().contains("happy-access"));
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(
+            fixture.asked(),
+            1,
+            "one interactive authorization, then the bearer persists"
+        );
+        let paths = fixture.server.seen_paths.lock().expect("seen paths");
+        let position = |needle: &str| {
+            paths
+                .iter()
+                .position(|path| path.contains(needle))
+                .unwrap_or_else(|| panic!("the server saw no {needle}: {paths:?}"))
+        };
+        assert!(
+            position("oauth-protected-resource") < position("oauth-authorization-server"),
+            "resource metadata precedes authorization metadata: {paths:?}"
+        );
+        assert!(
+            position("oauth-authorization-server") < position("POST /register"),
+            "registration follows discovery: {paths:?}"
+        );
+        assert!(
+            position("POST /register") < position("GET /authorize"),
+            "the browser opens after registration: {paths:?}"
+        );
+        assert!(
+            position("GET /authorize") < position("POST /token"),
+            "the code exchanges after the callback: {paths:?}"
+        );
+        let dcr = fixture.server.dcr_bodies.lock().expect("DCR bodies");
+        assert_eq!(dcr.len(), 1, "exactly one dynamic registration: {dcr:?}");
+        assert!(
+            dcr[0].contains("\"application_type\":\"native\""),
+            "the DCR body registers a native client: {}",
+            dcr[0]
+        );
+        let queries = fixture.server.auth_queries.lock().expect("auth queries");
+        assert_eq!(queries.len(), 1, "exactly one authorization request");
+        for field in [
+            "code_challenge=",
+            "code_challenge_method=S256",
+            "resource=",
+            "client_id=fixture-client",
+        ] {
+            assert!(
+                queries[0].contains(field),
+                "the authorization request carries {field}: {}",
+                queries[0]
+            );
+        }
+        let exchanges = fixture.server.token_bodies.lock().expect("token bodies");
+        assert_eq!(exchanges.len(), 1, "exactly one token exchange");
+        for field in [
+            "grant_type=authorization_code",
+            "code=fixture-code",
+            "code_verifier=",
+            "resource=",
+            "client_id=fixture-client",
+        ] {
+            assert!(
+                exchanges[0].contains(field),
+                "the token exchange carries {field}: {}",
+                exchanges[0]
+            );
+        }
+        let bearers = fixture.server.seen_bearers.lock().expect("seen bearers");
+        assert!(
+            bearers.len() >= 4,
+            "the unauthenticated probe, the stored token, the retried call, and the later call: {bearers:?}"
+        );
+        assert_eq!(
+            bearers[0], "",
+            "the first POST is unauthenticated; authorization begins on 401"
+        );
+        assert_eq!(bearers[1], "expired-access");
+        assert!(
+            bearers[2..].iter().all(|bearer| bearer == "happy-access"),
+            "every later POST carries the new bearer: {bearers:?}"
+        );
+    }
+
+    /// A callback whose `iss` differs from discovery is rejected before any
+    /// token request leaves the client.
+    #[tokio::test]
+    async fn oauth_issuer_mismatch() {
+        let (fixture, listener) = Fixture::start(
+            "mismatch-access",
+            vec![tokens_reply("mismatch-access", "mismatch-refresh")],
+        )
+        .await;
+        seed_access_only(&fixture, "expired-access", Vec::new());
+        fixture
+            .server
+            .spoof_authorize_iss(format!("{}/attacker", fixture.server.origin));
+        fixture.answer(Answer::Approve);
+        let transport = fixture.transport();
+        let scenario = async {
+            let driver = async {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let Some(url) = fixture.take_confirm_url() {
+                            let status = complete_browser_authorization(&url).await;
+                            assert_eq!(
+                                status.as_u16(),
+                                400,
+                                "the callback rejects the mismatched issuer"
+                            );
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the consent question opens for the browser");
+            };
+            let (result, ()) = tokio::join!(fixture.call(&transport), driver);
+            let error = result.expect_err("the issuer mismatch fails the call");
+            let text = match &error {
+                TransportError::Mcp(inner) => {
+                    assert!(
+                        matches!(inner, McpError::IssuerMismatch),
+                        "the mismatch surfaces as IssuerMismatch: {error:?}"
+                    );
+                    inner.to_string()
+                }
+                TransportError::Cancelled => {
+                    panic!("the mismatch stays an Mcp error: {error:?}")
+                }
+            };
+            assert_eq!(text, "mcp authorization failed: issuer mismatch");
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(
+            fixture.server.token_requests(),
+            0,
+            "no token request is sent after an issuer mismatch"
+        );
+        assert_eq!(fixture.asked(), 1);
+    }
+
+    /// One 403 unions the challenged scope with the stored scopes,
+    /// re-authorizes once, and the retried call succeeds.
+    #[tokio::test]
+    async fn oauth_step_up_scope() {
+        let (fixture, listener) = Fixture::start(
+            "stepup-access",
+            vec![tokens_reply("stepup-access", "stepup-refresh")],
+        )
+        .await;
+        fixture.server.require_step_up_times(1);
+        seed_access_only(&fixture, "stepup-access", vec!["read".to_owned()]);
+        fixture.answer(Answer::Approve);
+        let transport = fixture.transport();
+        let scenario = async {
+            let (result, ()) = tokio::join!(
+                fixture.call(&transport),
+                drive_browser_authorizations(&fixture, 1)
+            );
+            let response = result.expect("step-up re-authorization succeeds");
+            assert!(response.as_str().contains("stepup-access"));
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(
+            fixture.server.token_requests(),
+            1,
+            "the scope challenge re-authorizes exactly once"
+        );
+        assert_eq!(fixture.asked(), 1);
+        let file = auth::read_tokens(&fixture.dir.join("tokens.json"));
+        let record = auth::record_for(&file, &fixture.issuer, &fixture.server.resource)
+            .expect("the step-up persists a record");
+        assert_eq!(record.access_token, "stepup-access");
+        assert_eq!(record.scopes, vec!["files:write", "read"]);
+    }
+
+    /// Persistent 403s stop after the maximum: the call fails with the exact
+    /// step-up limit string instead of re-authorizing forever.
+    #[tokio::test]
+    async fn oauth_step_up_limit() {
+        let (fixture, listener) = Fixture::start(
+            "limited-access",
+            vec![
+                tokens_reply("limited-access", "limited-refresh"),
+                tokens_reply("limited-access", "limited-refresh"),
+                tokens_reply("limited-access", "limited-refresh"),
+            ],
+        )
+        .await;
+        fixture.server.require_step_up();
+        seed_access_only(&fixture, "limited-access", Vec::new());
+        fixture.answer(Answer::Approve);
+        let transport = fixture.transport();
+        let scenario = async {
+            let (result, ()) = tokio::join!(
+                fixture.call(&transport),
+                drive_browser_authorizations(&fixture, 2)
+            );
+            let error = result.expect_err("persistent 403s hit the limit");
+            let text = match &error {
+                TransportError::Mcp(inner) => {
+                    assert!(
+                        matches!(inner, McpError::StepUpLimit),
+                        "the cap surfaces as StepUpLimit: {error:?}"
+                    );
+                    inner.to_string()
+                }
+                TransportError::Cancelled => {
+                    panic!("the cap stays an Mcp error: {error:?}")
+                }
+            };
+            assert_eq!(text, "mcp authorization failed: step-up limit reached");
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(
+            fixture.server.token_requests(),
+            2,
+            "re-authorization stops at the cap"
+        );
+        assert_eq!(fixture.asked(), 2);
+    }
+
+    /// Issues one tool call on `transport` with `services` as the host and
+    /// `who` as the caller, mirroring the fixture call path.
+    fn direct_call<'a>(
+        transport: &'a Arc<HttpTransport>,
+        services: &'a CountingServices,
+        who: &'a Caller,
+    ) -> impl Future<Output = Result<RawJson, TransportError>> + Send + 'a {
+        let transport = Arc::clone(transport);
+        async move {
+            let ids = AtomicU64::new(1000);
+            let cancel = CancellationToken::new();
+            let call = CallCx {
+                method: "tools/call",
+                version: PROTOCOL_VERSION,
+                services,
+                who,
+                cancel: &cancel,
+                call_cancel: None,
+            };
+            transport
+                .exchange(1, &ids, "{\"name\":\"echo\"}", &[], None, &call)
+                .await
+        }
+    }
+
+    /// Two servers share one issuer under different canonical resources: each
+    /// holds its own token, and neither ever receives the other's bearer.
+    /// Bearer selection is per request from the verified issuer plus the
+    /// transport URL's canonical resource, so isolation holds for every call
+    /// on either transport with no prompt and no token request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn token_binding_per_resource() {
+        let (fixture_a, listener_a) = Fixture::start("token-a", Vec::new()).await;
+        let (fixture_b, listener_b) = Fixture::start("token-b", Vec::new()).await;
+        let resource_a = auth::canonical_resource(&fixture_a.url);
+        let resource_b = auth::canonical_resource(&fixture_b.url);
+        assert_ne!(
+            resource_a, resource_b,
+            "the two loopback servers are different resources"
+        );
+        let issuer = "https://shared-issuer.example";
+        let tokens_path = fixture_a.dir.join("tokens.json");
+        for (resource, token) in [(&resource_a, "token-a"), (&resource_b, "token-b")] {
+            auth::persist_token(
+                &tokens_path,
+                issuer,
+                resource,
+                TokenRecord {
+                    client_id: "client".to_owned(),
+                    access_token: token.to_owned(),
+                    refresh_token: None,
+                    scopes: Vec::new(),
+                },
+            )
+            .expect("seed per-resource credential");
+        }
+        let coordinator = Arc::new(RefreshCoordinator::new());
+        let build = |url: Url| {
+            HttpTransport::new(
+                test_key(),
+                url,
+                tokens_path.clone(),
+                "0.1.0".to_owned(),
+                &Budgets::default(),
+                Arc::clone(&coordinator),
+            )
+            .expect("per-resource transport")
+        };
+        let transport_a = Arc::new(build(fixture_a.url.clone()));
+        let transport_b = Arc::new(build(fixture_b.url.clone()));
+        transport_a.set_issuer(issuer).await;
+        transport_b.set_issuer(issuer).await;
+        let scenario = async {
+            let (first, second) = tokio::join!(
+                direct_call(&transport_a, fixture_a.services.as_ref(), &fixture_a.who),
+                direct_call(&transport_b, fixture_b.services.as_ref(), &fixture_b.who)
+            );
+            let first = first.expect("resource A answers with its own bearer");
+            let second = second.expect("resource B answers with its own bearer");
+            assert!(first.as_str().contains("token-a"));
+            assert!(second.as_str().contains("token-b"));
+        };
+        Box::pin(with_server(listener_a, &fixture_a.server, async {
+            Box::pin(with_server(listener_b, &fixture_b.server, scenario)).await;
+        }))
+        .await;
+        assert_eq!(fixture_a.asked(), 0, "no prompt on either transport");
+        assert_eq!(fixture_b.asked(), 0, "no prompt on either transport");
+        assert_eq!(
+            fixture_a.server.token_requests(),
+            0,
+            "no token request on either transport"
+        );
+        assert_eq!(
+            fixture_b.server.token_requests(),
+            0,
+            "no token request on either transport"
+        );
+        let bearers_a = fixture_a.server.seen_bearers.lock().expect("bearers A");
+        let bearers_b = fixture_b.server.seen_bearers.lock().expect("bearers B");
+        assert!(
+            !bearers_a.is_empty() && bearers_a.iter().all(|bearer| bearer == "token-a"),
+            "server A only ever saw its own bearer: {bearers_a:?}"
+        );
+        assert!(
+            !bearers_b.is_empty() && bearers_b.iter().all(|bearer| bearer == "token-b"),
+            "server B only ever saw its own bearer: {bearers_b:?}"
+        );
     }
 }
 

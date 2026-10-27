@@ -11,9 +11,10 @@ use dal_core::{ContextItem, EntryId, Family, ModelRoute, Part, RequestParams, Se
 use super::config::{HistoryConfig, HistoryConfigError, parse_config};
 use super::draw::{Grid, draw, paginate};
 use super::dream::{
-    DreamEvent, DreamFileError, DreamPhase, DreamState, check_dream_file, decode_dream_file,
-    transition,
+    DreamAction, DreamEvent, DreamFileError, DreamPhase, DreamState, check_dream_file,
+    consolidated_notice, decode_dream_file, failed_notice, park_notice, transition,
 };
+use super::pipeline::letter_text;
 use super::records::{LetterRecord, RecordError};
 use super::selection::{
     LetterVisibility, history_index_line, select_oldest_plus_newest,
@@ -1090,4 +1091,472 @@ fn draw_renders_deterministic_png_pages() {
     let kept: usize = pages.iter().map(|page| page.items.len()).sum();
     assert_ne!(pages.len(), 0);
     assert_eq!(kept, built.len());
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the round-trip walks every fixture in one table"
+)]
+fn skill_capture_roundtrip() {
+    let description = "歴史漢字の技能説明漢";
+    let registry = dal_ext::skills::SkillRegistry::merge(&[(
+        "capture-plugin",
+        vec![
+            dal_ext::skills::RegisteredSkill {
+                plugin: "capture-plugin".into(),
+                name: "capture-test".into(),
+                description: description.into(),
+                body: std::sync::Arc::from("body"),
+                letter2image: true,
+                mcp: None,
+            },
+            dal_ext::skills::RegisteredSkill {
+                plugin: "capture-plugin".into(),
+                name: "plain".into(),
+                description: "stays text".into(),
+                body: std::sync::Arc::from("body"),
+                letter2image: false,
+                mcp: None,
+            },
+        ],
+    )])
+    .expect("registry merges");
+    let font = dal_ext::Font::embedded();
+    let first_assembly =
+        dal_ext::letter::letters(&registry, &font).expect("real renderer assembles");
+    assert_eq!(
+        first_assembly.chunks.len(),
+        1,
+        "only the marked skill is captured"
+    );
+    assert!(
+        first_assembly.fallbacks.is_empty(),
+        "the CJK ideograph draws"
+    );
+    let chunk = first_assembly.chunks.first().expect("one admitted chunk");
+    assert_eq!(&*chunk.skill, "capture-test");
+    assert_eq!(
+        &*chunk.source_text, description,
+        "source text is byte-equal at capture"
+    );
+    assert_eq!(&chunk.png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    let digest = blake3::hash(&chunk.png).to_hex().to_string();
+    let record = LetterRecord::Skill {
+        v: 1,
+        id: "capture-test".to_string(),
+        png_blob: digest.clone(),
+        png_bytes: u32::try_from(chunk.png.len()).expect("png fits u32"),
+        width: chunk.width,
+        height: chunk.height,
+        cell: chunk.cell,
+        spans: Vec::new(),
+    };
+    let body = sonic_rs::to_string(&record).expect("skill record encodes");
+    let json = dal_core::RawJson::parse(&body).expect("skill record parses");
+    let restored =
+        LetterRecord::decode(&json, entry_id(2).expect("nonzero")).expect("skill restores");
+    assert_eq!(restored, record);
+    assert_eq!(restored.id(), "capture-test");
+    let mut blob_store: std::collections::HashMap<[u8; 32], Vec<u8>> =
+        std::collections::HashMap::new();
+    let png_digest = *blake3::hash(&chunk.png).as_bytes();
+    blob_store.insert(png_digest, chunk.png.to_vec());
+    let record_store = body.clone();
+    drop(first_assembly);
+    let reopened_png = blob_store
+        .get(&png_digest)
+        .expect("blob survives reopen")
+        .clone();
+    let reopened_json = dal_core::RawJson::parse(&record_store).expect("record survives reopen");
+    let reopened_record = LetterRecord::decode(&reopened_json, entry_id(2).expect("nonzero"))
+        .expect("record decodes after reopen");
+    assert_eq!(reopened_record, record);
+    assert_eq!(
+        blake3::hash(&reopened_png).to_hex().to_string(),
+        digest,
+        "reopened blob matches the committed digest"
+    );
+    let second_assembly = dal_ext::letter::letters(&registry, &font).expect("restart reassembles");
+    let redrawn = second_assembly
+        .chunks
+        .first()
+        .expect("restart admits the chunk");
+    assert_eq!(
+        &*redrawn.source_text, description,
+        "source text is byte-equal across restart"
+    );
+    assert_eq!(
+        &*redrawn.png,
+        &reopened_png[..],
+        "restart keeps the same PNG bytes"
+    );
+    assert_eq!(
+        blake3::hash(&redrawn.png).to_hex().to_string(),
+        digest,
+        "restart keeps the same PNG digest"
+    );
+    let source = description;
+    let bytes = source.as_bytes().to_vec();
+    let len = u32::try_from(bytes.len()).expect("fixture fits");
+    let piece = CompactPiece {
+        entry: entry_id(1).expect("nonzero"),
+        part: 0,
+        off: 0,
+        len,
+        total: len,
+        role: Role::User,
+        picture: None,
+    };
+    let built = items(std::slice::from_ref(&piece), |span: Span| {
+        bytes
+            .get(
+                usize::try_from(span.off).expect("off fits")
+                    ..usize::try_from(span.off + span.len).expect("end fits"),
+            )
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| SourceError {
+                message: "span outside CJK fixture".to_string(),
+            })
+    })
+    .expect("CJK items build");
+    assert!(
+        built
+            .iter()
+            .any(|item| matches!(item, Item::Text { text, .. } if text.contains('漢'))),
+        "the CJK ideograph survives the history item path"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the error table covers every decline in one list"
+)]
+fn letter_resolution_errors() {
+    assert_eq!(
+        RecordError::TooManyLetters { count: 4097 }.to_string(),
+        "history record has 4097 letters; the limit is 4096."
+    );
+    assert_eq!(
+        RecordError::TooManySpans { count: 65537 }.to_string(),
+        "history record has 65537 spans; the limit is 65536."
+    );
+    assert_eq!(
+        RecordError::BadCell {
+            width: 64,
+            height: 65
+        }
+        .to_string(),
+        "history record has cell 64x65; each side must be 1 to 64."
+    );
+    assert_eq!(
+        RecordError::BadDigest {
+            digest: "XYZ".to_string()
+        }
+        .to_string(),
+        "history record has png_blob \"XYZ\"; the digest must be 64 lowercase hexadecimal digits."
+    );
+    assert_eq!(
+        RecordError::SkillSpans { count: 1 }.to_string(),
+        "history record is a skill capture with 1 spans; skill captures carry no spans."
+    );
+    assert_eq!(
+        RecordError::BadSpan {
+            entry: 5,
+            part: 0,
+            off: 0,
+            len: 1
+        }
+        .to_string(),
+        "history record has a span [5,0,0,1] that does not name bytes of an earlier entry."
+    );
+    assert_eq!(
+        RecordError::Decode.to_string(),
+        "history record is not a version 1 history body."
+    );
+    assert_eq!(
+        HistoryError::Fetch {
+            entry: 7,
+            message: "gone".to_string()
+        }
+        .to_string(),
+        "cannot read the journal text of entry 7: gone"
+    );
+    assert_eq!(
+        dal_ext::letter::malformed_id_error("x"),
+        "letter id is malformed: x"
+    );
+    assert_eq!(
+        dal_ext::letter::missing_id_error("7"),
+        "letter 7 does not exist in this session"
+    );
+    assert_eq!(
+        dal_ext::letter::gone_source_error("7"),
+        "letter 7 source blob is gone"
+    );
+    assert_eq!(
+        dal_ext::letter::classify_letter_path(""),
+        dal_ext::letter::LetterRoute::Empty
+    );
+    assert_eq!(
+        dal_ext::letter::classify_letter_path("7"),
+        dal_ext::letter::LetterRoute::Numeric("7".into())
+    );
+    assert_eq!(
+        dal_ext::letter::classify_letter_path("history/1.1"),
+        dal_ext::letter::LetterRoute::History
+    );
+    assert_eq!(
+        dal_ext::letter::classify_letter_path("x"),
+        dal_ext::letter::LetterRoute::Malformed
+    );
+    assert_eq!(dal_ext::letter::parse_letter_id("7"), Some(7));
+    assert_eq!(dal_ext::letter::parse_letter_id("x"), None);
+    let drawn = history_index_line("history/2.3", 4, 7, LetterVisibility::Drawn);
+    assert_eq!(drawn, "letter://history/2.3  history image, entries 4-7");
+    let shown = history_index_line("history/2.3", 4, 7, LetterVisibility::ShownAsText);
+    assert_eq!(
+        shown,
+        "letter://history/2.3  history image, entries 4-7, shown as text"
+    );
+    let hidden = history_index_line("history/2.3", 4, 7, LetterVisibility::NotDrawn);
+    assert_eq!(
+        hidden,
+        "letter://history/2.3  history image, entries 4-7, not drawn"
+    );
+    let session = SessionId::new_v7();
+    let items = vec![Item::Text {
+        span: Span {
+            entry: entry_id(1).expect("nonzero"),
+            part: 0,
+            off: 0,
+            len: 5,
+        },
+        role: Role::User,
+        total: 5,
+        text: "hello".into(),
+    }];
+    let text = letter_text("history/1.1", session, &items);
+    assert!(
+        text.starts_with(&format!(
+            "letter://history/1.1 holds 1 piece of the journal of session {session}."
+        )),
+        "F-06 names the id, piece count, and session: {text}"
+    );
+    assert!(
+        text.contains("=== entry 1, user, part 0, bytes 0-5 of 5"),
+        "{text}"
+    );
+    assert!(text.ends_with('\n'), "F-06 ends with one final LF");
+    assert!(
+        !text.ends_with("\n\n"),
+        "F-06 has no extra trailing blank line"
+    );
+}
+
+#[test]
+fn letter_text_determinism() {
+    let session = SessionId::new_v7();
+    let first_span = Span {
+        entry: entry_id(1).expect("nonzero"),
+        part: 0,
+        off: 0,
+        len: 5,
+    };
+    let second_span = Span {
+        entry: entry_id(2).expect("nonzero"),
+        part: 1,
+        off: 2,
+        len: 3,
+    };
+    let items = vec![
+        Item::Text {
+            span: first_span,
+            role: Role::User,
+            total: 5,
+            text: "hello".into(),
+        },
+        Item::Text {
+            span: second_span,
+            role: Role::Assistant,
+            total: 9,
+            text: "bye".into(),
+        },
+    ];
+    let first = letter_text("history/1.1", session, &items);
+    let second = letter_text("history/1.1", session, &items);
+    assert_eq!(first, second, "the same inputs give byte-equal letter text");
+    assert!(
+        first.contains("=== entry 1, user, part 0, bytes 0-5 of 5\nhello"),
+        "first span header names entry, role, part, and byte range: {first}"
+    );
+    assert!(
+        first.contains("=== entry 2, assistant, part 1, bytes 2-5 of 9\nbye"),
+        "second span header keeps its role words and range: {first}"
+    );
+    assert!(first.ends_with('\n'));
+    assert!(!first.ends_with("\n\n"));
+    let rebuilt = vec![
+        Item::Text {
+            span: first_span,
+            role: Role::User,
+            total: 5,
+            text: "hello".into(),
+        },
+        Item::Text {
+            span: second_span,
+            role: Role::Assistant,
+            total: 9,
+            text: "bye".into(),
+        },
+    ];
+    let reopened = letter_text("history/1.1", session, &rebuilt);
+    assert_eq!(
+        reopened, first,
+        "letter text is byte-equal across a store reopen"
+    );
+    let single = letter_text(
+        "history/1.2",
+        session,
+        &[Item::Text {
+            span: first_span,
+            role: Role::Note,
+            total: 5,
+            text: "hi".into(),
+        }],
+    );
+    assert!(
+        single.contains("holds 1 piece of the journal"),
+        "one piece uses the singular noun: {single}"
+    );
+    assert!(
+        single.contains("=== entry 1, note, part 0, bytes 0-5 of 5"),
+        "{single}"
+    );
+}
+
+#[test]
+fn record_visibility() {
+    let services = Arc::new(FakeServices::default());
+    services
+        .push_raw(
+            "letter",
+            r#"{"v":1,"id":"history/1.1","kind":"compaction","png_blob":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","png_bytes":1,"width":136,"height":16,"cell":[8,16],"spans":[[1,0,0,1]],"letters":[1]}"#,
+        )
+        .expect("letter fixture stores");
+    services
+        .push_raw("note", r#"{"v":1,"text":"unrelated"}"#)
+        .expect("other kind stores");
+    let cx = ToolCx::for_test(Arc::clone(&services) as Arc<dyn Services>);
+    let letters = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime builds")
+        .block_on(services.records(cx.caller(), "letter"))
+        .expect("records read");
+    assert_eq!(
+        letters.len(),
+        1,
+        "records(\"letter\") returns only letter bodies"
+    );
+    let unknown = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime builds")
+        .block_on(services.records(cx.caller(), "unknown-kind-xyz"))
+        .expect("unknown kind reads");
+    assert!(
+        unknown.is_empty(),
+        "an unknown kind returns an empty vector"
+    );
+    let body = letters.first().expect("one letter body");
+    let record = LetterRecord::decode(body, entry_id(9).expect("nonzero")).expect("letter decodes");
+    assert!(matches!(record, LetterRecord::Compaction { .. }));
+    assert_eq!(record.id(), "history/1.1");
+    let dream = LetterRecord::Dream {
+        v: 1,
+        id: "dream/1".to_string(),
+        letters: Vec::new(),
+        summary: "s".to_string(),
+    };
+    assert!(
+        dream.spans().is_empty(),
+        "dream records carry no spans for the image index"
+    );
+}
+
+#[test]
+fn park_policy_lifecycle() {
+    let mut state = DreamState::new();
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..5 {
+        let actions = transition(&mut state, DreamEvent::JobTransientFailure);
+        assert_eq!(actions.len(), 1);
+        let DreamAction::Notify(text) = actions.into_iter().next().expect("one notice") else {
+            panic!("transient failure before park must notify");
+        };
+        seen.push(text);
+    }
+    assert_eq!(seen, vec![failed_notice(); 5]);
+    assert_eq!(state.phase, DreamPhase::Idle);
+    assert_eq!(state.transient_streak, 5);
+    let park = transition(&mut state, DreamEvent::JobTransientFailure);
+    assert_eq!(park, vec![DreamAction::Notify(park_notice())]);
+    assert_eq!(state.phase, DreamPhase::Parked);
+    assert_eq!(state.transient_streak, 6);
+    let suppressed = transition(&mut state, DreamEvent::JobTransientFailure);
+    assert!(
+        suppressed.is_empty(),
+        "the F-09 park notice fires exactly once per park"
+    );
+    let probe = transition(&mut state, DreamEvent::ProbeFailed);
+    assert_eq!(
+        probe,
+        vec![DreamAction::Notify(
+            "Auto-dream remains paused; the next probe is in 6 hours.".to_string()
+        )]
+    );
+    assert_eq!(state.phase, DreamPhase::Parked);
+    transition(&mut state, DreamEvent::ProbeSucceeded);
+    assert_eq!(state.phase, DreamPhase::Idle);
+    assert_eq!(state.transient_streak, 0);
+    assert_eq!(state.identical_streak, 0);
+    let mut again: Vec<String> = Vec::new();
+    for _ in 0..5 {
+        let actions = transition(&mut state, DreamEvent::JobTransientFailure);
+        let DreamAction::Notify(text) = actions.into_iter().next().expect("one notice") else {
+            panic!("second-park transient must notify");
+        };
+        again.push(text);
+    }
+    assert_eq!(again, vec![failed_notice(); 5]);
+    let repark = transition(&mut state, DreamEvent::JobTransientFailure);
+    assert_eq!(
+        repark,
+        vec![DreamAction::Notify(park_notice())],
+        "success clears the park so a later park notifies again"
+    );
+    let mut streak = DreamState::new();
+    for _ in 0..2 {
+        let actions = transition(
+            &mut streak,
+            DreamEvent::JobIdenticalFailure("same".to_string()),
+        );
+        assert_eq!(actions, vec![DreamAction::Notify(failed_notice())]);
+    }
+    let third = transition(
+        &mut streak,
+        DreamEvent::JobIdenticalFailure("same".to_string()),
+    );
+    assert_eq!(third, vec![DreamAction::Notify(park_notice())]);
+    let repeat = transition(
+        &mut streak,
+        DreamEvent::JobIdenticalFailure("same".to_string()),
+    );
+    assert!(
+        repeat.is_empty(),
+        "the identical-failure park notice also fires once"
+    );
+    assert_eq!(consolidated_notice(3), "Auto-dream consolidated 3 letters.");
 }
