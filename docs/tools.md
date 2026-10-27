@@ -22,7 +22,7 @@ The request has one required field and two optional ones. It takes nothing else:
 
 A cell inherits its operations from `eval.uses` in `dal.toml`. If you leave out `uses`, the cell may request all of them. If you give `uses`, the cell may request only those. Each must be in `eval.uses`. An id outside `eval.uses` stops the cell with `scope_exceeded`. If you give `uses = []`, the cell can only compute: no tools, network, state, or child sessions. With no `eval.uses`, every cell can only compute.
 
-Each cell starts fresh. It has three names: `ctx`, `tools` (the same as `ctx.tools`), and `data`. It needs no `load` and no wrapper function. It keeps no globals for the next cell. The last expression is the result. If the last statement is not an expression, the result is `None`. There is no `return`.
+Each cell starts fresh. It has five names: `ctx`, `tools` (the same as `ctx.tools`), `judge`, `judge_batch`, and `data`. `judge(question)` asks the session judge one yes-or-no question and returns a `bool`. `judge_batch(questions)` asks up to 32 and returns one `bool` per question in the same order; an empty list returns an empty list. A question is one line of 1 to 4096 bytes. A cell may call them only when the operation it calls, `judge.ask` or `judge.batch`, is in its `uses` and in `eval.uses`. It needs no `load` and no wrapper function. It keeps no globals for the next cell. The last expression is the result. If the last statement is not an expression, the result is `None`. There is no `return`.
 
 ```starlark
 page = tools.search("TODO", path = "src")

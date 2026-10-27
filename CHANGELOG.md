@@ -1,6 +1,41 @@
 # Changelog
 
 ## Unreleased
+- Add the `judge` extension service: an eval cell can ask the session judge one question with `judge.ask` or up to 32 at once with `judge.batch`. The cell may request `judge.ask` or `judge.batch` only when that operation is in its `uses` and in `eval.uses`, and every cell now receives the `judge` and `judge_batch` globals.
+- Refuse judge evaluation outside eval cells, enforced at declaration: the phase table refuses `judge.ask` and `judge.batch` to plugin handlers, commands, and models.
+- The `/login` provider picker puts an exact provider id first when the filter matches one: typing `openai` and pressing Enter starts the OpenAI sign-in, not a longer id like `azure-openai-responses` that only contains the text.
+- A scoped model id offered by several providers is priced for admission from each listed row instead of failing as unpriced: the configured price for a `provider/id` key wins, then the live catalog price, then the compiled table. A route that names its provider also prices through its `provider/model` spelling.
+- A user plugin can replace one bundled skill or rule with `replace = True` and `battery = "<bundled extension>"`: for example the `find-anything` skill owned by `skills`, or the `fabricated-unavailable-tool-call` rule owned by `quality`. Without the pair a name clash is still refused; the replacement moves only that record and inherits no service, tool, or grant. Removing the claim restores the bundled record on reload.
+- `[limits.plugins]` Starlark budgets take positive integers and report the key to raise: a real load, handler, or eval-cell breach names `raise limits.plugins.<key> to allow more`, while a user `fail()` that repeats the vendor wording gains no such remedy.
+- Deliver buffered `NextTurn` mailbox messages: the fold keeps one
+  pending-mail state derived from the journal, a turn start incorporates the
+  waiting rows into its durable input through one `mail_delivered` record
+  that both materializes the delivery entry and consumes the mail positions
+  in the same journal line (no input-without-ack cut, no duplicated
+  delivery), and the 100-waiting bound counts pending rows instead of every
+  retained row, so delivered history frees capacity without erasure. Cursor
+  reads stay nondestructive, and old journals replay unchanged: their rows
+  stay waiting until a real turn delivers them. Callers reach mail only
+  through the capability-scoped agents service with the host-minted caller
+  and a grant for that service; they never write the journal directly. The
+  same service backs dal and composed dalgona. A full mailbox answers `Full`
+  and writes no row; a missing or finished recipient answers `Gone`, with no
+  promise that a finished child still receives.
+- Bound journal shard registration: a stalled shard worker now fails session open
+  and the first append with a typed `register` timeout inside the existing 60 s
+  operation bound, shared with queue admission, instead of waiting forever. The
+  abandoned registration is released once when the worker resumes; append, settle,
+  close, and create waits are unchanged.
+- Add Radius browser OAuth discovery/loopback sign-in and RFC 8628 device authorization; existing API-key sign-in remains available.
+- Add OpenRouter browser PKCE sign-in, storing the durable exchange result as an API-key credential.
+- Breaking Rust API: OAuth provider metadata now permits clientless OAuth rows and optional device page/redirect fields; migrate `OAuthSpec` and `Device` consumers accordingly.
+- Open extension grant prompts with their own 120 s deadline instead of the
+  generic `[ask] timeout`: an unanswered capability question expires after two
+  minutes and settles the waiting service call as a typed denial.
+- Surface the inert judged-rule note when `rules.judge` is `"off"`: session
+  open emits one `rules` notice naming the judged-rule count
+  ("judge: off; N judged rule(s) are inert") when judged rules are in the set,
+  and emits nothing when there are none.
 - Filter thinking choices by host-supported levels: `/thinking` and the live
   settings row query the model route (default, alias, or remote) for its
   supported levels before opening the picker. Submitted choices revalidate
@@ -39,6 +74,7 @@
 - Keep scripted wire tests offline by serving model discovery on loopback.
 - Build sandbox helpers from Cargo's reported artifact paths.
 - Prevent PTY test harnesses from acquiring their children's controlling terminal.
+- Add the `conpty-oxide` workspace dependency for the Windows ConPTY path.
 - Add a non-publishing release preflight before package rehearsals. Resolve
   short and mixed-case crate names using Cargo's sparse-index path rules.
 - Preserve cache-write prices when regenerating the model catalog.
@@ -55,6 +91,7 @@
   rate limits.
 - Resolve family-only model routes through the single configured provider.
   Refuse ambiguous routes instead of choosing a provider implicitly.
+- Make provider definitions the single source for per-family auth, dialect, and request schema, and gate scoped models through config limits.
 - Stop unfinished process groups when their owner is dropped. A reaped leader's identity is consumed so a later drop cannot signal it again, and Unix wait paths observe the native leader before the group reap.
 - Make live owned jobs observable in `list`, `find`, `status`, and counts without moving process capacity: owned rows join the running start-order stream while the session child limit still bounds process-backed children only.
 - Bound completed Gemini CLI lines: a newline-terminated line longer than 1 MiB ends the stream with a protocol error before decoding, so the trailing result event cannot complete the turn; an exactly 1 MiB line is still accepted.
@@ -356,6 +393,7 @@
 - Render the `skills` prompt section as plain text when the letter font table
   fails to parse, instead of omitting the whole section. Skill names and
   descriptions stay visible; previously the section disappeared.
+- Remove the duplicate bundled OFL font license copy, as the license text remains in `LICENSE.md`.
 - Breaking Rust API: `InputEvent` gains `model: Option<ModelInfo>`, the model
   resolved for the input hooks from the session's selection or configured
   default. A later explicit model selection can change the first request's
@@ -379,6 +417,7 @@
 - Report mailbox delivery only after its journal write succeeds. Failed
   writes return a service error and leave the live steer queue unchanged.
   Full queues refuse messages without writing them to the journal.
+- Refuse an empty `mail_delivered` record at the store boundary, so a delivery always carries at least one row.
 - Respect OAuth cancellation while waiting for the auth lock and recheck it
   immediately before the atomic store. Cancellation observed at either check
   leaves stored credentials unchanged.
@@ -626,6 +665,8 @@
 - Fix reading extension manuals with the `read` tool: an extension that registers doc pages now serves them at its own `<name>://` address through `ManualScheme`, which `dalgon` re-exports.
 - Fix the `run` service: it now keeps the stdout prefix a caller asks for. Before, every run reported an overflow with an empty prefix, so extensions that read command output, such as the review battery, could not read it.
 - Fix the terminal help key and `/copy`: F1 now opens the key list instead of failing with "no command registered for keys", every key in the list shows its name, and `/copy` puts the last reply on the clipboard and reports `copied N characters` instead of printing debug text.
+- Fix clipboard copy in the terminal: `/copy` and selection copy now end the clipboard sequence with the standard string terminator, and send a long copy in writes of at most 4096 bytes. A refused write makes a best-effort attempt to close the sequence, and reports `copy failed: the terminal refused the selection`.
+- Render all diagram kinds on one worker with an eight-task queue, deduplicated in-flight work, pending-card updates, and panic-safe task cleanup. Ignore file, URL, and embedded-data image references in SVG rasterization.
 - Fix text typed in the terminal while a turn runs: it now steers the turn at its next safe point and shows `1 message queued for the next reply`. Before, the terminal refused it with a turn mismatch error and dropped the text.
 - Fix the terminal status line and the first-run banner: a model named in `dal.toml` now shows in the status line and clears the sign-in banner. The status line also shows token use and cost, writes the workspace path with `~`, and shows `waiting for you` in full.
 - Fix settled tool cards in the terminal: each call shows one `ok  {name} {summary} · {duration}` card, or `failed  ...`, with no leftover `working` row and no `\t` in the summary.
@@ -692,3 +733,5 @@
 - Fix extension records: `append_record` now writes a journal record before it returns, `records` reads only the calling extension's rows on the current leaf path, and a tool call runs as the extension that registered it, with that extension's `inject` set. Records survive resume and follow `/tree` leaf moves.
 - Move `dal-agent` diagnostics from standard error to `tracing` events on the `dalgon.agent` target: stuck driver batches, turn openings, journal append failures, idle provider streams, slow infer steps, and file-descriptor limit changes no longer write to the terminal. `DAL_DEBUG` process-edge timing stays on standard error.
 - Breaking Rust API: remove the exported `BUILTINS` and `MODE` command records. Iterate `dal_ext::commands::specs()` for the ordered metadata (with `mode` last), or call `spec("mode")` for that record.
+- Recover completed background-job reports after failed writes or interrupted appends without duplicating them. Report cancellation persistence failures instead of success.
+- Stop nested inference when a hook times out or its owning turn is cancelled.

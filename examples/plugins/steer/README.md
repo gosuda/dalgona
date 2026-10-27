@@ -11,7 +11,7 @@ It returns a message that states which path it took.
 The command `/steer:steer` takes the text as its positional argument.
 
 ## What differs from pi
-Pi sends a user message into the session unconditionally. This plugin branches on idleness first, because steering an idle turn and waking a running one are different requests to the host.
+Pi sends a user message into the session unconditionally. This plugin branches on idleness first, because steering a running turn and waking an idle one are different requests to the host.
 
 ## Install
 Copy to the dal plugins data root and add `steer` to `plugins`.

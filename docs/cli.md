@@ -223,7 +223,7 @@ dalgon dev journal replay journal.jsonl
 
 ## Files and environment
 
-The config file is `$XDG_CONFIG_HOME/dal/dal.toml`, or `~/.config/dal/dal.toml` when `XDG_CONFIG_HOME` is unset. The data root is `$XDG_DATA_HOME/dal/`, or `~/.local/share/dal/`. `dalgona` uses `dalgona/` in both places. dalgon ignores an `XDG_` path that is not absolute. The layout is the same on every OS. On Windows, `~` is `HOME`, else `USERPROFILE`, else `HOMEDRIVE` plus `HOMEPATH`.
+The config file is `$XDG_CONFIG_HOME/dal/dal.toml`, or `~/.config/dal/dal.toml` when `XDG_CONFIG_HOME` is unset. The data root is `$XDG_DATA_HOME/dal/`, or `~/.local/share/dal/`. `dalgona` uses `dalgona/` in both places. dalgon ignores an `XDG_` path that is not absolute. The layout is the same on every OS. On Windows, `~` is absolute `HOME`, then absolute `USERPROFILE`, then absolute `HOMEDRIVE` plus `HOMEPATH` combined.
 
 | variable | effect |
 |---|---|

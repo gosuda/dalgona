@@ -23,6 +23,7 @@ examples/env-read author,model docs 400
 guard user,model guard-extension 150
 install user,author platform-paths 120
 integrate integrator,model wire-adapters 300
+license user,model docs 240
 models user,model model-catalog 250
 philosophy user,model docs 200
 plugins author,model plugin-system 450

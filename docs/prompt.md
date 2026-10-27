@@ -48,7 +48,7 @@ The session driver does not pass `AGENTS.md` or `SYSTEM.md` text to this slot ye
 
 ## Font license
 
-This product bundles GNU Unifont 18.0.01 glyph data (`extensions/dal-ext/assets/unifont-18.0.01.hex`) under the SIL Open Font License, Version 1.1. The full license text is in `extensions/dal-ext/assets/OFL-1.1.txt`. Upstream: https://unifoundry.com/unifont/
+This product bundles GNU Unifont 18.0.01 glyph data for letter images. Upstream offers the font under the SIL Open Font License, Version 1.1, and GNU GPL version 2 or later with the GNU Font Embedding Exception. This distribution uses the SIL Open Font License, Version 1.1. Read the full bundled terms at dal://license under the appendix “Third-party font: GNU Unifont 18.0.01”. Upstream: https://unifoundry.com/unifont/.
 
 ## Next
 
