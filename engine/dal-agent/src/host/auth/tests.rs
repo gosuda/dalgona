@@ -59,6 +59,7 @@ fn oauth(expires_at: Option<i64>) -> Credential {
         expires_at,
         id_token: Some(String::from("stored-id")),
         account_id: Some(String::from("stored-account")),
+        project_id: None,
     })
 }
 

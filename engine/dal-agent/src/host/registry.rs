@@ -724,6 +724,9 @@ impl Host {
         // descendant swept by its owner's close. Ids are unique, so a swept
         // member cannot double-report.
         session_teardowns.stop().await;
+        // The snapshot coordinator's census workers are host-tracked; they
+        // cannot strand once every session (and waiter owner) is closed.
+        self.state.shared.snapshots.shutdown().await;
         let live: HashSet<SessionId> = self.table_ids().into_iter().collect();
         let sessions_closed = ids.iter().filter(|id| !live.contains(id)).count();
         // Provider shutdown joins its internally bounded refresh tasks. Do not
@@ -1223,6 +1226,22 @@ impl Host {
             mode,
         ));
         shared.restore_fold(&fold);
+        // The user's saved `/scoped-models` choice seeds every session a
+        // person opens, from the live config a save updates, so a session
+        // opened after a save and the next process both start scoped. A child
+        // session is model-driven, with no picker to undo a scope, so it
+        // inherits none.
+        if !resolved.child {
+            let saved_scope = self
+                .state
+                .shared
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .scoped_models()
+                .to_vec();
+            shared.set_scoped((!saved_scope.is_empty()).then_some(saved_scope));
+        }
         if let Some(policy) = &policy {
             if let Some(tools) = &policy.tools {
                 shared.restrict_tools(tools);
@@ -1237,12 +1256,8 @@ impl Host {
         let jobs_table = if resolved.ephemeral {
             crate::jobs::JobTable::new()
         } else {
-            let jobs_dir = crate::session::commands::host::session_jobs_dir(
-                &self.state,
-                &resolved.workspace,
-                resolved.id,
-            );
-            crate::jobs::JobTable::open(jobs_dir, fold.delivered_jobs())
+            let store = self.store_for(&resolved.workspace);
+            crate::jobs::JobTable::open(&store, resolved.id, fold.delivered_jobs())
                 .await
                 .map_err(|error| HostError::Io {
                     path: self.state.shared.data_root.clone(),
@@ -1339,6 +1354,7 @@ impl Host {
         }));
         let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
+            judge: None,
             grants: extensions.grants,
             broker: Arc::clone(&broker),
             backend: backend.clone(),
@@ -1409,14 +1425,6 @@ impl Host {
             GrantStore::with_runtime_scoped(
                 self.state.shared.data_root.clone(),
                 workspace.to_path_buf(),
-                ask_timeout(
-                    &self
-                        .state
-                        .shared
-                        .config
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                ),
                 Arc::clone(broker),
             )
             .map_err(|error| HostError::Config {

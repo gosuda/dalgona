@@ -278,6 +278,39 @@ impl Host {
             .map_err(HostError::Provider)
     }
 
+    /// Builds the owned request context for one relay stream.
+    ///
+    /// Mints a fresh session and wires the relay script host with captured
+    /// services. The services capture `deps` before the script is attached,
+    /// so that ordering is load-bearing; the caller keeps `tasks` and
+    /// `owner` alive in the returned stream via `own_relay_stream`.
+    fn relay_deps(
+        &self,
+        tasks: &crate::session::tasks::SessionTasks,
+        owner: &crate::session::continuation::ContinuationOwner,
+    ) -> crate::session::turn::RequestDeps {
+        let session = SessionId::new_v7();
+        let mut deps = crate::session::turn::RequestDeps {
+            session,
+            host: Arc::clone(&self.state),
+            script: None,
+            continuation: Some(owner.downgrade()),
+        };
+        let relay_services: Arc<dyn crate::ext::Services> = Arc::new(
+            crate::ext::synthetic::relay::RelayServices::new(deps.clone()),
+        );
+        let shared = &self.state.shared;
+        deps.script = Some(crate::session::script::SessionScriptHost::for_relay(
+            session,
+            shared,
+            Arc::clone(&shared.interpreters),
+            shared.generation.borrow().clone(),
+            tasks.clone(),
+            relay_services,
+        ));
+        deps
+    }
+
     /// Opens one attributed provider stream with no journal turn or retry.
     ///
     /// # Errors
@@ -293,16 +326,15 @@ impl Host {
         let _ = by;
         let shared = Arc::clone(&self.state.shared);
         if let Some(found) = crate::ext::synthetic::find_route(&shared, &route) {
-            // One stream-scoped owner per relay call; the returned stream
-            // holds it until end or drop, then ends it explicitly.
-            let tasks = crate::session::tasks::SessionTasks::new();
+            // One host-attached child owner per relay call; the returned
+            // stream holds it until end or drop, then ends it explicitly.
+            // The child is tracked by the host teardown owner, so host
+            // shutdown drains any live relay.
+            let runtime = tokio::runtime::Handle::current();
+            let tasks =
+                crate::session::tasks::SessionTasks::child(&self.state.session_teardowns, &runtime);
             let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
-            let deps = crate::session::turn::RequestDeps {
-                session: SessionId::new_v7(),
-                host: Arc::clone(&self.state),
-                script: None,
-                continuation: Some(owner.downgrade()),
-            };
+            let deps = self.relay_deps(&tasks, &owner);
             let cancel = CancellationToken::new();
             let stream = crate::ext::synthetic::open(&deps, found, request, &cancel).await;
             return Ok(own_relay_stream(stream, owner, tasks));
@@ -339,10 +371,14 @@ impl Host {
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
             })?;
-        // One stream-scoped owner per relay call on every path: the next
-        // full-history request mints a fresh owner and a fresh resume, so no
-        // conversation is adopted across relay calls and no relay API changes.
-        let tasks = crate::session::tasks::SessionTasks::new();
+        // One host-attached child owner per relay call on every path: the
+        // next full-history request mints a fresh owner and a fresh resume,
+        // so no conversation is adopted across relay calls and no relay API
+        // changes. The child is tracked by the host teardown owner, so host
+        // shutdown drains any live relay.
+        let runtime = tokio::runtime::Handle::current();
+        let tasks =
+            crate::session::tasks::SessionTasks::child(&self.state.session_teardowns, &runtime);
         let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
         let cancel = CancellationToken::new();
         if matches!(&request.model, ModelRoute::Api { family, .. } if *family == Family::Cursor) {
@@ -351,12 +387,7 @@ impl Host {
             // hooks, notices, and the request history travel unchanged in
             // `request` as today. Non-Cursor relays take the one-shot path
             // below, byte-identical to today.
-            let deps = crate::session::turn::RequestDeps {
-                session: SessionId::new_v7(),
-                host: Arc::clone(&self.state),
-                script: None,
-                continuation: Some(owner.downgrade()),
-            };
+            let deps = self.relay_deps(&tasks, &owner);
             let stream =
                 crate::session::continuation::open_step(&deps, provider, &request, &cancel)
                     .await
@@ -416,21 +447,23 @@ impl Host {
 }
 
 /// State owned by one relay call's returned stream: the stream-scoped
-/// continuation owner and its fresh tasks.
+/// continuation owner and its host-attached child tasks.
 struct RelayOwnerState {
     owner: Option<crate::session::continuation::ContinuationOwner>,
     tasks: crate::session::tasks::SessionTasks,
 }
 
-/// Holds one relay call's owner and fresh tasks in its returned stream.
+/// Holds one relay call's owner and host-attached child tasks in its
+/// returned stream.
 ///
 /// The stream ends at `ToolUse`/`EndTurn`, an error, or a drop — each ends
-/// the owner explicitly (`release_if_live`) and drains the fresh tasks. A
-/// clean terminal already resolved the run keepalive, so the drain ends at
-/// once; an early drop aborts the transport through the owner backstop and
-/// the inner stream's own cancellation action, which this wrapper observes
-/// but never replaces. Non-Cursor relays never park, so the release is a
-/// no-op for them by construction.
+/// the owner explicitly (`release_if_live`) and drains the child tasks. A
+/// clean terminal awaits the child stop; an early drop only cancels the
+/// child synchronously and never spawns: the parent-tracked drain watcher
+/// in the host teardown owner performs the bounded asynchronous stop. The
+/// inner stream's own cancellation action and the owner backstop remain
+/// intact and are observed, never replaced, by this wrapper. Non-Cursor
+/// relays never park, so the release is a no-op for them by construction.
 fn own_relay_stream(
     inner: dal_provider::EventStream,
     owner: crate::session::continuation::ContinuationOwner,
@@ -464,15 +497,12 @@ fn own_relay_stream(
     );
     dal_provider::EventStream::new(source, move || {
         // Early-drop path only: the source drop already ran the inner
-        // transport action and the owner backstop; this drains the fresh
-        // tasks. A clean terminal drops this action uncalled (the unfold
-        // above already stopped them; `stop` is idempotent either way).
-        let tasks = stop_tasks.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            drop(handle.spawn(async move {
-                tasks.stop().await;
-            }));
-        }
+        // transport action and the owner backstop; this cancels the child
+        // owner synchronously so its parent-tracked drain performs the
+        // bounded async stop. A clean terminal drops this action uncalled
+        // (the unfold above already stopped the child; cancelling before
+        // that awaited stop is idempotent either way).
+        stop_tasks.cancel();
     })
 }
 

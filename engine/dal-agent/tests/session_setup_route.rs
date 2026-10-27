@@ -45,6 +45,7 @@ fn recorded(id: u64, model: &str, route: Option<AssistantRoute>) -> Record {
         kind: EntryKind::Assistant {
             api: Family::Chat,
             model: model.into(),
+            provider: None,
             route,
             content: Vec::new(),
             usage: Usage {
