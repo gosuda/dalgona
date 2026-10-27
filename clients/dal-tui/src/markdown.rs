@@ -1798,14 +1798,10 @@ mod tests {
         /// the renderer's scheduling delay is unbounded in wall time. The wait
         /// stays bounded so a renderer that never lands still fails the test.
         fn wait_for_render(cache: &RenderCache, generation: u64) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while cache.generation() == generation {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "background renderer did not finish"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            assert!(
+                cache.wait_for_generation(generation, std::time::Duration::from_secs(120)),
+                "background renderer did not finish"
+            );
         }
 
         use super::super::{MarkdownStream, markdown_wired_rows};

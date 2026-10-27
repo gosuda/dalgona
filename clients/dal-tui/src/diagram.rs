@@ -462,6 +462,34 @@ impl RenderCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation
     }
+
+    /// Waits until a render lands past `after`, or `timeout` elapses.
+    ///
+    /// Returns whether the generation advanced. The wait is woken by the
+    /// worker when it records a render, so callers observe the event
+    /// instead of polling a wall-clock budget.
+    #[cfg(test)]
+    pub(crate) fn wait_for_generation(&self, after: u64, timeout: std::time::Duration) -> bool {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = std::time::Instant::now() + timeout;
+        while state.generation <= after {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self
+                .shared
+                .available
+                .wait_timeout(state, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
 }
 
 impl Drop for RenderCache {
@@ -539,6 +567,9 @@ fn run_worker(
         }
         state.insert(task.key, outcome);
         state.generation = state.generation.saturating_add(1);
+        // Wake anyone waiting for a landed render. The worker loop itself
+        // also waits on this condvar, so the extra wake is harmless.
+        shared.available.notify_all();
     }
 }
 
