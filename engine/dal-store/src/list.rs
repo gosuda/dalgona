@@ -833,6 +833,14 @@ impl FactFold {
                 self.depth.insert(entry.id, above.saturating_add(1));
                 self.leaf = Some(entry.id);
             }
+            Record::MailDelivered { entry, .. } => {
+                let above = self
+                    .leaf
+                    .and_then(|parent| self.depth.get(&parent).copied())
+                    .unwrap_or(0);
+                self.depth.insert(*entry, above.saturating_add(1));
+                self.leaf = Some(*entry);
+            }
             Record::Leaf { to, .. } => self.leaf = *to,
             _ => {}
         }

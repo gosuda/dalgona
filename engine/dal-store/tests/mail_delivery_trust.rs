@@ -18,8 +18,8 @@ use std::{fs, num::NonZeroU64};
 
 use dal_core::{
     AssistantRoute, AssistantStop, Block, CallId, DeliveredMail, Entry, EntryId, EntryKind, Family,
-    JournalPart, Mail, MailMode, Product, RawJson, Record, SessionId, TurnId, Usage, Workspace,
-    encode,
+    JournalPart, ListQuery, Mail, MailMode, Product, RawJson, Record, SessionId, TurnId, Usage,
+    Workspace, encode,
 };
 use dal_store::{AbortedTurn, Store, StoreError};
 use support::temp_dir::TempDir;
@@ -576,4 +576,38 @@ async fn a_clone_after_a_delivery_carries_the_delivered_entry() {
         ],
         "the clone keeps the whole path through the delivered entry"
     );
+}
+
+/// The listed message count walks the visible path through a delivery.
+///
+/// The delivered entry exists only through its `mail_delivered` line, so a
+/// listing fold that tracks ordinary entry records alone loses the count
+/// while the leaf is the delivery and restarts it at the entry after it.
+#[tokio::test]
+async fn the_listed_count_includes_the_delivered_entry() {
+    let (temp, store, id) = staged_delivery_journal("list-after-delivery").await;
+    let count = |store: &Store| {
+        store
+            .list(ListQuery {
+                limit: Some(500),
+                cursor: None,
+                search: None,
+            })
+            .expect("listing succeeds")
+            .items
+            .iter()
+            .find(|info| info.id == id)
+            .expect("the session is listed")
+            .message_count
+    };
+    assert_eq!(count(&store), Some(2), "the leaf is the delivered entry");
+    let (mut journal, _) = store.open_session(id).await.expect("session reopens");
+    journal
+        .append(vec![user(3, "after the delivery")])
+        .await
+        .expect("the append after a delivery lands");
+    journal.close().await.expect("session closes");
+    let listed = count(&store);
+    drop(temp);
+    assert_eq!(listed, Some(3), "the path is 1 -> 2 -> 3");
 }
