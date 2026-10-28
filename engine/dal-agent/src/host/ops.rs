@@ -334,9 +334,11 @@ impl Host {
             let tasks =
                 crate::session::tasks::SessionTasks::child(&self.state.session_teardowns, &runtime);
             let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
+            let unopened = tasks.cancel_on_drop();
             let deps = self.relay_deps(&tasks, &owner);
             let cancel = CancellationToken::new();
             let stream = crate::ext::synthetic::open(&deps, found, request, &cancel).await;
+            drop(unopened.disarm());
             return Ok(own_relay_stream(stream, owner, tasks));
         }
         let catalog = shared
@@ -380,6 +382,10 @@ impl Host {
         let tasks =
             crate::session::tasks::SessionTasks::child(&self.state.session_teardowns, &runtime);
         let owner = crate::session::continuation::ContinuationOwner::new(tasks.clone());
+        // A refused or dropped open must end the child owner too: its drain
+        // watcher stays parked on the host teardown owner until the child
+        // stop token fires.
+        let unopened = tasks.cancel_on_drop();
         let cancel = CancellationToken::new();
         if matches!(&request.model, ModelRoute::Api { family, .. } if *family == Family::Cursor) {
             // Cursor relays run on the owned run: the provider and admission
@@ -394,6 +400,7 @@ impl Host {
                     .map_err(|error| HostError::Config {
                         message: error.to_string().into(),
                     })?;
+            drop(unopened.disarm());
             return Ok(own_relay_stream(stream, owner, tasks));
         }
         let stream = provider
@@ -408,6 +415,7 @@ impl Host {
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
             })?;
+        drop(unopened.disarm());
         Ok(own_relay_stream(stream, owner, tasks))
     }
 

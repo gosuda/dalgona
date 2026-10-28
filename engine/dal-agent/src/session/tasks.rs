@@ -103,6 +103,11 @@ impl SessionTasks {
         self.stop.cancel();
     }
 
+    /// Returns a guard that cancels owned work when dropped undisarmed.
+    pub(crate) fn cancel_on_drop(&self) -> tokio_util::sync::DropGuard {
+        self.stop.clone().drop_guard()
+    }
+
     /// Returns the number of session-owned tasks still tracked.
     pub(crate) fn tracked(&self) -> usize {
         self.tracker.len()

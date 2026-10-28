@@ -2637,4 +2637,48 @@ mod tests {
             "the end hook cut off at the shared deadline was cancelled"
         );
     }
+
+    /// A relay whose provider refuses to open returns an error and leaves
+    /// no task parked on the host teardown owner.
+    #[tokio::test]
+    async fn a_failed_relay_open_leaves_no_host_task_behind() {
+        let extension = ExtensionBuilder::new("relay_leak", "0.1.0", ServiceSet::EMPTY)
+            .expect("extension builder")
+            .build()
+            .expect("extension");
+        let rig = shutdown_rig(extension, 0).await;
+        let route = rig.host.default_route().await.expect("default route");
+        let request = dal_core::ModelRequest {
+            purpose: dal_core::Purpose::Turn,
+            model: route.clone(),
+            system: "".into(),
+            tools: Arc::from(Vec::new()),
+            context: Arc::from(vec![dal_core::ContextItem::User {
+                parts: vec![dal_core::Part::Text { text: "hi".into() }],
+            }]),
+            params: dal_core::RequestParams::default(),
+            cache_key: None,
+        };
+        let mut first = rig
+            .host
+            .relay(ClientId::new("router"), route.clone(), request.clone())
+            .await
+            .expect("the one scripted step opens");
+        while first.next().await.is_some() {}
+        drop(first);
+        let baseline = rig.host.state.session_teardowns.tracked();
+        for _ in 0..3 {
+            let refused = rig
+                .host
+                .relay(ClientId::new("router"), route.clone(), request.clone())
+                .await;
+            assert!(refused.is_err(), "the exhausted script refuses the open");
+        }
+        assert_eq!(
+            rig.host.state.session_teardowns.tracked(),
+            baseline,
+            "a refused relay open must not park a drain watcher on the host"
+        );
+        let _ = rig.host.shutdown(Duration::from_secs(1)).await;
+    }
 }
