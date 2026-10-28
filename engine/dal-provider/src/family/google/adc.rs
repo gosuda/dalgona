@@ -444,8 +444,19 @@ impl Resolver {
         let response = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            response = self.client.execute(request) => response
-                .map_err(|error| http::from_reqwest(Family::GoogleVertex, error))?,
+            response = self.client.execute(request) => match response {
+                Ok(response) => response,
+                // Off Google Cloud nothing answers this origin: the source is
+                // absent, not a network failure worth replaying.
+                Err(error) => {
+                    return Err(match http::from_reqwest(Family::GoogleVertex, error) {
+                        ProviderError::Transport { .. } => ProviderError::NoCredentials {
+                            provider: provider.to_owned(),
+                        },
+                        other => other,
+                    });
+                }
+            },
         };
         if response.url() != &parsed {
             return Err(ProviderError::Transport {
@@ -1435,6 +1446,23 @@ mod tests {
         );
         while workers.join_next().await.is_some() {}
         while plain_workers.join_next().await.is_some() {}
+    }
+
+    /// Off Google Cloud nothing answers the metadata origin. With no other
+    /// source that is a missing credential the user can fix by signing in,
+    /// not a network failure the loop would replay.
+    #[tokio::test]
+    async fn vertex_adc_unreachable_metadata_is_no_credentials() {
+        let resolver = Resolver::new(EnvSnapshot::test(&[]), reqwest::Client::new())
+            .with_endpoints(unused_endpoint("/token"), unused_endpoint("/metadata"));
+        let error = resolver
+            .resolve(&CancellationToken::new(), "google-vertex")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::NoCredentials { provider } if provider == "google-vertex"),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
