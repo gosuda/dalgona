@@ -69,8 +69,9 @@ pub fn branch(
     mode: BranchMode,
     source: &Header,
 ) -> Result<Branch, BranchError> {
+    let tree = tree_records(records);
     let mut index: BTreeMap<EntryId, &Entry> = BTreeMap::new();
-    for record in records {
+    for record in &tree {
         if let Some(entry) = record.entry() {
             index.insert(entry.id, entry);
         }
@@ -108,7 +109,7 @@ pub fn branch(
     }
     path.reverse();
     let mut copied = Vec::new();
-    for record in records {
+    for record in &tree {
         let on_path = match record {
             Record::Label { entry, .. } => path.contains(entry),
             _ => record.entry().is_some_and(|entry| path.contains(&entry.id)),
@@ -132,4 +133,47 @@ pub fn branch(
         records: copied,
         anchor_parts,
     })
+}
+
+/// The records with each `mail_delivered` line replaced by the user entry it
+/// materializes, parented on the leaf so far exactly as replay derives it.
+///
+/// A branch carries no mailbox rows, so the delivered text must travel as an
+/// ordinary user entry; without it the parent walk stops at the delivery and
+/// the delivered text and every entry above it fall out of the branch.
+fn tree_records(records: &[Record]) -> Vec<Record> {
+    let mut leaf = None;
+    let mut tree = Vec::with_capacity(records.len());
+    for record in records {
+        match record {
+            Record::MailDelivered {
+                at, entry, mails, ..
+            } => {
+                let parts = mails
+                    .iter()
+                    .map(|mail| JournalPart::Text {
+                        text: mail.text.clone(),
+                    })
+                    .collect();
+                tree.push(Record::User(Entry {
+                    id: *entry,
+                    parent: leaf,
+                    at: *at,
+                    kind: EntryKind::User { parts },
+                }));
+                leaf = Some(*entry);
+            }
+            Record::Leaf { to, .. } => {
+                leaf = *to;
+                tree.push(record.clone());
+            }
+            _ => {
+                if let Some(entry) = record.entry() {
+                    leaf = Some(entry.id);
+                }
+                tree.push(record.clone());
+            }
+        }
+    }
+    tree
 }

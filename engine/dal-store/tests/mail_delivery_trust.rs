@@ -524,3 +524,56 @@ async fn the_entry_after_a_delivery_parents_on_the_delivered_entry() {
         "the entry after a delivery parents on the delivered entry"
     );
 }
+
+/// A clone taken after a delivery carries the delivered entry and the path
+/// above it.
+///
+/// The delivered entry exists only through its `mail_delivered` line, so a
+/// branch projection that indexes ordinary entry records alone stops its
+/// parent walk at the delivery and drops the delivered text and every
+/// earlier entry from the clone.
+#[tokio::test]
+async fn a_clone_after_a_delivery_carries_the_delivered_entry() {
+    let (temp, store, id) = staged_delivery_journal("clone-after-delivery").await;
+    let (mut journal, _) = store.open_session(id).await.expect("session reopens");
+    journal
+        .append(vec![user(3, "after the delivery")])
+        .await
+        .expect("the append after a delivery lands");
+    let clone = store
+        .clone_session(&mut journal)
+        .await
+        .expect("the clone is published");
+    let clone_id = clone.id();
+    drop(clone);
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store
+        .open_session(clone_id)
+        .await
+        .expect("the clone reopens");
+    let entries: Vec<(EntryId, Option<EntryId>, Vec<JournalPart>)> = reopened
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            Record::User(Entry {
+                id,
+                parent,
+                kind: EntryKind::User { parts },
+                ..
+            }) => Some((*id, *parent, parts.clone())),
+            _ => None,
+        })
+        .collect();
+    drop(reopened);
+    drop(temp);
+    let text = |text: &str| vec![JournalPart::Text { text: text.into() }];
+    assert_eq!(
+        entries,
+        vec![
+            (entry_id(1), None, text("durable prefix")),
+            (entry_id(2), Some(entry_id(1)), text("first")),
+            (entry_id(3), Some(entry_id(2)), text("after the delivery")),
+        ],
+        "the clone keeps the whole path through the delivered entry"
+    );
+}
