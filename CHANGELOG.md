@@ -7,6 +7,10 @@
 - A scoped model id offered by several providers is priced for admission from each listed row instead of failing as unpriced: the configured price for a `provider/id` key wins, then the live catalog price, then the compiled table. A route that names its provider also prices through its `provider/model` spelling.
 - A user plugin can replace one bundled skill or rule with `replace = True` and `battery = "<bundled extension>"`: for example the `find-anything` skill owned by `skills`, or the `fabricated-unavailable-tool-call` rule owned by `quality`. Without the pair a name clash is still refused; the replacement moves only that record and inherits no service, tool, or grant. Removing the claim restores the bundled record on reload.
 - `[limits.plugins]` Starlark budgets take positive integers and report the key to raise: a real load, handler, or eval-cell breach names `raise limits.plugins.<key> to allow more`, while a user `fail()` that repeats the vendor wording gains no such remedy.
+- Journal compatibility: new `mail_delivered` records use format 3, so a reader
+  that predates them reports a newer journal format instead of a damaged
+  journal. Other record kinds keep their format, and existing journals need no
+  conversion.
 - Deliver buffered `NextTurn` mailbox messages: the fold keeps one
   pending-mail state derived from the journal, a turn start incorporates the
   waiting rows into its durable input through one `mail_delivered` record

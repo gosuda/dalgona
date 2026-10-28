@@ -374,12 +374,12 @@ fn corpus() -> Vec<Record> {
 fn assert_oracle(line: &[u8], record: &Record) {
     let text = std::str::from_utf8(line).expect("canonical lines are UTF-8");
     let value: sonic_rs::Value = sonic_rs::from_str(text).expect("line parses as JSON");
-    // Turn reservations are the one record that requires format 2; every
-    // other record keeps format 1.
-    let version = if record.tag() == "turn_reserved" {
-        2
-    } else {
-        1
+    // Turn reservations require format 2, mail deliveries format 3, and
+    // every other record keeps format 1.
+    let version = match record.tag() {
+        "turn_reserved" => 2,
+        "mail_delivered" => 3,
+        _ => 1,
     };
     assert_eq!(
         value.get("v").and_then(sonic_rs::JsonValueTrait::as_u64),

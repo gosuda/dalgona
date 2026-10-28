@@ -2202,7 +2202,7 @@ mod tests {
     fn unknown_version_with_torn_tail_preserves_file_and_existing_sidefile() {
         let directory = TestDirectory::new();
         let mut prefix = encode_records(&[session_record()]);
-        prefix.extend_from_slice(b"{\"v\":3,\"type\":\"future\"}\n");
+        prefix.extend_from_slice(b"{\"v\":4,\"type\":\"future\"}\n");
         let tail = b"unfinished";
         let mut original = prefix.clone();
         original.extend_from_slice(tail);
@@ -2215,7 +2215,7 @@ mod tests {
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
-            Err(OpenFailure::UnknownVersion(3))
+            Err(OpenFailure::UnknownVersion(4))
         ));
         assert_eq!(fs::read(&path).expect("read journal"), original);
         assert_eq!(

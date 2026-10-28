@@ -19,7 +19,8 @@ use super::{
 };
 
 /// Writes one compact line with the format version first, followed by the
-/// record's declared member order and one LF. Reservations require format 2.
+/// record's declared member order and one LF. [`Record::format`] picks the
+/// version.
 ///
 /// # Errors
 /// Returns [`EncodeError::Json`] when a member fails to serialize,
@@ -51,12 +52,7 @@ pub(crate) fn encoded_len(record: &Record) -> Result<usize, EncodeError> {
 }
 
 fn write_line(record: &Record, out: &mut dyn io::Write) -> Result<(), EncodeError> {
-    let prefix = if matches!(record, Record::TurnReserved { .. }) {
-        b"{\"v\":2,".as_slice()
-    } else {
-        b"{\"v\":1,".as_slice()
-    };
-    out.write_all(prefix).map_err(|e| io_to_json_error(&e))?;
+    write!(out, "{{\"v\":{},", record.format()).map_err(|e| io_to_json_error(&e))?;
     let dropped = {
         let mut adapter = BodyWithoutOpeningBrace::new(out);
         encode_body(record, &mut adapter)?;

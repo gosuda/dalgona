@@ -843,7 +843,7 @@ mod tests {
         ));
         assert_eq!(
             version.to_string(),
-            "session file /s/journal.jsonl uses journal format 9; this dalgon reads format 1. Update dalgon to open it."
+            "session file /s/journal.jsonl uses journal format 9; this dalgon reads formats 1 to 3. Update dalgon to open it."
         );
     }
 

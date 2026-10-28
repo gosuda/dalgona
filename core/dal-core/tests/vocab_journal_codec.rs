@@ -152,14 +152,14 @@ fn malformed_version_shapes_are_invalid_not_unsupported() {
 fn version_is_checked_before_type_and_payload() {
     // Garbage payloads and reordered members still report the version first.
     // Every line below is well-formed JSON: version precedence applies to a
-    // scanned envelope, never to malformed bytes. Format 2 is supported (it
-    // carries `turn_reserved`), so only versions outside 1..=2 report
+    // scanned envelope, never to malformed bytes. Formats 2 and 3 are supported
+    // (`turn_reserved` and `mail_delivered`), so only versions outside 1..=3 report
     // `UnsupportedVersion` here.
     for (line, expected) in [
-        ("{\"v\":3,\"type\":42,\"garbage\":[]}", 3),
+        ("{\"v\":4,\"type\":42,\"garbage\":[]}", 4),
         ("{\"type\":\"leaf\",\"to\":1,\"v\":0}", 0),
-        ("{\"to\":1,\"v\":3,\"type\":\"leaf\"}", 3),
-        ("{\"v\":3,\"type\":\"leaf\",\"at\":[],\"to\":{}}", 3),
+        ("{\"to\":1,\"v\":4,\"type\":\"leaf\"}", 4),
+        ("{\"v\":4,\"type\":\"leaf\",\"at\":[],\"to\":{}}", 4),
         (
             "{\"v\":9,\"type\":\"leaf\",\"type\":\"leaf\",\"at\":\"x\",\"to\":1}",
             9,
@@ -262,7 +262,7 @@ fn missing_trailing_lf_still_decodes_and_encode_always_adds_one() {
 #[test]
 fn max_record_bound_is_pinned_and_ordinary_lines_fit() {
     assert_eq!(MAX_RECORD, 67_108_864);
-    assert_eq!(JOURNAL_VERSION, 2);
+    assert_eq!(JOURNAL_VERSION, 3);
     // The codec itself carries no length gate (the fold layer enforces the
     // bound via `encoded_len` when attaching replay payloads): a two-megabyte
     // text part round-trips through `encode`/`decode` untouched.
@@ -436,7 +436,10 @@ fn mail_delivered_round_trips_and_validates_its_members() {
     };
     let line = encode(&record).expect("mail delivered encodes");
     let text = std::str::from_utf8(&line).expect("utf8");
-    assert!(text.contains("\"type\":\"mail_delivered\""), "{text}");
+    assert!(
+        text.starts_with("{\"v\":3,\"type\":\"mail_delivered\""),
+        "{text}"
+    );
     assert!(text.contains("\"entry\":6"), "{text}");
     assert!(
         text.contains(
@@ -451,15 +454,24 @@ fn mail_delivered_round_trips_and_validates_its_members() {
     // Missing members, an empty mail, a zero position, an unknown nested
     // member, and a null turn are invalid records, never defaults.
     for bad in [
-        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6}"#,
-        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{}]}"#,
-        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":0,"text":"one"}]}"#,
-        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":1,"text":"one","extra":2}]}"#,
-        r#"{"v":1,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":null,"entry":6,"mails":[{"position":1,"text":"one"}]}"#,
+        r#"{"v":3,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6}"#,
+        r#"{"v":3,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{}]}"#,
+        r#"{"v":3,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":0,"text":"one"}]}"#,
+        r#"{"v":3,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":7,"entry":6,"mails":[{"position":1,"text":"one","extra":2}]}"#,
+        r#"{"v":3,"type":"mail_delivered","at":"2026-09-25T10:15:30.000Z","turn":null,"entry":6,"mails":[{"position":1,"text":"one"}]}"#,
     ] {
         assert!(
             matches!(decode(bad.as_bytes()), Err(DecodeError::Invalid { .. })),
             "{bad}"
+        );
+    }
+    // A delivery written at an older format is refused, and a format-2
+    // reader sees format 3 as newer instead of an unknown record kind.
+    for older in [1, 2] {
+        let line = text.replacen("\"v\":3", &format!("\"v\":{older}"), 1);
+        assert!(
+            matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+            "{line}"
         );
     }
 }

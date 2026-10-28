@@ -51,6 +51,18 @@ impl Record {
         }
     }
 
+    /// The journal line format this record kind is written in and must be
+    /// read at. A reader that predates the kind then reports a newer format
+    /// instead of a damaged journal.
+    #[must_use]
+    pub const fn format(&self) -> u16 {
+        match self {
+            Self::TurnReserved { .. } => 2,
+            Self::MailDelivered { .. } => 3,
+            _ => 1,
+        }
+    }
+
     /// The entry payload of a tree record, none otherwise.
     #[must_use]
     pub const fn entry(&self) -> Option<&Entry> {

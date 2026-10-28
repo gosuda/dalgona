@@ -401,17 +401,12 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
     };
     let kind = sonic_rs::from_slice::<&str>(record_type.value.as_bytes())
         .map_err(|_| invalid(record_type.offset, "member `type` must be a string"))?;
-    if kind == "turn_reserved" && version < 2 {
-        return Err(invalid(
-            record_type.offset,
-            "turn_reserved requires format 2",
-        ));
-    }
     let record = decode_record(kind, &mut members)?;
-    if version == 2 && !matches!(record, Record::TurnReserved { .. }) {
+    let format = record.format();
+    if version != u64::from(format) {
         return Err(invalid(
             record_type.offset,
-            "this record kind requires format 1",
+            format!("{kind} requires format {format}"),
         ));
     }
     Ok(Decoded { record })

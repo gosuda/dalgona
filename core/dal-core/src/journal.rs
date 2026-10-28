@@ -1,6 +1,7 @@
 //! Versioned journal records, their strict line codec, and the pure
 //! session-branch projection.
-//! Existing record kinds retain format 1; turn reservations require format 2.
+//! Existing record kinds retain format 1; turn reservations require format 2
+//! and mail deliveries require format 3 (see [`Record::format`]).
 //! Encoding uses the declared member order, so canonical vectors round-trip
 //! byte for byte. Line length can be measured without allocating the line
 //! via [`encoded_len`]. Decoding checks the version before the type and payload,

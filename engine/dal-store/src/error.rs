@@ -25,7 +25,8 @@ pub enum StoreError {
     },
     /// The journal names a format this build does not read.
     #[error(
-        "session file {path} uses journal format {found}; this dalgon reads format 1. Update dalgon to open it."
+        "session file {path} uses journal format {found}; this dalgon reads formats 1 to {max}. Update dalgon to open it.",
+        max = dal_core::JOURNAL_VERSION
     )]
     UnknownVersion {
         /// The journal path.

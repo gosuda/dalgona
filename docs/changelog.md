@@ -20,6 +20,7 @@ This page lists the user-visible changes in each version. The `/changelog` comma
 - `models/list` rows add `route` and `reference`. The remote model picker selects by route for the session only and scopes by provider. Servers without them keep the older selection by name. The protocol version is still 1.
 - Fix remote API-key sign-in outcome reporting. See [remote sign-in](commands.md#remote-sign-in).
 - Persist turn identities before acknowledging queued work. Cancelling a queued turn no longer invalidates later journal entries. Restarting a session cannot reuse its reserved identity. Queued text is not restored.
+- Delivered mailbox messages use journal format 3. A build that reads only formats 1 and 2 reports a newer journal format instead of a damaged journal. Existing journals need no conversion.
 - New turn-ID reservations use journal format 2. Other records retain format 1. Existing journals need no conversion. A reader must support format 2 after a reservation is written. See [durable turn identities](sessions.md#durable-turn-identities).
 - Rust code that uses `dal-tools` can call `patch::styles::tier` again, also in constant expressions. It returns the prompt-intensity tier of an edit style.
 - Reject unsupported Unicode duration units with a configuration error instead of panicking.

@@ -260,8 +260,8 @@ fn decode_drops_unknown_members_and_rejects_bad_shapes() {
         })
     ));
     assert!(matches!(
-        decode(b"{\"v\":3,\"type\":\"leaf\",\"at\":\"2026-09-25T14:05:00.000Z\",\"to\":41}"),
-        Err(DecodeError::UnsupportedVersion { found: 3 })
+        decode(b"{\"v\":4,\"type\":\"leaf\",\"at\":\"2026-09-25T14:05:00.000Z\",\"to\":41}"),
+        Err(DecodeError::UnsupportedVersion { found: 4 })
     ));
     assert!(matches!(
         decode(b"{\"type\":\"leaf\",\"at\":\"x\",\"to\":1}"),
@@ -400,13 +400,13 @@ fn decode_reports_absolute_nested_member_offsets() {
 #[test]
 fn unsupported_version_precedes_duplicate_type_and_payload() {
     for line in [
-        "{\"v\":3,\"type\":\"leaf\",\"type\":\"other\",\"at\":\"x\",\"to\":1}",
-        "{\"type\":\"leaf\",\"to\":1,\"to\":2,\"v\":3}",
-        "{\"to\":1,\"v\":3,\"type\":\"leaf\",\"to\":2}",
+        "{\"v\":4,\"type\":\"leaf\",\"type\":\"other\",\"at\":\"x\",\"to\":1}",
+        "{\"type\":\"leaf\",\"to\":1,\"to\":2,\"v\":4}",
+        "{\"to\":1,\"v\":4,\"type\":\"leaf\",\"to\":2}",
     ] {
         assert!(matches!(
             decode(line.as_bytes()),
-            Err(DecodeError::UnsupportedVersion { found: 3 })
+            Err(DecodeError::UnsupportedVersion { found: 4 })
         ));
     }
 }
@@ -1412,10 +1412,10 @@ fn reservation_format_preserves_legacy_bytes_and_rejects_old_version()
     assert!(scan_head(reserved).is_none());
     let old = br#"{"v":1,"type":"turn_reserved","at":"2026-10-13T00:00:00.000Z","turn":2}"#;
     assert!(matches!(decode(old), Err(DecodeError::Invalid { .. })));
-    let future = br#"{"v":3,"type":"turn_reserved","at":"2026-10-13T00:00:00.000Z","turn":2}"#;
+    let future = br#"{"v":4,"type":"turn_reserved","at":"2026-10-13T00:00:00.000Z","turn":2}"#;
     assert!(matches!(
         decode(future),
-        Err(DecodeError::UnsupportedVersion { found: 3 })
+        Err(DecodeError::UnsupportedVersion { found: 4 })
     ));
     Ok(())
 }
