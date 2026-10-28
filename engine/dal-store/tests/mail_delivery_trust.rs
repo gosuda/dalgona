@@ -491,3 +491,36 @@ async fn valid_delivery_advances_entry_state_and_keeps_recovery_ids_unique() {
         "the tree holds the prefix, the assistant, and the one repair entry"
     );
 }
+
+/// The entry appended after a delivery parents on the delivered entry.
+///
+/// The delivery materializes tree entry 2, so the store's append index must
+/// treat it as the new leaf. Otherwise the next entry parents on entry 1 and
+/// the durable delivery falls off the served leaf path, and a fork or clone
+/// taken from that index cannot carry it.
+#[tokio::test]
+async fn the_entry_after_a_delivery_parents_on_the_delivered_entry() {
+    let (temp, store, id) = staged_delivery_journal("leaf-after-delivery").await;
+    let (mut journal, _) = store.open_session(id).await.expect("session reopens");
+    journal
+        .append(vec![user(3, "after the delivery")])
+        .await
+        .expect("the append after a delivery lands");
+    journal.close().await.expect("session closes");
+    let (reopened, _) = store.open_session(id).await.expect("session reopens again");
+    let parent = reopened
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::User(entry) if entry.id == entry_id(3) => Some(entry.parent),
+            _ => None,
+        })
+        .expect("the later user entry is durable");
+    drop(reopened);
+    drop(temp);
+    assert_eq!(
+        parent,
+        Some(entry_id(2)),
+        "the entry after a delivery parents on the delivered entry"
+    );
+}

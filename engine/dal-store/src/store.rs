@@ -763,6 +763,11 @@ impl AppendIndex {
     fn observe(&mut self, record: &Record) {
         match record {
             Record::Leaf { to, .. } => self.leaf = *to,
+            // A delivery materializes the user entry it names, so it moves the
+            // leaf exactly as the validator and the fold do. Without this arm
+            // the next append parents on the pre-delivery leaf and the durable
+            // delivery falls off the served leaf path.
+            Record::MailDelivered { entry, .. } => self.leaf = Some(*entry),
             _ => {
                 if let Some(entry) = record.entry() {
                     self.leaf = Some(entry.id);
