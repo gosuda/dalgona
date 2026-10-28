@@ -703,6 +703,16 @@ fn validate_models(
         })?;
         let caps = decode_model_caps(&model_site, local.as_str(), model.caps)?;
         let uses = parse_uses(&model_site, "model", local.as_str(), &model.uses)?;
+        if let Some(op) = uses.iter().find(|op| !Phase::Model.permits(op)) {
+            return Err(LoadError::Uses {
+                path: model_site.path.clone(),
+                line: model_site.line,
+                col: model_site.col,
+                id: op.to_string().into(),
+                message: format!("model `{local}` may not request it; only an eval cell may")
+                    .into(),
+            });
+        }
         validated.push(ModelDecl {
             id: ExportId {
                 plugin: declared.clone(),

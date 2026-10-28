@@ -475,6 +475,32 @@ fn model_uses_are_checked_against_the_model_phase() {
 }
 
 #[test]
+fn judge_operations_are_refused_outside_eval_cells() {
+    for op in ["judge.ask", "judge.batch"] {
+        let declarations = [
+            tool_plugin(&format!("input = dal.schema(), uses = [\"{op}\"]")),
+            format!(
+                "def run(ctx, args):\n    return None\nt = dal.tool(description = \"d\", input = dal.schema(), run = run, uses = [\"{op}\"])\nplugin = dal.plugin(name = \"probe\", version = \"0.1.0\", commands = {{\"c\": dal.command(tool = t)}})\n"
+            ),
+            format!(
+                "def h(ctx, event):\n    return None\nplugin = dal.plugin(name = \"probe\", version = \"0.1.0\", hooks = [dal.on(\"session_start\", h, uses = [\"{op}\"])])\n"
+            ),
+            format!(
+                "def infer(ctx, request):\n    return None\nm = dal.model(id = \"dalgona/m\", caps = {{\"context_window\": 1, \"thinking\": [\"off\"], \"tool_use\": False, \"image_input\": False}}, run = infer, uses = [\"{op}\"])\nplugin = dal.plugin(name = \"probe\", version = \"0.1.0\", models = {{\"m\": m}})\n"
+            ),
+        ];
+        for body in declarations {
+            let error = rejected(&body);
+            let LoadError::Uses { id, message, .. } = error else {
+                panic!("{op}: expected Uses, got {error:?}\n{body}");
+            };
+            assert_eq!(id.as_ref(), op);
+            assert!(message.contains("may not request"), "{message}");
+        }
+    }
+}
+
+#[test]
 fn model_forward_is_not_declarable_by_a_tool() {
     let error = rejected(&tool_plugin(
         "input = dal.schema(), uses = [\"models.forward\"]",
