@@ -2988,10 +2988,17 @@ pub(crate) fn auth_header(
                 message: String::from("credential-less entries carry no auth header"),
             }),
         },
-        Credential::OAuth(oauth) if matches!(family, Family::Codex | Family::Anthropic) => Ok((
-            "authorization",
-            format!("Bearer {}", oauth.access_token.expose()),
-        )),
+        Credential::OAuth(oauth)
+            if matches!(
+                family,
+                Family::Codex | Family::Anthropic | Family::PiMessages
+            ) =>
+        {
+            Ok((
+                "authorization",
+                format!("Bearer {}", oauth.access_token.expose()),
+            ))
+        }
         Credential::OAuth(_) => Err(ProviderError::InvalidRequest {
             message: format!("{provider} does not accept an OAuth credential"),
         }),
@@ -3045,6 +3052,24 @@ pub(crate) fn model_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signed-in Radius row carries an OAuth credential, and the pi-messages
+    /// wire sends it as a bearer. Refusing it would make `login radius`
+    /// succeed and then fail every turn.
+    #[test]
+    fn pi_messages_accepts_an_oauth_bearer() {
+        let oauth = Credential::OAuth(OAuthCredential {
+            access_token: "radius-token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: None,
+            id_token: None,
+            account_id: None,
+            project_id: None,
+        });
+        let header = auth_header(AuthStyle::Bearer, &oauth, Family::PiMessages, "radius")
+            .expect("the radius row accepts its OAuth credential");
+        assert_eq!(header, ("authorization", "Bearer radius-token".to_owned()));
+    }
 
     /// The pre-minted bearer order: the `GOOGLE_CLOUD_ACCESS_TOKEN` alias
     /// wins, the gcloud override answers alone, a blank alias is skipped,
