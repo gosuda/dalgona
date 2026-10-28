@@ -1165,6 +1165,15 @@ impl Fixture {
         ToolCx::for_test(self.host.clone()).caller().clone()
     }
 
+    /// The repository top the fixtures script for `rev-parse --show-toplevel`.
+    fn repo_top(&self) -> String {
+        ToolCx::for_test(self.host.clone())
+            .workspace()
+            .as_path()
+            .display()
+            .to_string()
+    }
+
     async fn tool(&self, args: &str) -> Result<String, ServiceError> {
         self.runtime
             .tool(
@@ -1970,9 +1979,10 @@ async fn opening_a_session_registers_no_workspace_lock() -> TestResult {
 #[tokio::test]
 async fn failed_stash_preflight_cannot_silently_drop_tracked_changes() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
+    let top = fixture.repo_top();
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output(&temp_toplevel())),
+        Ok(output(&top)),
         Ok(output("head")),
         Err("stash could not read tracked files"),
     ]);
@@ -1992,11 +2002,12 @@ async fn failed_stash_preflight_cannot_silently_drop_tracked_changes() -> TestRe
 #[tokio::test]
 async fn implicit_and_explicit_worktree_steps_start_in_distinct_workspaces() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
+    let top = fixture.repo_top();
     {
         let mut script = fixture.script();
         script.run_outputs.extend([
             Ok(output("git version 2.47.0")),
-            Ok(output(&temp_toplevel())),
+            Ok(output(&top)),
             Ok(output("head")),
             Ok(output("snapshot")),
         ]);
@@ -2050,9 +2061,10 @@ async fn implicit_and_explicit_worktree_steps_start_in_distinct_workspaces() -> 
 #[tokio::test]
 async fn isolated_tasks_save_patch_and_merge_from_the_parent_workspace() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
+    let top = fixture.repo_top();
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output(&temp_toplevel())),
+        Ok(output(&top)),
         Ok(output("head")),
         Ok(output("snapshot")),
         Ok(output("")),
@@ -2095,12 +2107,13 @@ async fn isolated_tasks_save_patch_and_merge_from_the_parent_workspace() -> Test
             .iter()
             .all(|request| request.argv.first().is_some_and(|argv| argv == "git"))
     );
+    let workspace = ToolCx::for_test(fixture.host.clone()).workspace().clone();
     assert!(
         script
             .run_requests
             .iter()
             .filter(|request| request.argv.iter().any(|argv| argv == "apply"))
-            .all(|request| request.cwd.as_deref() == Some(std::env::temp_dir().as_path()))
+            .all(|request| request.cwd.as_deref() == Some(workspace.as_path()))
     );
     Ok(())
 }
@@ -3966,14 +3979,9 @@ const ISOLATED_WRITE: &str = r#"{"action":"run","steps":[{"name":"write","prompt
 
 type GitAnswer = Result<RunOutput, &'static str>;
 
-/// The git answers of one isolated task up to its saved patch: preflight,
-/// the worktree, the staged diff, and the changed names.
-fn isolated_prefix() -> Vec<GitAnswer> {
-    isolated_prefix_for("code\n", "diff --git a/code b/code\n")
-}
-
-/// The scripted repository top level: the platform temp dir the test
-/// workspaces live under, so the fixtures hold under any TMPDIR.
+/// The parent temp dir used where a scripted value alone is needed: the
+/// subdirectories of one checkout script their common parent top while
+/// their workspaces name their own subdirectories explicitly.
 fn temp_toplevel() -> String {
     std::env::temp_dir().display().to_string()
 }
@@ -4015,9 +4023,14 @@ async fn sessions_on_one_workspace_apply_their_patches_one_at_a_time() -> TestRe
     let gate = Arc::new(ApplyGate::new());
     let first = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
     let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    let top = first.repo_top();
     for fixture in [&first, &second] {
         let mut script = fixture.script();
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
     }
     first.tool(ISOLATED_WRITE).await?;
@@ -4130,9 +4143,14 @@ async fn retained_run(
     tail: Vec<GitAnswer>,
 ) -> Result<(Fixture, String), Box<dyn std::error::Error>> {
     let fixture = Fixture::open_config(isolation_config()?).await?;
+    let top = fixture.repo_top();
     {
         let mut script = fixture.script();
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend(tail);
     }
     fixture.tool(ISOLATED_WRITE).await?;
@@ -4305,12 +4323,15 @@ async fn a_run_aborted_between_steps_settles_cancelled_not_done() -> TestResult 
 async fn queued_worktree_items_create_no_checkout_until_a_worker_is_free() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
     let hold = CancellationToken::new();
+    let top = fixture.repo_top();
     {
         let mut script = fixture.script();
         script.hold = Some(hold.clone());
-        script
-            .run_outputs
-            .extend(isolated_prefix().into_iter().take(4));
+        script.run_outputs.extend(
+            isolated_prefix_for_top(&top, "code\n", "diff --git a/code b/code\n")
+                .into_iter()
+                .take(4),
+        );
         script.run_outputs.extend((0..40).map(|_| Ok(output(""))));
     }
     fixture.tool(r#"{"action":"run","steps":[{"name":"pool","prompt":"edit {{item}}","items":["one","two","three","four"],"workers":2,"tools":["patch"],"isolation":"worktree"}]}"#).await?;
@@ -4332,10 +4353,15 @@ async fn queued_worktree_items_create_no_checkout_until_a_worker_is_free() -> Te
 async fn a_task_cancelled_while_queued_for_a_worker_never_starts() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
     let hold = CancellationToken::new();
+    let top = fixture.repo_top();
     {
         let mut script = fixture.script();
         script.hold = Some(hold.clone());
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend((0..40).map(|_| Ok(output(""))));
     }
     fixture.tool(r#"{"action":"run","steps":[{"name":"pool","prompt":"edit {{item}}","items":["one","two"],"workers":1,"tools":["patch"],"isolation":"worktree"}]}"#).await?;
@@ -5423,15 +5449,19 @@ async fn same_workspace_merges_serialize_with_peak_one() -> TestResult {
     let gate = Arc::new(ApplyGate::new());
     let first = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
     let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    let top_text = first.repo_top();
     for fixture in [&first, &second] {
         let mut script = fixture.script();
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top_text,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
     }
     first.tool(ISOLATED_WRITE).await?;
     second.tool(ISOLATED_WRITE).await?;
-    let top =
-        super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&temp_toplevel())).await;
+    let top = super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&top_text)).await;
     let window = std::time::Duration::from_secs(5);
     tokio::time::timeout(window, gate.entered(1)).await?;
     let Some(ApplyEvent::Enter(holder)) = gate.events().first().copied() else {
@@ -5583,11 +5613,16 @@ async fn a_failed_apply_check_releases_the_hold_for_the_next_merge() -> TestResu
     let gate = Arc::new(ApplyGate::new());
     let first = Fixture::open_on(runtime.clone(), None).await?;
     let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    let top_text = first.repo_top();
     {
         // The checkout refuses the apply check, so the first merge retains
         // its worktree down the error path without ever reaching apply.
         let mut script = first.script();
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top_text,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend([
             Ok(failed_output("error: patch failed: code:1")),
             Ok(output("")),
@@ -5596,13 +5631,16 @@ async fn a_failed_apply_check_releases_the_hold_for_the_next_merge() -> TestResu
     }
     {
         let mut script = second.script();
-        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(isolated_prefix_for_top(
+            &top_text,
+            "code\n",
+            "diff --git a/code b/code\n",
+        ));
         script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
     }
     first.tool(ISOLATED_WRITE).await?;
     second.tool(ISOLATED_WRITE).await?;
-    let top =
-        super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&temp_toplevel())).await;
+    let top = super::merge_locks::MergeLocks::canonical_key(std::path::Path::new(&top_text)).await;
     let window = std::time::Duration::from_secs(5);
     // The second merge must reach apply: if the retained merge leaked its
     // hold, this waits out the window and the test fails loudly.
@@ -6026,8 +6064,8 @@ async fn run_salvage(fixture: &Fixture, data: &std::path::Path) -> dal_core::Wor
 }
 
 /// Drives open salvage from `workspace`, the checkout the owner opened over.
-/// The real-git proofs pass their repo top: the scripted test workspace is the
-/// platform temp dir, where a real `rev-parse --show-toplevel` finds no repo.
+/// The real-git proofs pass their repo top: the scripted test workspace is a
+/// dedicated per-process child of the platform temp dir.
 async fn run_salvage_in(
     fixture: &Fixture,
     data: &std::path::Path,
@@ -7552,9 +7590,10 @@ async fn a_created_worktree_records_the_run_base_in_its_creation_receipt() -> Te
     let mut config = isolation_config()?;
     config.data_root = Some(data.clone());
     let fixture = Fixture::open_config(config).await?;
+    let top = fixture.repo_top();
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output(&temp_toplevel())),
+        Ok(output(&top)),
         Ok(output("head")),
         Ok(output(SALVAGE_BASE)),
         Ok(output("")),
@@ -7627,9 +7666,10 @@ async fn a_receipt_that_cannot_be_recorded_fails_the_task_and_removes_its_fresh_
     let mut config = isolation_config()?;
     config.data_root = Some(data.clone());
     let fixture = Fixture::open_config(config).await?;
+    let top = fixture.repo_top();
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output(&temp_toplevel())),
+        Ok(output(&top)),
         Ok(output("head")),
         Ok(output("snapshot")),
         Ok(output("")),

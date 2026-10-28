@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::common::{Host as ScriptedServices, TestResult, locked, run_tool};
+use super::common::{Host as ScriptedServices, TestResult, locked, run_tool, tool_workspace};
 use dal_agent::ext::{BoxFuture, ExtensionBuilder, HookCx, HookError, ObserveHook};
 use dal_agent::{Env, Host, Product, SessionRef};
 use dal_core::ext::SessionStart;
@@ -40,7 +40,7 @@ where
 
 async fn temp_file(label: &str, bytes: &[u8]) -> Result<(String, PathBuf), Box<dyn StdError>> {
     let name = format!("dalgona-quality-{label}-{}.py", std::process::id());
-    let path = std::env::temp_dir().join(&name);
+    let path = tool_workspace().join(&name);
     let write_path = path.clone();
     let bytes = bytes.to_vec();
     blocking(move || std::fs::write(write_path, bytes)).await?;

@@ -2700,12 +2700,12 @@ async fn patch_dispatch_envelope_applies_for_every_freeform_dialect() {
             rejections.push(format!("{style}: {error}"));
             continue;
         }
+        let path = cx.workspace().as_path().join(&name);
         let outcome = tool.run(ToolCall::new("probe", raw), cx).await;
         let ToolOutcome::Ok(output) = outcome else {
             rejections.push(format!("{style}: call was denied"));
             continue;
         };
-        let path = std::env::temp_dir().join(&name);
         let written = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(written, expected, "{style} applied: {output:?}");
         let _ = std::fs::remove_file(&path);
@@ -2729,11 +2729,11 @@ async fn patch_dispatch_structured_changes_apply_for_replace() {
         .classify(&raw, cx.workspace())
         .expect("structured call classifies");
     assert_eq!(class, ToolClass::Patch);
+    let path = cx.workspace().as_path().join(&name);
     let outcome = tool.run(ToolCall::new("probe", raw), cx).await;
     let ToolOutcome::Ok(output) = outcome else {
         panic!("structured call must not be denied");
     };
-    let path = std::env::temp_dir().join(&name);
     let written = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(written, "body\n", "replace applied: {output:?}");
     let _ = std::fs::remove_file(&path);
@@ -2748,16 +2748,14 @@ async fn patch_dispatch_cancelled_call_settles_as_interrupted_and_writes_nothing
     cx.cancel().cancel();
     let raw = RawValue::parse(&args).expect("structured call is one JSON value");
 
+    let path = cx.workspace().as_path().join(&name);
     let outcome = tool.run(ToolCall::new("probe", raw), cx).await;
 
     assert!(
         matches!(outcome, ToolOutcome::Err(dal_agent::ToolError::Cancelled)),
         "a call cancelled before publication settles as interrupted"
     );
-    assert!(
-        !std::env::temp_dir().join(&name).exists(),
-        "the cancelled call wrote nothing"
-    );
+    assert!(!path.exists(), "the cancelled call wrote nothing");
 }
 
 #[tokio::test]

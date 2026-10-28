@@ -289,6 +289,17 @@ impl Services for Host {
     }
 }
 
+/// The directory every `run_tool` call resolves relative paths against.
+///
+/// Fixtures that the tools must read live here, not in the platform temp dir.
+pub(crate) fn tool_workspace() -> std::path::PathBuf {
+    let services: Arc<dyn Services> = Host::answering([]);
+    ToolCx::for_test(services)
+        .workspace()
+        .as_path()
+        .to_path_buf()
+}
+
 /// Runs the tool `name` of `extension` once against `host` and renders its outcome as text.
 pub(crate) async fn run_tool(
     extension: &Extension,

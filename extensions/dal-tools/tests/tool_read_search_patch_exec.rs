@@ -3,7 +3,8 @@
 //! Every test drives the registered `dal-tools` extension through the public
 //! `Tool` seam with a deny/approve test context, exactly as a host would:
 //! classify-then-run, model-visible error strings, and real filesystem bytes
-//! under a scratch directory inside the test workspace (`/tmp`). Nothing here
+//! under a scratch directory inside the test workspace (a dedicated
+//! per-process child of the platform temp dir). Nothing here
 //! reaches into `pub(crate)` engine internals; a green suite proves the
 //! boundary contracts a model actually meets.
 //!
@@ -273,9 +274,10 @@ fn scratch() -> (tempfile::TempDir, String) {
 }
 
 /// An existing file outside the tool workspace, for escape probes that must
-/// not create fixtures outside the workspace. The test workspace is the
-/// platform temp dir, so any fixed system path outside it qualifies; the
-/// first existing candidate wins.
+/// not create fixtures outside the workspace. The test workspace is a
+/// dedicated per-process child of the platform temp dir, so `/etc/hostname`
+/// and `/etc/hosts` lie outside that child and qualify; the first existing
+/// candidate wins.
 fn outside_file() -> PathBuf {
     for candidate in ["/etc/hostname", "/etc/hosts", "/"] {
         let path = PathBuf::from(candidate);

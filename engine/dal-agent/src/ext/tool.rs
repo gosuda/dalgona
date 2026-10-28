@@ -525,8 +525,9 @@ impl ToolCx<'_> {
     /// Mints a test context over `services` with a fail-closed stub runtime.
     ///
     /// Authorization denies, spawning denies, schemes resolve nothing; the
-    /// workspace points at the platform temp dir, which the stub never
-    /// writes. Foreign test batteries drive tools through this context.
+    /// workspace is a dedicated per-process child of the platform temp dir,
+    /// which the stub never writes. Foreign test batteries drive tools
+    /// through this context.
     #[must_use]
     pub fn for_test(services: Arc<dyn Services>) -> ToolCx<'static> {
         let caller = Caller::new(
@@ -831,30 +832,44 @@ impl ToolCxRuntime for ForTestRuntime {
     }
 }
 
-/// Builds the test workspace root from the platform temp dir.
+/// Builds a dedicated, per-process test workspace under the platform temp dir.
+///
+/// Index builds walk the whole workspace, so the tests must not run with the
+/// shared temp dir as their root. The directory is resolved once per process
+/// and reused by every call.
 ///
 /// The path is absolute by construction on every supported platform; the
 /// dead arm only satisfies the type system and never runs.
+#[expect(
+    clippy::panic,
+    reason = "a test helper with no error channel reports a broken workspace by failing the test"
+)]
 fn test_workspace() -> Workspace {
-    let dir = std::env::temp_dir();
-    #[cfg(unix)]
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        PathBuf::from("/").join(dir)
-    };
-    #[cfg(windows)]
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        PathBuf::from(r"C:\").join(dir)
-    };
-    match Workspace::new(dir) {
-        Ok(workspace) => workspace,
-        Err(_) => loop {
-            std::thread::park();
-        },
-    }
+    static WORKSPACE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let dir = WORKSPACE_DIR
+        .get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("dal-tool-workspace-{}", std::process::id()));
+            #[cfg(unix)]
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                PathBuf::from("/").join(dir)
+            };
+            #[cfg(windows)]
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                PathBuf::from(r"C:\").join(dir)
+            };
+            std::fs::create_dir_all(&dir).unwrap_or_else(|error| {
+                panic!("test workspace {} is unwritable: {error}", dir.display())
+            });
+            dir
+        })
+        .clone();
+    Workspace::new(dir.clone())
+        .unwrap_or_else(|error| panic!("test workspace {} is rejected: {error}", dir.display()))
 }
 
 #[cfg(test)]
